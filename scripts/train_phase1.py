@@ -64,26 +64,22 @@ def main() -> None:
     # Step 1: 加载特征数据，初始化 TradingEnv
     # ----------------------------------------------------------------
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
-    pipeline = FeaturePipeline(config.data_dir, pair, config)
-    states = pipeline.get_state_vector()  # (T, 45)
+    pipeline = FeaturePipeline(config.data_dir, pair)
+    train_df, _, _ = pipeline.get_state_vector()
+    train_prices_df, _, _  = pipeline.get_prices()
 
-    # 使用第一列作为价格代理（wap 特征）
-    # [NOTE: 论文未明确指定价格列，使用 states 第 0 列作为价格]
-    prices = states[:, 0].copy()
-
-    # 按时间划分，仅使用训练集
-    train_states, _, _ = pipeline.split_by_date(states)
-    train_prices = prices[: len(train_states)]
+    train_states = train_df.to_numpy()
+    prices = train_prices_df["close"].to_numpy()
 
     logger.info(
         "训练集: states shape=%s, prices shape=%s",
         train_states.shape,
-        train_prices.shape,
+        prices.shape,
     )
 
     env = TradingEnv(
         states=train_states,
-        prices=train_prices,
+        prices=prices,
         pair=pair,
         horizon=config.horizon,
     )

@@ -284,16 +284,12 @@ def evaluate_pair(
 
     # 加载特征数据
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
-    pipeline = FeaturePipeline(config.data_dir, pair, config)
-    states = pipeline.get_state_vector()  # (T, 45)
+    pipeline = FeaturePipeline(config.data_dir, pair)
+    _, _, test_df = pipeline.get_state_vector()
+    _, _, test_prices_df = pipeline.get_prices()
 
-    # 使用第一列作为价格代理
-    # [NOTE: 论文未明确指定价格列，使用 states 第 0 列作为价格]
-    prices = states[:, 0].copy()
-
-    # 按时间划分，使用测试集
-    _, _, test_states = pipeline.split_by_date(states)
-    test_prices = prices[len(states) - len(test_states):]
+    test_states = test_df.to_numpy()
+    test_prices = test_prices_df["close"].to_numpy()
 
     logger.info(
         "测试集: states shape=%s, prices shape=%s",
