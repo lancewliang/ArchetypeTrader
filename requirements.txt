@@ -1,0 +1,7 @@
+# Core dependencies
+pyarrow>=14.0.0
+numpy>=1.24.0
+polars>=0.20.0 
+# Training (managed by conda environment.yml or pip install)
+# torch>=2.0.0
+# pandas>=2.0.0
