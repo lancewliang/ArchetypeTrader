@@ -223,9 +223,9 @@ def run_horizon_with_refinement(
         a_refs: 每步的 a_ref 列表
     """
     state = env.reset(horizon_idx)
-    policy_adapter.reset()
 
     h = len(base_actions)
+    has_adjusted = False
     actual_return = 0.0
     cumulative_reward = 0.0  # R_arche: 逐步累积的实时收益
     final_actions = []
@@ -271,7 +271,7 @@ def run_horizon_with_refinement(
         a_ref = a_ref_idx.item() - 1  # 0→-1, 1→0, 2→1
 
         # Section 4.3 / Eq. 6: Policy adapter 计算最终动作
-        a_final = policy_adapter.compute_final_action(a_base, a_base_prev, a_ref)
+        a_final, has_adjusted = policy_adapter.compute_final_action(a_base, a_base_prev, a_ref, has_adjusted)
 
         # 在 env 中执行最终动作
         next_state, reward, done, _ = env.step(a_final)
@@ -436,6 +436,7 @@ def main() -> None:
         R_base = compute_base_return(train_env, h_idx, base_actions)
 
         # Section 4.3: 在 horizon 内执行 step 级别精炼
+        policy_adapter = PolicyAdapter()
         (
             R_actual,
             final_actions,
@@ -447,7 +448,7 @@ def main() -> None:
             horizon_idx=h_idx,
             base_actions=base_actions,
             refinement_agent=refinement_agent,
-            policy_adapter=PolicyAdapter(),
+            policy_adapter=policy_adapter,
             e_a_sel=e_a_sel,
             device=device,
             horizon=h,
@@ -523,7 +524,7 @@ def main() -> None:
             # 重新前向传播以获取 logits
             ce_loss = torch.tensor(0.0, device=device)
             state_replay = train_env.reset(h_idx)
-            policy_adapter_replay = PolicyAdapter()
+            has_adjusted_replay = False
             a_base_prev_replay = int(base_actions[0])
             cumulative_reward_replay = 0.0
 
@@ -553,8 +554,8 @@ def main() -> None:
 
                 # 重放环境步骤以获取正确的下一状态
                 a_ref_r = a_refs[step_idx]
-                a_final_r = policy_adapter_replay.compute_final_action(
-                    a_base_r, a_base_prev_replay, a_ref_r
+                a_final_r, has_adjusted_replay = policy_adapter.compute_final_action(
+                    a_base_r, a_base_prev_replay, a_ref_r, has_adjusted_replay
                 )
                 next_state_r, reward_r, done_r, _ = train_env.step(a_final_r)
                 cumulative_reward_replay += reward_r

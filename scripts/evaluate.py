@@ -210,11 +210,11 @@ def run_horizon_inference(
         step_returns: 每步收益列表
     """
     state = env.reset(horizon_idx)
-    policy_adapter.reset()
 
     h = len(base_actions)
     step_returns = []
     a_base_prev = int(base_actions[0])
+    has_adjusted = False
 
     for step_idx in range(h):
         a_base = int(base_actions[step_idx])
@@ -241,7 +241,7 @@ def run_horizon_inference(
             a_ref_idx = torch.argmax(action_probs, dim=-1).item()
             a_ref = a_ref_idx - 1  # 0→-1, 1→0, 2→1
 
-        a_final = policy_adapter.compute_final_action(a_base, a_base_prev, a_ref)
+        a_final, has_adjusted = policy_adapter.compute_final_action(a_base, a_base_prev, a_ref, has_adjusted)
 
         next_state, reward, done, _ = env.step(a_final)
         step_returns.append(reward)
