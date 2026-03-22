@@ -2,6 +2,8 @@
 
 基于 PyTorch 的三阶段强化学习加密货币交易框架，源自提交至 **AAAI 2026** 的论文。系统通过动态规划和向量量化从历史数据中发现可复用的交易原型，再通过分层 RL 智能体部署到实时交易中。
 
+> ⚠️ **声明：** 本代码尚未经过真实交易数据的验证测试，无法确保实现的正确性。请关注后续更新。
+
 > **论文：** *ArchetypeTrader: Reinforcement Learning for Selecting and Refining Learnable Strategic Archetypes in Quantitative Trading* [[PDF]](AAAI26_ArchetypeTrader.pdf)
 > Chuqiao Zong, Molei Qin, Haochong Xia, Bo An — Nanyang Technological University, Singapore
 >

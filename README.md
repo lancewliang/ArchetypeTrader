@@ -2,6 +2,8 @@
 
 A PyTorch implementation of the three-phase reinforcement learning framework for cryptocurrency trading, based on the paper submitted to **AAAI 2026**. The system discovers reusable trading archetypes from historical data via dynamic programming and vector quantization, then deploys them through hierarchical RL agents for real-time trading.
 
+> ⚠️ **Disclaimer:** This codebase has NOT been validated with real trading data yet. Correctness of the implementation cannot be guaranteed at this stage. Please stay tuned for updates.
+
 > **Paper:** *ArchetypeTrader: Reinforcement Learning for Selecting and Refining Learnable Strategic Archetypes in Quantitative Trading* [[PDF]](AAAI26_ArchetypeTrader.pdf)
 > Chuqiao Zong, Molei Qin, Haochong Xia, Bo An — Nanyang Technological University, Singapore
 >
