@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper below."
+title: "ArchetypeTrader"
+type: software
+authors:
+  - family-names: Zong
+    given-names: Chuqiao
+    affiliation: Nanyang Technological University
+    email: zong0005@e.ntu.edu.sg
+  - family-names: Qin
+    given-names: Molei
+    affiliation: Nanyang Technological University
+    email: molei001@e.ntu.edu.sg
+  - family-names: Xia
+    given-names: Haochong
+    affiliation: Nanyang Technological University
+    email: haochong001@e.ntu.edu.sg
+  - family-names: An
+    given-names: Bo
+    affiliation: Nanyang Technological University
+    email: boan@ntu.edu.sg
+preferred-citation:
+  type: conference-paper
+  title: "ArchetypeTrader: Reinforcement Learning for Selecting and Refining Learnable Strategic Archetypes in Quantitative Trading"
+  authors:
+    - family-names: Zong
+      given-names: Chuqiao
+    - family-names: Qin
+      given-names: Molei
+    - family-names: Xia
+      given-names: Haochong
+    - family-names: An
+      given-names: Bo
+  collection-title: "Proceedings of the AAAI Conference on Artificial Intelligence (AAAI)"
+  year: 2026
