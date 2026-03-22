@@ -179,18 +179,20 @@ class TestComputeTop5HindsightOptimal:
         base_actions = np.ones(h, dtype=int)
 
         result = compute_top5_hindsight_optimal(prices, base_actions, step_idx=0, env=env)
-        returns = [r for _, r in result]
+        returns = [r for _, _, r in result]
         assert returns == sorted(returns, reverse=True)
 
     def test_result_tuple_structure(self):
-        """每个结果是 (adaptation_action, resulting_return) 元组。"""
+        """每个结果是 (τ_opt, adaptation_action, resulting_return) 三元组。"""
         h = 6
         env = self._make_env(h)
         prices = np.linspace(100.0, 106.0, h)
         base_actions = np.ones(h, dtype=int)
 
         result = compute_top5_hindsight_optimal(prices, base_actions, step_idx=0, env=env)
-        for action, ret in result:
+        for tau_opt, action, ret in result:
+            assert isinstance(tau_opt, int), f"τ_opt 应为 int，得到 {type(tau_opt)}"
+            assert 0 <= tau_opt < h, f"τ_opt 应在 [0, {h}) 范围内，得到 {tau_opt}"
             assert action in (-1, 1), f"调整动作应为 -1 或 1，得到 {action}"
             assert isinstance(ret, float)
 
@@ -216,7 +218,7 @@ class TestComputeTop5HindsightOptimal:
 
         result = compute_top5_hindsight_optimal(prices, base_actions, step_idx=0, env=env)
         # top-1 应该是在最早的步做多
-        top_action, top_return = result[0]
+        tau_opt, top_action, top_return = result[0]
         assert top_action == 1  # long
         assert top_return > 0.0
 
@@ -319,7 +321,7 @@ class TestRegretRewardProperties:
         )
 
         # Verify sorted descending by return
-        returns = [r for _, r in result]
+        returns = [r for _, _, r in result]
         for i in range(len(returns) - 1):
             assert returns[i] >= returns[i + 1], (
                 f"Results not sorted descending: {returns}"

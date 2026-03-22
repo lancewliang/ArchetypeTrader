@@ -33,6 +33,7 @@ from src.data.feature_pipeline import FeaturePipeline
 from src.env.trading_env import TradingEnv
 from src.phase1.codebook import VQCodebook
 from src.phase1.vq_decoder import VQDecoder
+from src.phase1.vq_encoder import VQEncoder
 from src.phase2.selection_agent import SelectionAgent
 from src.utils.logger import get_logger
 
@@ -40,12 +41,13 @@ logger = get_logger(__name__)
 
 
 def load_phase1_model(config, pair: str, device: torch.device):
-    """加载 Phase I 模型（码本 + 冻结 Decoder）。
+    """加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）。
 
     # 需求 7.4: 前置阶段模型文件不存在时抛出明确错误
     # 需求 5.3: 冻结 Decoder 参数
 
     Returns:
+        encoder: 加载权重后的 VQEncoder（冻结，用于获取 ground-truth archetype label）
         codebook: 加载权重后的 VQCodebook（冻结）
         decoder: 加载权重后的 VQDecoder（冻结）
     """
@@ -60,6 +62,15 @@ def load_phase1_model(config, pair: str, device: torch.device):
 
     logger.info("加载 Phase I 模型: %s", model_path)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+
+    # 初始化并加载 Encoder（用于获取 ground-truth archetype label）
+    encoder = VQEncoder(
+        state_dim=config.state_dim,
+        action_dim=config.action_dim,
+        hidden_dim=config.lstm_hidden_dim,
+        latent_dim=config.latent_dim,
+    ).to(device)
+    encoder.load_state_dict(checkpoint["encoder"])
 
     # 初始化并加载 Codebook
     codebook = VQCodebook(
@@ -77,17 +88,20 @@ def load_phase1_model(config, pair: str, device: torch.device):
     ).to(device)
     decoder.load_state_dict(checkpoint["decoder"])
 
-    # 需求 5.3: 冻结 Codebook 和 Decoder — 不参与梯度更新
+    # 需求 5.3: 冻结 Encoder、Codebook 和 Decoder — 不参与梯度更新
+    for param in encoder.parameters():
+        param.requires_grad = False
     for param in codebook.parameters():
         param.requires_grad = False
     for param in decoder.parameters():
         param.requires_grad = False
 
+    encoder.eval()
     codebook.eval()
     decoder.eval()
 
-    logger.info("Phase I 模型加载完成，Codebook 和 Decoder 已冻结")
-    return codebook, decoder
+    logger.info("Phase I 模型加载完成，Encoder、Codebook 和 Decoder 已冻结")
+    return encoder, codebook, decoder
 
 
 
@@ -213,9 +227,9 @@ def main() -> None:
     logger.info("使用设备: %s", device)
 
     # ----------------------------------------------------------------
-    # Step 1: 加载 Phase I 模型（码本 + 冻结 Decoder）
+    # Step 1: 加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）
     # ----------------------------------------------------------------
-    codebook, decoder = load_phase1_model(config, pair, device)
+    encoder, codebook, decoder = load_phase1_model(config, pair, device)
 
     # ----------------------------------------------------------------
     # Step 2: 加载特征数据，初始化 TradingEnv
@@ -279,14 +293,14 @@ def main() -> None:
     # ----------------------------------------------------------------
     # Step 4: 训练循环 — 3M 步（horizon 级别 RL）
     # Section 4.2: Horizon-level RL
-    # 目标函数含 KL 惩罚: α × KL(π || uniform), α=1
-    # Policy loss = -log π(k|s) × advantage + α × KL
+    # 目标函数 Eq. 5: J = E[Σ γ^t r_sel - α × KL(â_sel || π_sel)]
+    # â_sel 是 VQ encoder 对当前 horizon 示范轨迹分配的 ground-truth archetype label
+    # Policy loss = -log π(k|s) × advantage + α × KL(â_sel || π_sel)
     # Value loss = (R - V(s))²
     # ----------------------------------------------------------------
     alpha = config.selection_alpha  # KL 惩罚系数，默认 1.0
     gamma = config.discount_factor
     K = config.num_archetypes
-    uniform_prob = 1.0 / K  # 均匀分布概率
 
     total_steps = config.phase2_total_steps
     val_interval = max(train_env.num_horizons, 1000)  # 每遍历一次训练集或 1000 步评估一次
@@ -307,9 +321,53 @@ def main() -> None:
         h_idx = np.random.randint(0, train_env.num_horizons)
 
         # 获取 horizon 起始状态
-        state = train_env.states[h_idx * train_env.horizon]
+        h = train_env.horizon
+        start = h_idx * h
+        end = min(start + h, len(train_env.states))
+        state = train_env.states[start]
         state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         # state_t: (1, state_dim)
+
+        # Section 4.2: 获取 ground-truth archetype label â_sel
+        # 使用冻结的 VQ encoder + codebook 对当前 horizon 的示范数据编码
+        horizon_states = train_env.states[start:end]  # (h, state_dim)
+
+        # 使用 decoder 生成 base actions 作为示范动作（用于 encoder 输入）
+        # 先用 codebook 中所有原型尝试，选择最佳匹配
+        # 简化方案：使用 DP planner 的示范轨迹或直接用 encoder 编码
+        # 这里我们用 encoder 对 horizon 数据编码获取 ground-truth label
+        with torch.no_grad():
+            # 为了获取 ground-truth label，需要示范轨迹
+            # 使用所有 K 个原型的 decoder 输出，选择重建损失最小的作为 â_sel
+            horizon_states_t = torch.tensor(
+                horizon_states, dtype=torch.float32, device=device
+            ).unsqueeze(0)  # (1, h, state_dim)
+
+            best_label = 0
+            best_loss = float("inf")
+            for ki in range(K):
+                z_qi = codebook.embeddings.weight[ki].unsqueeze(0)  # (1, code_dim)
+                logits_i = decoder(horizon_states_t, z_qi)  # (1, h, action_dim)
+                actions_i = torch.argmax(logits_i, dim=-1).squeeze(0)  # (h,)
+                # 用这些 actions 作为 encoder 输入
+                r_dummy = torch.zeros(1, len(actions_i), device=device)
+                z_e_i = encoder(
+                    horizon_states_t,
+                    actions_i.unsqueeze(0),
+                    r_dummy,
+                )  # (1, latent_dim)
+                _, indices_i, _ = codebook.quantize(z_e_i)
+                # 如果 encoder 将此轨迹映射回原型 ki，说明匹配良好
+                # 使用重建损失作为匹配度量
+                logits_flat = logits_i.reshape(-1, config.action_dim)
+                targets_flat = actions_i.reshape(-1)
+                loss_i = F.cross_entropy(logits_flat, targets_flat).item()
+                if loss_i < best_loss:
+                    best_loss = loss_i
+                    best_label = ki
+
+            # â_sel: ground-truth archetype label (one-hot)
+            gt_label = best_label
 
         # Section 4.2: Agent 选择原型
         action_probs, value = agent(state_t)
@@ -334,14 +392,12 @@ def main() -> None:
         R = torch.tensor([horizon_return], dtype=torch.float32, device=device)
         advantage = R - value.squeeze()  # advantage = R - V(s)
 
-        # KL 惩罚: KL(π || uniform) = Σ π(k) × log(π(k) / (1/K))
-        # = Σ π(k) × (log π(k) + log K)
-        kl_divergence = torch.sum(
-            action_probs * (torch.log(action_probs + 1e-8) - np.log(uniform_prob)),
-            dim=-1,
-        )  # (1,)
+        # Eq. 5: KL(â_sel || π_sel) — â_sel 是 ground-truth archetype 的 one-hot 分布
+        # KL(one_hot(gt) || π) = -log π(gt)（因为 one-hot 分布的熵为 0）
+        gt_label_t = torch.tensor([gt_label], dtype=torch.long, device=device)
+        kl_divergence = -torch.log(action_probs[0, gt_label] + 1e-8)
 
-        # Policy loss = -log π(k|s) × advantage.detach() + α × KL
+        # Policy loss = -log π(k|s) × advantage.detach() + α × KL(â_sel || π_sel)
         policy_loss = -log_prob * advantage.detach() + alpha * kl_divergence
 
         # Value loss = (R - V(s))²

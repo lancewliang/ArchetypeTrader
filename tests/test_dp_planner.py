@@ -54,6 +54,7 @@ def _brute_force_max_reward(
     prices: np.ndarray,
     m: int,
     commission_rate: float = 0.0002,
+    gamma: float = 0.99,
 ) -> float:
     """暴力枚举所有满足单次交易约束的动作序列，返回最大总奖励。
 
@@ -62,6 +63,9 @@ def _brute_force_max_reward(
       - 全 flat
       - flat...flat, open(long/short)...hold, flat...flat
       - flat...flat, open(long/short)...hold（不平仓，持有到结束）
+
+    注意：使用折扣因子 γ 与 DP planner 保持一致。
+    最后一步动作复制倒数第二步（Algorithm 1, Step 13）。
     """
     N = len(prices)
     if N == 0:
@@ -96,7 +100,12 @@ def _brute_force_max_reward(
         return True
 
     def _compute_total_reward(actions):
-        """计算动作序列的总奖励。"""
+        """计算动作序列的折扣总奖励（含 Algorithm 1 Step 13 最后一步复制规则）。"""
+        # 应用 Algorithm 1 Step 13: â_{N-1} ← â_{N-2}
+        actions = list(actions)
+        if N >= 2:
+            actions[N - 1] = actions[N - 2]
+
         total = 0.0
         current_pos = 0  # flat
         for t, a in enumerate(actions):
@@ -107,16 +116,27 @@ def _brute_force_max_reward(
             # 价差
             p_next = prices[t + 1] if t + 1 < len(prices) else prices[t]
             reward = new_pos * (p_next - prices[t]) - cost
-            total += reward
+            total += (gamma ** t) * reward
             current_pos = new_pos
         return total
 
     best = -np.inf
-    for actions in itertools.product([0, 1, 2], repeat=N):
-        if _is_valid(actions):
-            r = _compute_total_reward(actions)
-            if r > best:
-                best = r
+    # 只枚举前 N-1 步（最后一步由 Step 13 决定）
+    if N >= 2:
+        for actions in itertools.product([0, 1, 2], repeat=N):
+            # 应用 Step 13 规则后检查有效性
+            actions_list = list(actions)
+            actions_list[N - 1] = actions_list[N - 2]
+            if _is_valid(actions_list):
+                r = _compute_total_reward(tuple(actions_list))
+                if r > best:
+                    best = r
+    else:
+        for actions in itertools.product([0, 1, 2], repeat=N):
+            if _is_valid(actions):
+                r = _compute_total_reward(actions)
+                if r > best:
+                    best = r
 
     return best
 
@@ -358,7 +378,7 @@ class TestDPOptimality:
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
     def test_optimality_random_prices(self, seed):
-        """随机价格序列下 DP 收益 == 暴力枚举最大收益。"""
+        """随机价格序列下 DP 折扣收益 == 暴力枚举最大折扣收益。"""
         rng = np.random.RandomState(seed)
         N = 6  # 小规模以保证暴力枚举可行 (3^6 = 729)
         prices = 100.0 + np.cumsum(rng.randn(N) * 5)
@@ -366,11 +386,12 @@ class TestDPOptimality:
 
         env = _make_env(prices, pair="BTC", horizon=N)
         planner = DPPlanner(env)
+        gamma = planner.gamma
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
-        dp_reward = float(r_demo.sum())
+        dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
 
-        bf_reward = _brute_force_max_reward(prices, m=env.m)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
 
         assert abs(dp_reward - bf_reward) < 1e-6, (
             f"seed={seed}: DP reward={dp_reward:.6f} != BF reward={bf_reward:.6f}"
@@ -382,10 +403,11 @@ class TestDPOptimality:
         prices = np.array([100.0, 110.0, 120.0, 130.0, 140.0])
         env = _make_env(prices, pair="BTC", horizon=N)
         planner = DPPlanner(env)
+        gamma = planner.gamma
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
-        dp_reward = float(r_demo.sum())
-        bf_reward = _brute_force_max_reward(prices, m=env.m)
+        dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
 
         assert abs(dp_reward - bf_reward) < 1e-6
 
@@ -395,10 +417,11 @@ class TestDPOptimality:
         prices = np.array([140.0, 130.0, 120.0, 110.0, 100.0])
         env = _make_env(prices, pair="BTC", horizon=N)
         planner = DPPlanner(env)
+        gamma = planner.gamma
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
-        dp_reward = float(r_demo.sum())
-        bf_reward = _brute_force_max_reward(prices, m=env.m)
+        dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
 
         assert abs(dp_reward - bf_reward) < 1e-6
 
@@ -408,10 +431,11 @@ class TestDPOptimality:
         prices = np.array([100.0, 90.0, 80.0, 70.0, 80.0, 90.0, 100.0])
         env = _make_env(prices, pair="BTC", horizon=N)
         planner = DPPlanner(env)
+        gamma = planner.gamma
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
-        dp_reward = float(r_demo.sum())
-        bf_reward = _brute_force_max_reward(prices, m=env.m)
+        dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
 
         assert abs(dp_reward - bf_reward) < 1e-6
 
@@ -424,10 +448,11 @@ class TestDPOptimality:
 
         env = _make_env(prices, pair="BTC", horizon=N)
         planner = DPPlanner(env)
+        gamma = planner.gamma
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
-        dp_reward = float(r_demo.sum())
-        bf_reward = _brute_force_max_reward(prices, m=env.m)
+        dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
 
         assert abs(dp_reward - bf_reward) < 1e-6, (
             f"N=10: DP reward={dp_reward:.6f} != BF reward={bf_reward:.6f}"
@@ -442,10 +467,11 @@ class TestDPOptimality:
 
         env = _make_env(prices, pair="ETH", horizon=N)
         planner = DPPlanner(env)
+        gamma = planner.gamma
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
-        dp_reward = float(r_demo.sum())
-        bf_reward = _brute_force_max_reward(prices, m=env.m)
+        dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
 
         assert abs(dp_reward - bf_reward) < 1e-4, (
             f"ETH: DP reward={dp_reward:.6f} != BF reward={bf_reward:.6f}"
@@ -506,7 +532,7 @@ class TestPropDPOptimality:
     )
     @settings(max_examples=100, deadline=None)
     def test_prop_dp_optimality_small_scale(self, h, seed):
-        """长度 ≤ 10 时，DP 收益 ≥ 暴力枚举最大收益（容差内）。"""
+        """长度 ≤ 10 时，DP 折扣收益 ≥ 暴力枚举最大折扣收益（容差内）。"""
         rng = np.random.RandomState(seed)
         prices = 100.0 + np.cumsum(rng.randn(h) * 5)
         prices = np.maximum(prices, 1.0)
@@ -514,11 +540,12 @@ class TestPropDPOptimality:
         states = rng.randn(h, 45).astype(np.float64)
         env = TradingEnv(states=states, prices=prices, pair="BTC", horizon=h)
         planner = DPPlanner(env)
+        gamma = planner.gamma
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
-        dp_reward = float(r_demo.sum())
+        dp_reward = sum(gamma ** t * r_demo[t] for t in range(h))
 
-        bf_reward = _brute_force_max_reward(prices, m=env.m)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
 
         assert dp_reward >= bf_reward - 1e-6, (
             f"h={h}, seed={seed}: DP reward={dp_reward:.6f} < BF reward={bf_reward:.6f}"

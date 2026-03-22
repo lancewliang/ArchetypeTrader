@@ -38,15 +38,17 @@ class DPPlanner:
     # flat 动作索引
     FLAT_ACTION = 1
 
-    def __init__(self, env: TradingEnv):
+    def __init__(self, env: TradingEnv, gamma: float = 0.99):
         """
         Args:
             env: MDP 交易环境实例，提供奖励计算和持仓映射。
+            gamma: 折扣因子 γ，默认 0.99（与论文 Algorithm 1 一致）。
         """
         self.env = env
         self.pair = env.pair
         self.horizon = env.horizon
         self.m = env.m  # 最大持仓量
+        self.gamma = gamma
 
     # ------------------------------------------------------------------
     # 核心接口
@@ -120,8 +122,8 @@ class DPPlanner:
                         )
                         reward = next_position * (p_next - p_t) - execution_cost
 
-                        # Bellman 方程: V[t, a_prev, c] = max_a { r(t, a_prev, a) + V[t+1, a, c'] }
-                        val = reward + V[t + 1, a_next, c_next]
+                        # Bellman 方程: V[t, a_prev, c] = max_a { r(t, a_prev→a) + γ × V[t+1, a, c'] }
+                        val = reward + self.gamma * V[t + 1, a_next, c_next]
 
                         if val > best_val:
                             best_val = val
@@ -142,7 +144,8 @@ class DPPlanner:
         current_c = 0  # 未交易
         current_position = 0  # flat 持仓
 
-        for t in range(N):
+        # Algorithm 1, Step 9-12: 前向追踪 t = 0 到 N-2
+        for t in range(N - 1):
             # 选择最优动作
             next_action = Pi[t, current_action_idx, current_c]
             next_position = TradingEnv.POSITION_MAP[next_action] * self.m
@@ -164,6 +167,23 @@ class DPPlanner:
             )
             current_action_idx = next_action
             current_position = next_position
+
+        # Algorithm 1, Step 13: â_{N-1} ← â_{N-2}
+        if N >= 2:
+            a_demo[N - 1] = a_demo[N - 2]
+        else:
+            # N=1 的边界情况：只有一步，使用 Pi 表
+            a_demo[0] = Pi[0, self.FLAT_ACTION, 0]
+
+        # 计算最后一步的奖励
+        last_action = int(a_demo[N - 1])
+        last_position = TradingEnv.POSITION_MAP[last_action] * self.m
+        p_t = prices[N - 1]
+        p_next = prices[N] if N < len(prices) else prices[N - 1]
+        execution_cost = self.env.compute_execution_cost(
+            last_action, current_position, p_t
+        )
+        r_demo[N - 1] = last_position * (p_next - p_t) - execution_cost
 
         s_demo = states.copy()
         return s_demo, a_demo, r_demo

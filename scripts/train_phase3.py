@@ -192,7 +192,6 @@ def run_horizon_with_refinement(
     refinement_agent: RefinementAgent,
     policy_adapter: PolicyAdapter,
     e_a_sel: np.ndarray,
-    R_arche: float,
     device: torch.device,
     horizon: int,
 ):
@@ -202,6 +201,9 @@ def run_horizon_with_refinement(
     # 每个 step: refinement agent 观测 state + context → 输出 a_ref
     #            → policy adapter 计算 final action → env step
     # 收集 (log_prob, value, reward) 用于 Actor-Critic 更新
+    #
+    # R_arche_τ = Σ_{i=t}^{τ} r_i^step 逐步累积实时收益（论文定义）
+    # τ_remain = t + h - τ 剩余绝对步数（论文定义）
 
     Args:
         env: 交易环境
@@ -210,7 +212,6 @@ def run_horizon_with_refinement(
         refinement_agent: 精炼 agent
         policy_adapter: 策略适配器
         e_a_sel: 选定原型的嵌入向量 (code_dim,)
-        R_arche: 原型基线收益（用于上下文）
         device: 计算设备
         horizon: horizon 长度
 
@@ -226,6 +227,7 @@ def run_horizon_with_refinement(
 
     h = len(base_actions)
     actual_return = 0.0
+    cumulative_reward = 0.0  # R_arche: 逐步累积的实时收益
     final_actions = []
     log_probs = []
     values = []
@@ -243,12 +245,13 @@ def run_horizon_with_refinement(
         ).unsqueeze(0)  # (1, 45)
 
         # s_ref2 = [e_a_sel (code_dim=16), a_base (1), R_arche (1), τ_remain (1)]
-        # τ_remain = 剩余步数比例
-        tau_remain = (h - step_idx) / h
+        # τ_remain = t + h - τ（论文定义：horizon 内剩余的绝对步数）
+        tau_remain = float(h - step_idx)
+        # R_arche_τ = Σ_{i=t}^{τ} r_i^step（逐步累积的实时收益）
         context = np.concatenate([
             e_a_sel,
             np.array([a_base], dtype=np.float32),
-            np.array([R_arche], dtype=np.float32),
+            np.array([cumulative_reward], dtype=np.float32),
             np.array([tau_remain], dtype=np.float32),
         ])  # (code_dim + 3,) = (19,)
         s_ref2 = torch.tensor(
@@ -273,6 +276,7 @@ def run_horizon_with_refinement(
         # 在 env 中执行最终动作
         next_state, reward, done, _ = env.step(a_final)
         actual_return += reward
+        cumulative_reward += reward  # 更新 R_arche: 逐步累积实时收益
 
         # 收集训练数据
         final_actions.append(a_final)
@@ -431,9 +435,6 @@ def main() -> None:
         # 计算 R_base: 使用 base actions 的 horizon 总收益
         R_base = compute_base_return(train_env, h_idx, base_actions)
 
-        # R_arche 用于上下文（使用 R_base 作为原型基线收益）
-        R_arche = R_base
-
         # Section 4.3: 在 horizon 内执行 step 级别精炼
         (
             R_actual,
@@ -448,19 +449,31 @@ def main() -> None:
             refinement_agent=refinement_agent,
             policy_adapter=PolicyAdapter(),
             e_a_sel=e_a_sel,
-            R_arche=R_arche,
             device=device,
             horizon=h,
         )
 
-        # Section 4.3: 计算 top-1 hindsight-optimal 收益 R_1_opt
+        # Section 4.3 / Eq. 7: 计算 top-5 hindsight-optimal adaptations
+        # O_top5 = {(τ_opt^n, a_opt^n, R_opt^n)}_{n=1}^{5}
         top5 = compute_top5_hindsight_optimal(
             prices=horizon_prices,
             base_actions=base_actions,
             step_idx=0,
             env=train_env,
         )
-        R_1_opt = top5[0][1] if top5 else R_base
+        R_1_opt = top5[0][2] if top5 else R_base  # top5 现在是 (τ_opt, a_opt, R_opt) 三元组
+
+        # Section 4.3 / Eq. 9: 构建 hindsight-optimal 动作序列 â_ref
+        # â_ref_τ = a_opt^n if τ = τ_opt^n, else 0
+        # 用于交叉熵监督损失 L(â_ref, π_ref)
+        h_actual = len(a_refs)
+        optimal_actions = np.zeros(h_actual, dtype=np.int64)  # 默认 a_ref=0 (不调整)
+        if top5:
+            # 使用 top-1 的 (τ_opt, a_opt) 作为监督信号
+            tau_opt, a_opt, _ = top5[0]
+            if tau_opt < h_actual:
+                # a_opt ∈ {-1, 1} → 映射到索引 {0, 2}，加上 0→1 的偏移
+                optimal_actions[tau_opt] = a_opt + 1  # -1→0, 0→1, 1→2
 
         # Section 4.3: 计算 regret-aware reward for each step
         # 论文中 regret reward 是 horizon 级别的，分配给有调整的 step
@@ -475,7 +488,8 @@ def main() -> None:
             )
             step_rewards.append(r_ref)
 
-        # Section 4.3: Actor-Critic 更新
+        # Section 4.3 / Eq. 9: Actor-Critic 更新
+        # J' = E[Σ γ^τ r_ref - β_2 × L(â_ref, π_ref)]
         # 计算折扣回报 (从后向前)
         returns = []
         G = 0.0
@@ -499,8 +513,60 @@ def main() -> None:
             # Value loss = (G_t - V(s_t))²
             value_loss = F.mse_loss(values_t, returns_t)
 
-            # 总损失: policy_loss + β_2 × value_loss
-            loss = policy_loss + beta2 * value_loss
+            # Eq. 9: β_2 × L(â_ref, π_ref) — 交叉熵监督损失
+            # 使用 hindsight-optimal 动作 â_ref 作为监督标签
+            # 重新前向传播获取 action logits（用于交叉熵计算）
+            optimal_actions_t = torch.tensor(
+                optimal_actions[:h_actual], dtype=torch.long, device=device
+            )
+            # 收集每步的 action_probs 用于交叉熵
+            # 重新前向传播以获取 logits
+            ce_loss = torch.tensor(0.0, device=device)
+            state_replay = train_env.reset(h_idx)
+            policy_adapter_replay = PolicyAdapter()
+            a_base_prev_replay = int(base_actions[0])
+            cumulative_reward_replay = 0.0
+
+            for step_idx in range(h_actual):
+                a_base_r = int(base_actions[step_idx])
+                s_ref1_r = torch.tensor(
+                    state_replay, dtype=torch.float32, device=device
+                ).unsqueeze(0)
+                tau_remain_r = float(h - step_idx)
+                context_r = np.concatenate([
+                    e_a_sel,
+                    np.array([a_base_r], dtype=np.float32),
+                    np.array([cumulative_reward_replay], dtype=np.float32),
+                    np.array([tau_remain_r], dtype=np.float32),
+                ])
+                s_ref2_r = torch.tensor(
+                    context_r, dtype=torch.float32, device=device
+                ).unsqueeze(0)
+
+                action_probs_r, _ = refinement_agent(s_ref1_r, s_ref2_r)
+                # 交叉熵: -log π(â_ref | s_ref)
+                target_r = optimal_actions_t[step_idx].unsqueeze(0)
+                ce_step = F.cross_entropy(
+                    torch.log(action_probs_r + 1e-8), target_r
+                )
+                ce_loss = ce_loss + ce_step
+
+                # 重放环境步骤以获取正确的下一状态
+                a_ref_r = a_refs[step_idx]
+                a_final_r = policy_adapter_replay.compute_final_action(
+                    a_base_r, a_base_prev_replay, a_ref_r
+                )
+                next_state_r, reward_r, done_r, _ = train_env.step(a_final_r)
+                cumulative_reward_replay += reward_r
+                state_replay = next_state_r
+                a_base_prev_replay = a_base_r
+                if done_r:
+                    break
+
+            ce_loss = ce_loss / h_actual
+
+            # Eq. 9: 总损失 = policy_loss + value_loss + β_2 × cross_entropy_loss
+            loss = policy_loss + value_loss + beta2 * ce_loss
 
             optimizer.zero_grad()
             loss.backward()

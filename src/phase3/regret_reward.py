@@ -9,10 +9,11 @@
 # R_1_opt : top-1 hindsight-optimal adaptation 的收益
 # β_1     : regret 系数，可选 {0.3, 0.5, 0.7}
 #
-# Top-5 hindsight-optimal adaptations:
+# Top-5 hindsight-optimal adaptations (Eq. 7):
+#   O_top5 = {(τ_opt^n, a_opt^n, R_opt^n)}_{n=1}^{5}
 #   对 horizon 内每个可能的调整点和调整动作，
 #   计算假设执行该调整后的 horizon 收益，
-#   返回收益最高的 5 个 (adaptation_action, resulting_return)。
+#   返回收益最高的 5 个 (τ_opt, adaptation_action, resulting_return)。
 """
 
 from typing import List, Tuple
@@ -59,17 +60,17 @@ def compute_top5_hindsight_optimal(
     base_actions: np.ndarray,
     step_idx: int,
     env: TradingEnv,
-) -> List[Tuple[int, float]]:
+) -> List[Tuple[int, int, float]]:
     """Compute top-5 hindsight-optimal adaptations at a given step.
 
-    # Section 4.3: Hindsight-optimal adaptations
+    # Section 4.3 / Eq. 7: Hindsight-optimal adaptations
+    # O_top5 = {(τ_opt^n, a_opt^n, R_opt^n)}_{n=1}^{5}
     # 对 horizon 内从 step_idx 开始的每个可能调整点，
-    # 尝试每种调整动作 {-1, 0, 1}，计算假设执行该调整后的总收益。
+    # 尝试每种调整动作 {-1, 1}，计算假设执行该调整后的总收益。
     # 返回收益最高的 5 个结果。
     #
     # 调整动作含义（对应 Eq. 6）:
     #   a_ref = -1 → a_final = 0 (flat/short)
-    #   a_ref =  0 → a_final = a_base (不变)
     #   a_ref =  1 → a_final = 2 (long)
 
     Args:
@@ -79,15 +80,16 @@ def compute_top5_hindsight_optimal(
         env: TradingEnv 实例，用于获取持仓量和佣金率等参数
 
     Returns:
-        List of (adaptation_action, resulting_return) tuples,
+        List of (τ_opt, adaptation_action, resulting_return) tuples,
         sorted descending by return. 最多 5 个。
-        adaptation_action ∈ {-1, 0, 1}
+        τ_opt: 调整时间步
+        adaptation_action ∈ {-1, 1}
     """
     h = len(prices)
     m = env.m
     commission_rate = env.COMMISSION_RATE
 
-    candidates: List[Tuple[int, float]] = []
+    candidates: List[Tuple[int, int, float]] = []
 
     # 对从 step_idx 到 horizon 末尾的每个可能调整点
     for adapt_step in range(step_idx, h):
@@ -101,10 +103,10 @@ def compute_top5_hindsight_optimal(
                 m=m,
                 commission_rate=commission_rate,
             )
-            candidates.append((a_ref, total_return))
+            candidates.append((adapt_step, a_ref, total_return))
 
     # 按收益降序排列，取 top-5
-    candidates.sort(key=lambda x: x[1], reverse=True)
+    candidates.sort(key=lambda x: x[2], reverse=True)
     return candidates[:5]
 
 
