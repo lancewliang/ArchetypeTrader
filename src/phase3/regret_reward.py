@@ -93,6 +93,13 @@ def compute_top5_hindsight_optimal(
 
     # 对从 step_idx 到 horizon 末尾的每个可能调整点
     for adapt_step in range(step_idx, h):
+        # Eq. 6 约束: 若 a_base ≠ a_base_prev，则该步不可调整（基础动作变化优先）
+        a_base_prev = int(base_actions[adapt_step - 1]) if adapt_step > 0 else int(base_actions[0])
+        a_base_cur = int(base_actions[adapt_step])
+        if adapt_step > 0 and a_base_cur != a_base_prev:
+            # 基础动作在此步发生变化，Eq. 6 规定 a_final = a_base，不可调整
+            continue
+
         # 对每种非零调整动作 {-1, 1}（a_ref=0 不产生调整）
         for a_ref in [-1, 1]:
             total_return = _simulate_adaptation(
