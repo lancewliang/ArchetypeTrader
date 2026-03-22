@@ -1,0 +1,4 @@
+# file: /home/lanceliang/opt/aiwork/ArchetypeTrader/src/env/trading_env.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.0002, 100, 200, 2500, 'BNB', 'BTC', 'DOT', 'ETH', 'execution_cost', 'old_position', 'position', 'price', 'step_in_horizon']

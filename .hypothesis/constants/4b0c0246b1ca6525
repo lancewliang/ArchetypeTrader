@@ -1,0 +1,4 @@
+# file: /home/lanceliang/opt/aiwork/ArchetypeTrader/src/evaluation/metrics.py
+# hypothesis_version: 6.151.9
+
+[0.0, 1.0, 52560, 'annual_calmar_ratio', 'annual_sharpe_ratio', 'annual_sortino_ratio', 'annual_volatility', 'max_drawdown', 'total_return']

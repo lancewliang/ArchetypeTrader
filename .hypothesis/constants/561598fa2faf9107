@@ -1,0 +1,4 @@
+# file: /home/lanceliang/opt/aiwork/ArchetypeTrader/src/data/feature_pipeline.py
+# hypothesis_version: 6.151.9
+
+['%Y-%m-%d', 'BNB', 'BTC', 'DOT', 'ETH', 'single_features', 'single_features.npy', 'trend_features', 'trend_features.npy', '配置的日期范围无效：总时间跨度 ≤ 0']
