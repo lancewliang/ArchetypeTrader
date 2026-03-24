@@ -193,7 +193,6 @@ def run_horizon_with_refinement(
     policy_adapter: PolicyAdapter,
     e_a_sel: np.ndarray,
     device: torch.device,
-    horizon: int,
 ):
     """在一个 horizon 内执行 step 级别的精炼训练。
 
@@ -213,22 +212,21 @@ def run_horizon_with_refinement(
         policy_adapter: 策略适配器
         e_a_sel: 选定原型的嵌入向量 (code_dim,)
         device: 计算设备
-        horizon: horizon 长度
 
     Returns:
-        actual_return: 精炼后的 horizon 总收益 R
-        final_actions: 实际执行的动作序列 (h,)
-        log_probs: 每步的 log_prob 列表
-        values: 每步的 value 列表
-        a_refs: 每步的 a_ref 列表
+        actual_return: 精炼后的完整 horizon 总收益 R
+        log_probs: 每步的 log_prob 列表（仅 RL episode 步）
+        values: 每步的 value 列表（仅 RL episode 步）
+        a_refs: 每步的 a_ref 列表（仅 RL episode 步）
+        adjusted_step: 实际生效调整的步索引，-1 表示无调整
     """
     state = env.reset(horizon_idx)
 
     h = len(base_actions)
     has_adjusted = False
+    adjusted_step = -1  # 实际生效调整的步索引，-1 表示无调整
     actual_return = 0.0
     cumulative_reward = 0.0  # R_arche: 逐步累积的实时收益
-    final_actions = []
     log_probs = []
     values = []
     a_refs = []
@@ -280,7 +278,6 @@ def run_horizon_with_refinement(
         cumulative_reward += reward  # 更新 R_arche: 逐步累积实时收益
 
         # 收集训练数据
-        final_actions.append(a_final)
         log_probs.append(log_prob)
         values.append(value.squeeze())
         a_refs.append(a_ref)
@@ -297,16 +294,16 @@ def run_horizon_with_refinement(
         # RL episode 终止，但仍需执行剩余 base actions 以计算完整
         # horizon return R（用于 Eq.8 的 regret reward）
         if has_adjusted and not prev_has_adjusted:
+            adjusted_step = step_idx
             for remaining_idx in range(step_idx + 1, h):
                 a_remaining = int(base_actions[remaining_idx])
                 _, reward_remaining, done_remaining, _ = env.step(a_remaining)
                 actual_return += reward_remaining
-                final_actions.append(a_remaining)
                 if done_remaining:
                     break
             break
 
-    return actual_return, final_actions, log_probs, values, a_refs
+    return actual_return, log_probs, values, a_refs, adjusted_step
 
 
 def main() -> None:
@@ -450,10 +447,10 @@ def main() -> None:
         policy_adapter = PolicyAdapter()
         (
             R_actual,
-            final_actions,
             log_probs,
             values,
             a_refs,
+            adjusted_step,
         ) = run_horizon_with_refinement(
             env=train_env,
             horizon_idx=h_idx,
@@ -462,7 +459,6 @@ def main() -> None:
             policy_adapter=policy_adapter,
             e_a_sel=e_a_sel,
             device=device,
-            horizon=h,
         )
 
         # Section 4.3 / Eq. 7: 计算 top-5 hindsight-optimal adaptations
@@ -487,17 +483,20 @@ def main() -> None:
                 # a_opt ∈ {-1, 1} → 映射到索引 {0, 2}，加上 0→1 的偏移
                 optimal_actions[tau_opt] = a_opt + 1  # -1→0, 0→1, 1→2
 
-        # Section 4.3: 计算 regret-aware reward for each step
-        # 论文中 regret reward 是 horizon 级别的，分配给有调整的 step
+        # Eq.(8): regret-aware reward 仅在实际生效的调整步赋值
+        # 其余步（包括被 Eq.6 阻止的非零 a_ref）统一为 0
         step_rewards = []
-        for a_ref in a_refs:
-            r_ref = compute_regret_reward(
-                R=R_actual,
-                R_base=R_base,
-                R_1_opt=R_1_opt,
-                a_ref=a_ref,
-                beta1=beta1,
-            )
+        for idx in range(len(a_refs)):
+            if idx == adjusted_step:
+                r_ref = compute_regret_reward(
+                    R=R_actual,
+                    R_base=R_base,
+                    R_1_opt=R_1_opt,
+                    a_ref=a_refs[idx],
+                    beta1=beta1,
+                )
+            else:
+                r_ref = 0.0
             step_rewards.append(r_ref)
 
         # Section 4.3 / Eq. 9: Actor-Critic 更新
