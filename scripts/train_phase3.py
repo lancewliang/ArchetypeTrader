@@ -271,6 +271,7 @@ def run_horizon_with_refinement(
         a_ref = a_ref_idx.item() - 1  # 0→-1, 1→0, 2→1
 
         # Section 4.3 / Eq. 6: Policy adapter 计算最终动作
+        prev_has_adjusted = has_adjusted
         a_final, has_adjusted = policy_adapter.compute_final_action(a_base, a_base_prev, a_ref, has_adjusted)
 
         # 在 env 中执行最终动作
@@ -289,6 +290,20 @@ def run_horizon_with_refinement(
         a_base_prev = a_base
 
         if done:
+            break
+
+        # 论文: "the RL episode terminates as soon as the adapter chooses
+        # a non-zero action"
+        # RL episode 终止，但仍需执行剩余 base actions 以计算完整
+        # horizon return R（用于 Eq.8 的 regret reward）
+        if has_adjusted and not prev_has_adjusted:
+            for remaining_idx in range(step_idx + 1, h):
+                a_remaining = int(base_actions[remaining_idx])
+                _, reward_remaining, done_remaining, _ = env.step(a_remaining)
+                actual_return += reward_remaining
+                final_actions.append(a_remaining)
+                if done_remaining:
+                    break
             break
 
     return actual_return, final_actions, log_probs, values, a_refs
