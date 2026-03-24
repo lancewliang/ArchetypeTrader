@@ -55,6 +55,7 @@ def _brute_force_max_reward(
     m: int,
     commission_rate: float = 0.0002,
     gamma: float = 0.99,
+    states: np.ndarray | None = None,
 ) -> float:
     """暴力枚举所有满足单次交易约束的动作序列，返回最大总奖励。
 
@@ -110,9 +111,19 @@ def _brute_force_max_reward(
         current_pos = 0  # flat
         for t, a in enumerate(actions):
             new_pos = pos_map[a] * m
-            # 执行损失
-            delta = abs(new_pos - current_pos)
-            cost = commission_rate * delta * prices[t] if delta > 0 else 0.0
+            # 执行损失: slippage + commission
+            delta_pos = new_pos - current_pos
+            if delta_pos != 0:
+                abs_delta = abs(delta_pos)
+                if states is not None:
+                    slippage = TradingEnv.compute_lob_slippage(
+                        delta_pos, states[t], prices[t]
+                    )
+                else:
+                    slippage = 0.0
+                cost = slippage + commission_rate * abs_delta * prices[t]
+            else:
+                cost = 0.0
             # 价差
             p_next = prices[t + 1] if t + 1 < len(prices) else prices[t]
             reward = new_pos * (p_next - prices[t]) - cost
@@ -391,7 +402,7 @@ class TestDPOptimality:
         _, a_demo, r_demo = planner.plan(env.states, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
 
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states)
 
         assert abs(dp_reward - bf_reward) < 1e-6, (
             f"seed={seed}: DP reward={dp_reward:.6f} != BF reward={bf_reward:.6f}"
@@ -407,7 +418,7 @@ class TestDPOptimality:
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states)
 
         assert abs(dp_reward - bf_reward) < 1e-6
 
@@ -421,7 +432,7 @@ class TestDPOptimality:
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states)
 
         assert abs(dp_reward - bf_reward) < 1e-6
 
@@ -435,7 +446,7 @@ class TestDPOptimality:
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states)
 
         assert abs(dp_reward - bf_reward) < 1e-6
 
@@ -452,7 +463,7 @@ class TestDPOptimality:
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states)
 
         assert abs(dp_reward - bf_reward) < 1e-6, (
             f"N=10: DP reward={dp_reward:.6f} != BF reward={bf_reward:.6f}"
@@ -471,7 +482,7 @@ class TestDPOptimality:
 
         _, a_demo, r_demo = planner.plan(env.states, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states)
 
         assert abs(dp_reward - bf_reward) < 1e-4, (
             f"ETH: DP reward={dp_reward:.6f} != BF reward={bf_reward:.6f}"
@@ -545,7 +556,7 @@ class TestPropDPOptimality:
         _, a_demo, r_demo = planner.plan(env.states, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(h))
 
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states)
 
         assert dp_reward >= bf_reward - 1e-6, (
             f"h={h}, seed={seed}: DP reward={dp_reward:.6f} < BF reward={bf_reward:.6f}"

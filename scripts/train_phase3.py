@@ -468,20 +468,23 @@ def main() -> None:
             base_actions=base_actions,
             step_idx=0,
             env=train_env,
+            states=horizon_states,
         )
         R_1_opt = top5[0][2] if top5 else R_base  # top5 现在是 (τ_opt, a_opt, R_opt) 三元组
 
-        # Section 4.3 / Eq. 9: 构建 hindsight-optimal 动作序列 â_ref
-        # â_ref_τ = a_opt^n if τ = τ_opt^n, else 0
-        # 用于交叉熵监督损失 L(â_ref, π_ref)
+        # Eq.(9): 构建 hindsight-optimal 动作序列 â_ref
+        # â_ref_τ = a_opt^n if τ = τ_opt^n, else 0 (不调整)
+        # 索引映射: a_ref_idx 0→a_ref=-1, 1→a_ref=0, 2→a_ref=1
+        # 默认 index=1 对应 a_ref=0 (不调整)
         h_actual = len(a_refs)
-        optimal_actions = np.zeros(h_actual, dtype=np.int64)  # 默认 a_ref=0 (不调整)
+        optimal_actions = np.ones(h_actual, dtype=np.int64)  # 默认 index=1 (a_ref=0, 不调整)
         if top5:
-            # 使用 top-1 的 (τ_opt, a_opt) 作为监督信号
-            tau_opt, a_opt, _ = top5[0]
-            if tau_opt < h_actual:
-                # a_opt ∈ {-1, 1} → 映射到索引 {0, 2}，加上 0→1 的偏移
-                optimal_actions[tau_opt] = a_opt + 1  # -1→0, 0→1, 1→2
+            # 使用 top-5 的 (τ_opt, a_opt) 构建监督信号
+            # top5 按 return 降序排列，同一 τ 只取最优的
+            for tau_opt, a_opt, _ in top5:
+                if tau_opt < h_actual and optimal_actions[tau_opt] == 1:
+                    # a_opt ∈ {-1, 1} → 索引 {0, 2}
+                    optimal_actions[tau_opt] = a_opt + 1  # -1→0, 1→2
 
         # Eq.(8): regret-aware reward 仅在实际生效的调整步赋值
         # 其余步（包括被 Eq.6 阻止的非零 a_ref）统一为 0

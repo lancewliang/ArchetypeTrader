@@ -257,11 +257,12 @@ class TestExecutionCost:
                 assert cost >= 0.0
 
     def test_fill_cost_non_negative(self, env_btc):
-        """fill cost 始终 ≥ 0"""
-        for action in [0, 1, 2]:
-            for pos in [-8, 0, 8]:
-                fc = env_btc.compute_fill_cost(action, pos)
-                assert fc >= 0.0
+        """fill cost (slippage) 始终 ≥ 0"""
+        state = env_btc.states[0]
+        price = 50000.0
+        for delta_pos in [-16, -8, 0, 8, 16]:
+            fc = env_btc.compute_fill_cost(delta_pos, state, price)
+            assert fc >= 0.0
 
 
 # ---------------------------------------------------------------------------

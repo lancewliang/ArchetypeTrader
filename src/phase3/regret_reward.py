@@ -60,6 +60,7 @@ def compute_top5_hindsight_optimal(
     base_actions: np.ndarray,
     step_idx: int,
     env: TradingEnv,
+    states: np.ndarray | None = None,
 ) -> List[Tuple[int, int, float]]:
     """Compute top-5 hindsight-optimal adaptations at a given step.
 
@@ -78,6 +79,8 @@ def compute_top5_hindsight_optimal(
         base_actions: 基础动作序列 shape (h,)，值域 {0, 1, 2}
         step_idx: 当前步索引（从此步开始考虑调整）
         env: TradingEnv 实例，用于获取持仓量和佣金率等参数
+        states: 当前 horizon 的状态序列 shape (h, state_dim)，
+                用于计算 LOB slippage。可选，为 None 时退化为仅佣金。
 
     Returns:
         List of (τ_opt, adaptation_action, resulting_return) tuples,
@@ -109,6 +112,7 @@ def compute_top5_hindsight_optimal(
                 a_ref=a_ref,
                 m=m,
                 commission_rate=commission_rate,
+                states=states,
             )
             candidates.append((adapt_step, a_ref, total_return))
 
@@ -124,6 +128,7 @@ def _simulate_adaptation(
     a_ref: int,
     m: int,
     commission_rate: float,
+    states: np.ndarray | None = None,
 ) -> float:
     """模拟在指定步执行一次调整后的 horizon 总收益。
 
@@ -132,6 +137,10 @@ def _simulate_adaptation(
     #   在 adapt_step 处应用调整: a_ref=-1 → action=0, a_ref=1 → action=2
     #   在 adapt_step 之后恢复 base_actions
     # 每个 horizon 最多一次调整（已由单次 adapt_step 保证）
+    #
+    # Section 3.1: O_t = C(|ΔP|) - |ΔP| × p_mark + δ × |ΔP| × p_mark
+    # 当 states 提供时，使用 LOB 5-level walk 计算 slippage；
+    # 否则退化为仅佣金。
 
     Args:
         prices: horizon 价格序列 shape (h,)
@@ -140,6 +149,7 @@ def _simulate_adaptation(
         a_ref: 调整信号 ∈ {-1, 1}
         m: 最大持仓量
         commission_rate: 佣金率
+        states: horizon 状态序列 shape (h, state_dim)，可选
 
     Returns:
         horizon 总收益（所有步奖励之和）
@@ -165,9 +175,20 @@ def _simulate_adaptation(
         direction = position_map[action]
         new_position = direction * m
 
-        # 计算执行损失（佣金）
-        delta = abs(new_position - position)
-        execution_cost = commission_rate * delta * prices[t] if delta > 0 else 0.0
+        # Section 3.1: O_t = slippage + commission
+        delta_pos = new_position - position
+        if delta_pos != 0:
+            abs_delta = abs(delta_pos)
+            if states is not None:
+                slippage = TradingEnv.compute_lob_slippage(
+                    delta_pos, states[t], prices[t]
+                )
+            else:
+                slippage = 0.0
+            commission = commission_rate * abs_delta * prices[t]
+            execution_cost = slippage + commission
+        else:
+            execution_cost = 0.0
 
         # 更新持仓
         position = new_position

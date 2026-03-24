@@ -32,6 +32,13 @@ class TradingEnv:
     # Section 3.1: 佣金率 δ = 0.02%
     COMMISSION_RATE: float = 0.0002
 
+    # Section 3.1: LOB feature indices in state vector
+    # (matching SINGLE_FEATURES order in feature_pipeline.py)
+    LOB_ASK_PRICE_IDX = [0, 4, 8, 12, 16]   # ask1..ask5 price
+    LOB_ASK_SIZE_IDX = [1, 5, 9, 13, 17]     # ask1..ask5 size
+    LOB_BID_PRICE_IDX = [2, 6, 10, 14, 18]   # bid1..bid5 price
+    LOB_BID_SIZE_IDX = [3, 7, 11, 15, 19]    # bid1..bid5 size
+
     def __init__(
         self,
         states: np.ndarray,
@@ -138,7 +145,7 @@ class TradingEnv:
 
         # Section 3.1: 计算执行损失 O_t（仅在持仓变化时产生）
         execution_cost = self.compute_execution_cost(
-            action, old_position, self.prices[t]
+            action, old_position, self.prices[t], self.states[t]
         )
 
         # 更新持仓
@@ -182,47 +189,101 @@ class TradingEnv:
 
         return next_state, reward, done, info
 
-    def compute_fill_cost(self, action: int, current_position: int) -> float:
-        """计算 LOB fill cost（成交价差）。
+    @staticmethod
+    def compute_lob_slippage(
+        delta_position: int, state: np.ndarray, mark_price: float,
+    ) -> float:
+        """Walk the 5-level LOB to compute slippage cost.
 
-        # Section 3.1: LOB fill cost 计算
-        # [NOTE: 论文未明确描述从特征向量计算 fill cost 的具体方法]
-        # 由于 LOB 信息已嵌入状态特征（bid/ask sizes），此处使用简化模型：
-        # fill cost = 半个 spread × 交易量变化
-        # 当持仓不变时 fill cost 为 0
+        # Section 3.1: C(|ΔP|) - |ΔP| × p_mark
+        # For buys (ΔP > 0): walk ask side, slippage = fill_cash - |ΔP| × mark
+        # For sells (ΔP < 0): walk bid side, slippage = |ΔP| × mark - fill_cash
+        #
+        # If the 5-level book cannot fill the entire order, remaining
+        # quantity is filled at the worst available level.
 
         Args:
-            action: 交易动作 a_t ∈ {0, 1, 2}
-            current_position: 当前持仓量
+            delta_position: signed position change (>0 buy, <0 sell)
+            state: state vector containing LOB features (45-dim)
+            mark_price: mark price p_mark
 
         Returns:
-            fill cost（非负值）
+            slippage cost (non-negative)
         """
-        target_direction = self.POSITION_MAP[action]
-        new_position = target_direction * self.m
-
-        # 持仓未变化，无 fill cost
-        if new_position == current_position:
+        if delta_position == 0:
             return 0.0
 
-        # [TODO: 论文未提供从特征向量精确计算 LOB fill cost 的方法]
-        # 简化模型：使用固定的 spread 比例作为 fill cost 近似
-        # 实际实现应根据 LOB 深度（bid/ask sizes in state features）计算
-        # 此处 fill cost 设为 0，佣金已在 compute_execution_cost 中计算
-        return 0.0
+        abs_delta = float(abs(delta_position))
+
+        if delta_position > 0:
+            price_idx = TradingEnv.LOB_ASK_PRICE_IDX
+            size_idx = TradingEnv.LOB_ASK_SIZE_IDX
+        else:
+            price_idx = TradingEnv.LOB_BID_PRICE_IDX
+            size_idx = TradingEnv.LOB_BID_SIZE_IDX
+
+        qty_remaining = abs_delta
+        fill_cash = 0.0
+        last_price = mark_price
+
+        for p_i, s_i in zip(price_idx, size_idx):
+            level_price = float(state[p_i])
+            level_size = float(state[s_i])
+            if level_price <= 0 or level_size <= 0:
+                continue
+            last_price = level_price
+            fill_qty = min(qty_remaining, level_size)
+            fill_cash += fill_qty * level_price
+            qty_remaining -= fill_qty
+            if qty_remaining <= 0:
+                break
+
+        # Fill remaining at worst available level
+        if qty_remaining > 0:
+            fill_cash += qty_remaining * last_price
+
+        # Slippage: always non-negative
+        if delta_position > 0:
+            slippage = fill_cash - abs_delta * mark_price
+        else:
+            slippage = abs_delta * mark_price - fill_cash
+
+        return max(slippage, 0.0)
+
+    def compute_fill_cost(
+        self, delta_position: int, state: np.ndarray, mark_price: float,
+    ) -> float:
+        """Compute LOB fill cost (slippage component of execution loss).
+
+        # Section 3.1: C(|ΔP|) - |ΔP| × p_mark
+        # Delegates to compute_lob_slippage.
+
+        Args:
+            delta_position: signed position change
+            state: state vector containing LOB features
+            mark_price: mark price
+
+        Returns:
+            slippage cost (non-negative)
+        """
+        return self.compute_lob_slippage(delta_position, state, mark_price)
 
     def compute_execution_cost(
-        self, action: int, current_position: int, price: float
+        self, action: int, current_position: int, price: float,
+        state: np.ndarray | None = None,
     ) -> float:
-        """计算总执行损失 = fill cost + 佣金。
+        """计算总执行损失 = slippage + 佣金。
 
-        # Section 3.1: O_t = fill_cost + commission
-        # 佣金 = δ × |ΔP| × price，δ = 0.02%
+        # Section 3.1: O_t = C(|ΔP|) - |ΔP| × p_mark + δ × |ΔP| × p_mark
+        #                   = slippage + commission
+        # C(·) 通过 walk 5-level LOB 计算。
+        # 若 state 未提供，退化为仅佣金（向后兼容）。
 
         Args:
             action: 交易动作 a_t ∈ {0, 1, 2}
             current_position: 当前持仓量
-            price: 当前价格
+            price: 当前 mark price
+            state: 状态向量（含 LOB 特征），可选
 
         Returns:
             总执行损失（非负值）
@@ -230,16 +291,21 @@ class TradingEnv:
         target_direction = self.POSITION_MAP[action]
         new_position = target_direction * self.m
 
-        # 持仓变化量
-        delta_position = abs(new_position - current_position)
+        # 持仓变化量（有符号）
+        delta_position = new_position - current_position
 
         if delta_position == 0:
             return 0.0
 
-        # Fill cost（基于 LOB 深度）
-        fill_cost = self.compute_fill_cost(action, current_position)
+        abs_delta = abs(delta_position)
+
+        # C(|ΔP|) - |ΔP| × p_mark: LOB slippage
+        if state is not None:
+            slippage = self.compute_lob_slippage(delta_position, state, price)
+        else:
+            slippage = 0.0
 
         # Section 3.1: 佣金 = δ × |ΔP| × price
-        commission = self.COMMISSION_RATE * delta_position * price
+        commission = self.COMMISSION_RATE * abs_delta * price
 
-        return fill_cost + commission
+        return slippage + commission
