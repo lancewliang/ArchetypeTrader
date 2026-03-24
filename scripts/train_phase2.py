@@ -26,7 +26,6 @@ import sys
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from src.config import parse_args
 from src.data.feature_pipeline import FeaturePipeline
@@ -273,6 +272,30 @@ def main() -> None:
         sys.exit(1)
 
     # ----------------------------------------------------------------
+    # Step 2.5: 加载 DP 示范轨迹（用于 Eq.5 的 ground-truth archetype label）
+    # DP 轨迹文件由 Phase I 的 DPPlanner.generate_trajectories() 生成，
+    # 前 num_horizons 条与训练环境 horizon 索引 1:1 对齐。
+    # ----------------------------------------------------------------
+    traj_path = os.path.join(
+        config.result_dir, "dp_trajectories", f"{pair}_trajectories.npz"
+    )
+    if not os.path.exists(traj_path):
+        raise FileNotFoundError(
+            f"DP 轨迹文件不存在: {traj_path}\n"
+            f"请先运行 Phase I 训练: python scripts/train_phase1.py --pair {pair}"
+        )
+    demo_data = np.load(traj_path)
+    demo_states = demo_data["states"]    # (N, h, state_dim)
+    demo_actions = demo_data["actions"]  # (N, h)
+    demo_rewards = demo_data["rewards"]  # (N, h)
+    logger.info(
+        "DP 示范轨迹加载完成: %d 条, horizon=%d (训练 env horizons=%d)",
+        demo_states.shape[0],
+        demo_states.shape[1],
+        train_env.num_horizons,
+    )
+
+    # ----------------------------------------------------------------
     # Step 3: 初始化 SelectionAgent
     # ----------------------------------------------------------------
     agent = SelectionAgent(
@@ -296,8 +319,6 @@ def main() -> None:
     # Value loss = (R - V(s))²
     # ----------------------------------------------------------------
     alpha = config.selection_alpha  # KL 惩罚系数，默认 1.0
-    gamma = config.discount_factor
-    K = config.num_archetypes
 
     total_steps = config.phase2_total_steps
     val_interval = max(train_env.num_horizons, 1000)  # 每遍历一次训练集或 1000 步评估一次
@@ -318,53 +339,28 @@ def main() -> None:
         h_idx = np.random.randint(0, train_env.num_horizons)
 
         # 获取 horizon 起始状态
-        h = train_env.horizon
-        start = h_idx * h
-        end = min(start + h, len(train_env.states))
+        start = h_idx * train_env.horizon
         state = train_env.states[start]
         state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         # state_t: (1, state_dim)
 
-        # Section 4.2: 获取 ground-truth archetype label â_sel
-        # 使用冻结的 VQ encoder + codebook 对当前 horizon 的示范数据编码
-        horizon_states = train_env.states[start:end]  # (h, state_dim)
-
-        # 使用 decoder 生成 base actions 作为示范动作（用于 encoder 输入）
-        # 先用 codebook 中所有原型尝试，选择最佳匹配
-        # 简化方案：使用 DP planner 的示范轨迹或直接用 encoder 编码
-        # 这里我们用 encoder 对 horizon 数据编码获取 ground-truth label
+        # Eq.(5): 获取 ground-truth archetype label â_sel
+        # 使用冻结的 VQ encoder + codebook 对该 horizon 的 DP 示范轨迹编码
+        # h_idx 与 demo 轨迹索引 1:1 对齐（dp_planner.generate_trajectories 顺序遍历）
         with torch.no_grad():
-            # 为了获取 ground-truth label，需要示范轨迹
-            # 使用所有 K 个原型的 decoder 输出，选择重建损失最小的作为 â_sel
-            horizon_states_t = torch.tensor(
-                horizon_states, dtype=torch.float32, device=device
+            demo_s = torch.tensor(
+                demo_states[h_idx], dtype=torch.float32, device=device
             ).unsqueeze(0)  # (1, h, state_dim)
+            demo_a = torch.tensor(
+                demo_actions[h_idx], dtype=torch.long, device=device
+            ).unsqueeze(0)  # (1, h)
+            demo_r = torch.tensor(
+                demo_rewards[h_idx], dtype=torch.float32, device=device
+            ).unsqueeze(0)  # (1, h)
 
-            best_label = 0
-            best_loss = float("inf")
-            for ki in range(K):
-                z_qi = codebook.embeddings.weight[ki].unsqueeze(0)  # (1, code_dim)
-                logits_i = decoder(horizon_states_t, z_qi)  # (1, h, action_dim)
-                actions_i = torch.argmax(logits_i, dim=-1).squeeze(0)  # (h,)
-                # 用这些 actions 作为 encoder 输入
-                r_dummy = torch.zeros(1, len(actions_i), device=device)
-                z_e_i = encoder(
-                    horizon_states_t,
-                    actions_i.unsqueeze(0),
-                    r_dummy,
-                )  # (1, latent_dim)
-                _, indices_i, _ = codebook.quantize(z_e_i)
-                # 如果 encoder 将此轨迹映射回原型 ki，说明匹配良好
-                # 使用重建损失作为匹配度量
-                logits_flat = logits_i.reshape(-1, config.action_dim)
-                targets_flat = actions_i.reshape(-1)
-                loss_i = F.cross_entropy(logits_flat, targets_flat).item()
-                if loss_i < best_loss:
-                    best_loss = loss_i
-                    best_label = ki
-
-            # â_sel: ground-truth archetype label (one-hot)
-            gt_label = best_label
+            z_e = encoder(demo_s, demo_a, demo_r)       # (1, latent_dim)
+            _, gt_indices, _ = codebook.quantize(z_e)    # (1,)
+            gt_label = gt_indices.item()
 
         # Section 4.2: Agent 选择原型
         action_probs, value = agent(state_t)
@@ -391,7 +387,6 @@ def main() -> None:
 
         # Eq. 5: KL(â_sel || π_sel) — â_sel 是 ground-truth archetype 的 one-hot 分布
         # KL(one_hot(gt) || π) = -log π(gt)（因为 one-hot 分布的熵为 0）
-        gt_label_t = torch.tensor([gt_label], dtype=torch.long, device=device)
         kl_divergence = -torch.log(action_probs[0, gt_label] + 1e-8)
 
         # Policy loss = -log π(k|s) × advantage.detach() + α × KL(â_sel || π_sel)
