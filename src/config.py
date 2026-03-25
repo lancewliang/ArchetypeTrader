@@ -16,7 +16,7 @@ class Config:
     # 数据配置
     data_dir: str = "data/feature_list"
     result_dir: str = "result"
-    pairs: List[str] = field(default_factory=lambda: ["BTC", "ETH", "DOT", "BNB"])
+    pairs: List[str] = field(default_factory=lambda: ["ETH"])
 
     # 特征维度
     single_feature_dim: int = 36

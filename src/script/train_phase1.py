@@ -68,6 +68,8 @@ def main() -> None:
     train_df, _, _ = pipeline.get_state_vector()
     train_prices_df, _, _  = pipeline.get_prices()
 
+    logger.info(f"train_df.shape={train_df.shape}, train_prices_df.shape={train_prices_df.shape}")
+
     train_states = train_df.to_numpy()
     prices = train_prices_df["close"].to_numpy()
 
