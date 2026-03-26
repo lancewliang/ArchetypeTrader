@@ -60,7 +60,7 @@ def compute_top5_hindsight_optimal(
     base_actions: np.ndarray,
     step_idx: int,
     env: TradingEnv,
-    states: np.ndarray | None = None,
+    states: list[dict] | None = None,
 ) -> List[Tuple[int, int, float]]:
     """Compute top-5 hindsight-optimal adaptations at a given step.
 
@@ -79,7 +79,7 @@ def compute_top5_hindsight_optimal(
         base_actions: 基础动作序列 shape (h,)，值域 {0, 1, 2}
         step_idx: 当前步索引（从此步开始考虑调整）
         env: TradingEnv 实例，用于获取持仓量和佣金率等参数
-        states: 当前 horizon 的状态序列 shape (h, state_dim)，
+        states: 当前 horizon 的状态序列 list[dict]（polars row dicts），
                 用于计算 LOB slippage。可选，为 None 时退化为仅佣金。
 
     Returns:
@@ -128,7 +128,7 @@ def _simulate_adaptation(
     a_ref: int,
     m: int,
     commission_rate: float,
-    states: np.ndarray | None = None,
+    states: list[dict] | None = None,
 ) -> float:
     """模拟在指定步执行一次调整后的 horizon 总收益。
 
@@ -149,7 +149,7 @@ def _simulate_adaptation(
         a_ref: 调整信号 ∈ {-1, 1}
         m: 最大持仓量
         commission_rate: 佣金率
-        states: horizon 状态序列 shape (h, state_dim)，可选
+        states: horizon 状态序列 list[dict]（polars row dicts），可选
 
     Returns:
         horizon 总收益（所有步奖励之和）

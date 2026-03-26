@@ -121,7 +121,7 @@ class DPPlanner:
                         # 计算即时奖励
                         # r_step_t = new_position * (p_{t+1} - p_t) - execution_cost
                         execution_cost = self.env.compute_execution_cost(
-                            a_next, prev_position, p_t, np.array(states.row(t))
+                            a_next, prev_position, p_t, states.row(t, named=True)
                         )
                         reward = next_position * (p_next - p_t) - execution_cost
 
@@ -157,7 +157,7 @@ class DPPlanner:
             p_t = prices[t]
             p_next = prices[t + 1] if (t + 1) < len(prices) else prices[t]
             execution_cost = self.env.compute_execution_cost(
-                next_action, current_position, p_t, np.array(states.row(t))
+                next_action, current_position, p_t, states.row(t, named=True)
             )
             reward = next_position * (p_next - p_t) - execution_cost
 
@@ -184,7 +184,7 @@ class DPPlanner:
         p_t = prices[N - 1]
         p_next = prices[N] if N < len(prices) else prices[N - 1]
         execution_cost = self.env.compute_execution_cost(
-            last_action, current_position, p_t, np.array(states.row(N - 1))
+            last_action, current_position, p_t, states.row(N - 1, named=True)
         )
         r_demo[N - 1] = last_position * (p_next - p_t) - execution_cost
 

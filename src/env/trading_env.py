@@ -35,10 +35,10 @@ class TradingEnv:
 
     # Section 3.1: LOB feature indices in state vector
     # (matching SINGLE_FEATURES order in feature_pipeline.py)
-    LOB_ASK_PRICE_IDX = [0, 4, 8, 12, 16]   # ask1..ask5 price
-    LOB_ASK_SIZE_IDX = [1, 5, 9, 13, 17]     # ask1..ask5 size
-    LOB_BID_PRICE_IDX = [2, 6, 10, 14, 18]   # bid1..bid5 price
-    LOB_BID_SIZE_IDX = [3, 7, 11, 15, 19]    # bid1..bid5 size
+    LOB_ASK_PRICE_COLS = ["ask1_price", "ask2_price", "ask3_price", "ask4_price", "ask5_price"]
+    LOB_ASK_SIZE_COLS = ["ask1_size", "ask2_size", "ask3_size", "ask4_size", "ask5_size"]
+    LOB_BID_PRICE_COLS = ["bid1_price", "bid2_price", "bid3_price", "bid4_price", "bid5_price"]
+    LOB_BID_SIZE_COLS = ["bid1_size", "bid2_size", "bid3_size", "bid4_size", "bid5_size"]
 
     def __init__(
         self,
@@ -148,8 +148,12 @@ class TradingEnv:
         new_position = target_direction * self.m
 
         # Section 3.1: 计算执行损失 O_t（仅在持仓变化时产生）
+        if self.states_dataframe is not None:
+            state_dict = self.states_dataframe.row(t, named=True)
+        else:
+            state_dict = None
         execution_cost = self.compute_execution_cost(
-            action, old_position, self.prices[t], self.states[t]
+            action, old_position, self.prices[t], state_dict
         )
 
         # 更新持仓
@@ -195,7 +199,7 @@ class TradingEnv:
 
     @staticmethod
     def compute_lob_slippage(
-        delta_position: int, state: np.ndarray, mark_price: float,
+        delta_position: int, state: dict, mark_price: float,
     ) -> float:
         """Walk the 5-level LOB to compute slippage cost.
 
@@ -208,7 +212,7 @@ class TradingEnv:
 
         Args:
             delta_position: signed position change (>0 buy, <0 sell)
-            state: state vector containing LOB features (45-dim)
+            state: polars row dict containing LOB features
             mark_price: mark price p_mark
 
         Returns:
@@ -220,19 +224,19 @@ class TradingEnv:
         abs_delta = float(abs(delta_position))
 
         if delta_position > 0:
-            price_idx = TradingEnv.LOB_ASK_PRICE_IDX
-            size_idx = TradingEnv.LOB_ASK_SIZE_IDX
+            price_cols = TradingEnv.LOB_ASK_PRICE_COLS
+            size_cols = TradingEnv.LOB_ASK_SIZE_COLS
         else:
-            price_idx = TradingEnv.LOB_BID_PRICE_IDX
-            size_idx = TradingEnv.LOB_BID_SIZE_IDX
+            price_cols = TradingEnv.LOB_BID_PRICE_COLS
+            size_cols = TradingEnv.LOB_BID_SIZE_COLS
 
         qty_remaining = abs_delta
         fill_cash = 0.0
         last_price = mark_price
 
-        for p_i, s_i in zip(price_idx, size_idx):
-            level_price = float(state[p_i])
-            level_size = float(state[s_i])
+        for p_col, s_col in zip(price_cols, size_cols):
+            level_price = float(state[p_col])
+            level_size = float(state[s_col])
             if level_price <= 0 or level_size <= 0:
                 continue
             last_price = level_price
@@ -242,11 +246,9 @@ class TradingEnv:
             if qty_remaining <= 0:
                 break
 
-        # Fill remaining at worst available level
         if qty_remaining > 0:
             fill_cash += qty_remaining * last_price
 
-        # Slippage: always non-negative
         if delta_position > 0:
             slippage = fill_cash - abs_delta * mark_price
         else:
@@ -255,7 +257,7 @@ class TradingEnv:
         return max(slippage, 0.0)
 
     def compute_fill_cost(
-        self, delta_position: int, state: np.ndarray, mark_price: float,
+        self, delta_position: int, state: dict, mark_price: float,
     ) -> float:
         """Compute LOB fill cost (slippage component of execution loss).
 
@@ -264,7 +266,7 @@ class TradingEnv:
 
         Args:
             delta_position: signed position change
-            state: state vector containing LOB features
+            state: polars row dict containing LOB features
             mark_price: mark price
 
         Returns:
@@ -274,7 +276,7 @@ class TradingEnv:
 
     def compute_execution_cost(
         self, action: int, current_position: int, price: float,
-        state: np.ndarray | None = None,
+        state: dict | None = None,
     ) -> float:
         """计算总执行损失 = slippage + 佣金。
 
@@ -287,7 +289,7 @@ class TradingEnv:
             action: 交易动作 a_t ∈ {0, 1, 2}
             current_position: 当前持仓量
             price: 当前 mark price
-            state: 状态向量（含 LOB 特征），可选
+            state: polars row dict（含 LOB 特征），可选
 
         Returns:
             总执行损失（非负值）

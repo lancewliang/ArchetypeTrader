@@ -4,8 +4,10 @@
 """
 
 import numpy as np
+import polars as pl
 import pytest
 
+from src.data.feature_pipeline import SINGLE_FEATURES, TREND_FEATURES
 from src.env.trading_env import TradingEnv
 
 
@@ -22,9 +24,12 @@ def _make_env(
     price_step: float = 10.0,
 ) -> TradingEnv:
     """创建一个简单的测试环境。"""
-    states = np.random.RandomState(42).randn(T, state_dim).astype(np.float64)
+    rng = np.random.RandomState(42)
+    states = rng.randn(T, state_dim).astype(np.float64)
     prices = np.arange(price_start, price_start + T * price_step, price_step)[:T]
-    return TradingEnv(states=states, prices=prices, pair=pair, horizon=horizon)
+    feature_cols = SINGLE_FEATURES + TREND_FEATURES
+    states_df = pl.DataFrame(states, schema=feature_cols[:state_dim])
+    return TradingEnv(states=states, prices=prices, pair=pair, horizon=horizon, states_dataframe=states_df)
 
 
 @pytest.fixture
@@ -258,7 +263,7 @@ class TestExecutionCost:
 
     def test_fill_cost_non_negative(self, env_btc):
         """fill cost (slippage) 始终 ≥ 0"""
-        state = env_btc.states[0]
+        state = env_btc.states_dataframe.row(0, named=True)
         price = 50000.0
         for delta_pos in [-16, -8, 0, 8, 16]:
             fc = env_btc.compute_fill_cost(delta_pos, state, price)
@@ -323,8 +328,11 @@ def _make_prop_env(
         assert T is not None
         T_actual = T
         prices = np.linspace(100.0, 200.0, T_actual)
-    states = np.random.RandomState(0).randn(T_actual, state_dim).astype(np.float64)
-    return TradingEnv(states=states, prices=prices, pair=pair, horizon=horizon)
+    rng = np.random.RandomState(0)
+    states = rng.randn(T_actual, state_dim).astype(np.float64)
+    feature_cols = SINGLE_FEATURES + TREND_FEATURES
+    states_df = pl.DataFrame(states, schema=feature_cols)
+    return TradingEnv(states=states, prices=prices, pair=pair, horizon=horizon, states_dataframe=states_df)
 
 
 # Feature: archetype-trader, Property 5: 持仓状态不变量

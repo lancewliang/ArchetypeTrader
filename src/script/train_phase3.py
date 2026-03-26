@@ -464,12 +464,13 @@ def main() -> None:
 
         # Section 4.3 / Eq. 7: 计算 top-5 hindsight-optimal adaptations
         # O_top5 = {(τ_opt^n, a_opt^n, R_opt^n)}_{n=1}^{5}
+        horizon_states_list = train_env.states_dataframe[start:end].rows(named=True)
         top5 = compute_top5_hindsight_optimal(
             prices=horizon_prices,
             base_actions=base_actions,
             step_idx=0,
             env=train_env,
-            states=horizon_states,
+            states=horizon_states_list,
         )
         R_1_opt = top5[0][2] if top5 else R_base  # top5 现在是 (τ_opt, a_opt, R_opt) 三元组
 
