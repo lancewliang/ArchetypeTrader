@@ -254,12 +254,14 @@ def main() -> None:
         prices=train_prices,
         pair=pair,
         horizon=config.horizon,
+        states_dataframe=train_df,
     )
     val_env = TradingEnv(
         states=val_states,
         prices=val_prices,
         pair=pair,
         horizon=config.horizon,
+        states_dataframe=val_df,
     )
     logger.info(
         "TradingEnv 初始化完成: train_horizons=%d, val_horizons=%d",

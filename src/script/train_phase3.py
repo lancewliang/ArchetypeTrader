@@ -358,6 +358,7 @@ def main() -> None:
         prices=train_prices,
         pair=pair,
         horizon=config.horizon,
+        states_dataframe=train_df,
     )
     logger.info("TradingEnv 初始化完成: train_horizons=%d", train_env.num_horizons)
 

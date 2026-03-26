@@ -303,6 +303,7 @@ def evaluate_pair(
         prices=test_prices,
         pair=pair,
         horizon=config.horizon,
+        states_dataframe=test_df,
     )
     logger.info("TradingEnv 初始化完成: test_horizons=%d", test_env.num_horizons)
 

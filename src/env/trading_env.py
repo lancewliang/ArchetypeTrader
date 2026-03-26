@@ -10,6 +10,7 @@
 from typing import Dict, Tuple
 
 import numpy as np
+import polars as pl
 
 
 class TradingEnv:
@@ -45,6 +46,7 @@ class TradingEnv:
         prices: np.ndarray,
         pair: str,
         horizon: int = 72,
+        states_dataframe: pl.DataFrame=None,
     ):
         """
         Args:
@@ -52,6 +54,7 @@ class TradingEnv:
             prices: 价格序列 shape (T,)，mark prices 用于奖励计算
             pair: 交易对名称，如 'BTC', 'ETH', 'DOT', 'BNB'
             horizon: 交易周期长度 h，默认 72
+            states_dataframe: 对应的 polars DataFrame，可选
         """
         if pair not in self.MAX_POSITIONS:
             raise ValueError(
@@ -71,6 +74,7 @@ class TradingEnv:
         self.pair = pair
         self.horizon = horizon
         self.state_dim = states.shape[1]
+        self.states_dataframe = states_dataframe
 
         # Section 3.1: 最大持仓量 m
         self.m: int = self.MAX_POSITIONS[pair]
