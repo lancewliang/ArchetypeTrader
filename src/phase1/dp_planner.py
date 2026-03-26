@@ -14,9 +14,10 @@
 """
 
 import os
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Union
 
 import numpy as np
+import polars as pl
 
 from src.env.trading_env import TradingEnv
 from src.utils.logger import get_logger
@@ -56,7 +57,7 @@ class DPPlanner:
     # ------------------------------------------------------------------
 
     def plan(
-        self, states: np.ndarray, prices: np.ndarray
+        self, states: pl.DataFrame, prices: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """对单个 horizon 执行动态规划，生成最优示范轨迹。
 
@@ -65,7 +66,7 @@ class DPPlanner:
         # Algorithm 1, Step 3: 前向追踪 (Forward pass)
 
         Args:
-            states: 单个 horizon 的状态序列, shape (N, state_dim)
+            states: 单个 horizon 的状态序列, polars DataFrame
             prices: 单个 horizon 的价格序列, shape (N,)
                     需要 N+1 个价格点来计算 N 步奖励，
                     但如果只有 N 个价格，最后一步价差为 0。
@@ -120,7 +121,7 @@ class DPPlanner:
                         # 计算即时奖励
                         # r_step_t = new_position * (p_{t+1} - p_t) - execution_cost
                         execution_cost = self.env.compute_execution_cost(
-                            a_next, prev_position, p_t, states[t]
+                            a_next, prev_position, p_t, np.array(states.row(t))
                         )
                         reward = next_position * (p_next - p_t) - execution_cost
 
@@ -156,7 +157,7 @@ class DPPlanner:
             p_t = prices[t]
             p_next = prices[t + 1] if (t + 1) < len(prices) else prices[t]
             execution_cost = self.env.compute_execution_cost(
-                next_action, current_position, p_t, states[t]
+                next_action, current_position, p_t, np.array(states.row(t))
             )
             reward = next_position * (p_next - p_t) - execution_cost
 
@@ -183,11 +184,11 @@ class DPPlanner:
         p_t = prices[N - 1]
         p_next = prices[N] if N < len(prices) else prices[N - 1]
         execution_cost = self.env.compute_execution_cost(
-            last_action, current_position, p_t, states[N - 1]
+            last_action, current_position, p_t, np.array(states.row(N - 1))
         )
         r_demo[N - 1] = last_position * (p_next - p_t) - execution_cost
 
-        s_demo = states.copy()
+        s_demo = states.to_numpy().copy()
         return s_demo, a_demo, r_demo
 
     def generate_trajectories(
@@ -222,11 +223,17 @@ class DPPlanner:
         )
 
         # 对每个 horizon 执行一次 DP 规划
+        if self.env.states_dataframe is None:
+            raise ValueError(
+                f"DPPlanner.generate_trajectories() 需要 env.states_dataframe，"
+                f"但当前为 None。请在创建 TradingEnv 时传入 states_dataframe 参数。"
+            )
+
         horizon_results = []
         for h_idx in range(num_horizons):
             start = h_idx * self.horizon
             end = start + self.horizon
-            h_states = self.env.states[start:end]
+            h_states = self.env.states_dataframe[start:end]
             # 价格需要多取一个点用于最后一步奖励计算
             price_end = min(end + 1, len(self.env.prices))
             h_prices = self.env.prices[start:price_end]
