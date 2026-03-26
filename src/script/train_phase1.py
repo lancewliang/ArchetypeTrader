@@ -67,9 +67,7 @@ def main() -> None:
     pipeline = FeaturePipeline(config.data_dir, pair)
     train_df, _, _ = pipeline.get_state_vector()
     train_prices_df, _, _  = pipeline.get_prices()
-
-    logger.info(f"train_df.shape={train_df.shape}, train_prices_df.shape={train_prices_df.shape}")
-
+    
     train_states = train_df.to_numpy()
     prices = train_prices_df["close"].to_numpy()
 
@@ -85,13 +83,14 @@ def main() -> None:
         pair=pair,
         horizon=config.horizon,
     )
-    logger.info("TradingEnv 初始化完成: num_horizons=%d", env.num_horizons)
+    
+    logger.info("TradingEnv 初始化完成 num_horizons =  总行数/切片内行数 = train_states.shape[0]/horizon: num_horizons=%d, horizon=%d", env.num_horizons, config.horizon)
 
     # ----------------------------------------------------------------
     # Step 2: 生成 DP 示范轨迹
     # ----------------------------------------------------------------
     traj_path = os.path.join(
-        config.result_dir, "dp_trajectories", f"{pair}_trajectories.npz"
+        config.result_dir, pair, "dp_trajectories", f"trajectories.npz"
     )
 
     if os.path.exists(traj_path):

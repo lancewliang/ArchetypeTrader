@@ -14,7 +14,7 @@ class Config:
     """ArchetypeTrader 全局配置，包含所有超参数。"""
 
     # 数据配置
-    data_dir: str = "data/feature_list"
+    data_dir: str = "data"
     result_dir: str = "result"
     pairs: List[str] = field(default_factory=lambda: ["ETH"])
 
@@ -36,7 +36,7 @@ class Config:
     latent_dim: int = 16  # z_e 维度
     num_archetypes: int = 10  # K = 10
     vq_beta0: float = 0.25  # 承诺损失系数
-    num_trajectories: int = 30000
+    num_trajectories: int = 8000
     phase1_epochs: int = 100
 
     # Phase II 配置

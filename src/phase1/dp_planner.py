@@ -37,7 +37,8 @@ class DPPlanner:
     NUM_ACTIONS = 3
     # flat 动作索引
     FLAT_ACTION = 1
-
+    # 约束标志: c ∈ {0, 1}
+    C = 2
     def __init__(self, env: TradingEnv, gamma: float = 0.99):
         """
         Args:
@@ -81,8 +82,9 @@ class DPPlanner:
         # Algorithm 1, Step 1: 初始化
         # V[N, a, c] = 0 for all a, c
         # ============================================================
-        V = np.zeros((N + 1, A, 2), dtype=np.float64)
-        Pi = np.full((N, A, 2), self.FLAT_ACTION, dtype=np.int32)
+
+        V = np.zeros((N + 1, A, self.C), dtype=np.float64)
+        Pi = np.full((N, A, self.C), self.FLAT_ACTION, dtype=np.int32)
 
         # ============================================================
         # Algorithm 1, Step 2: 反向填表 (Backward pass)
@@ -97,7 +99,7 @@ class DPPlanner:
                 # 当前持仓（由上一步动作决定）
                 prev_position = TradingEnv.POSITION_MAP[a_prev] * self.m
 
-                for c in range(2):
+                for c in range(self.C):
                     best_val = -np.inf
                     best_action = self.FLAT_ACTION
 
@@ -228,8 +230,18 @@ class DPPlanner:
             # 价格需要多取一个点用于最后一步奖励计算
             price_end = min(end + 1, len(self.env.prices))
             h_prices = self.env.prices[start:price_end]
-
+            
             s_demo, a_demo, r_demo = self.plan(h_states, h_prices)
+
+            if h_idx == 0:
+                logger.info(
+                    "Horizon 0 shapes: h_states=%s, h_prices=%s, s_demo=%s, a_demo=%s, r_demo=%s",
+                    h_states.shape,
+                    h_prices.shape,
+                    s_demo.shape,
+                    a_demo.shape,
+                    r_demo.shape,
+                )
 
             # 检查是否为全 flat 轨迹（无有效交易路径）
             if np.all(a_demo == self.FLAT_ACTION):

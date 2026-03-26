@@ -23,10 +23,10 @@ class TradingEnv:
 
     # 各交易对最大持仓量 m
     MAX_POSITIONS: Dict[str, int] = {
-        "BTC": 8,
-        "ETH": 100,
-        "DOT": 2500,
-        "BNB": 200,
+        "BTC": 1,
+        "ETH": 1,
+        "DOT": 1,
+        "BNB": 1,
     }
 
     # Section 3.1: 佣金率 δ = 0.02%

@@ -56,9 +56,9 @@ class FeaturePipeline:
         if self._loaded:
             return
 
-        train_path = f"{self.data_dir}/df_train.feather"
-        val_path = f"{self.data_dir}/df_val.feather"
-        test_path = f"{self.data_dir}/df_test.feather"
+        train_path = f"{self.data_dir}/{self.pair}/df_train.feather"
+        val_path = f"{self.data_dir}/{self.pair}/df_val.feather"
+        test_path = f"{self.data_dir}/{self.pair}/df_test.feather"
 
         self._raw_train = pl.DataFrame._from_arrow(pa_feather.read_table(train_path))
         self._raw_val = pl.DataFrame._from_arrow(pa_feather.read_table(val_path))
