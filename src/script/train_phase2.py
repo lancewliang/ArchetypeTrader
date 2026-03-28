@@ -52,7 +52,7 @@ def load_phase1_model(config, pair: str, device: torch.device):
         decoder: 加载权重后的 VQDecoder（冻结）
     """
     model_path = os.path.join(
-        config.result_dir, "phase1_archetype_discovery", pair, f"{pair}_vq_model.pt"
+        config.result_dir,  pair, "phase1_archetype_discovery", f"{pair}_vq_model.pt"
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -352,21 +352,16 @@ def main() -> None:
         # 使用冻结的 VQ encoder + codebook 对该 horizon 的 DP 示范轨迹编码
         # h_idx 与 demo 轨迹索引 1:1 对齐（dp_planner.generate_trajectories 顺序遍历）
         with torch.no_grad():
-            demo_s = torch.tensor(
-                demo_states[h_idx], dtype=torch.float32, device=device
-            ).unsqueeze(0)  # (1, h, state_dim)
-            demo_a = torch.tensor(
-                demo_actions[h_idx], dtype=torch.long, device=device
-            ).unsqueeze(0)  # (1, h)
-            demo_r = torch.tensor(
-                demo_rewards[h_idx], dtype=torch.float32, device=device
-            ).unsqueeze(0)  # (1, h)
+            demo_s = torch.tensor(demo_states[h_idx], dtype=torch.float32, device=device).unsqueeze(0)  # (1, h, state_dim)
+            demo_a = torch.tensor(demo_actions[h_idx], dtype=torch.long, device=device).unsqueeze(0)  # (1, h)
+            demo_r = torch.tensor(demo_rewards[h_idx], dtype=torch.float32, device=device).unsqueeze(0)  # (1, h)
 
             z_e = encoder(demo_s, demo_a, demo_r)       # (1, latent_dim)
             _, gt_indices, _ = codebook.quantize(z_e)    # (1,)
             gt_label = gt_indices.item()
 
         # Section 4.2: Agent 选择原型
+        # 返回所有原型的策略概率和价值函数输出
         action_probs, value = agent(state_t)
         # action_probs: (1, K), value: (1, 1)
 
@@ -377,8 +372,12 @@ def main() -> None:
 
         # 获取选定原型的量化嵌入
         z_q = codebook.embeddings.weight[k.item()].unsqueeze(0)  # (1, code_dim)
-
+        
+        if step_count == 0:
+            logger.info("state_t的形状:%s action_probs的形状:%s value的形状:%s z_q的形状:%s",state_t.shape,action_probs.shape,value.shape,z_q.shape)            
+             
         # Section 4.2: 冻结 Decoder 生成 micro actions → env 执行 → horizon return
+        # horizon return 就是这一个horizon的奖励总和
         horizon_return = run_horizon_with_decoder(
             train_env, h_idx, decoder, z_q, device
         )
