@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from src.config import parse_args
 from src.data.dataset import TrajectoryDataset
@@ -170,7 +171,7 @@ def main() -> None:
 
     logger.info("开始训练: %d epochs", config.phase1_epochs)
 
-    for epoch in range(1, config.phase1_epochs + 1):
+    for epoch in tqdm(range(1, config.phase1_epochs + 1), desc="Training Epochs"):
         encoder.train()
         codebook.train()
         decoder.train()
@@ -245,7 +246,7 @@ def main() -> None:
     # ----------------------------------------------------------------
     # Step 5: 保存模型到 result/phase1_archetype_discovery/
     # ----------------------------------------------------------------
-    save_dir = os.path.join(config.result_dir, "phase1_archetype_discovery")
+    save_dir = os.path.join(config.result_dir, pair ,"phase1_archetype_discovery")
     os.makedirs(save_dir, exist_ok=True)
 
     save_path = os.path.join(save_dir, f"{pair}_vq_model.pt")
