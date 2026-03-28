@@ -36,11 +36,11 @@ class Config:
     latent_dim: int = 16  # z_e 维度
     num_archetypes: int = 10  # K = 10
     vq_beta0: float = 0.25  # 承诺损失系数
-    num_trajectories: int = 8000
+    num_trajectories: int = 8000  # 52万行的化差不多哦 52万除以72等于7200. 8000 是一个折中值
     phase1_epochs: int = 100
 
     # Phase II 配置
-    phase2_total_steps: int = 3_000_000
+    phase2_total_steps: int = 8000*100
     selection_alpha: float = 1.0  # KL 惩罚系数
 
     # Phase III 配置

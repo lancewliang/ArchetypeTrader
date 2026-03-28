@@ -52,7 +52,7 @@ def load_phase1_model(config, pair: str, device: torch.device):
         decoder: 加载权重后的 VQDecoder（冻结）
     """
     model_path = os.path.join(
-        config.result_dir, "phase1_archetype_discovery", f"{pair}_vq_model.pt"
+        config.result_dir, "phase1_archetype_discovery", pair, f"{pair}_vq_model.pt"
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -281,7 +281,7 @@ def main() -> None:
     # 前 num_horizons 条与训练环境 horizon 索引 1:1 对齐。
     # ----------------------------------------------------------------
     traj_path = os.path.join(
-        config.result_dir, "dp_trajectories", f"{pair}_trajectories.npz"
+        config.result_dir, pair, "dp_trajectories", f"{pair}_trajectories.npz"
     )
     if not os.path.exists(traj_path):
         raise FileNotFoundError(
@@ -329,7 +329,7 @@ def main() -> None:
     log_interval = 100  # 每 100 步输出日志
 
     best_val_return = float("-inf")
-    save_dir = os.path.join(config.result_dir, "phase2_archetype_selection")
+    save_dir = os.path.join(config.result_dir, pair, "phase2_archetype_selection")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f"{pair}_selection_agent.pt")
 
