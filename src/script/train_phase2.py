@@ -1,31 +1,46 @@
 #!/usr/bin/env python
-"""Phase II 训练脚本 — 原型选择
+"""Phase II 训练脚本 — 原型选择（PPO 风格）
 
 # 需求: 7.2, 5.3, 5.4, 5.5, 5.7, 7.4, 7.5, 7.6, 7.7
 #
 # 流程:
 # 1. 加载 Phase I 模型（码本 + 冻结 Decoder），检查文件存在性
 # 2. 加载特征数据，初始化 TradingEnv（训练集 + 验证集）
-# 3. 初始化 SelectionAgent（Actor-Critic）
-# 4. 训练 3M 步（horizon 级别 RL）
+# 3. 初始化 SelectionAgent（Actor-Critic backbone）
+# 4. 训练 3M 步（horizon 级别 RL / PPO 风格）
 #    - 每个 horizon: agent 选择原型 → 冻结 decoder 生成 micro actions → env 执行 → 计算 horizon return
-#    - Actor-Critic 更新: advantage = R - V(s)
-#    - KL 惩罚: α × KL(π || uniform)，α=1
-#    - Policy loss = -log π(k|s) × advantage + α × KL
-#    - Value loss = (R - V(s))²
+#    - PPO 更新: clipped surrogate objective + value loss + entropy bonus
+#    - imitation / KL 惩罚: α × KL(â_sel || π_sel)
+#    - 其中 â_sel 来自冻结的 VQ encoder + codebook，对应论文 Eq.(5) 的 ground-truth archetype label
 # 5. 定期在验证集上评估，保存最优检查点
 # 6. 保存模型到 result/phase2_archetype_selection/
 #
 # 用法:
 #   python scripts/train_phase2.py --pair BTC
 #   python scripts/train_phase2.py --pair ETH --phase2-total-steps 1000000 --lr 1e-4
+#
+# 论文对应（AAAI26_ArchetypeTrader_core.md）:
+# - Section 4.2 Archetype Selection
+# - 高层状态: horizon 首 bar 的市场状态 s_sel
+# - 高层动作: archetype index a_sel ∈ {0, ..., K-1}
+# - 高层奖励: 一个 horizon 内的 step reward 累加得到 r_sel
+# - 目标函数: Eq.(5) 中“环境收益 + ground-truth archetype 一致性约束”
+#
+# 实现说明:
+# - 本脚本尽量保留你原代码的日志、方法分块和论文注解；
+# - 在训练器上，从“单步 Actor-Critic”升级为“horizon-level PPO 风格”；
+# - 不追求完全标准 PPO，而是优先保持论文语义与原工程结构的一致性。
 """
+
+from __future__ import annotations
 
 import os
 import sys
+from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from src.config import parse_args
@@ -40,11 +55,91 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def load_phase1_model(config, pair: str, device: torch.device):
+def _cfg(config: Any, name: str, default: Any) -> Any:
+    """安全读取配置项；若不存在则回退到默认值。
+
+    功能说明:
+        为 PPO 新增超参数提供向后兼容能力；即使 src.config.parse_args
+        尚未加入这些字段，本脚本也可以直接运行。
+
+    论文相关:
+        论文本身定义了 Phase II 的高层 MDP 和目标函数 Eq.(5)，
+        但未强制规定 PPO 的工程超参数；因此这里把 rollout/minibatch/
+        clip/entropy 等都做成可选配置，属于训练器层面的实现细节。
+    """
+    return getattr(config, name, default)
+
+
+def get_phase2_hparams(config: Any) -> dict[str, Any]:
+    """读取 PPO 相关超参数。
+
+    功能说明:
+        从 config 中读取 Phase II 的 PPO 风格训练参数，若外部配置未定义，
+        则使用安全默认值。
+    ppo 参数说明：
+        rollout_batch_size	每轮收集的样本数（horizon 数量），用于构建经验池
+        ppo_epochs	对同一批数据重复训练的轮数（通常 3-10）
+        minibatch_size	每个 epoch 内切分成的小批量大小
+        clip_eps	策略裁剪范围（如 0.2 表示新旧策略概率比限制在 [0.8, 1.2]），防止策略突变
+        vf_coef	价值函数损失的权重系数（总 loss = policy_loss + vf_coef × value_loss）
+        ent_coef	熵正则化系数，鼓励探索（越大越倾向于均匀分布）
+        max_grad_norm	梯度裁剪阈值，防止梯度爆炸
+        log_interval	每 N 步输出一次日志
+        eval_max_horizons	验证集评估时最多评估的 horizon 数量（None 表示全部）
+    论文相关:
+        论文的核心是 Section 4.2 的 horizon-level selector 与 Eq.(5) 的目标，
+        这里的 clip_eps / ppo_epochs / minibatch_size / ent_coef / vf_coef
+        是为了把原先的单步 Actor-Critic 升级为更稳定的 PPO 风格优化器。
+
+    Returns:
+        dict[str, Any]: 统一整理后的 PPO 超参数字典。
+    """
+    rollout_batch_size = int(_cfg(config, "phase2_rollout_batch_size", 256))
+    ppo_epochs = int(_cfg(config, "phase2_ppo_epochs", 4))
+    minibatch_size = int(_cfg(config, "phase2_minibatch_size", 64))
+    clip_eps = float(_cfg(config, "phase2_clip_eps", 0.2))
+    vf_coef = float(_cfg(config, "phase2_vf_coef", 0.5))
+    ent_coef = float(_cfg(config, "phase2_ent_coef", 0.01))
+    max_grad_norm = float(_cfg(config, "phase2_max_grad_norm", 1.0))
+    log_interval = int(_cfg(config, "phase2_log_interval", 100))
+    eval_max_horizons = _cfg(config, "phase2_eval_max_horizons", None)
+
+    rollout_batch_size = max(1, rollout_batch_size)
+    ppo_epochs = max(1, ppo_epochs)
+    minibatch_size = max(1, minibatch_size)
+    log_interval = max(1, log_interval)
+
+    return {
+        "rollout_batch_size": rollout_batch_size,
+        "ppo_epochs": ppo_epochs,
+        "minibatch_size": minibatch_size,
+        "clip_eps": clip_eps,
+        "vf_coef": vf_coef,
+        "ent_coef": ent_coef,
+        "max_grad_norm": max_grad_norm,
+        "log_interval": log_interval,
+        "eval_max_horizons": eval_max_horizons,
+    }
+
+
+def load_phase1_model(config: Any, pair: str, device: torch.device):
     """加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）。
 
     # 需求 7.4: 前置阶段模型文件不存在时抛出明确错误
     # 需求 5.3: 冻结 Decoder 参数
+
+    功能说明:
+        读取 Phase I 训练好的 VQEncoder / VQCodebook / VQDecoder。
+        在 Phase II 中，这三部分都作为“已学习好的 archetype prior”使用，
+        不再参与梯度更新。
+
+    论文相关:
+        - Phase I 对应 Archetype Discovery；
+        - Phase II 对应 Archetype Selection；
+        - Section 4.2 明确要求：selector 选出 archetype 后，
+          由 frozen decoder p_theta_d(a_base | s, e_{a_sel}) 生成 micro actions；
+        - 同时，ground-truth archetype label â_sel 由冻结 encoder + codebook
+          对当前 horizon 的 demonstration chunk 编码得到，对应论文 Eq.(5)。
 
     Returns:
         encoder: 加载权重后的 VQEncoder（冻结，用于获取 ground-truth archetype label）
@@ -52,7 +147,10 @@ def load_phase1_model(config, pair: str, device: torch.device):
         decoder: 加载权重后的 VQDecoder（冻结）
     """
     model_path = os.path.join(
-        config.result_dir,  pair, "phase1_archetype_discovery", f"{pair}_vq_model.pt"
+        config.result_dir,
+        pair,
+        "phase1_archetype_discovery",
+        f"{pair}_vq_model.pt",
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -104,7 +202,6 @@ def load_phase1_model(config, pair: str, device: torch.device):
     return encoder, codebook, decoder
 
 
-
 def run_horizon_with_decoder(
     env: TradingEnv,
     horizon_idx: int,
@@ -120,6 +217,17 @@ def run_horizon_with_decoder(
     # 3. argmax 得到 micro actions
     # 4. 在 env 中逐步执行，累计 horizon return
 
+    功能说明:
+        该函数负责把“高层 archetype 决策”真正落地为一个 horizon 内的
+        低层执行收益：先用 decoder 生成整段 micro action，再逐步喂给 env，
+        最终得到该 horizon 的累计回报。
+
+    论文相关:
+        - 对应 Section 4.2 中：选定 archetype 后，将其 code e_{a_sel}
+          输入 frozen decoder p_theta_d(a_base | s, e_{a_sel})；
+        - 该函数输出的 horizon_return 对应论文里的 r_t^sel，
+          即一个 horizon 内所有 step reward 的求和。
+
     Args:
         env: 交易环境
         horizon_idx: horizon 索引
@@ -130,6 +238,7 @@ def run_horizon_with_decoder(
     Returns:
         horizon_return: 该 horizon 的总收益（未折扣）
     """
+    # 进入指定 horizon；保留 reset 调用，确保 env 内部游标与当前 horizon 对齐。
     state = env.reset(horizon_idx)
     horizon_return = 0.0
 
@@ -140,13 +249,15 @@ def run_horizon_with_decoder(
     horizon_states = env.states[start:end]  # (h, state_dim)
 
     # Decoder 批量生成 action logits
-    states_t = torch.tensor(horizon_states, dtype=torch.float32, device=device).unsqueeze(0)
+    states_t = torch.tensor(
+        horizon_states, dtype=torch.float32, device=device
+    ).unsqueeze(0)
     # states_t: (1, h, state_dim)
 
     with torch.no_grad():
         action_logits = decoder(states_t, z_q)  # (1, h, action_dim)
         actions = torch.argmax(action_logits, dim=-1).squeeze(0)  # (h,)
-        actions_np = actions.cpu().numpy()
+        actions_np = actions.detach().cpu().numpy()
 
     # 在 env 中逐步执行 micro actions
     for step_idx in range(len(actions_np)):
@@ -156,7 +267,278 @@ def run_horizon_with_decoder(
         if done:
             break
 
-    return horizon_return
+    # state 变量仅用于保留 reset 语义和调试语境；逻辑上无需额外使用。
+    _ = state
+    return float(horizon_return)
+
+
+def get_horizon_start_states(env: TradingEnv, horizon_indices: np.ndarray) -> np.ndarray:
+    """获取一批 horizon 的起始状态。
+
+    功能说明:
+        将一组 horizon index 映射到对应的首 bar 状态，用于构建 selector 的
+        batch 输入。
+
+    论文相关:
+        Section 4.2 明确规定高层状态 s_sel 定义为当前 horizon 第一根 bar 的
+        状态向量，因此这里严格按 horizon 起点取状态，而不是取整段序列。
+    """
+    start_indices = horizon_indices * env.horizon
+    return env.states[start_indices]
+
+
+def get_ground_truth_labels(
+    encoder: VQEncoder,
+    codebook: VQCodebook,
+    demo_states: np.ndarray,
+    demo_actions: np.ndarray,
+    demo_rewards: np.ndarray,
+    horizon_indices: np.ndarray,
+    device: torch.device,
+) -> torch.Tensor:
+    """批量计算 Eq.(5) 中的 ground-truth archetype label。
+
+    功能说明:
+        从 DP demonstration dataset 中取出指定 horizon 的示范轨迹，
+        通过冻结的 VQEncoder + VQCodebook 计算离散 archetype index，
+        作为当前 horizon 的监督标签。
+
+    论文相关:
+        - 这里得到的 gt label 就是论文 Eq.(5) 中的 â_sel；
+        - 其作用不是强行替代 RL，而是作为 KL regularization / imitation prior，
+          让高层 selector 在探索时仍保持与 demonstration archetype 的一致性。
+
+    Returns:
+        torch.Tensor: 形状为 (batch,) 的 ground-truth archetype index。
+    """
+    demo_s = torch.tensor(demo_states[horizon_indices], dtype=torch.float32, device=device)
+    demo_a = torch.tensor(demo_actions[horizon_indices], dtype=torch.long, device=device)
+    demo_r = torch.tensor(demo_rewards[horizon_indices], dtype=torch.float32, device=device)
+
+    with torch.no_grad():
+        z_e = encoder(demo_s, demo_a, demo_r)  # (batch, latent_dim)
+        _, gt_indices, _ = codebook.quantize(z_e)  # (batch,)
+
+    return gt_indices.long()
+
+
+def collect_rollout_batch(
+    agent: SelectionAgent,
+    encoder: VQEncoder,
+    codebook: VQCodebook,
+    decoder: VQDecoder,
+    train_env: TradingEnv,
+    demo_states: np.ndarray,
+    demo_actions: np.ndarray,
+    demo_rewards: np.ndarray,
+    batch_size: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    """采集一批 horizon-level rollout，用于 PPO 更新。
+
+    功能说明:
+        从训练环境中随机采样一批 horizon：
+        1. 取每个 horizon 的起始状态作为 selector 输入；
+        2. 用当前策略采样 archetype；
+        3. 对应 archetype embedding 经 frozen decoder 生成 micro actions；
+        4. 在 env 中执行并获得 horizon return；
+        5. 保存 PPO 所需的 states / actions / old_log_probs / returns / advantages；
+        6. 同时保存 demonstration 侧的 gt_labels 用于 imitation 正则。
+
+    论文相关:
+        这一步是对 Section 4.2 的工程展开：
+        - 高层状态: s_sel = horizon 首 bar 状态；
+        - 高层动作: a_sel = archetype index；
+        - 高层奖励: r_sel = Σ step_reward over horizon；
+        - ground-truth label: â_sel = VQ encoder + codebook(demo chunk)。
+
+    实现说明:
+        advantage 这里采用简化的一步形式 advantage = return - value，
+        更接近原始代码结构；虽然不是全量 GAE，但已经满足 PPO 风格更新所需。
+
+    Returns:
+        dict[str, torch.Tensor]: PPO 更新所需的一批张量。
+    """
+    # 随机采样一批训练 horizon。保持和原实现一致：horizon 是 Phase II 的基本决策单位。
+    horizon_indices = np.random.randint(0, train_env.num_horizons, size=batch_size)
+
+    # 获取 horizon 起始状态，对应论文中的 s_sel。
+    states_np = get_horizon_start_states(train_env, horizon_indices)
+    states_t = torch.tensor(states_np, dtype=torch.float32, device=device)
+    # logger.info("get_horizon_start_states states_t的形状:%s",states_t.shape)
+    
+    with torch.no_grad():
+        # Section 4.2: Agent 选择原型
+        # 返回所有原型的策略概率和价值函数输出
+        action_probs, values = agent(states_t)
+        dist = torch.distributions.Categorical(probs=action_probs)
+
+        # 从策略分布中采样原型索引
+        actions = dist.sample()  # (batch,)
+        old_log_probs = dist.log_prob(actions)  # (batch,)
+
+        # Eq.(5): 获取 ground-truth archetype label â_sel
+        # 使用冻结的 VQ encoder + codebook 对这些 horizon 的 DP 示范轨迹编码。
+        gt_labels = get_ground_truth_labels(
+            encoder,
+            codebook,
+            demo_states,
+            demo_actions,
+            demo_rewards,
+            horizon_indices,
+            device,
+        )
+
+    returns: list[float] = []
+    for i, h_idx in enumerate(horizon_indices):
+        # 获取选定原型的量化嵌入；对应论文中的 e_{a_sel}。
+        z_q = codebook.embeddings.weight[actions[i].item()].unsqueeze(0)  # (1, code_dim)
+
+        # Section 4.2: 冻结 Decoder 生成 micro actions → env 执行 → horizon return
+        # horizon return 就是这一个 horizon 的奖励总和。
+        horizon_return = run_horizon_with_decoder(
+            train_env, int(h_idx), decoder, z_q, device
+        )
+        returns.append(horizon_return)
+
+    returns_t = torch.tensor(returns, dtype=torch.float32, device=device)
+    values_t = values.squeeze(-1).detach()
+
+    # Section 4.2 / PPO 版本: advantage = R - V(s)
+    # 这里保持与原代码同一语义，只是改成 batch 形式。
+    advantages_t = returns_t - values_t
+
+    # PPO 中通常会做 advantage normalization，以稳定比例项 ratio 的更新。
+    if batch_size > 1:
+        advantages_t = (
+            advantages_t - advantages_t.mean()
+        ) / (advantages_t.std(unbiased=False) + 1e-8)
+
+    return {
+        "states": states_t,
+        "actions": actions.detach(),
+        "old_log_probs": old_log_probs.detach(),
+        "returns": returns_t.detach(),
+        "advantages": advantages_t.detach(),
+        "gt_labels": gt_labels.detach(),
+    }
+
+
+def ppo_update(
+    agent: SelectionAgent,
+    optimizer: torch.optim.Optimizer,
+    batch: dict[str, torch.Tensor],
+    alpha: float,
+    clip_eps: float,
+    vf_coef: float,
+    ent_coef: float,
+    ppo_epochs: int,
+    minibatch_size: int,
+    max_grad_norm: float,
+    device: torch.device,
+) -> dict[str, float]:
+    """对同一批 rollout 执行多轮 PPO 更新。
+
+    功能说明:
+        对 collect_rollout_batch 收集到的 on-policy 数据进行多轮 minibatch 更新，
+        这是把原始“单样本即时更新”改成“PPO 风格批量更新”的核心函数。
+
+    论文相关:
+        - 论文 Eq.(5) 给出了“环境奖励 + archetype 一致性约束”的目标；
+        - 这里把该目标分解为四项：
+          1) PPO clipped policy loss：负责优化 selector 的策略改进；
+          2) value loss：估计 horizon return；
+          3) entropy bonus：维持 archetype 探索；
+          4) imitation loss：实现 KL(â_sel || π_sel) 的 one-hot 等价形式。
+
+    实现说明:
+        - imitation_loss 使用 F.nll_loss(log(action_probs), gt_labels)；
+        - 对于 one-hot 的 â_sel，这与 KL(one_hot || π) 只差常数项，
+          因此可视为论文 Eq.(5) 中 KL regularization 的稳定实现。
+
+    Returns:
+        dict[str, float]: 本轮 PPO 更新的统计量，供日志打印与调试。
+    """
+    states = batch["states"]
+    actions = batch["actions"]
+    old_log_probs = batch["old_log_probs"]
+    returns = batch["returns"]
+    advantages = batch["advantages"]
+    gt_labels = batch["gt_labels"]
+
+    batch_size = states.size(0)
+    minibatch_size = min(minibatch_size, batch_size)
+
+    policy_losses: list[float] = []
+    value_losses: list[float] = []
+    imitation_losses: list[float] = []
+    entropies: list[float] = []
+    total_losses: list[float] = []
+    clip_fractions: list[float] = []
+
+    for _ in range(ppo_epochs):
+        perm = torch.randperm(batch_size, device=device)
+
+        for start in range(0, batch_size, minibatch_size):
+            idx = perm[start : start + minibatch_size]
+
+            mb_states = states[idx]
+            mb_actions = actions[idx]
+            mb_old_log_probs = old_log_probs[idx]
+            mb_returns = returns[idx]
+            mb_advantages = advantages[idx]
+            mb_gt_labels = gt_labels[idx]
+
+            # 重新计算当前 policy 下的概率分布和 value，构造 PPO ratio。
+            action_probs, values = agent(mb_states)
+            dist = torch.distributions.Categorical(probs=action_probs)
+            new_log_probs = dist.log_prob(mb_actions)
+            entropy = dist.entropy().mean()
+
+            # PPO clipped surrogate objective。
+            ratio = torch.exp(new_log_probs - mb_old_log_probs)
+            surrogate1 = ratio * mb_advantages
+            surrogate2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * mb_advantages
+            policy_loss = -torch.min(surrogate1, surrogate2).mean()
+
+            # Value loss = (R - V(s))^2；保持和原始实现同一含义。
+            value_pred = values.squeeze(-1)
+            value_loss = F.mse_loss(value_pred, mb_returns)
+
+            # Eq.(5): KL(â_sel || π_sel)
+            # one-hot(gt) 对 policy 的 KL，可等价实现为 NLL / cross-entropy。
+            imitation_loss = F.nll_loss(torch.log(action_probs + 1e-8), mb_gt_labels)
+
+            # 总损失：PPO policy + critic + entropy + imitation prior。
+            total_loss = (
+                policy_loss
+                + vf_coef * value_loss
+                - ent_coef * entropy
+                + alpha * imitation_loss
+            )
+
+            optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
+            optimizer.step()
+
+            clip_fraction = ((ratio - 1.0).abs() > clip_eps).float().mean()
+
+            policy_losses.append(float(policy_loss.detach().item()))
+            value_losses.append(float(value_loss.detach().item()))
+            imitation_losses.append(float(imitation_loss.detach().item()))
+            entropies.append(float(entropy.detach().item()))
+            total_losses.append(float(total_loss.detach().item()))
+            clip_fractions.append(float(clip_fraction.detach().item()))
+
+    return {
+        "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
+        "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
+        "imitation_loss": float(np.mean(imitation_losses)) if imitation_losses else 0.0,
+        "entropy": float(np.mean(entropies)) if entropies else 0.0,
+        "total_loss": float(np.mean(total_losses)) if total_losses else 0.0,
+        "clip_fraction": float(np.mean(clip_fractions)) if clip_fractions else 0.0,
+    }
 
 
 def evaluate_on_validation(
@@ -165,10 +547,21 @@ def evaluate_on_validation(
     decoder: VQDecoder,
     val_env: TradingEnv,
     device: torch.device,
+    max_horizons: int | None = None,
 ) -> float:
     """在验证集上评估 SelectionAgent，返回平均 horizon return。
 
     # 需求 5.7: 定期在验证集上评估性能
+
+    功能说明:
+        在验证阶段，对每个 horizon 取首 bar 状态，使用当前策略贪心选择最优
+        archetype（argmax），再通过 frozen decoder 执行整段微动作并累加收益。
+
+    论文相关:
+        - 对应 Section 4.2 的 inference 过程；
+        - 训练时可以采样以保持探索，验证时通常用 argmax 检查 selector
+          当前学到的 archetype 匹配能力；
+        - 返回值仍然是 horizon-level 平均回报，与论文中的 r_sel 定义一致。
 
     Args:
         agent: SelectionAgent
@@ -176,6 +569,7 @@ def evaluate_on_validation(
         decoder: 冻结的 Decoder
         val_env: 验证集环境
         device: 计算设备
+        max_horizons: 若指定，则只评估前若干个 horizon，用于加速验证
 
     Returns:
         平均 horizon return
@@ -186,6 +580,9 @@ def evaluate_on_validation(
 
     if num_horizons == 0:
         return 0.0
+
+    if max_horizons is not None:
+        num_horizons = min(num_horizons, int(max_horizons))
 
     # 使用 tqdm 显示进度条
     for h_idx in tqdm(range(num_horizons), desc="验证集评估"):
@@ -203,25 +600,289 @@ def evaluate_on_validation(
         total_return += horizon_ret
 
     agent.train()
-    return total_return / num_horizons
+    return total_return / max(1, num_horizons)
 
+
+def save_checkpoint(
+    save_path: str,
+    agent: SelectionAgent,
+    optimizer: torch.optim.Optimizer,
+    reward_history: list[float],
+    best_val_return: float,
+    step_count: int,
+    config: Any,
+    ppo_hparams: dict[str, Any],
+) -> None:
+    """统一保存 checkpoint。
+
+    功能说明:
+        保存当前 SelectionAgent、优化器状态、训练奖励历史、最佳验证表现，
+        以及 Phase II 所需的关键超参数，便于恢复训练和对照实验。
+
+    论文相关:
+        保存的核心对象仍然围绕论文 Section 4.2：
+        高层 selector 参数 + 训练时的 archetype selection 配置。
+        这里额外保存 PPO 风格超参数，是为了复现实验时可追溯优化器设定。
+    """
+    torch.save(
+        {
+            "agent": agent.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "training_rewards": reward_history,
+            "best_validation_return": best_val_return,
+            "step": step_count,
+            "config": {
+                "state_dim": config.state_dim,
+                "num_archetypes": config.num_archetypes,
+                "selection_alpha": config.selection_alpha,
+                "phase2_total_steps": config.phase2_total_steps,
+                "learning_rate": config.learning_rate,
+                "discount_factor": config.discount_factor,
+                "phase2_rollout_batch_size": ppo_hparams["rollout_batch_size"],
+                "phase2_ppo_epochs": ppo_hparams["ppo_epochs"],
+                "phase2_minibatch_size": ppo_hparams["minibatch_size"],
+                "phase2_clip_eps": ppo_hparams["clip_eps"],
+                "phase2_vf_coef": ppo_hparams["vf_coef"],
+                "phase2_ent_coef": ppo_hparams["ent_coef"],
+                "phase2_max_grad_norm": ppo_hparams["max_grad_norm"],
+            },
+        },
+        save_path,
+    )
+
+
+def run_training_loop(
+    agent: SelectionAgent,
+    encoder: VQEncoder,
+    codebook: VQCodebook,
+    decoder: VQDecoder,
+    train_env: TradingEnv,
+    val_env: TradingEnv,
+    demo_states: np.ndarray,
+    demo_actions: np.ndarray,
+    demo_rewards: np.ndarray,
+    optimizer: torch.optim.Optimizer,
+    alpha: float,
+    total_steps: int,
+    val_interval: int,
+    log_interval: int,
+    save_path: str,
+    config: Any,
+    ppo_hparams: dict[str, Any],
+    device: torch.device,
+) -> tuple[float, list[float], int]:
+    """执行 Phase II 训练循环（PPO 版本）。
+
+    Args:
+        agent: SelectionAgent
+        encoder: 冻结的 VQEncoder
+        codebook: 冻结的 VQCodebook
+        decoder: 冻结的 VQDecoder
+        train_env: 训练集环境
+        val_env: 验证集环境
+        demo_states: DP 示范轨迹状态 (N, h, state_dim)
+        demo_actions: DP 示范轨迹动作 (N, h)
+        demo_rewards: DP 示范轨迹奖励 (N, h)
+        optimizer: 优化器
+        alpha: KL / imitation 惩罚系数
+        total_steps: 总训练步数（以 horizon 样本数计）
+        val_interval: 验证间隔
+        log_interval: 日志间隔
+        save_path: 最优模型保存路径
+        config: 配置对象
+        ppo_hparams: PPO 相关配置字典
+        device: 计算设备
+
+    功能说明:
+        这是 Phase II 的主训练入口：
+        反复执行“收集一批 horizon rollout → 多轮 PPO 更新 → 周期性验证与保存”。
+
+    论文相关:
+        - 对应 Section 4.2 的 horizon-level RL；
+        - 目标函数核心仍然来自 Eq.(5)：
+          J = E[Σ γ^t r_sel - α × KL(â_sel || π_sel)]；
+        - 这里把原先的单步 Actor-Critic 训练器升级为 PPO 风格，
+          但高层状态/动作/奖励和 demonstration archetype regularization 均保持不变。
+
+    Returns:
+        best_val_return: 最优验证集 return
+        reward_history: 奖励历史
+        step_count: 实际训练步数
+    """
+    best_val_return = float("-inf")
+    reward_history: list[float] = []
+    step_count = 0
+    last_stats: dict[str, float] = {
+        "policy_loss": 0.0,
+        "value_loss": 0.0,
+        "imitation_loss": 0.0,
+        "entropy": 0.0,
+        "total_loss": 0.0,
+        "clip_fraction": 0.0,
+    }
+
+    rollout_batch_size = int(ppo_hparams["rollout_batch_size"])
+    ppo_epochs = int(ppo_hparams["ppo_epochs"])
+    minibatch_size = int(ppo_hparams["minibatch_size"])
+    clip_eps = float(ppo_hparams["clip_eps"])
+    vf_coef = float(ppo_hparams["vf_coef"])
+    ent_coef = float(ppo_hparams["ent_coef"])
+    max_grad_norm = float(ppo_hparams["max_grad_norm"])
+    eval_max_horizons = ppo_hparams["eval_max_horizons"]
+
+    next_log_step = log_interval
+    next_val_step = val_interval
+
+    # 保留原有日志。
+    logger.info("开始训练: %d 步", total_steps)
+    # 新增 PPO 训练器细节日志，便于和单步 Actor-Critic 区分。
+    logger.info(
+        "开始训练: total_steps=%d, rollout_batch=%d, ppo_epochs=%d, minibatch=%d, clip_eps=%.3f",
+        total_steps,
+        rollout_batch_size,
+        ppo_epochs,
+        minibatch_size,
+        clip_eps,
+    )
+
+    while step_count < total_steps:
+        current_batch_size = min(rollout_batch_size, total_steps - step_count)
+
+        batch = collect_rollout_batch(
+            agent=agent,
+            encoder=encoder,
+            codebook=codebook,
+            decoder=decoder,
+            train_env=train_env,
+            demo_states=demo_states,
+            demo_actions=demo_actions,
+            demo_rewards=demo_rewards,
+            batch_size=current_batch_size,
+            device=device,
+        )
+
+        if step_count == 0:
+            logger.info(
+                "首批 rollout 形状: states=%s, actions=%s, returns=%s, advantages=%s, gt_labels=%s",
+                tuple(batch["states"].shape),
+                tuple(batch["actions"].shape),
+                tuple(batch["returns"].shape),
+                tuple(batch["advantages"].shape),
+                tuple(batch["gt_labels"].shape),
+            )
+
+        last_stats = ppo_update(
+            agent=agent,
+            optimizer=optimizer,
+            batch=batch,
+            alpha=alpha,
+            clip_eps=clip_eps,
+            vf_coef=vf_coef,
+            ent_coef=ent_coef,
+            ppo_epochs=ppo_epochs,
+            minibatch_size=minibatch_size,
+            max_grad_norm=max_grad_norm,
+            device=device,
+        )
+
+        batch_returns = batch["returns"].detach().cpu().tolist()
+        reward_history.extend(float(x) for x in batch_returns)
+        step_count += current_batch_size
+
+        # 日志输出
+        if step_count >= next_log_step or step_count == total_steps:
+            recent_rewards = reward_history[-min(log_interval, len(reward_history)) :]
+            avg_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
+            batch_avg_reward = float(np.mean(batch_returns)) if batch_returns else 0.0
+            logger.info(
+                "Step %7d/%d — avg_reward=%.4f, batch_reward=%.4f, total=%.4f, policy=%.4f, value=%.4f, imitation=%.4f, entropy=%.4f, clipfrac=%.4f",
+                step_count,
+                total_steps,
+                avg_reward,
+                batch_avg_reward,
+                last_stats["total_loss"],
+                last_stats["policy_loss"],
+                last_stats["value_loss"],
+                last_stats["imitation_loss"],
+                last_stats["entropy"],
+                last_stats["clip_fraction"],
+            )
+            next_log_step = ((step_count // log_interval) + 1) * log_interval
+
+        # 需求 5.7: 定期在验证集上评估，保存最优检查点
+        if step_count >= next_val_step or step_count == total_steps:
+            val_return = evaluate_on_validation(
+                agent=agent,
+                codebook=codebook,
+                decoder=decoder,
+                val_env=val_env,
+                device=device,
+                max_horizons=eval_max_horizons,
+            )
+            logger.info(
+                "验证集评估 (step %d): avg_return=%.4f (best=%.4f)",
+                step_count,
+                val_return,
+                best_val_return,
+            )
+
+            if val_return > best_val_return:
+                best_val_return = val_return
+                save_checkpoint(
+                    save_path=save_path,
+                    agent=agent,
+                    optimizer=optimizer,
+                    reward_history=reward_history,
+                    best_val_return=best_val_return,
+                    step_count=step_count,
+                    config=config,
+                    ppo_hparams=ppo_hparams,
+                )
+                logger.info("最优模型已保存到 %s (val_return=%.4f)", save_path, val_return)
+
+            next_val_step = ((step_count // val_interval) + 1) * val_interval
+
+    return best_val_return, reward_history, step_count
 
 
 def main() -> None:
+    """Phase II 训练入口。
+
+    功能说明:
+        负责串联整个训练流程：解析配置、加载 Phase I 模型、准备训练/验证环境、
+        加载 DP demonstration、初始化 SelectionAgent、执行 PPO 风格训练、
+        并保存最优与最终模型。
+
+    论文相关:
+        - Step 1: 使用 Phase I 学到的 archetype discovery 结果；
+        - Step 2~4: 对应 Phase II 的 archetype selection；
+        - 训练目标基于 Eq.(5)，但优化器实现采用 horizon-level PPO 风格。
+    """
     # ----------------------------------------------------------------
     # Step 0: 解析配置
     # ----------------------------------------------------------------
     config = parse_args()
     pair = config.pairs[0]  # 单交易对训练
+    ppo_hparams = get_phase2_hparams(config)
+
     logger.info("Phase II 训练开始: pair=%s", pair)
     logger.info(
-        "超参数: total_steps=%d, lr=%.1e, selection_alpha=%.2f, "
-        "num_archetypes=%d, discount_factor=%.2f",
+        "超参数: total_steps=%d, lr=%.1e, selection_alpha=%.2f, num_archetypes=%d, discount_factor=%.2f",
         config.phase2_total_steps,
         config.learning_rate,
         config.selection_alpha,
         config.num_archetypes,
         config.discount_factor,
+    )
+    logger.info(
+        "PPO 超参数: rollout_batch=%d, ppo_epochs=%d, minibatch=%d, clip_eps=%.3f, vf_coef=%.3f, ent_coef=%.4f, max_grad_norm=%.2f",
+        ppo_hparams["rollout_batch_size"],
+        ppo_hparams["ppo_epochs"],
+        ppo_hparams["minibatch_size"],
+        ppo_hparams["clip_eps"],
+        ppo_hparams["vf_coef"],
+        ppo_hparams["ent_coef"],
+        ppo_hparams["max_grad_norm"],
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -288,6 +949,7 @@ def main() -> None:
             f"DP 轨迹文件不存在: {traj_path}\n"
             f"请先运行 Phase I 训练: python scripts/train_phase1.py --pair {pair}"
         )
+
     demo_data = np.load(traj_path)
     demo_states = demo_data["states"]    # (N, h, state_dim)
     demo_actions = demo_data["actions"]  # (N, h)
@@ -298,6 +960,12 @@ def main() -> None:
         demo_states.shape[1],
         train_env.num_horizons,
     )
+
+    if demo_states.shape[0] < train_env.num_horizons:
+        raise ValueError(
+            "DP 示范轨迹数量少于训练环境的 horizon 数量，无法为每个训练 horizon 提供 ground-truth archetype label。"
+            f" demo={demo_states.shape[0]}, train_horizons={train_env.num_horizons}"
+        )
 
     # ----------------------------------------------------------------
     # Step 3: 初始化 SelectionAgent
@@ -315,170 +983,57 @@ def main() -> None:
     optimizer = torch.optim.Adam(agent.parameters(), lr=config.learning_rate)
 
     # ----------------------------------------------------------------
-    # Step 4: 训练循环 — 3M 步（horizon 级别 RL）
+    # Step 4: 训练循环 — horizon 级别 RL（PPO 风格）
     # Section 4.2: Horizon-level RL
     # 目标函数 Eq. 5: J = E[Σ γ^t r_sel - α × KL(â_sel || π_sel)]
     # â_sel 是 VQ encoder 对当前 horizon 示范轨迹分配的 ground-truth archetype label
-    # Policy loss = -log π(k|s) × advantage + α × KL(â_sel || π_sel)
+    # PPO policy loss = -min(ratio*A, clip(ratio, 1±eps)*A)
     # Value loss = (R - V(s))²
+    # imitation loss = KL(â_sel || π_sel) 的稳定实现
     # ----------------------------------------------------------------
-    alpha = config.selection_alpha  # KL 惩罚系数，默认 1.0
-
-    total_steps = config.phase2_total_steps
+    alpha = config.selection_alpha  # KL / imitation 惩罚系数
+    total_steps = int(config.phase2_total_steps)
     val_interval = max(train_env.num_horizons, 1000)  # 每遍历一次训练集或 1000 步评估一次
-    log_interval = 100  # 每 100 步输出日志
+    log_interval = int(ppo_hparams["log_interval"])
 
-    best_val_return = float("-inf")
     save_dir = os.path.join(config.result_dir, pair, "phase2_archetype_selection")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f"{pair}_selection_agent.pt")
 
-    reward_history = []
-    step_count = 0
+    best_val_return, reward_history, step_count = run_training_loop(
+        agent=agent,
+        encoder=encoder,
+        codebook=codebook,
+        decoder=decoder,
+        train_env=train_env,
+        val_env=val_env,
+        demo_states=demo_states,
+        demo_actions=demo_actions,
+        demo_rewards=demo_rewards,
+        optimizer=optimizer,
+        alpha=alpha,
+        total_steps=total_steps,
+        val_interval=val_interval,
+        log_interval=log_interval,
+        save_path=save_path,
+        config=config,
+        ppo_hparams=ppo_hparams,
+        device=device,
+    )
 
-    logger.info("开始训练: %d 步", total_steps)
-
-    while step_count < total_steps:
-        # 随机选择一个训练 horizon
-        h_idx = np.random.randint(0, train_env.num_horizons)
-
-        # 获取 horizon 起始状态
-        start = h_idx * train_env.horizon
-        state = train_env.states[start]
-        state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-        # state_t: (1, state_dim)
-
-        # Eq.(5): 获取 ground-truth archetype label â_sel
-        # 使用冻结的 VQ encoder + codebook 对该 horizon 的 DP 示范轨迹编码
-        # h_idx 与 demo 轨迹索引 1:1 对齐（dp_planner.generate_trajectories 顺序遍历）
-        with torch.no_grad():
-            demo_s = torch.tensor(demo_states[h_idx], dtype=torch.float32, device=device).unsqueeze(0)  # (1, h, state_dim)
-            demo_a = torch.tensor(demo_actions[h_idx], dtype=torch.long, device=device).unsqueeze(0)  # (1, h)
-            demo_r = torch.tensor(demo_rewards[h_idx], dtype=torch.float32, device=device).unsqueeze(0)  # (1, h)
-
-            z_e = encoder(demo_s, demo_a, demo_r)       # (1, latent_dim)
-            _, gt_indices, _ = codebook.quantize(z_e)    # (1,)
-            gt_label = gt_indices.item()
-
-        # Section 4.2: Agent 选择原型
-        # 返回所有原型的策略概率和价值函数输出
-        action_probs, value = agent(state_t)
-        # action_probs: (1, K), value: (1, 1)
-
-        # 从策略分布中采样原型索引
-        dist = torch.distributions.Categorical(action_probs)
-        k = dist.sample()  # (1,)
-        log_prob = dist.log_prob(k)  # (1,)
-
-        # 获取选定原型的量化嵌入
-        z_q = codebook.embeddings.weight[k.item()].unsqueeze(0)  # (1, code_dim)
-        
-        if step_count == 0:
-            logger.info("state_t的形状:%s action_probs的形状:%s value的形状:%s z_q的形状:%s",state_t.shape,action_probs.shape,value.shape,z_q.shape)            
-             
-        # Section 4.2: 冻结 Decoder 生成 micro actions → env 执行 → horizon return
-        # horizon return 就是这一个horizon的奖励总和
-        horizon_return = run_horizon_with_decoder(
-            train_env, h_idx, decoder, z_q, device
-        )
-
-        reward_history.append(horizon_return)
-
-        # Section 4.2: Actor-Critic 更新
-        R = torch.tensor([horizon_return], dtype=torch.float32, device=device)
-        advantage = R - value.squeeze()  # advantage = R - V(s)
-
-        # Eq. 5: KL(â_sel || π_sel) — â_sel 是 ground-truth archetype 的 one-hot 分布
-        # KL(one_hot(gt) || π) = -log π(gt)（因为 one-hot 分布的熵为 0）
-        kl_divergence = -torch.log(action_probs[0, gt_label] + 1e-8)
-
-        # Policy loss = -log π(k|s) × advantage.detach() + α × KL(â_sel || π_sel)
-        policy_loss = -log_prob * advantage.detach() + alpha * kl_divergence
-
-        # Value loss = (R - V(s))²
-        value_loss = advantage.pow(2)
-
-        # 总损失
-        loss = (policy_loss + value_loss).mean()
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        step_count += 1
-
-        # 日志输出
-        if step_count % log_interval == 0:
-            recent_rewards = reward_history[-log_interval:]
-            avg_reward = np.mean(recent_rewards) if recent_rewards else 0.0
-            logger.info(
-                "Step %7d/%d — avg_reward=%.4f, loss=%.4f, kl=%.4f",
-                step_count,
-                total_steps,
-                avg_reward,
-                loss.item(),
-                kl_divergence.item(),
-            )
-
-        # 需求 5.7: 定期在验证集上评估，保存最优检查点
-        if step_count % val_interval == 0:
-            val_return = evaluate_on_validation(
-                agent, codebook, decoder, val_env, device
-            )
-            logger.info(
-                "验证集评估 (step %d): avg_return=%.4f (best=%.4f)",
-                step_count,
-                val_return,
-                best_val_return,
-            )
-
-            if val_return > best_val_return:
-                best_val_return = val_return
-                torch.save(
-                    {
-                        "agent": agent.state_dict(),
-                        "training_rewards": reward_history,
-                        "best_validation_return": best_val_return,
-                        "step": step_count,
-                        "config": {
-                            "state_dim": config.state_dim,
-                            "num_archetypes": config.num_archetypes,
-                            "selection_alpha": config.selection_alpha,
-                            "phase2_total_steps": config.phase2_total_steps,
-                            "learning_rate": config.learning_rate,
-                            "discount_factor": config.discount_factor,
-                        },
-                    },
-                    save_path,
-                )
-                logger.info("最优模型已保存到 %s (val_return=%.4f)", save_path, val_return)
-
-    # ----------------------------------------------------------------
-    # Step 5: 最终保存（如果训练结束时不是最优也保存最终版本）
-    # ----------------------------------------------------------------
     final_save_path = os.path.join(save_dir, f"{pair}_selection_agent_final.pt")
-    torch.save(
-        {
-            "agent": agent.state_dict(),
-            "training_rewards": reward_history,
-            "best_validation_return": best_val_return,
-            "step": step_count,
-            "config": {
-                "state_dim": config.state_dim,
-                "num_archetypes": config.num_archetypes,
-                "selection_alpha": config.selection_alpha,
-                "phase2_total_steps": config.phase2_total_steps,
-                "learning_rate": config.learning_rate,
-                "discount_factor": config.discount_factor,
-            },
-        },
-        final_save_path,
+    save_checkpoint(
+        save_path=final_save_path,
+        agent=agent,
+        optimizer=optimizer,
+        reward_history=reward_history,
+        best_val_return=best_val_return,
+        step_count=step_count,
+        config=config,
+        ppo_hparams=ppo_hparams,
     )
     logger.info("最终模型已保存到 %s", final_save_path)
 
-    # ----------------------------------------------------------------
-    # Step 6: 输出训练日志摘要
-    # ----------------------------------------------------------------
     logger.info("=" * 50)
     logger.info("Phase II 训练完成: pair=%s", pair)
     logger.info("总训练步数: %d", step_count)

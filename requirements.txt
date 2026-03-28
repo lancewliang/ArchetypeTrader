@@ -5,3 +5,5 @@ polars>=0.20.0
 # Training (managed by conda environment.yml or pip install)
 # torch>=2.0.0
 # pandas>=2.0.0
+tqdm>=4.64.0
+#pytorch 2.9.1

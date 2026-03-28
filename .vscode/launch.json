@@ -1,0 +1,27 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: train_phase1",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/script/train_phase1.py",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "console": "integratedTerminal"
+        },
+                {
+            "name": "Python Debugger: train_phase2",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/script/train_phase2.py",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "console": "integratedTerminal"
+        }
+    ]
+}
