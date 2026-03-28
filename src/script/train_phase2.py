@@ -26,6 +26,7 @@ import sys
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from src.config import parse_args
 from src.data.feature_pipeline import FeaturePipeline
@@ -186,7 +187,8 @@ def evaluate_on_validation(
     if num_horizons == 0:
         return 0.0
 
-    for h_idx in range(num_horizons):
+    # 使用 tqdm 显示进度条
+    for h_idx in tqdm(range(num_horizons), desc="验证集评估"):
         state = val_env.states[h_idx * val_env.horizon]
         state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
 

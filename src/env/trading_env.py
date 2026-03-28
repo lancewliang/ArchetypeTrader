@@ -247,8 +247,10 @@ class TradingEnv:
                 break
 
         if qty_remaining > 0:
+            
             fill_cash += qty_remaining * last_price
-
+        # 价格举例：当前持仓量为 0，目标持仓量为 1，当前价格为 10，如果 通过委托价格9 购买 fillcash 9 slippage 为 -1
+        # 价格举例：当前持仓量为 0，目标持仓量为 1，当前价格为 10，如果 通过委托价格11购买 fillcash 11 slippage 为 1
         if delta_position > 0:
             slippage = fill_cash - abs_delta * mark_price
         else:

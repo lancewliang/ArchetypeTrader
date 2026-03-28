@@ -18,6 +18,7 @@ from typing import Dict, Tuple, Union
 
 import numpy as np
 import polars as pl
+from tqdm import tqdm
 
 from src.env.trading_env import TradingEnv
 from src.utils.logger import get_logger
@@ -230,7 +231,8 @@ class DPPlanner:
             )
 
         horizon_results = []
-        for h_idx in range(num_horizons):
+        # 使用 tqdm 显示进度条
+        for h_idx in tqdm(range(num_horizons), desc="生成DP轨迹"):
             start = h_idx * self.horizon
             end = start + self.horizon
             h_states = self.env.states_dataframe[start:end]
