@@ -94,14 +94,14 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
     Returns:
         dict[str, Any]: 统一整理后的 PPO 超参数字典。
     """
-    rollout_batch_size = int(_cfg(config, "phase2_rollout_batch_size", 256))
+    rollout_batch_size = int(_cfg(config, "phase2_rollout_batch_size", 512))
     ppo_epochs = int(_cfg(config, "phase2_ppo_epochs", 4))
-    minibatch_size = int(_cfg(config, "phase2_minibatch_size", 64))
+    minibatch_size = int(_cfg(config, "phase2_minibatch_size", 512))
     clip_eps = float(_cfg(config, "phase2_clip_eps", 0.2))
     vf_coef = float(_cfg(config, "phase2_vf_coef", 0.5))
     ent_coef = float(_cfg(config, "phase2_ent_coef", 0.01))
     max_grad_norm = float(_cfg(config, "phase2_max_grad_norm", 1.0))
-    log_interval = int(_cfg(config, "phase2_log_interval", 100))
+    log_interval = int(_cfg(config, "phase2_log_interval", 100000))
     eval_max_horizons = _cfg(config, "phase2_eval_max_horizons", None)
 
     rollout_batch_size = max(1, rollout_batch_size)
@@ -745,6 +745,7 @@ def run_training_loop(
         clip_eps,
     )
 
+    pbar = tqdm(total=total_steps, desc="Phase II 训练", unit="step", dynamic_ncols=True)
     while step_count < total_steps:
         current_batch_size = min(rollout_batch_size, total_steps - step_count)
 
@@ -789,10 +790,19 @@ def run_training_loop(
         reward_history.extend(float(x) for x in batch_returns)
         step_count += current_batch_size
 
+        # 更新进度条
+        recent_rewards = reward_history[-min(log_interval, len(reward_history)) :]
+        avg_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
+        pbar.update(current_batch_size)
+        pbar.set_postfix({
+            "avg_r": f"{avg_reward:.4f}",
+            "loss": f"{last_stats['total_loss']:.4f}",
+            "policy": f"{last_stats['policy_loss']:.4f}",
+            "val": f"{best_val_return:.4f}",
+        })
+
         # 日志输出
         if step_count >= next_log_step or step_count == total_steps:
-            recent_rewards = reward_history[-min(log_interval, len(reward_history)) :]
-            avg_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
             batch_avg_reward = float(np.mean(batch_returns)) if batch_returns else 0.0
             logger.info(
                 "Step %7d/%d — avg_reward=%.4f, batch_reward=%.4f, total=%.4f, policy=%.4f, value=%.4f, imitation=%.4f, entropy=%.4f, clipfrac=%.4f",
@@ -811,6 +821,7 @@ def run_training_loop(
 
         # 需求 5.7: 定期在验证集上评估，保存最优检查点
         if step_count >= next_val_step or step_count == total_steps:
+            pbar.set_description("验证集评估中")
             val_return = evaluate_on_validation(
                 agent=agent,
                 codebook=codebook,
@@ -840,7 +851,16 @@ def run_training_loop(
                 )
                 logger.info("最优模型已保存到 %s (val_return=%.4f)", save_path, val_return)
 
+            pbar.set_description("Phase II 训练")
+            pbar.set_postfix({
+                "avg_r": f"{avg_reward:.4f}",
+                "loss": f"{last_stats['total_loss']:.4f}",
+                "policy": f"{last_stats['policy_loss']:.4f}",
+                "val": f"{best_val_return:.4f}",
+            })
             next_val_step = ((step_count // val_interval) + 1) * val_interval
+
+    pbar.close()
 
     return best_val_return, reward_history, step_count
 
@@ -993,7 +1013,7 @@ def main() -> None:
     # ----------------------------------------------------------------
     alpha = config.selection_alpha  # KL / imitation 惩罚系数
     total_steps = int(config.phase2_total_steps)
-    val_interval = max(train_env.num_horizons, 1000)  # 每遍历一次训练集或 1000 步评估一次
+    val_interval = max(train_env.num_horizons, train_env.num_horizons*10)  # 每遍历一次训练集或步评估一次
     log_interval = int(ppo_hparams["log_interval"])
 
     save_dir = os.path.join(config.result_dir, pair, "phase2_archetype_selection")
