@@ -378,7 +378,7 @@ class DPPlanner:
         Args:
             trajectories: 轨迹字典
         """
-        save_dir = os.path.join("result", "dp_trajectories")
+        save_dir = os.path.join("result", self.pair ,"dp_trajectories")
         os.makedirs(save_dir, exist_ok=True)
         save_path = os.path.join(save_dir, f"{self.pair}_trajectories.npz")
 
