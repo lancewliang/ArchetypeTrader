@@ -55,6 +55,116 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _parameter_grad_norm(parameters) -> float:
+    """计算一组参数当前梯度的 L2 norm。
+
+    功能说明:
+        用于观察 PPO 更新时 policy / value 头是否真的在收到梯度，
+        便于排查“critic 压过 actor”或“policy 基本没学动”的问题。
+    """
+    total_sq = 0.0
+    has_grad = False
+    for param in parameters:
+        if param.grad is None:
+            continue
+        grad_norm = float(param.grad.detach().data.norm(2).item())
+        total_sq += grad_norm * grad_norm
+        has_grad = True
+    if not has_grad:
+        return 0.0
+    return float(total_sq ** 0.5)
+
+
+def _histogram_counts(values: np.ndarray | list[int], num_bins: int) -> np.ndarray:
+    """把离散标签序列转成固定长度直方图计数。"""
+    values_np = np.asarray(values, dtype=np.int64).reshape(-1)
+    if values_np.size == 0:
+        return np.zeros(num_bins, dtype=np.int64)
+    valid = values_np[(values_np >= 0) & (values_np < num_bins)]
+    if valid.size == 0:
+        return np.zeros(num_bins, dtype=np.int64)
+    return np.bincount(valid, minlength=num_bins).astype(np.int64)
+
+
+def _format_histogram_from_counts(counts: np.ndarray | list[int]) -> str:
+    """把直方图计数格式化成紧凑日志字符串。"""
+    counts_np = np.asarray(counts, dtype=np.int64).reshape(-1)
+    return "[" + ", ".join(f"{idx}:{int(v)}" for idx, v in enumerate(counts_np.tolist())) + "]"
+
+
+def _aggregate_execution_diagnostics(horizon_details: list[dict[str, Any]]) -> dict[str, Any]:
+    """汇总一批 horizon 执行诊断指标。
+
+    功能说明:
+        把 decoder 在环境中的 horizon 级执行结果拆成 gross pnl / cost / turnover
+        / 换仓次数等指标，避免只看最终 reward 而无法定位负收益来源。
+    """
+    if not horizon_details:
+        return {
+            "avg_return": 0.0,
+            "avg_gross_pnl": 0.0,
+            "avg_execution_cost": 0.0,
+            "avg_commission": 0.0,
+            "avg_slippage": 0.0,
+            "avg_position_changes": 0.0,
+            "avg_direct_flips": 0.0,
+            "avg_turnover": 0.0,
+            "decoder_action_histogram": _format_histogram_from_counts(np.zeros(3, dtype=np.int64)),
+        }
+
+    decoder_hist = np.sum(
+        [np.asarray(item["decoder_action_histogram"], dtype=np.int64) for item in horizon_details],
+        axis=0,
+    )
+
+    return {
+        "avg_return": float(np.mean([item["horizon_return"] for item in horizon_details])),
+        "avg_gross_pnl": float(np.mean([item["gross_pnl"] for item in horizon_details])),
+        "avg_execution_cost": float(np.mean([item["execution_cost_total"] for item in horizon_details])),
+        "avg_commission": float(np.mean([item["commission_total"] for item in horizon_details])),
+        "avg_slippage": float(np.mean([item["slippage_total"] for item in horizon_details])),
+        "avg_position_changes": float(np.mean([item["num_position_changes"] for item in horizon_details])),
+        "avg_direct_flips": float(np.mean([item["num_direct_flips"] for item in horizon_details])),
+        "avg_turnover": float(np.mean([item["turnover_total"] for item in horizon_details])),
+        "decoder_action_histogram": _format_histogram_from_counts(decoder_hist),
+    }
+
+
+def _run_policy_on_horizons(
+    codebook: VQCodebook,
+    decoder: VQDecoder,
+    env: TradingEnv,
+    horizon_indices: np.ndarray,
+    device: torch.device,
+    selected_archetypes: np.ndarray,
+) -> dict[str, Any]:
+    """在给定 horizons 上执行指定 archetype 选择结果，并汇总诊断指标。"""
+    if len(horizon_indices) != len(selected_archetypes):
+        raise ValueError(
+            f"horizon_indices 和 selected_archetypes 长度不一致: {len(horizon_indices)} vs {len(selected_archetypes)}"
+        )
+
+    horizon_details: list[dict[str, Any]] = []
+    for h_idx, archetype_idx in zip(horizon_indices.tolist(), selected_archetypes.tolist()):
+        z_q = codebook.embeddings.weight[int(archetype_idx)].unsqueeze(0)
+        detail = run_horizon_with_decoder(
+            env=env,
+            horizon_idx=int(h_idx),
+            decoder=decoder,
+            z_q=z_q,
+            device=device,
+            return_details=True,
+        )
+        horizon_details.append(detail)
+
+    metrics = _aggregate_execution_diagnostics(horizon_details)
+    metrics["selected_histogram"] = _format_histogram_from_counts(
+        _histogram_counts(selected_archetypes, codebook.embeddings.weight.size(0))
+    )
+    metrics["num_horizons"] = int(len(horizon_indices))
+    return metrics
+
+
 def _cfg(config: Any, name: str, default: Any) -> Any:
     """安全读取配置项；若不存在则回退到默认值。
 
@@ -86,6 +196,7 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
         max_grad_norm	梯度裁剪阈值，防止梯度爆炸
         log_interval	每 N 步输出一次日志
         eval_max_horizons	验证集评估时最多评估的 horizon 数量（None 表示全部）
+        diagnostic_horizons	训练子集诊断时抽样的 horizon 数量
     论文相关:
         论文的核心是 Section 4.2 的 horizon-level selector 与 Eq.(5) 的目标，
         这里的 clip_eps / ppo_epochs / minibatch_size / ent_coef / vf_coef
@@ -94,20 +205,34 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
     Returns:
         dict[str, Any]: 统一整理后的 PPO 超参数字典。
     """
-    rollout_batch_size = int(_cfg(config, "phase2_rollout_batch_size", 512))
+    rollout_batch_size = int(_cfg(config, "phase2_rollout_batch_size", 1024))
     ppo_epochs = int(_cfg(config, "phase2_ppo_epochs", 4))
-    minibatch_size = int(_cfg(config, "phase2_minibatch_size", 512))
+    minibatch_size = int(_cfg(config, "phase2_minibatch_size", 256))
     clip_eps = float(_cfg(config, "phase2_clip_eps", 0.2))
-    vf_coef = float(_cfg(config, "phase2_vf_coef", 0.5))
-    ent_coef = float(_cfg(config, "phase2_ent_coef", 0.01))
+    vf_coef = float(_cfg(config, "phase2_vf_coef", 0.2))
+    ent_coef = float(_cfg(config, "phase2_ent_coef", 0.02))
     max_grad_norm = float(_cfg(config, "phase2_max_grad_norm", 1.0))
     log_interval = int(_cfg(config, "phase2_log_interval", 100000))
     eval_max_horizons = _cfg(config, "phase2_eval_max_horizons", None)
+    diagnostic_horizons = int(_cfg(config, "phase2_diagnostic_horizons", 128))
 
     rollout_batch_size = max(1, rollout_batch_size)
     ppo_epochs = max(1, ppo_epochs)
     minibatch_size = max(1, minibatch_size)
     log_interval = max(1, log_interval)
+    diagnostic_horizons = max(1, diagnostic_horizons)
+
+    # PPO 关键保护：minibatch 必须小于 rollout_batch，否则第一轮 full-batch
+    # 更新在 advantage 零均值归一化后很容易导致 policy loss 接近 0。
+    if rollout_batch_size > 1 and minibatch_size >= rollout_batch_size:
+        adjusted_minibatch = max(1, rollout_batch_size // 4)
+        logger.warning(
+            "检测到 minibatch_size(%d) >= rollout_batch_size(%d)，自动调整为 %d，避免 full-batch PPO 导致 actor 更新退化。",
+            minibatch_size,
+            rollout_batch_size,
+            adjusted_minibatch,
+        )
+        minibatch_size = adjusted_minibatch
 
     return {
         "rollout_batch_size": rollout_batch_size,
@@ -119,6 +244,7 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
         "max_grad_norm": max_grad_norm,
         "log_interval": log_interval,
         "eval_max_horizons": eval_max_horizons,
+        "diagnostic_horizons": diagnostic_horizons,
     }
 
 
@@ -208,7 +334,8 @@ def run_horizon_with_decoder(
     decoder: VQDecoder,
     z_q: torch.Tensor,
     device: torch.device,
-) -> float:
+    return_details: bool = False,
+) -> float | dict[str, Any]:
     """使用冻结 Decoder 在一个 horizon 内执行交易，返回 horizon 总收益。
 
     # Section 4.2: 冻结 Decoder 生成 micro actions
@@ -222,6 +349,9 @@ def run_horizon_with_decoder(
         低层执行收益：先用 decoder 生成整段 micro action，再逐步喂给 env，
         最终得到该 horizon 的累计回报。
 
+        为了排查 reward 为负的来源，这里额外统计 gross pnl / execution cost /
+        turnover / direct flips 等诊断信息；默认仍返回 float，保持原调用方式兼容。
+
     论文相关:
         - 对应 Section 4.2 中：选定 archetype 后，将其 code e_{a_sel}
           输入 frozen decoder p_theta_d(a_base | s, e_{a_sel})；
@@ -234,13 +364,27 @@ def run_horizon_with_decoder(
         decoder: 冻结的 VQ Decoder
         z_q: 选定原型的量化嵌入 (1, code_dim)
         device: 计算设备
+        return_details: 是否返回执行细分统计
 
     Returns:
         horizon_return: 该 horizon 的总收益（未折扣）
+        或包含收益拆分项的 detail 字典
     """
     # 进入指定 horizon；保留 reset 调用，确保 env 内部游标与当前 horizon 对齐。
     state = env.reset(horizon_idx)
-    horizon_return = 0.0
+
+    stats: dict[str, Any] = {
+        "horizon_return": 0.0,
+        "gross_pnl": 0.0,
+        "execution_cost_total": 0.0,
+        "commission_total": 0.0,
+        "slippage_total": 0.0,
+        "num_position_changes": 0,
+        "num_direct_flips": 0,
+        "turnover_total": 0.0,
+        "num_steps": 0,
+        "decoder_action_histogram": [0, 0, 0],
+    }
 
     # 收集 horizon 内所有状态用于 decoder 批量推理
     h = env.horizon
@@ -262,14 +406,43 @@ def run_horizon_with_decoder(
     # 在 env 中逐步执行 micro actions
     for step_idx in range(len(actions_np)):
         action = int(actions_np[step_idx])
-        _, reward, done, _ = env.step(action)
-        horizon_return += reward
+        if 0 <= action < len(stats["decoder_action_histogram"]):
+            stats["decoder_action_histogram"][action] += 1
+
+        _, reward, done, info = env.step(action)
+
+        old_position = int(info.get("old_position", 0))
+        new_position = int(info.get("position", old_position))
+        execution_cost = float(info.get("execution_cost", 0.0))
+        price = float(info.get("price", 0.0))
+        delta_position = int(new_position - old_position)
+
+        commission = float(env.COMMISSION_RATE * abs(delta_position) * price)
+        commission = min(commission, execution_cost)
+        slippage = max(0.0, execution_cost - commission)
+        gross_pnl = float(reward + execution_cost)
+
+        if old_position != new_position:
+            stats["num_position_changes"] += 1
+        if old_position != 0 and new_position != 0 and np.sign(old_position) != np.sign(new_position):
+            stats["num_direct_flips"] += 1
+
+        stats["turnover_total"] += float(abs(delta_position))
+        stats["horizon_return"] += float(reward)
+        stats["gross_pnl"] += gross_pnl
+        stats["execution_cost_total"] += execution_cost
+        stats["commission_total"] += commission
+        stats["slippage_total"] += slippage
+        stats["num_steps"] += 1
+
         if done:
             break
 
     # state 变量仅用于保留 reset 语义和调试语境；逻辑上无需额外使用。
     _ = state
-    return float(horizon_return)
+    if return_details:
+        return stats
+    return float(stats["horizon_return"])
 
 
 def get_horizon_start_states(env: TradingEnv, horizon_indices: np.ndarray) -> np.ndarray:
@@ -333,7 +506,7 @@ def collect_rollout_batch(
     demo_rewards: np.ndarray,
     batch_size: int,
     device: torch.device,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Any]:
     """采集一批 horizon-level rollout，用于 PPO 更新。
 
     功能说明:
@@ -343,7 +516,8 @@ def collect_rollout_batch(
         3. 对应 archetype embedding 经 frozen decoder 生成 micro actions；
         4. 在 env 中执行并获得 horizon return；
         5. 保存 PPO 所需的 states / actions / old_log_probs / returns / advantages；
-        6. 同时保存 demonstration 侧的 gt_labels 用于 imitation 正则。
+        6. 同时保存 demonstration 侧的 gt_labels 用于 imitation 正则；
+        7. 额外记录 reward 拆分项和 archetype 直方图，便于定位负收益来源。
 
     论文相关:
         这一步是对 Section 4.2 的工程展开：
@@ -357,7 +531,7 @@ def collect_rollout_batch(
         更接近原始代码结构；虽然不是全量 GAE，但已经满足 PPO 风格更新所需。
 
     Returns:
-        dict[str, torch.Tensor]: PPO 更新所需的一批张量。
+        dict[str, Any]: PPO 更新所需的一批张量和 rollout 诊断信息。
     """
     # 随机采样一批训练 horizon。保持和原实现一致：horizon 是 Phase II 的基本决策单位。
     horizon_indices = np.random.randint(0, train_env.num_horizons, size=batch_size)
@@ -365,12 +539,12 @@ def collect_rollout_batch(
     # 获取 horizon 起始状态，对应论文中的 s_sel。
     states_np = get_horizon_start_states(train_env, horizon_indices)
     states_t = torch.tensor(states_np, dtype=torch.float32, device=device)
-    # logger.info("get_horizon_start_states states_t的形状:%s",states_t.shape)
-    
+
     with torch.no_grad():
         # Section 4.2: Agent 选择原型
         # 返回所有原型的策略概率和价值函数输出
         action_probs, values = agent(states_t)
+        greedy_actions = torch.argmax(action_probs, dim=-1)
         dist = torch.distributions.Categorical(probs=action_probs)
 
         # 从策略分布中采样原型索引
@@ -390,29 +564,55 @@ def collect_rollout_batch(
         )
 
     returns: list[float] = []
+    rollout_details: list[dict[str, Any]] = []
     for i, h_idx in enumerate(horizon_indices):
         # 获取选定原型的量化嵌入；对应论文中的 e_{a_sel}。
         z_q = codebook.embeddings.weight[actions[i].item()].unsqueeze(0)  # (1, code_dim)
 
         # Section 4.2: 冻结 Decoder 生成 micro actions → env 执行 → horizon return
         # horizon return 就是这一个 horizon 的奖励总和。
-        horizon_return = run_horizon_with_decoder(
-            train_env, int(h_idx), decoder, z_q, device
+        detail = run_horizon_with_decoder(
+            train_env, int(h_idx), decoder, z_q, device, return_details=True
         )
-        returns.append(horizon_return)
+        returns.append(float(detail["horizon_return"]))
+        rollout_details.append(detail)
 
     returns_t = torch.tensor(returns, dtype=torch.float32, device=device)
     values_t = values.squeeze(-1).detach()
 
     # Section 4.2 / PPO 版本: advantage = R - V(s)
     # 这里保持与原代码同一语义，只是改成 batch 形式。
-    advantages_t = returns_t - values_t
+    raw_advantages_t = returns_t - values_t
+    advantages_t = raw_advantages_t.clone()
 
     # PPO 中通常会做 advantage normalization，以稳定比例项 ratio 的更新。
     if batch_size > 1:
         advantages_t = (
             advantages_t - advantages_t.mean()
         ) / (advantages_t.std(unbiased=False) + 1e-8)
+
+    actions_np = actions.detach().cpu().numpy()
+    greedy_np = greedy_actions.detach().cpu().numpy()
+    gt_np = gt_labels.detach().cpu().numpy()
+
+    diagnostics = _aggregate_execution_diagnostics(rollout_details)
+    diagnostics.update(
+        {
+            "raw_adv_mean": float(raw_advantages_t.mean().item()) if raw_advantages_t.numel() > 0 else 0.0,
+            "raw_adv_std": float(raw_advantages_t.std(unbiased=False).item()) if raw_advantages_t.numel() > 0 else 0.0,
+            "sampled_archetype_histogram": _format_histogram_from_counts(
+                _histogram_counts(actions_np, agent.num_archetypes)
+            ),
+            "greedy_archetype_histogram": _format_histogram_from_counts(
+                _histogram_counts(greedy_np, agent.num_archetypes)
+            ),
+            "gt_label_histogram": _format_histogram_from_counts(
+                _histogram_counts(gt_np, agent.num_archetypes)
+            ),
+            "sampled_gt_agreement": float(np.mean(actions_np == gt_np)) if gt_np.size > 0 else 0.0,
+            "greedy_gt_agreement": float(np.mean(greedy_np == gt_np)) if gt_np.size > 0 else 0.0,
+        }
+    )
 
     return {
         "states": states_t,
@@ -421,13 +621,14 @@ def collect_rollout_batch(
         "returns": returns_t.detach(),
         "advantages": advantages_t.detach(),
         "gt_labels": gt_labels.detach(),
+        "diagnostics": diagnostics,
     }
 
 
 def ppo_update(
     agent: SelectionAgent,
     optimizer: torch.optim.Optimizer,
-    batch: dict[str, torch.Tensor],
+    batch: dict[str, Any],
     alpha: float,
     clip_eps: float,
     vf_coef: float,
@@ -475,6 +676,10 @@ def ppo_update(
     entropies: list[float] = []
     total_losses: list[float] = []
     clip_fractions: list[float] = []
+    approx_kls: list[float] = []
+    policy_grad_norms: list[float] = []
+    value_grad_norms: list[float] = []
+    shared_grad_norms: list[float] = []
 
     for _ in range(ppo_epochs):
         perm = torch.randperm(batch_size, device=device)
@@ -519,10 +724,16 @@ def ppo_update(
 
             optimizer.zero_grad()
             total_loss.backward()
+
+            policy_grad_norm = _parameter_grad_norm(agent.policy_head.parameters())
+            value_grad_norm = _parameter_grad_norm(agent.value_head.parameters())
+            shared_grad_norm = _parameter_grad_norm(agent.shared.parameters())
+
             torch.nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
             optimizer.step()
 
             clip_fraction = ((ratio - 1.0).abs() > clip_eps).float().mean()
+            approx_kl = (mb_old_log_probs - new_log_probs).mean()
 
             policy_losses.append(float(policy_loss.detach().item()))
             value_losses.append(float(value_loss.detach().item()))
@@ -530,6 +741,10 @@ def ppo_update(
             entropies.append(float(entropy.detach().item()))
             total_losses.append(float(total_loss.detach().item()))
             clip_fractions.append(float(clip_fraction.detach().item()))
+            approx_kls.append(float(approx_kl.detach().item()))
+            policy_grad_norms.append(float(policy_grad_norm))
+            value_grad_norms.append(float(value_grad_norm))
+            shared_grad_norms.append(float(shared_grad_norm))
 
     return {
         "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
@@ -538,6 +753,10 @@ def ppo_update(
         "entropy": float(np.mean(entropies)) if entropies else 0.0,
         "total_loss": float(np.mean(total_losses)) if total_losses else 0.0,
         "clip_fraction": float(np.mean(clip_fractions)) if clip_fractions else 0.0,
+        "approx_kl": float(np.mean(approx_kls)) if approx_kls else 0.0,
+        "policy_grad_norm": float(np.mean(policy_grad_norms)) if policy_grad_norms else 0.0,
+        "value_grad_norm": float(np.mean(value_grad_norms)) if value_grad_norms else 0.0,
+        "shared_grad_norm": float(np.mean(shared_grad_norms)) if shared_grad_norms else 0.0,
     }
 
 
@@ -548,8 +767,8 @@ def evaluate_on_validation(
     val_env: TradingEnv,
     device: torch.device,
     max_horizons: int | None = None,
-) -> float:
-    """在验证集上评估 SelectionAgent，返回平均 horizon return。
+) -> dict[str, Any]:
+    """在验证集上评估 SelectionAgent，返回平均 horizon return 和诊断指标。
 
     # 需求 5.7: 定期在验证集上评估性能
 
@@ -557,11 +776,14 @@ def evaluate_on_validation(
         在验证阶段，对每个 horizon 取首 bar 状态，使用当前策略贪心选择最优
         archetype（argmax），再通过 frozen decoder 执行整段微动作并累加收益。
 
+        除平均 return 外，还额外输出 gross pnl / execution cost / turnover /
+        direct flips / archetype histogram 等诊断项，便于区分“方向错”和“成本过高”。
+
     论文相关:
         - 对应 Section 4.2 的 inference 过程；
         - 训练时可以采样以保持探索，验证时通常用 argmax 检查 selector
           当前学到的 archetype 匹配能力；
-        - 返回值仍然是 horizon-level 平均回报，与论文中的 r_sel 定义一致。
+        - 返回值仍然围绕 horizon-level 回报，与论文中的 r_sel 定义一致。
 
     Args:
         agent: SelectionAgent
@@ -572,17 +794,19 @@ def evaluate_on_validation(
         max_horizons: 若指定，则只评估前若干个 horizon，用于加速验证
 
     Returns:
-        平均 horizon return
+        dict[str, Any]: 平均 return 及执行诊断
     """
     agent.eval()
-    total_return = 0.0
     num_horizons = val_env.num_horizons
 
     if num_horizons == 0:
-        return 0.0
+        return {"avg_return": 0.0, "selected_histogram": "[]"}
 
     if max_horizons is not None:
         num_horizons = min(num_horizons, int(max_horizons))
+
+    selected_archetypes: list[int] = []
+    horizon_details: list[dict[str, Any]] = []
 
     # 使用 tqdm 显示进度条
     for h_idx in tqdm(range(num_horizons), desc="验证集评估"):
@@ -593,14 +817,144 @@ def evaluate_on_validation(
             action_probs, _ = agent(state_t)
             k = torch.argmax(action_probs, dim=-1).item()
 
+        selected_archetypes.append(int(k))
+
         # 获取选定原型的量化嵌入
         z_q = codebook.embeddings.weight[k].unsqueeze(0)  # (1, code_dim)
 
-        horizon_ret = run_horizon_with_decoder(val_env, h_idx, decoder, z_q, device)
-        total_return += horizon_ret
+        detail = run_horizon_with_decoder(
+            val_env, h_idx, decoder, z_q, device, return_details=True
+        )
+        horizon_details.append(detail)
+
+    metrics = _aggregate_execution_diagnostics(horizon_details)
+    metrics["selected_histogram"] = _format_histogram_from_counts(
+        _histogram_counts(selected_archetypes, codebook.embeddings.weight.size(0))
+    )
+    metrics["avg_return"] = metrics.pop("avg_return")
 
     agent.train()
-    return total_return / max(1, num_horizons)
+    return metrics
+
+
+def evaluate_training_subset_diagnostics(
+    agent: SelectionAgent,
+    encoder: VQEncoder,
+    codebook: VQCodebook,
+    decoder: VQDecoder,
+    train_env: TradingEnv,
+    demo_states: np.ndarray,
+    demo_actions: np.ndarray,
+    demo_rewards: np.ndarray,
+    diagnostic_horizons: int,
+    device: torch.device,
+) -> dict[str, Any]:
+    """在训练子集上做 learned / random / oracle / fixed baseline 对照。
+
+    功能说明:
+        该诊断不直接参与训练，只用于定位负收益来源：
+        - learned selector 是否优于 random；
+        - gt oracle 是否明显高于 learned；
+        - best fixed archetype 是否已经为负。
+
+    论文相关:
+        这一步并不改变论文算法本身，而是对 Section 4.2 的 archetype selector
+        做工程诊断，帮助判断瓶颈在 selector 还是在 frozen archetype 基座。
+    """
+    subset_size = min(int(diagnostic_horizons), train_env.num_horizons)
+    if subset_size <= 0:
+        return {
+            "num_horizons": 0,
+            "learned_return": 0.0,
+            "random_return": 0.0,
+            "oracle_return": 0.0,
+            "best_fixed_return": 0.0,
+            "best_fixed_idx": -1,
+            "learned_gt_agreement": 0.0,
+            "fixed_returns": "[]",
+        }
+
+    horizon_indices = np.random.choice(train_env.num_horizons, size=subset_size, replace=False)
+    horizon_indices = np.asarray(horizon_indices, dtype=np.int64)
+
+    states_np = get_horizon_start_states(train_env, horizon_indices)
+    states_t = torch.tensor(states_np, dtype=torch.float32, device=device)
+    with torch.no_grad():
+        action_probs, _ = agent(states_t)
+        learned_actions = torch.argmax(action_probs, dim=-1).detach().cpu().numpy()
+
+    gt_labels = get_ground_truth_labels(
+        encoder=encoder,
+        codebook=codebook,
+        demo_states=demo_states,
+        demo_actions=demo_actions,
+        demo_rewards=demo_rewards,
+        horizon_indices=horizon_indices,
+        device=device,
+    ).detach().cpu().numpy()
+
+    learned_metrics = _run_policy_on_horizons(
+        codebook=codebook,
+        decoder=decoder,
+        env=train_env,
+        horizon_indices=horizon_indices,
+        device=device,
+        selected_archetypes=learned_actions,
+    )
+
+    rng = np.random.default_rng(12345)
+    random_actions = rng.integers(0, codebook.embeddings.weight.size(0), size=subset_size, dtype=np.int64)
+    random_metrics = _run_policy_on_horizons(
+        codebook=codebook,
+        decoder=decoder,
+        env=train_env,
+        horizon_indices=horizon_indices,
+        device=device,
+        selected_archetypes=random_actions,
+    )
+
+    oracle_metrics = _run_policy_on_horizons(
+        codebook=codebook,
+        decoder=decoder,
+        env=train_env,
+        horizon_indices=horizon_indices,
+        device=device,
+        selected_archetypes=gt_labels,
+    )
+
+    fixed_returns: list[float] = []
+    for archetype_idx in range(codebook.embeddings.weight.size(0)):
+        fixed_actions = np.full(subset_size, archetype_idx, dtype=np.int64)
+        fixed_metrics = _run_policy_on_horizons(
+            codebook=codebook,
+            decoder=decoder,
+            env=train_env,
+            horizon_indices=horizon_indices,
+            device=device,
+            selected_archetypes=fixed_actions,
+        )
+        fixed_returns.append(float(fixed_metrics["avg_return"]))
+
+    best_fixed_idx = int(np.argmax(fixed_returns)) if fixed_returns else -1
+
+    return {
+        "num_horizons": subset_size,
+        "learned_return": float(learned_metrics["avg_return"]),
+        "random_return": float(random_metrics["avg_return"]),
+        "oracle_return": float(oracle_metrics["avg_return"]),
+        "best_fixed_return": float(max(fixed_returns)) if fixed_returns else 0.0,
+        "best_fixed_idx": best_fixed_idx,
+        "learned_gt_agreement": float(np.mean(learned_actions == gt_labels)) if gt_labels.size > 0 else 0.0,
+        "learned_selected_histogram": learned_metrics["selected_histogram"],
+        "oracle_label_histogram": _format_histogram_from_counts(
+            _histogram_counts(gt_labels, codebook.embeddings.weight.size(0))
+        ),
+        "fixed_returns": "[" + ", ".join(f"{idx}:{ret:.4f}" for idx, ret in enumerate(fixed_returns)) + "]",
+        "learned_avg_gross_pnl": float(learned_metrics["avg_gross_pnl"]),
+        "learned_avg_cost": float(learned_metrics["avg_execution_cost"]),
+        "learned_avg_turnover": float(learned_metrics["avg_turnover"]),
+        "learned_avg_direct_flips": float(learned_metrics["avg_direct_flips"]),
+    }
 
 
 def save_checkpoint(
@@ -645,6 +999,7 @@ def save_checkpoint(
                 "phase2_vf_coef": ppo_hparams["vf_coef"],
                 "phase2_ent_coef": ppo_hparams["ent_coef"],
                 "phase2_max_grad_norm": ppo_hparams["max_grad_norm"],
+                "phase2_diagnostic_horizons": ppo_hparams["diagnostic_horizons"],
             },
         },
         save_path,
@@ -697,6 +1052,11 @@ def run_training_loop(
         这是 Phase II 的主训练入口：
         反复执行“收集一批 horizon rollout → 多轮 PPO 更新 → 周期性验证与保存”。
 
+        相比原版本，新增了三类诊断：
+        1) rollout 奖励拆分（gross pnl / cost / turnover / flips）；
+        2) actor/critic 梯度与 approx_kl；
+        3) 训练子集上的 learned / random / oracle / fixed baseline 对照。
+
     论文相关:
         - 对应 Section 4.2 的 horizon-level RL；
         - 目标函数核心仍然来自 Eq.(5)：
@@ -719,6 +1079,24 @@ def run_training_loop(
         "entropy": 0.0,
         "total_loss": 0.0,
         "clip_fraction": 0.0,
+        "approx_kl": 0.0,
+        "policy_grad_norm": 0.0,
+        "value_grad_norm": 0.0,
+        "shared_grad_norm": 0.0,
+    }
+    last_batch_diag: dict[str, Any] = {
+        "avg_return": 0.0,
+        "avg_gross_pnl": 0.0,
+        "avg_execution_cost": 0.0,
+        "avg_turnover": 0.0,
+        "avg_direct_flips": 0.0,
+        "sampled_gt_agreement": 0.0,
+        "greedy_gt_agreement": 0.0,
+        "sampled_archetype_histogram": "[]",
+        "gt_label_histogram": "[]",
+        "decoder_action_histogram": "[]",
+        "raw_adv_mean": 0.0,
+        "raw_adv_std": 0.0,
     }
 
     rollout_batch_size = int(ppo_hparams["rollout_batch_size"])
@@ -729,6 +1107,7 @@ def run_training_loop(
     ent_coef = float(ppo_hparams["ent_coef"])
     max_grad_norm = float(ppo_hparams["max_grad_norm"])
     eval_max_horizons = ppo_hparams["eval_max_horizons"]
+    diagnostic_horizons = int(ppo_hparams["diagnostic_horizons"])
 
     next_log_step = log_interval
     next_val_step = val_interval
@@ -761,6 +1140,7 @@ def run_training_loop(
             batch_size=current_batch_size,
             device=device,
         )
+        last_batch_diag = batch["diagnostics"]
 
         if step_count == 0:
             logger.info(
@@ -770,6 +1150,17 @@ def run_training_loop(
                 tuple(batch["returns"].shape),
                 tuple(batch["advantages"].shape),
                 tuple(batch["gt_labels"].shape),
+            )
+            logger.info(
+                "首批 rollout 诊断: gross=%.4f, cost=%.4f, turnover=%.4f, flips=%.4f, sampled_hist=%s, gt_hist=%s, sampled_agree=%.4f, greedy_agree=%.4f",
+                last_batch_diag["avg_gross_pnl"],
+                last_batch_diag["avg_execution_cost"],
+                last_batch_diag["avg_turnover"],
+                last_batch_diag["avg_direct_flips"],
+                last_batch_diag["sampled_archetype_histogram"],
+                last_batch_diag["gt_label_histogram"],
+                last_batch_diag["sampled_gt_agreement"],
+                last_batch_diag["greedy_gt_agreement"],
             )
 
         last_stats = ppo_update(
@@ -798,6 +1189,7 @@ def run_training_loop(
             "avg_r": f"{avg_reward:.4f}",
             "loss": f"{last_stats['total_loss']:.4f}",
             "policy": f"{last_stats['policy_loss']:.4f}",
+            "kl": f"{last_stats['approx_kl']:.4f}",
             "val": f"{best_val_return:.4f}",
         })
 
@@ -805,7 +1197,7 @@ def run_training_loop(
         if step_count >= next_log_step or step_count == total_steps:
             batch_avg_reward = float(np.mean(batch_returns)) if batch_returns else 0.0
             logger.info(
-                "Step %7d/%d — avg_reward=%.4f, batch_reward=%.4f, total=%.4f, policy=%.4f, value=%.4f, imitation=%.4f, entropy=%.4f, clipfrac=%.4f",
+                "Step %7d/%d — avg_reward=%.4f, batch_reward=%.4f, total=%.4f, policy=%.4f, value=%.4f, imitation=%.4f, entropy=%.4f, clipfrac=%.4f, kl=%.4f, p_gn=%.4f, v_gn=%.4f, shared_gn=%.4f",
                 step_count,
                 total_steps,
                 avg_reward,
@@ -816,13 +1208,41 @@ def run_training_loop(
                 last_stats["imitation_loss"],
                 last_stats["entropy"],
                 last_stats["clip_fraction"],
+                last_stats["approx_kl"],
+                last_stats["policy_grad_norm"],
+                last_stats["value_grad_norm"],
+                last_stats["shared_grad_norm"],
+            )
+            logger.info(
+                "Step %7d/%d — rollout诊断: gross=%.4f, cost=%.4f (commission=%.4f, slippage=%.4f), turnover=%.4f, flips=%.4f, raw_adv_mean=%.4f, raw_adv_std=%.4f, sampled_agree=%.4f, greedy_agree=%.4f",
+                step_count,
+                total_steps,
+                last_batch_diag["avg_gross_pnl"],
+                last_batch_diag["avg_execution_cost"],
+                last_batch_diag["avg_commission"],
+                last_batch_diag["avg_slippage"],
+                last_batch_diag["avg_turnover"],
+                last_batch_diag["avg_direct_flips"],
+                last_batch_diag["raw_adv_mean"],
+                last_batch_diag["raw_adv_std"],
+                last_batch_diag["sampled_gt_agreement"],
+                last_batch_diag["greedy_gt_agreement"],
+            )
+            logger.info(
+                "Step %7d/%d — archetype直方图: sampled=%s, greedy=%s, gt=%s, decoder_actions=%s",
+                step_count,
+                total_steps,
+                last_batch_diag["sampled_archetype_histogram"],
+                last_batch_diag["greedy_archetype_histogram"],
+                last_batch_diag["gt_label_histogram"],
+                last_batch_diag["decoder_action_histogram"],
             )
             next_log_step = ((step_count // log_interval) + 1) * log_interval
 
         # 需求 5.7: 定期在验证集上评估，保存最优检查点
         if step_count >= next_val_step or step_count == total_steps:
             pbar.set_description("验证集评估中")
-            val_return = evaluate_on_validation(
+            val_metrics = evaluate_on_validation(
                 agent=agent,
                 codebook=codebook,
                 decoder=decoder,
@@ -830,11 +1250,54 @@ def run_training_loop(
                 device=device,
                 max_horizons=eval_max_horizons,
             )
+            val_return = float(val_metrics["avg_return"])
             logger.info(
-                "验证集评估 (step %d): avg_return=%.4f (best=%.4f)",
+                "验证集评估 (step %d): avg_return=%.4f (best=%.4f), gross=%.4f, cost=%.4f, turnover=%.4f, flips=%.4f, selected=%s",
                 step_count,
                 val_return,
                 best_val_return,
+                val_metrics["avg_gross_pnl"],
+                val_metrics["avg_execution_cost"],
+                val_metrics["avg_turnover"],
+                val_metrics["avg_direct_flips"],
+                val_metrics["selected_histogram"],
+            )
+
+            train_diag = evaluate_training_subset_diagnostics(
+                agent=agent,
+                encoder=encoder,
+                codebook=codebook,
+                decoder=decoder,
+                train_env=train_env,
+                demo_states=demo_states,
+                demo_actions=demo_actions,
+                demo_rewards=demo_rewards,
+                diagnostic_horizons=diagnostic_horizons,
+                device=device,
+            )
+            logger.info(
+                "训练子集诊断 (n=%d): learned=%.4f, random=%.4f, oracle=%.4f, best_fixed=%.4f(k=%d), gt_agree=%.4f",
+                train_diag["num_horizons"],
+                train_diag["learned_return"],
+                train_diag["random_return"],
+                train_diag["oracle_return"],
+                train_diag["best_fixed_return"],
+                train_diag["best_fixed_idx"],
+                train_diag["learned_gt_agreement"],
+            )
+            logger.info(
+                "训练子集诊断 (n=%d): gross=%.4f, cost=%.4f, turnover=%.4f, flips=%.4f, learned_hist=%s, oracle_hist=%s",
+                train_diag["num_horizons"],
+                train_diag["learned_avg_gross_pnl"],
+                train_diag["learned_avg_cost"],
+                train_diag["learned_avg_turnover"],
+                train_diag["learned_avg_direct_flips"],
+                train_diag["learned_selected_histogram"],
+                train_diag["oracle_label_histogram"],
+            )
+            logger.info(
+                "训练子集固定原型收益: %s",
+                train_diag["fixed_returns"],
             )
 
             if val_return > best_val_return:
@@ -856,6 +1319,7 @@ def run_training_loop(
                 "avg_r": f"{avg_reward:.4f}",
                 "loss": f"{last_stats['total_loss']:.4f}",
                 "policy": f"{last_stats['policy_loss']:.4f}",
+                "kl": f"{last_stats['approx_kl']:.4f}",
                 "val": f"{best_val_return:.4f}",
             })
             next_val_step = ((step_count // val_interval) + 1) * val_interval
@@ -895,7 +1359,7 @@ def main() -> None:
         config.discount_factor,
     )
     logger.info(
-        "PPO 超参数: rollout_batch=%d, ppo_epochs=%d, minibatch=%d, clip_eps=%.3f, vf_coef=%.3f, ent_coef=%.4f, max_grad_norm=%.2f",
+        "PPO 超参数: rollout_batch=%d, ppo_epochs=%d, minibatch=%d, clip_eps=%.3f, vf_coef=%.3f, ent_coef=%.4f, max_grad_norm=%.2f, diagnostic_horizons=%d",
         ppo_hparams["rollout_batch_size"],
         ppo_hparams["ppo_epochs"],
         ppo_hparams["minibatch_size"],
@@ -903,6 +1367,7 @@ def main() -> None:
         ppo_hparams["vf_coef"],
         ppo_hparams["ent_coef"],
         ppo_hparams["max_grad_norm"],
+        ppo_hparams["diagnostic_horizons"],
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
