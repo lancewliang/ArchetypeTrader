@@ -18,6 +18,9 @@
 """
 
 import os
+import shutil
+from datetime import datetime
+from typing import Any, List, Tuple
 
 import numpy as np
 import torch
@@ -38,6 +41,22 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+PAPER_PHASE1_REFERENCE_TRAIN_ROWS = 1_400_000
+PAPER_PHASE1_SPEC = {
+    "state_dim": 45,
+    "action_dim": 3,
+    "horizon": 72,
+    "commission_rate": 0.0002,
+    "lstm_hidden_dim": 128,
+    "latent_dim": 16,
+    "num_archetypes": 10,
+    "vq_beta0": 0.25,
+    "num_trajectories": 30000,
+    "phase1_epochs": 100,
+    "discount_factor": 0.99,
+    "max_positions": {"BTC": 8, "ETH": 100, "DOT": 2500, "BNB": 200},
+}
+
 
 def set_reproducibility_seed(seed: int) -> None:
     """设置 Phase I 复现实验所需的随机种子。
@@ -54,6 +73,7 @@ def set_reproducibility_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+
 def compute_grad_norm(parameters) -> float:
     """计算参数梯度的全局 L2 范数。
 
@@ -66,6 +86,7 @@ def compute_grad_norm(parameters) -> float:
         norm = param.grad.detach().data.norm(2).item()
         total += norm * norm
     return float(total ** 0.5)
+
 
 
 def summarize_code_usage(code_counts: np.ndarray) -> dict:
@@ -93,17 +114,188 @@ def summarize_code_usage(code_counts: np.ndarray) -> dict:
     }
 
 
+
+def assert_paper_phase1_settings(config: Any, pair: str) -> None:
+    """强制检查当前配置是否严格等于论文 Phase I 主实验设置。
+
+    该守卫不改变论文算法，只负责阻止“看起来在复现论文、实际上配置已偏离”的运行。
+    若用户希望做非论文设置实验，应显式修改该守卫或另建 debug 分支，而不是在主线脚本中静默放宽。
+
+    Args:
+        config: 解析后的运行配置。
+        pair: 当前交易对名称。
+
+    Raises:
+        ValueError: 当任一关键配置与论文主实验不一致时抛出。
+    """
+    mismatches: List[str] = []
+
+    def _check_exact(name: str, actual: Any, expected: Any) -> None:
+        if actual != expected:
+            mismatches.append(f"{name}: actual={actual}, expected={expected}")
+
+    def _check_float(name: str, actual: float, expected: float, atol: float = 1e-12) -> None:
+        if not np.isclose(actual, expected, atol=atol, rtol=0.0):
+            mismatches.append(f"{name}: actual={actual}, expected={expected}")
+
+    _check_exact("state_dim", config.state_dim, PAPER_PHASE1_SPEC["state_dim"])
+    _check_exact("action_dim", config.action_dim, PAPER_PHASE1_SPEC["action_dim"])
+    _check_exact("horizon", config.horizon, PAPER_PHASE1_SPEC["horizon"])
+    _check_float("commission_rate", config.commission_rate, PAPER_PHASE1_SPEC["commission_rate"])
+    _check_exact("lstm_hidden_dim", config.lstm_hidden_dim, PAPER_PHASE1_SPEC["lstm_hidden_dim"])
+    _check_exact("latent_dim", config.latent_dim, PAPER_PHASE1_SPEC["latent_dim"])
+    _check_exact("num_archetypes", config.num_archetypes, PAPER_PHASE1_SPEC["num_archetypes"])
+    _check_float("vq_beta0", config.vq_beta0, PAPER_PHASE1_SPEC["vq_beta0"])
+    _check_exact("num_trajectories", config.num_trajectories, PAPER_PHASE1_SPEC["num_trajectories"])
+    _check_exact("phase1_epochs", config.phase1_epochs, PAPER_PHASE1_SPEC["phase1_epochs"])
+    _check_float("discount_factor", config.discount_factor, PAPER_PHASE1_SPEC["discount_factor"])
+
+    expected_m = PAPER_PHASE1_SPEC["max_positions"].get(pair)
+    actual_m = config.max_positions.get(pair)
+    _check_exact(f"max_positions[{pair}]", actual_m, expected_m)
+
+    if mismatches:
+        joined = "\n  - ".join(mismatches)
+        raise ValueError(
+            "当前运行配置不是严格论文 Phase I 主实验设置，已停止训练。\n"
+            f"  - {joined}"
+        )
+
+
+
+def log_training_data_scale(train_rows: int) -> None:
+    """记录当前训练数据规模与论文规模的差异。
+
+    该日志只用于解释“当前是 reduced-data reproduction”，不会阻止训练。
+    论文约使用 140 万行训练数据；用户当前约 52 万行，因此需要把数据规模差异与算法差异分开。
+    """
+    ratio = float(train_rows) / float(PAPER_PHASE1_REFERENCE_TRAIN_ROWS)
+    logger.warning(
+        "当前训练集行数=%d，论文约使用=%d 行；当前约为论文数据规模的 %.2f%%。"
+        "这仍属于严格论文算法/公式下的 reduced-data reproduction，而非同数据规模复现。",
+        train_rows,
+        PAPER_PHASE1_REFERENCE_TRAIN_ROWS,
+        ratio * 100.0,
+    )
+
+
+
+def expected_num_available_starts(total_rows: int, horizon: int) -> int:
+    """计算滑窗采样协议下全部合法起点数量。"""
+    return max(total_rows - horizon + 1, 0)
+
+
+
+def inspect_trajectory_cache(
+    traj_path: str,
+    config: Any,
+    pair: str,
+    train_rows: int,
+) -> Tuple[bool, List[str]]:
+    """检查现有轨迹缓存是否与当前严格论文设置兼容。
+
+    检查项覆盖 pair / horizon / gamma / num_trajectories / sampling_seed /
+    训练集长度 / state_dim / commission_rate / max_position / 算法变体标记，
+    从而避免误复用旧缓存导致“日志看起来一样、实际并未重跑”。
+
+    Args:
+        traj_path: 轨迹缓存路径。
+        config: 当前运行配置。
+        pair: 当前交易对。
+        train_rows: 当前训练集行数。
+
+    Returns:
+        (is_compatible, reasons)
+    """
+    if not os.path.exists(traj_path):
+        return False, ["trajectory cache 文件不存在"]
+
+    reasons: List[str] = []
+    expected_starts = expected_num_available_starts(train_rows, config.horizon)
+    expected_values = {
+        "pair": pair,
+        "horizon": int(config.horizon),
+        "gamma": float(config.discount_factor),
+        "num_sampled_trajectories": int(config.num_trajectories),
+        "sampling_seed": int(config.phase1_sampling_seed),
+        "num_available_starts": int(expected_starts),
+        "training_rows": int(train_rows),
+        "state_dim": int(config.state_dim),
+        "commission_rate": float(config.commission_rate),
+        "max_position": int(config.max_positions[pair]),
+        "algorithm_variant": "paper_single_change",
+    }
+
+    with np.load(traj_path, allow_pickle=False) as data:
+        required_keys = set(expected_values.keys()) | {"states", "actions", "rewards"}
+        missing_keys = sorted(required_keys - set(data.files))
+        if missing_keys:
+            reasons.append(f"cache 缺少关键元数据: {missing_keys}")
+            return False, reasons
+
+        states = data["states"]
+        actions = data["actions"]
+        rewards = data["rewards"]
+        if states.ndim != 3 or states.shape[1] != config.horizon or states.shape[2] != config.state_dim:
+            reasons.append(
+                f"states shape 不匹配: actual={states.shape}, expected=(*, {config.horizon}, {config.state_dim})"
+            )
+        if actions.ndim != 2 or actions.shape[0] != states.shape[0] or actions.shape[1] != config.horizon:
+            reasons.append(
+                f"actions shape 不匹配: actual={actions.shape}, expected=({states.shape[0]}, {config.horizon})"
+            )
+        if rewards.ndim != 2 or rewards.shape[0] != states.shape[0] or rewards.shape[1] != config.horizon:
+            reasons.append(
+                f"rewards shape 不匹配: actual={rewards.shape}, expected=({states.shape[0]}, {config.horizon})"
+            )
+
+        for key, expected in expected_values.items():
+            raw_value = data[key]
+            if isinstance(raw_value, np.ndarray) and raw_value.shape == ():
+                actual = raw_value.item()
+            elif isinstance(raw_value, np.ndarray) and raw_value.size == 1:
+                actual = raw_value.reshape(()).item()
+            else:
+                actual = raw_value
+            if isinstance(actual, bytes):
+                actual = actual.decode("utf-8")
+            if isinstance(expected, float):
+                if not np.isclose(float(actual), expected, atol=1e-12, rtol=0.0):
+                    reasons.append(f"{key} 不匹配: actual={actual}, expected={expected}")
+            else:
+                if actual != expected:
+                    reasons.append(f"{key} 不匹配: actual={actual}, expected={expected}")
+
+    return len(reasons) == 0, reasons
+
+
+
+def backup_incompatible_cache(traj_path: str, reasons: List[str]) -> str:
+    """备份不兼容的旧轨迹缓存，避免被当前严格论文运行误复用。"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = traj_path.replace(".npz", f".incompatible_{timestamp}.npz")
+    shutil.move(traj_path, backup_path)
+    logger.warning(
+        "检测到现有 trajectory cache 与当前严格论文设置不兼容，已备份到 %s。原因: %s",
+        backup_path,
+        reasons,
+    )
+    return backup_path
+
+
+
 def main() -> None:
     # ----------------------------------------------------------------
     # Step 0: 解析配置
     # ----------------------------------------------------------------
     config = parse_args()
     pair = config.pairs[0]  # 单交易对训练
+    assert_paper_phase1_settings(config, pair)
     set_reproducibility_seed(config.phase1_sampling_seed)
 
     logger.info("Phase I 训练开始: pair=%s", pair)
     logger.info(
-        "超参数: epochs=%d, batch_size=%d, lr=%.1e, latent_dim=%d, "
+        "严格论文主线配置已通过守卫检查: epochs=%d, batch_size=%d, lr=%.1e, latent_dim=%d, "
         "num_archetypes=%d, num_trajectories=%d, vq_beta0=%.2f, sampling_seed=%d",
         config.phase1_epochs,
         config.batch_size,
@@ -128,12 +320,21 @@ def main() -> None:
 
     train_states = train_df.to_numpy()
     prices = train_prices_df["close"].to_numpy()
+    train_rows = int(train_states.shape[0])
 
     logger.info(
         "训练集: states shape=%s, prices shape=%s",
         train_states.shape,
         prices.shape,
     )
+    log_training_data_scale(train_rows)
+
+    available_starts = expected_num_available_starts(train_rows, config.horizon)
+    if available_starts < config.num_trajectories:
+        raise ValueError(
+            "当前训练集不足以在严格论文滑窗协议下无放回采样 30k trajectories。"
+            f" available_starts={available_starts}, required={config.num_trajectories}"
+        )
 
     env = TradingEnv(
         states=train_states,
@@ -147,11 +348,12 @@ def main() -> None:
 
     logger.info(
         "TradingEnv 初始化完成 num_horizons = 总行数/切片内行数 = train_states.shape[0]/horizon: "
-        "num_horizons=%d, horizon=%d, max_position=%d, commission_rate=%.6f",
+        "num_horizons=%d, horizon=%d, max_position=%d, commission_rate=%.6f, available_starts=%d",
         env.num_horizons,
         config.horizon,
         env.m,
         env.commission_rate,
+        available_starts,
     )
 
     # ----------------------------------------------------------------
@@ -165,10 +367,22 @@ def main() -> None:
     )
     traj_path = DPPlanner.build_trajectory_cache_path(config.result_dir, pair)
 
+    need_generate_trajectories = True
     if os.path.exists(traj_path):
-        logger.info("发现已有轨迹文件，直接加载: %s", traj_path)
-        dataset = TrajectoryDataset.from_npz(traj_path)
-    else:
+        cache_ok, cache_reasons = inspect_trajectory_cache(
+            traj_path=traj_path,
+            config=config,
+            pair=pair,
+            train_rows=train_rows,
+        )
+        if cache_ok:
+            logger.info("发现与当前严格论文设置兼容的轨迹缓存，直接加载: %s", traj_path)
+            dataset = TrajectoryDataset.from_npz(traj_path)
+            need_generate_trajectories = False
+        else:
+            backup_incompatible_cache(traj_path, cache_reasons)
+
+    if need_generate_trajectories:
         logger.info(
             "开始生成 DP 示范轨迹: num_trajectories=%d",
             config.num_trajectories,
@@ -423,6 +637,8 @@ def main() -> None:
                 "discount_factor": config.discount_factor,
                 "commission_rate": config.commission_rate,
                 "max_positions": config.max_positions,
+                "paper_phase1_reference_train_rows": PAPER_PHASE1_REFERENCE_TRAIN_ROWS,
+                "current_train_rows": train_rows,
             },
         },
         save_path,

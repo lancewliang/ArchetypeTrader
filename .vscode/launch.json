@@ -5,7 +5,7 @@
             "name": "Python Debugger: train_phase1",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/src/script/train_phase1.py",
+            "program": "${workspaceFolder}/scripts/train_phase1.py",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
@@ -16,7 +16,7 @@
             "name": "Python Debugger: train_phase2",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/src/script/train_phase2.py",
+            "program": "${workspaceFolder}/script/train_phase2.py",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"

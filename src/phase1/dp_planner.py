@@ -282,6 +282,11 @@ class DPPlanner:
                     "pair": np.array(self.pair),
                     "horizon": np.int64(self.horizon),
                     "gamma": np.float64(self.gamma),
+                    "training_rows": np.int64(len(self.env.states)),
+                    "state_dim": np.int64(self.env.state_dim),
+                    "commission_rate": np.float64(self.env.commission_rate),
+                    "max_position": np.int64(self.m),
+                    "algorithm_variant": np.array("paper_single_change"),
                 }
             )
             self._save_trajectories(result)
@@ -345,6 +350,11 @@ class DPPlanner:
             "pair": np.array(self.pair),
             "horizon": np.int64(self.horizon),
             "gamma": np.float64(self.gamma),
+            "training_rows": np.int64(len(self.env.states)),
+            "state_dim": np.int64(self.env.state_dim),
+            "commission_rate": np.float64(self.env.commission_rate),
+            "max_position": np.int64(self.m),
+            "algorithm_variant": np.array("paper_single_change"),
         }
 
         logger.info(
