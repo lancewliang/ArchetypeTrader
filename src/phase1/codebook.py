@@ -7,6 +7,8 @@
 
 from typing import Tuple
 
+import math
+
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -29,6 +31,44 @@ class VQCodebook(nn.Module):
         self.num_codes = num_codes
         self.code_dim = code_dim
         self.embeddings = nn.Embedding(num_codes, code_dim)
+        self.reset_embedding_parameters()
+
+    def reset_embedding_parameters(self) -> None:
+        """重置码本参数。
+
+        该方法只影响实现层初始化策略，不改变论文中的量化公式
+        `k = argmin_j ||z_e - e_j||^2, z_q = e_k`。
+        默认采用与 embedding 维度相关的均匀分布，避免初始向量尺度过大。
+        """
+        bound = 1.0 / math.sqrt(float(max(self.code_dim, 1)))
+        nn.init.uniform_(self.embeddings.weight, -bound, bound)
+
+    def set_codebook_vectors(self, vectors: Tensor) -> None:
+        """用外部给定向量覆盖码本初值。
+
+        该接口用于 data-driven codebook initialization。它只改变码本的
+        初始位置，不改变 Phase I 的主流程、最近邻量化规则或损失函数。
+
+        Args:
+            vectors: shape = (num_codes, code_dim) 的初始化向量矩阵。
+
+        Raises:
+            ValueError: 当 shape 与当前码本不一致时抛出。
+        """
+        if vectors.ndim != 2:
+            raise ValueError(f"vectors 应为 2D 张量，实际 ndim={vectors.ndim}")
+        expected_shape = (self.num_codes, self.code_dim)
+        if tuple(vectors.shape) != expected_shape:
+            raise ValueError(
+                f"vectors shape 不匹配: actual={tuple(vectors.shape)}, expected={expected_shape}"
+            )
+
+        with torch.no_grad():
+            prepared = vectors.to(
+                device=self.embeddings.weight.device,
+                dtype=self.embeddings.weight.dtype,
+            )
+            self.embeddings.weight.copy_(prepared)
 
     def quantize(self, z_e: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """向量量化：最近邻查找 + straight-through estimator。

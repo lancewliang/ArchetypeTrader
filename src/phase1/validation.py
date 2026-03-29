@@ -43,6 +43,10 @@ REWARD_REPLAY_HARD_MAX_ABS_THRESHOLD = 1e-4
 BELLMAN_HARD_THRESHOLD = 1e-6
 SEVERE_CODE_COLLAPSE_DOMINANT_RATIO = 0.99
 SEVERE_CODE_COLLAPSE_USED_CODE_THRESHOLD = 1
+LATENT_DEPENDENCY_MAX_BATCHES = 16
+LATENT_DEPENDENCY_REC_LOSS_DELTA_THRESHOLD = 0.02
+LATENT_DEPENDENCY_TOKEN_ACC_DROP_THRESHOLD = 0.03
+LATENT_DEPENDENCY_CHANGE_DETECT_DROP_THRESHOLD = 0.03
 
 
 def _to_serializable(value: Any) -> Any:
@@ -126,6 +130,345 @@ def _compute_grad_norm(parameters: Iterable[torch.nn.Parameter]) -> float:
         grad_norm = param.grad.detach().data.norm(2).item()
         total += grad_norm * grad_norm
     return float(total ** 0.5)
+
+
+def _create_latent_metric_accumulator() -> Dict[str, Any]:
+    """构造 latent dependency 测试的指标累加器。"""
+    return {
+        "sample_count": 0,
+        "token_count": 0,
+        "rec_loss_weight_sum": 0.0,
+        "token_correct": 0,
+        "exact_match_count": 0,
+        "change_detect_correct": 0,
+        "change_step_errors": [],
+    }
+
+
+def _accumulate_latent_variant_metrics(
+    accumulator: Dict[str, Any],
+    preds: torch.Tensor,
+    targets: torch.Tensor,
+    rec_loss: torch.Tensor,
+) -> None:
+    """累计某个 latent 变体下的重建与变点指标。"""
+    batch_size = int(targets.shape[0])
+    token_count = int(targets.numel())
+    accumulator["sample_count"] += batch_size
+    accumulator["token_count"] += token_count
+    accumulator["rec_loss_weight_sum"] += float(rec_loss.item()) * batch_size
+    accumulator["token_correct"] += int((preds == targets).sum().item())
+    accumulator["exact_match_count"] += int(torch.all(preds == targets, dim=1).sum().item())
+    accumulator["change_detect_correct"] += int(
+        (((preds[:, 1:] != preds[:, :-1]).any(dim=1)) == ((targets[:, 1:] != targets[:, :-1]).any(dim=1))).sum().item()
+    )
+
+    gt_changes = (targets[:, 1:] != targets[:, :-1]).detach().cpu().numpy()
+    pred_changes = (preds[:, 1:] != preds[:, :-1]).detach().cpu().numpy()
+    gt_has_change = gt_changes.any(axis=1)
+    pred_has_change = pred_changes.any(axis=1)
+    for row_idx in range(batch_size):
+        if gt_has_change[row_idx] and pred_has_change[row_idx]:
+            gt_step = int(np.argmax(gt_changes[row_idx]) + 1)
+            pred_step = int(np.argmax(pred_changes[row_idx]) + 1)
+            accumulator["change_step_errors"].append(abs(gt_step - pred_step))
+
+
+def _finalize_latent_variant_metrics(accumulator: Dict[str, Any]) -> Dict[str, Any]:
+    """将 latent 变体指标累加器转为最终报告。"""
+    sample_count = int(accumulator["sample_count"])
+    token_count = int(accumulator["token_count"])
+    change_step_errors = np.asarray(accumulator["change_step_errors"], dtype=np.float64)
+    return {
+        "sample_count": sample_count,
+        "token_count": token_count,
+        "rec_loss": float(accumulator["rec_loss_weight_sum"] / max(sample_count, 1)),
+        "token_accuracy": float(accumulator["token_correct"] / max(token_count, 1)),
+        "trajectory_exact_match_rate": float(accumulator["exact_match_count"] / max(sample_count, 1)),
+        "change_detect_accuracy": float(accumulator["change_detect_correct"] / max(sample_count, 1)),
+        "change_step_mae": _safe_mean(change_step_errors),
+    }
+
+
+def evaluate_latent_dependency(
+    encoder: VQEncoder,
+    codebook: VQCodebook,
+    decoder: VQDecoder,
+    dataloader: DataLoader,
+    device: torch.device,
+    action_dim: int,
+    max_batches: int = LATENT_DEPENDENCY_MAX_BATCHES,
+) -> Dict[str, Any]:
+    """验证 decoder 是否真的依赖 z_q。
+
+    测试包含 5 个条件：
+    1. normal: 使用正常 z_q。
+    2. shuffled: batch 内固定随机打乱 z_q。
+    3. single_code: 整个 batch 共享同一个 code 向量。
+    4. mean_latent: 整个 batch 使用该 batch 的平均 z_q。
+    5. zero_latent: 整个 batch 使用全 0 latent。
+
+    该测试不改变训练算法，只检验 `p_theta_d(a_hat | s_demo, z_q)` 在实现中
+    是否对 z_q 敏感。
+    """
+    ce_loss_fn = nn.CrossEntropyLoss()
+    metrics = {
+        "normal": _create_latent_metric_accumulator(),
+        "shuffled": _create_latent_metric_accumulator(),
+        "single_code": _create_latent_metric_accumulator(),
+        "mean_latent": _create_latent_metric_accumulator(),
+        "zero_latent": _create_latent_metric_accumulator(),
+    }
+    checked_batches = 0
+    checked_samples = 0
+    shuffle_generator = torch.Generator(device="cpu")
+    shuffle_generator.manual_seed(0)
+
+    with torch.no_grad():
+        for batch_idx, (s_demo, a_demo, r_demo) in enumerate(dataloader):
+            if batch_idx >= max_batches:
+                break
+            s_demo = s_demo.to(device)
+            a_demo = a_demo.to(device)
+            r_demo = r_demo.to(device)
+            batch_size = int(s_demo.shape[0])
+            if batch_size <= 0:
+                continue
+
+            z_e = encoder(s_demo, a_demo, r_demo)
+            z_q_st, indices, _ = codebook.quantize(z_e)
+
+            if batch_size > 1:
+                shuffle_perm = torch.randperm(batch_size, generator=shuffle_generator).to(device)
+                shuffled_latent = z_q_st[shuffle_perm]
+            else:
+                shuffled_latent = z_q_st
+
+            single_code_index = int(indices[0].item())
+            single_code_latent = codebook.embeddings.weight[single_code_index].unsqueeze(0).expand(batch_size, -1)
+            mean_latent = torch.mean(z_q_st, dim=0, keepdim=True).expand(batch_size, -1)
+            zero_latent = torch.zeros_like(z_q_st)
+
+            latent_variants = {
+                "normal": z_q_st,
+                "shuffled": shuffled_latent,
+                "single_code": single_code_latent,
+                "mean_latent": mean_latent,
+                "zero_latent": zero_latent,
+            }
+
+            for variant_name, latent_variant in latent_variants.items():
+                action_logits = decoder(s_demo, latent_variant)
+                preds = torch.argmax(action_logits, dim=-1)
+                rec_loss = ce_loss_fn(action_logits.reshape(-1, action_dim), a_demo.reshape(-1))
+                _accumulate_latent_variant_metrics(metrics[variant_name], preds, a_demo, rec_loss)
+
+            checked_batches += 1
+            checked_samples += batch_size
+
+    final_metrics = {name: _finalize_latent_variant_metrics(acc) for name, acc in metrics.items()}
+    normal_metrics = final_metrics["normal"]
+    shuffled_metrics = final_metrics["shuffled"]
+    single_code_metrics = final_metrics["single_code"]
+    mean_latent_metrics = final_metrics["mean_latent"]
+    zero_latent_metrics = final_metrics["zero_latent"]
+
+    delta_rec_loss_shuffled = float(shuffled_metrics["rec_loss"] - normal_metrics["rec_loss"])
+    delta_token_accuracy_shuffled = float(shuffled_metrics["token_accuracy"] - normal_metrics["token_accuracy"])
+    delta_change_detect_accuracy_shuffled = float(
+        shuffled_metrics["change_detect_accuracy"] - normal_metrics["change_detect_accuracy"]
+    )
+    delta_rec_loss_single_code = float(single_code_metrics["rec_loss"] - normal_metrics["rec_loss"])
+    delta_token_accuracy_single_code = float(single_code_metrics["token_accuracy"] - normal_metrics["token_accuracy"])
+    delta_rec_loss_mean_latent = float(mean_latent_metrics["rec_loss"] - normal_metrics["rec_loss"])
+    delta_token_accuracy_mean_latent = float(mean_latent_metrics["token_accuracy"] - normal_metrics["token_accuracy"])
+    delta_rec_loss_zero_latent = float(zero_latent_metrics["rec_loss"] - normal_metrics["rec_loss"])
+    delta_token_accuracy_zero_latent = float(zero_latent_metrics["token_accuracy"] - normal_metrics["token_accuracy"])
+    delta_change_detect_accuracy_zero_latent = float(
+        zero_latent_metrics["change_detect_accuracy"] - normal_metrics["change_detect_accuracy"]
+    )
+
+    latent_is_effective = bool(
+        delta_rec_loss_shuffled > LATENT_DEPENDENCY_REC_LOSS_DELTA_THRESHOLD
+        or delta_token_accuracy_shuffled < -LATENT_DEPENDENCY_TOKEN_ACC_DROP_THRESHOLD
+        or delta_change_detect_accuracy_shuffled < -LATENT_DEPENDENCY_CHANGE_DETECT_DROP_THRESHOLD
+        or delta_rec_loss_single_code > LATENT_DEPENDENCY_REC_LOSS_DELTA_THRESHOLD
+        or delta_token_accuracy_single_code < -LATENT_DEPENDENCY_TOKEN_ACC_DROP_THRESHOLD
+        or delta_rec_loss_mean_latent > LATENT_DEPENDENCY_REC_LOSS_DELTA_THRESHOLD
+        or delta_token_accuracy_mean_latent < -LATENT_DEPENDENCY_TOKEN_ACC_DROP_THRESHOLD
+        or delta_rec_loss_zero_latent > LATENT_DEPENDENCY_REC_LOSS_DELTA_THRESHOLD
+        or delta_token_accuracy_zero_latent < -LATENT_DEPENDENCY_TOKEN_ACC_DROP_THRESHOLD
+        or delta_change_detect_accuracy_zero_latent < -LATENT_DEPENDENCY_CHANGE_DETECT_DROP_THRESHOLD
+    )
+
+    return {
+        "checked_batches": int(checked_batches),
+        "checked_samples": int(checked_samples),
+        "shuffle_strategy": "fixed_random_permutation",
+        "single_code_strategy": "use_first_selected_code_in_each_batch",
+        "mean_latent_strategy": "batch_mean_z_q",
+        "zero_latent_strategy": "all_zero_latent",
+        "thresholds": {
+            "rec_loss_delta": LATENT_DEPENDENCY_REC_LOSS_DELTA_THRESHOLD,
+            "token_accuracy_drop": LATENT_DEPENDENCY_TOKEN_ACC_DROP_THRESHOLD,
+            "change_detect_accuracy_drop": LATENT_DEPENDENCY_CHANGE_DETECT_DROP_THRESHOLD,
+        },
+        "normal": normal_metrics,
+        "shuffled": shuffled_metrics,
+        "single_code": single_code_metrics,
+        "mean_latent": mean_latent_metrics,
+        "zero_latent": zero_latent_metrics,
+        "delta_rec_loss_shuffled": delta_rec_loss_shuffled,
+        "delta_token_accuracy_shuffled": delta_token_accuracy_shuffled,
+        "delta_change_detect_accuracy_shuffled": delta_change_detect_accuracy_shuffled,
+        "delta_rec_loss_single_code": delta_rec_loss_single_code,
+        "delta_token_accuracy_single_code": delta_token_accuracy_single_code,
+        "delta_rec_loss_mean_latent": delta_rec_loss_mean_latent,
+        "delta_token_accuracy_mean_latent": delta_token_accuracy_mean_latent,
+        "delta_rec_loss_zero_latent": delta_rec_loss_zero_latent,
+        "delta_token_accuracy_zero_latent": delta_token_accuracy_zero_latent,
+        "delta_change_detect_accuracy_zero_latent": delta_change_detect_accuracy_zero_latent,
+        "latent_is_effective": latent_is_effective,
+    }
+
+
+def _compute_pca_explained_variance(latents: np.ndarray, topk: int = 5) -> Dict[str, Any]:
+    """计算 z_e 的 PCA 方差解释率。"""
+    if latents.size == 0:
+        return {"explained_variance_ratio_topk": [], "effective_rank": 0}
+    centered = latents - np.mean(latents, axis=0, keepdims=True)
+    cov = np.cov(centered, rowvar=False)
+    eigvals = np.linalg.eigvalsh(cov)
+    eigvals = np.maximum(eigvals[::-1], 0.0)
+    total = float(np.sum(eigvals))
+    ratios = (eigvals / total).tolist() if total > 0 else [0.0 for _ in range(len(eigvals))]
+    effective_rank = int(np.sum(eigvals > 1e-8))
+    return {
+        "explained_variance_ratio_topk": [float(v) for v in ratios[:topk]],
+        "effective_rank": effective_rank,
+    }
+
+
+def _subsample_rows(array: np.ndarray, max_rows: int, seed: int = 0) -> np.ndarray:
+    """对数组按行做不放回子采样。"""
+    if array.shape[0] <= max_rows:
+        return array
+    rng = np.random.default_rng(seed)
+    indices = rng.choice(array.shape[0], size=max_rows, replace=False)
+    return array[indices]
+
+
+def _build_farthest_point_centers(points: np.ndarray, num_clusters: int, seed: int = 0) -> np.ndarray:
+    """使用 farthest-point 初始化一组中心。"""
+    if points.shape[0] <= 0:
+        raise ValueError("points 不能为空")
+    rng = np.random.default_rng(seed)
+    first_index = int(rng.integers(0, points.shape[0]))
+    centers = [points[first_index]]
+    min_dist_sq = np.sum((points - centers[0]) ** 2, axis=1)
+    while len(centers) < num_clusters:
+        next_index = int(np.argmax(min_dist_sq))
+        centers.append(points[next_index])
+        current_dist_sq = np.sum((points - points[next_index]) ** 2, axis=1)
+        min_dist_sq = np.minimum(min_dist_sq, current_dist_sq)
+    return np.asarray(centers, dtype=np.float64)
+
+
+def _run_fixed_kmeans(points: np.ndarray, num_clusters: int, max_iters: int = 20, seed: int = 0) -> Dict[str, Any]:
+    """在 z_e 上运行一个轻量固定轮次 k-means，仅用于诊断。"""
+    if points.shape[0] <= 0:
+        return {
+            "centers": np.empty((0, points.shape[1] if points.ndim == 2 else 0), dtype=np.float64),
+            "labels": np.empty(0, dtype=np.int64),
+            "counts": np.empty(0, dtype=np.int64),
+            "inertia": 0.0,
+        }
+    num_clusters = int(min(max(num_clusters, 1), points.shape[0]))
+    centers = _build_farthest_point_centers(points, num_clusters=num_clusters, seed=seed)
+    labels = np.zeros(points.shape[0], dtype=np.int64)
+    for _ in range(max_iters):
+        dist_sq = np.sum((points[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+        new_labels = np.argmin(dist_sq, axis=1).astype(np.int64)
+        new_centers = centers.copy()
+        for cluster_idx in range(num_clusters):
+            mask = new_labels == cluster_idx
+            if np.any(mask):
+                new_centers[cluster_idx] = np.mean(points[mask], axis=0)
+        center_shift = float(np.linalg.norm(new_centers - centers))
+        centers = new_centers
+        labels = new_labels
+        if center_shift < 1e-6:
+            break
+    final_dist_sq = np.sum((points - centers[labels]) ** 2, axis=1)
+    counts = np.bincount(labels, minlength=num_clusters)
+    return {
+        "centers": centers,
+        "labels": labels,
+        "counts": counts.astype(np.int64),
+        "inertia": float(np.sum(final_dist_sq)),
+    }
+
+
+def analyze_pre_quantization_separability(
+    z_e_array: np.ndarray,
+    num_clusters: int,
+    pairwise_max_samples: int = 1024,
+    kmeans_max_samples: int = 8192,
+) -> Dict[str, Any]:
+    """分析量化前 z_e 的几何可分性。"""
+    if z_e_array.size == 0:
+        return {
+            "num_samples": 0,
+            "latent_dim": 0,
+            "z_e_feature_std_mean": 0.0,
+            "z_e_feature_std_min": 0.0,
+            "z_e_feature_std_max": 0.0,
+            "sample_pairwise_l2_mean": 0.0,
+            "sample_pairwise_l2_p05": 0.0,
+            "sample_pairwise_l2_p95": 0.0,
+            "pca_explained_variance_ratio_topk": [],
+            "pca_effective_rank": 0,
+            "offline_kmeans_used_cluster_count": 0,
+            "offline_kmeans_dominant_cluster_ratio": 0.0,
+            "offline_kmeans_cluster_histogram": {},
+            "offline_kmeans_inertia": 0.0,
+        }
+
+    z_e_array = np.asarray(z_e_array, dtype=np.float64)
+    dim_std = np.std(z_e_array, axis=0)
+
+    pairwise_subset = _subsample_rows(z_e_array, max_rows=pairwise_max_samples, seed=0)
+    if pairwise_subset.shape[0] >= 2:
+        pairwise_l2 = np.linalg.norm(pairwise_subset[:, None, :] - pairwise_subset[None, :, :], axis=2)
+        off_diag_mask = ~np.eye(pairwise_subset.shape[0], dtype=bool)
+        pairwise_values = pairwise_l2[off_diag_mask]
+    else:
+        pairwise_values = np.empty(0, dtype=np.float64)
+
+    pca_stats = _compute_pca_explained_variance(z_e_array, topk=5)
+
+    kmeans_subset = _subsample_rows(z_e_array, max_rows=kmeans_max_samples, seed=1)
+    kmeans_stats = _run_fixed_kmeans(kmeans_subset, num_clusters=num_clusters, max_iters=20, seed=2)
+    counts = kmeans_stats["counts"]
+    total = int(np.sum(counts))
+    dominant_ratio = float(np.max(counts) / total) if total > 0 else 0.0
+
+    return {
+        "num_samples": int(z_e_array.shape[0]),
+        "latent_dim": int(z_e_array.shape[1]),
+        "z_e_feature_std_mean": _safe_mean(dim_std),
+        "z_e_feature_std_min": _safe_min(dim_std),
+        "z_e_feature_std_max": _safe_max(dim_std),
+        "sample_pairwise_l2_mean": _safe_mean(pairwise_values),
+        "sample_pairwise_l2_p05": float(np.percentile(pairwise_values, 5)) if pairwise_values.size else 0.0,
+        "sample_pairwise_l2_p95": float(np.percentile(pairwise_values, 95)) if pairwise_values.size else 0.0,
+        "pca_explained_variance_ratio_topk": pca_stats["explained_variance_ratio_topk"],
+        "pca_effective_rank": int(pca_stats["effective_rank"]),
+        "offline_kmeans_used_cluster_count": int(np.sum(counts > 0)),
+        "offline_kmeans_dominant_cluster_ratio": dominant_ratio,
+        "offline_kmeans_cluster_histogram": {str(i): int(v) for i, v in enumerate(counts.tolist())},
+        "offline_kmeans_inertia": float(kmeans_stats["inertia"]),
+    }
 
 
 def replay_rewards_from_actions(
@@ -532,6 +875,8 @@ def validate_phase1_model(
         "reconstruction": {},
         "codebook_usage": {},
         "latent_geometry": {},
+        "pre_quantization_separability": {},
+        "latent_dependency": {},
         "training_monitor_summary": {},
         "bad_case_examples": [],
         "hard_failures": [],
@@ -553,6 +898,17 @@ def validate_phase1_model(
         return report
 
     encoder, codebook, decoder, model_config = _load_phase1_models(checkpoint, device)
+    report["checkpoint_integrity"]["encoder_reward_normalization"] = getattr(
+        encoder, "get_reward_normalization", lambda: {}
+    )()
+    report["checkpoint_integrity"]["decoder_parameterization"] = model_config.get(
+        "decoder_parameterization",
+        "unknown",
+    )
+    report["checkpoint_integrity"]["encoder_output_parameterization"] = model_config.get(
+        "encoder_output_parameterization",
+        getattr(encoder, "get_output_parameterization", lambda: {})(),
+    )
     encoder.eval()
     codebook.eval()
     decoder.eval()
@@ -587,6 +943,7 @@ def validate_phase1_model(
     code_counts = np.zeros(int(model_config["num_archetypes"]), dtype=np.int64)
     confusion = np.zeros((int(model_config["action_dim"]), int(model_config["action_dim"])), dtype=np.int64)
     z_e_norm_values: List[np.ndarray] = []
+    z_e_batch_values: List[np.ndarray] = []
     z_q_norm_values: List[np.ndarray] = []
     quantization_distance_values: List[np.ndarray] = []
     logit_abs_max = 0.0
@@ -631,6 +988,7 @@ def validate_phase1_model(
                 num_classes=int(model_config["action_dim"]),
             )
             z_e_norm_values.append(torch.norm(z_e, dim=1).detach().cpu().numpy())
+            z_e_batch_values.append(z_e.detach().cpu().numpy())
             z_q_norm_values.append(torch.norm(z_q_st, dim=1).detach().cpu().numpy())
             quantization_distance_values.append(torch.norm(z_e - z_q_st, dim=1).detach().cpu().numpy())
             logit_abs_max = max(logit_abs_max, float(action_logits.abs().max().item()))
@@ -693,6 +1051,7 @@ def validate_phase1_model(
     change_detect_accuracy = float(change_detect_correct / total_samples)
 
     z_e_norm_array = np.concatenate(z_e_norm_values) if z_e_norm_values else np.empty(0, dtype=np.float64)
+    z_e_array = np.concatenate(z_e_batch_values, axis=0) if z_e_batch_values else np.empty((0, int(model_config["latent_dim"])), dtype=np.float64)
     z_q_norm_array = np.concatenate(z_q_norm_values) if z_q_norm_values else np.empty(0, dtype=np.float64)
     quantization_distance_array = np.concatenate(quantization_distance_values) if quantization_distance_values else np.empty(0, dtype=np.float64)
 
@@ -785,6 +1144,29 @@ def validate_phase1_model(
     }
     if report["latent_geometry"]["pairwise_codebook_cosine_min"] > 0.95:
         report["soft_warnings"].append("pairwise_codebook_cosine_min 过高，多个 codebook 向量可能过于相似")
+
+    report["pre_quantization_separability"] = analyze_pre_quantization_separability(
+        z_e_array=z_e_array,
+        num_clusters=int(model_config["num_archetypes"]),
+    )
+    if report["pre_quantization_separability"].get("offline_kmeans_used_cluster_count", 0) <= 1:
+        report["soft_warnings"].append("pre-quantization z_e 几何几乎不可分，encoder 输出在量化前已接近单簇")
+    elif report["pre_quantization_separability"].get("offline_kmeans_dominant_cluster_ratio", 0.0) > 0.95:
+        report["soft_warnings"].append("pre-quantization z_e 几何高度不均衡，encoder 输出在量化前已存在单簇支配风险")
+
+    report["latent_dependency"] = evaluate_latent_dependency(
+        encoder=encoder,
+        codebook=codebook,
+        decoder=decoder,
+        dataloader=dataloader,
+        device=device,
+        action_dim=int(model_config["action_dim"]),
+        max_batches=LATENT_DEPENDENCY_MAX_BATCHES,
+    )
+    if not report["latent_dependency"].get("latent_is_effective", False):
+        report["soft_warnings"].append(
+            "latent dependency test 显示 decoder 对 z_q 不敏感，存在 state shortcut 风险"
+        )
 
     training_monitor = checkpoint.get("training_monitor", {})
     report["training_monitor_summary"] = training_monitor

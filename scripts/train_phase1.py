@@ -20,7 +20,7 @@
 import os
 import shutil
 from datetime import datetime
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -55,6 +55,28 @@ PAPER_PHASE1_SPEC = {
     "phase1_epochs": 100,
     "discount_factor": 0.99,
     "max_positions": {"BTC": 8, "ETH": 100, "DOT": 2500, "BNB": 200},
+}
+
+# -----------------------------------------------------------------------------
+# Paper-consistent debug branch v4 超参数
+# -----------------------------------------------------------------------------
+# 说明:
+# 1. 仍不改变论文主流程、模型接口、最近邻量化公式或联合损失。
+# 2. 在 v3 的基础上，进一步把主攻点放到 encoder 表征可分性：
+#    - encoder 改为时间维 mean/max pooling summary；
+#    - 正式 VQ 训练前先做短暂的连续 latent 重建预训练；
+#    - 最终仍回到论文原来的最近邻量化与联合损失。
+PAPER_CONSISTENT_DEBUG = {
+    "decoder_lr_multiplier": 0.35,
+    "grad_clip_max_norm": 1.0,
+    "latent_init_max_samples": 8192,
+    "latent_init_batch_size": 512,
+    "reward_norm_eps": 1e-6,
+    "continuous_pretrain_epochs": 8,
+    "continuous_pretrain_decoder_lr_multiplier": 0.50,
+    "vq_loss_warmup_epochs": 10,
+    "vq_loss_warmup_start": 0.0,
+    "vq_loss_warmup_end": 1.0,
 }
 
 
@@ -111,6 +133,319 @@ def summarize_code_usage(code_counts: np.ndarray) -> dict:
         "dominant_code_ratio": float(np.max(code_counts) / total),
         "codebook_entropy": entropy,
         "codebook_perplexity": perplexity,
+    }
+
+
+def compute_linear_warmup_weight(
+    current_epoch: int,
+    warmup_epochs: int,
+    start_weight: float = 0.0,
+    end_weight: float = 1.0,
+) -> float:
+    """计算线性 warmup 权重。
+
+    该 warmup 只作用于 VQ 两项在训练前期的优化强度，最终仍回到论文原式
+    `L = L_rec + ||sg[z_e]-z_q||^2 + beta0 * ||z_e-sg[z_q]||^2`。
+
+    Args:
+        current_epoch: 当前 epoch，从 1 开始。
+        warmup_epochs: warmup 持续 epoch 数；<=0 时直接返回 end_weight。
+        start_weight: 起始权重。
+        end_weight: 结束权重。
+    """
+    if warmup_epochs <= 0:
+        return float(end_weight)
+    progress = min(max(float(current_epoch), 1.0), float(warmup_epochs)) / float(warmup_epochs)
+    return float(start_weight + (end_weight - start_weight) * progress)
+
+
+def estimate_reward_normalization_from_dataloader(
+    dataloader: DataLoader,
+) -> Dict[str, float]:
+    """估计训练集 reward 的标准化统计量。
+
+    该统计量只用于实现层的输入尺度稳定，不改变论文中的 reward 定义或
+    encoder 输入接口 `(s_demo, a_demo, r_demo)`。
+
+    Args:
+        dataloader: 不打乱顺序的轨迹数据加载器。
+
+    Returns:
+        包含 reward_mean / reward_std / reward_min / reward_max / reward_count 的字典。
+    """
+    total_count = 0
+    total_sum = 0.0
+    total_sq_sum = 0.0
+    reward_min = float("inf")
+    reward_max = float("-inf")
+
+    for _, _, r_demo in dataloader:
+        reward_array = r_demo.detach().cpu().numpy().astype(np.float64, copy=False)
+        if reward_array.size <= 0:
+            continue
+        total_count += int(reward_array.size)
+        total_sum += float(np.sum(reward_array))
+        total_sq_sum += float(np.sum(np.square(reward_array)))
+        reward_min = min(reward_min, float(np.min(reward_array)))
+        reward_max = max(reward_max, float(np.max(reward_array)))
+
+    if total_count <= 0:
+        raise ValueError("无法从 dataloader 中估计 reward 标准化统计量：reward 总数为 0")
+
+    reward_mean = total_sum / float(total_count)
+    reward_var = max(total_sq_sum / float(total_count) - reward_mean * reward_mean, 0.0)
+    reward_std = max(float(np.sqrt(reward_var)), float(PAPER_CONSISTENT_DEBUG["reward_norm_eps"]))
+
+    return {
+        "reward_mean": float(reward_mean),
+        "reward_std": float(reward_std),
+        "reward_min": float(reward_min),
+        "reward_max": float(reward_max),
+        "reward_count": int(total_count),
+    }
+
+
+
+def train_continuous_latent_pretrain(
+    encoder: VQEncoder,
+    decoder: VQDecoder,
+    dataloader: DataLoader,
+    device: torch.device,
+    action_dim: int,
+    encoder_lr: float,
+    decoder_lr_multiplier: float,
+    grad_clip_max_norm: float,
+    num_epochs: int,
+) -> Dict[str, Any]:
+    """先用连续 z_e 做短暂重建预训练，再进入 VQ 训练。
+
+    该阶段不改变最终论文模型；它只是在正式最近邻量化前，
+    先让 encoder/decoder 学出非平凡的连续 latent 几何结构，
+    以降低“量化前即单簇塌缩”的风险。
+
+    Args:
+        encoder: Phase I 编码器。
+        decoder: Phase I 解码器。
+        dataloader: 轨迹数据加载器。
+        device: 运行设备。
+        action_dim: 动作空间大小。
+        encoder_lr: 预训练阶段 encoder 学习率。
+        decoder_lr_multiplier: decoder 学习率缩放系数。
+        grad_clip_max_norm: 梯度裁剪阈值。
+        num_epochs: 连续 latent 预训练轮数。
+
+    Returns:
+        记录预训练损失与精度历史的字典。
+    """
+    summary: Dict[str, Any] = {
+        "enabled": bool(num_epochs > 0),
+        "num_epochs": int(max(num_epochs, 0)),
+        "loss_history": [],
+        "token_accuracy_history": [],
+        "exact_match_history": [],
+        "z_e_feature_std_history": [],
+        "encoder_lr": float(encoder_lr),
+        "decoder_lr": float(encoder_lr) * float(decoder_lr_multiplier),
+    }
+    if num_epochs <= 0:
+        return summary
+
+    optimizer = torch.optim.Adam(
+        [
+            {"params": encoder.parameters(), "lr": float(encoder_lr)},
+            {"params": decoder.parameters(), "lr": float(encoder_lr) * float(decoder_lr_multiplier)},
+        ]
+    )
+    ce_loss_fn = nn.CrossEntropyLoss()
+
+    logger.info(
+        "开始连续 latent 预训练: epochs=%d, encoder_lr=%.2e, decoder_lr=%.2e",
+        num_epochs,
+        float(encoder_lr),
+        float(encoder_lr) * float(decoder_lr_multiplier),
+    )
+
+    for epoch in range(1, num_epochs + 1):
+        encoder.train()
+        decoder.train()
+
+        epoch_loss = 0.0
+        epoch_token_correct = 0
+        epoch_token_total = 0
+        epoch_exact_match = 0
+        epoch_sample_total = 0
+        epoch_z_e_feature_std_sum = 0.0
+        num_batches = 0
+
+        for s_demo, a_demo, r_demo in dataloader:
+            s_demo = s_demo.to(device)
+            a_demo = a_demo.to(device)
+            r_demo = r_demo.to(device)
+
+            z_e = encoder(s_demo, a_demo, r_demo)
+            action_logits = decoder(s_demo, z_e)
+            pred_actions = torch.argmax(action_logits, dim=-1)
+
+            rec_loss = ce_loss_fn(action_logits.reshape(-1, action_dim), a_demo.reshape(-1))
+
+            optimizer.zero_grad()
+            rec_loss.backward()
+            torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=grad_clip_max_norm)
+            torch.nn.utils.clip_grad_norm_(decoder.parameters(), max_norm=grad_clip_max_norm)
+            optimizer.step()
+
+            batch_size = int(s_demo.shape[0])
+            epoch_loss += float(rec_loss.item())
+            epoch_token_correct += int((pred_actions == a_demo).sum().item())
+            epoch_token_total += int(a_demo.numel())
+            epoch_exact_match += int(torch.all(pred_actions == a_demo, dim=1).sum().item())
+            epoch_sample_total += batch_size
+            epoch_z_e_feature_std_sum += float(torch.std(z_e.detach(), dim=0).mean().item()) * batch_size
+            num_batches += 1
+
+        avg_loss = epoch_loss / max(num_batches, 1)
+        token_accuracy = float(epoch_token_correct / max(epoch_token_total, 1))
+        exact_match_rate = float(epoch_exact_match / max(epoch_sample_total, 1))
+        avg_z_e_feature_std = float(epoch_z_e_feature_std_sum / max(epoch_sample_total, 1))
+
+        summary["loss_history"].append(avg_loss)
+        summary["token_accuracy_history"].append(token_accuracy)
+        summary["exact_match_history"].append(exact_match_rate)
+        summary["z_e_feature_std_history"].append(avg_z_e_feature_std)
+
+        if epoch == 1 or epoch == num_epochs or epoch % 5 == 0:
+            logger.info(
+                "预训练 Epoch %2d/%d — rec_loss=%.4f, token_acc=%.4f, exact_match=%.4f, z_e_feature_std=%.6f",
+                epoch,
+                num_epochs,
+                avg_loss,
+                token_accuracy,
+                exact_match_rate,
+                avg_z_e_feature_std,
+            )
+
+    return summary
+
+
+def collect_encoder_latents_for_init(
+    encoder: VQEncoder,
+    dataloader: DataLoader,
+    device: torch.device,
+    max_samples: int = 4096,
+) -> np.ndarray:
+    """收集 encoder 产生的初始 z_e，用于 data-driven codebook 初始化。
+
+    该方法严格沿用论文中的 encoder 接口 `q_{theta_e}(z_e | s_demo, a_demo, r_demo)`，
+    只把随机初始化后的 encoder 输出作为码本初始位置的参考，不改变量化或损失定义。
+
+    Args:
+        encoder: Phase I 编码器。
+        dataloader: 轨迹数据加载器。
+        device: 运行设备。
+        max_samples: 最多收集多少条 latent。
+
+    Returns:
+        shape = (num_collected, latent_dim) 的 numpy 数组。
+    """
+    if max_samples <= 0:
+        raise ValueError(f"max_samples 必须为正整数，实际为 {max_samples}")
+
+    was_training = encoder.training
+    encoder.eval()
+    collected: List[np.ndarray] = []
+    num_collected = 0
+
+    with torch.no_grad():
+        for s_demo, a_demo, r_demo in dataloader:
+            s_demo = s_demo.to(device)
+            a_demo = a_demo.to(device)
+            r_demo = r_demo.to(device)
+            z_e = encoder(s_demo, a_demo, r_demo)
+            z_e_np = z_e.detach().cpu().numpy()
+            collected.append(z_e_np)
+            num_collected += int(z_e_np.shape[0])
+            if num_collected >= max_samples:
+                break
+
+    if was_training:
+        encoder.train()
+
+    if not collected:
+        raise ValueError("未能从 dataloader 收集到任何 encoder latent，无法进行 codebook 初始化")
+
+    latents = np.concatenate(collected, axis=0)[:max_samples]
+    return latents.astype(np.float32, copy=False)
+
+
+def build_data_driven_codebook_init(
+    latent_vectors: np.ndarray,
+    num_codes: int,
+    seed: int,
+) -> np.ndarray:
+    """基于 encoder latent 构造码本初始向量。
+
+    算法采用 farthest-point sampling：
+    1. 随机选取第一个中心。
+    2. 之后每次选择与当前中心集合最远的样本。
+
+    该方法只决定 `e_0, ..., e_{K-1}` 的初始位置，不改变论文中的
+    最近邻量化公式 `k = argmin_j ||z_e - e_j||^2`。
+
+    Args:
+        latent_vectors: shape = (N, latent_dim) 的候选 z_e。
+        num_codes: 码本大小 K。
+        seed: 随机种子，用于首个中心抽样。
+
+    Returns:
+        shape = (num_codes, latent_dim) 的初始化矩阵。
+    """
+    if latent_vectors.ndim != 2:
+        raise ValueError(f"latent_vectors 应为 2D 数组，实际 ndim={latent_vectors.ndim}")
+    if latent_vectors.shape[0] <= 0:
+        raise ValueError("latent_vectors 为空，无法构造 codebook 初始化")
+    if num_codes <= 0:
+        raise ValueError(f"num_codes 必须为正整数，实际为 {num_codes}")
+
+    candidates = np.asarray(latent_vectors, dtype=np.float32)
+    if candidates.shape[0] < num_codes:
+        repeats = int(np.ceil(float(num_codes) / float(candidates.shape[0])))
+        candidates = np.tile(candidates, (repeats, 1))
+
+    rng = np.random.default_rng(seed)
+    first_idx = int(rng.integers(0, candidates.shape[0]))
+    selected_indices = [first_idx]
+
+    min_distance_sq = np.sum((candidates - candidates[first_idx]) ** 2, axis=1)
+    for _ in range(1, num_codes):
+        next_idx = int(np.argmax(min_distance_sq))
+        selected_indices.append(next_idx)
+        next_distance_sq = np.sum((candidates - candidates[next_idx]) ** 2, axis=1)
+        min_distance_sq = np.minimum(min_distance_sq, next_distance_sq)
+
+    return candidates[selected_indices].astype(np.float32, copy=True)
+
+
+def summarize_codebook_init(init_codes: np.ndarray) -> Dict[str, float]:
+    """汇总 data-driven codebook 初始化的几何统计。"""
+    if init_codes.ndim != 2:
+        raise ValueError(f"init_codes 应为 2D 数组，实际 ndim={init_codes.ndim}")
+
+    code_norms = np.linalg.norm(init_codes, axis=1)
+    if init_codes.shape[0] >= 2:
+        pairwise_l2 = []
+        for i in range(init_codes.shape[0]):
+            for j in range(i + 1, init_codes.shape[0]):
+                pairwise_l2.append(float(np.linalg.norm(init_codes[i] - init_codes[j])))
+        pairwise_l2_array = np.asarray(pairwise_l2, dtype=np.float64)
+    else:
+        pairwise_l2_array = np.empty(0, dtype=np.float64)
+
+    return {
+        "init_code_norm_mean": float(np.mean(code_norms)) if code_norms.size else 0.0,
+        "init_code_norm_std": float(np.std(code_norms)) if code_norms.size else 0.0,
+        "pairwise_l2_mean": float(np.mean(pairwise_l2_array)) if pairwise_l2_array.size else 0.0,
+        "pairwise_l2_min": float(np.min(pairwise_l2_array)) if pairwise_l2_array.size else 0.0,
+        "pairwise_l2_max": float(np.max(pairwise_l2_array)) if pairwise_l2_array.size else 0.0,
     }
 
 
@@ -403,6 +738,22 @@ def main() -> None:
         shuffle=True,
         drop_last=False,
     )
+    init_dataloader = DataLoader(
+        dataset,
+        batch_size=min(config.batch_size, PAPER_CONSISTENT_DEBUG["latent_init_batch_size"]),
+        shuffle=False,
+        drop_last=False,
+    )
+
+    reward_norm_summary = estimate_reward_normalization_from_dataloader(init_dataloader)
+    logger.info(
+        "训练 reward 标准化统计: mean=%.6f, std=%.6f, min=%.6f, max=%.6f, count=%d",
+        reward_norm_summary["reward_mean"],
+        reward_norm_summary["reward_std"],
+        reward_norm_summary["reward_min"],
+        reward_norm_summary["reward_max"],
+        reward_norm_summary["reward_count"],
+    )
 
     # ----------------------------------------------------------------
     # Step 3: 初始化 VQ Encoder、Codebook、Decoder
@@ -413,6 +764,12 @@ def main() -> None:
         hidden_dim=config.lstm_hidden_dim,
         latent_dim=config.latent_dim,
     ).to(device)
+
+    encoder.set_reward_normalization(
+        reward_mean=reward_norm_summary["reward_mean"],
+        reward_std=reward_norm_summary["reward_std"],
+        eps=PAPER_CONSISTENT_DEBUG["reward_norm_eps"],
+    )
 
     codebook = VQCodebook(
         num_codes=config.num_archetypes,
@@ -427,19 +784,66 @@ def main() -> None:
     ).to(device)
 
     logger.info(
-        "模型初始化完成: Encoder params=%d, Codebook params=%d, Decoder params=%d",
+        "模型初始化完成: Encoder params=%d, Codebook params=%d, Decoder params=%d, encoder_reward_std=%.6f",
         sum(p.numel() for p in encoder.parameters()),
         sum(p.numel() for p in codebook.parameters()),
         sum(p.numel() for p in decoder.parameters()),
+        encoder.get_reward_normalization()["reward_std"],
     )
 
-    # 优化器：联合训练 encoder + codebook + decoder
-    all_params = (
-        list(encoder.parameters())
-        + list(codebook.parameters())
-        + list(decoder.parameters())
+    pretrain_summary = train_continuous_latent_pretrain(
+        encoder=encoder,
+        decoder=decoder,
+        dataloader=dataloader,
+        device=device,
+        action_dim=config.action_dim,
+        encoder_lr=float(config.learning_rate),
+        decoder_lr_multiplier=float(PAPER_CONSISTENT_DEBUG["continuous_pretrain_decoder_lr_multiplier"]),
+        grad_clip_max_norm=float(PAPER_CONSISTENT_DEBUG["grad_clip_max_norm"]),
+        num_epochs=int(PAPER_CONSISTENT_DEBUG["continuous_pretrain_epochs"]),
     )
-    optimizer = torch.optim.Adam(all_params, lr=config.learning_rate)
+
+    # Paper-consistent debug: 预训练后，用 encoder 产生的 z_e 初始化 codebook。
+    init_latents = collect_encoder_latents_for_init(
+        encoder=encoder,
+        dataloader=init_dataloader,
+        device=device,
+        max_samples=PAPER_CONSISTENT_DEBUG["latent_init_max_samples"],
+    )
+    init_codes = build_data_driven_codebook_init(
+        latent_vectors=init_latents,
+        num_codes=config.num_archetypes,
+        seed=config.phase1_sampling_seed,
+    )
+    codebook.set_codebook_vectors(torch.from_numpy(init_codes).to(device=device))
+    codebook_init_summary = summarize_codebook_init(init_codes)
+    logger.info(
+        "完成预训练后 data-driven codebook 初始化: max_samples=%d, init_code_norm_mean=%.4f, pairwise_l2_min=%.4f, pairwise_l2_mean=%.4f",
+        min(PAPER_CONSISTENT_DEBUG["latent_init_max_samples"], int(init_latents.shape[0])),
+        codebook_init_summary["init_code_norm_mean"],
+        codebook_init_summary["pairwise_l2_min"],
+        codebook_init_summary["pairwise_l2_mean"],
+    )
+
+    # 优化器：联合训练 encoder + codebook + decoder。
+    # 这里仅调整参数组学习率，不改变论文的损失项与前向/量化流程。
+    encoder_lr = float(config.learning_rate)
+    codebook_lr = float(config.learning_rate)
+    decoder_lr = float(config.learning_rate) * float(PAPER_CONSISTENT_DEBUG["decoder_lr_multiplier"])
+    optimizer = torch.optim.Adam(
+        [
+            {"params": encoder.parameters(), "lr": encoder_lr},
+            {"params": codebook.parameters(), "lr": codebook_lr},
+            {"params": decoder.parameters(), "lr": decoder_lr},
+        ]
+    )
+    logger.info(
+        "优化器参数组: encoder_lr=%.2e, codebook_lr=%.2e, decoder_lr=%.2e, grad_clip_max_norm=%.2f",
+        encoder_lr,
+        codebook_lr,
+        decoder_lr,
+        PAPER_CONSISTENT_DEBUG["grad_clip_max_norm"],
+    )
 
     # 重建损失：交叉熵（decoder 输出 logits vs ground-truth actions）
     ce_loss_fn = nn.CrossEntropyLoss()
@@ -464,6 +868,8 @@ def main() -> None:
     logit_abs_max_history = []
     z_e_norm_history = []
     quantization_mse_history = []
+    z_e_feature_std_history = []
+    vq_loss_weight_history = []
 
     logger.info("开始训练: %d epochs", config.phase1_epochs)
 
@@ -486,7 +892,15 @@ def main() -> None:
         epoch_logit_abs_max = 0.0
         epoch_z_e_norm_sum = 0.0
         epoch_quantization_mse_sum = 0.0
+        epoch_z_e_feature_std_sum = 0.0
         num_batches = 0
+
+        vq_loss_weight = compute_linear_warmup_weight(
+            current_epoch=epoch,
+            warmup_epochs=int(PAPER_CONSISTENT_DEBUG["vq_loss_warmup_epochs"]),
+            start_weight=float(PAPER_CONSISTENT_DEBUG["vq_loss_warmup_start"]),
+            end_weight=float(PAPER_CONSISTENT_DEBUG["vq_loss_warmup_end"]),
+        )
 
         for s_demo, a_demo, r_demo in dataloader:
             s_demo = s_demo.to(device)   # (B, h, state_dim)
@@ -516,10 +930,13 @@ def main() -> None:
             encoder_commitment = config.vq_beta0 * torch.mean(
                 (z_e - z_q_detached) ** 2
             )
+            weighted_codebook_loss = vq_loss_weight * commitment_loss
+            weighted_encoder_commitment = vq_loss_weight * encoder_commitment
 
-            # 总损失: L = L_rec + commitment_loss + β₀ × encoder_commitment
-            # = L_rec + ||sg[z_e] - z_q||² + 0.25 × ||z_e - sg[z_q]||²
-            total_loss = rec_loss + commitment_loss + encoder_commitment
+            # 总损失: 训练前期对 VQ 两项做线性 warmup，最终恢复到论文原式。
+            # 当 warmup 权重达到 1 后，
+            # L = L_rec + ||sg[z_e] - z_q||² + beta0 * ||z_e - sg[z_q]||²
+            total_loss = rec_loss + weighted_codebook_loss + weighted_encoder_commitment
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -528,12 +945,25 @@ def main() -> None:
             epoch_codebook_grad += compute_grad_norm(codebook.parameters())
             epoch_decoder_grad += compute_grad_norm(decoder.parameters())
 
+            torch.nn.utils.clip_grad_norm_(
+                encoder.parameters(),
+                max_norm=PAPER_CONSISTENT_DEBUG["grad_clip_max_norm"],
+            )
+            torch.nn.utils.clip_grad_norm_(
+                codebook.parameters(),
+                max_norm=PAPER_CONSISTENT_DEBUG["grad_clip_max_norm"],
+            )
+            torch.nn.utils.clip_grad_norm_(
+                decoder.parameters(),
+                max_norm=PAPER_CONSISTENT_DEBUG["grad_clip_max_norm"],
+            )
+
             optimizer.step()
 
             batch_size = int(s_demo.shape[0])
             epoch_loss += total_loss.item()
             epoch_rec_loss += rec_loss.item()
-            epoch_vq_loss += (commitment_loss.item() + encoder_commitment.item())
+            epoch_vq_loss += (weighted_codebook_loss.item() + weighted_encoder_commitment.item())
             epoch_token_correct += int((pred_actions == a_demo).sum().item())
             epoch_token_total += int(a_demo.numel())
             epoch_exact_match += int(torch.all(pred_actions == a_demo, dim=1).sum().item())
@@ -542,6 +972,7 @@ def main() -> None:
             epoch_logit_abs_max = max(epoch_logit_abs_max, float(action_logits.abs().max().item()))
             epoch_z_e_norm_sum += float(torch.norm(z_e, dim=1).mean().item()) * batch_size
             epoch_quantization_mse_sum += float(torch.mean((z_e - z_q_detached) ** 2).item()) * batch_size
+            epoch_z_e_feature_std_sum += float(torch.std(z_e.detach(), dim=0).mean().item()) * batch_size
             num_batches += 1
 
         avg_loss = epoch_loss / max(num_batches, 1)
@@ -555,6 +986,7 @@ def main() -> None:
         avg_decoder_grad = float(epoch_decoder_grad / max(num_batches, 1))
         avg_z_e_norm = float(epoch_z_e_norm_sum / max(epoch_sample_total, 1))
         avg_quantization_mse = float(epoch_quantization_mse_sum / max(epoch_sample_total, 1))
+        avg_z_e_feature_std = float(epoch_z_e_feature_std_sum / max(epoch_sample_total, 1))
 
         loss_history.append(avg_loss)
         rec_loss_history.append(avg_rec)
@@ -570,16 +1002,19 @@ def main() -> None:
         logit_abs_max_history.append(epoch_logit_abs_max)
         z_e_norm_history.append(avg_z_e_norm)
         quantization_mse_history.append(avg_quantization_mse)
+        z_e_feature_std_history.append(avg_z_e_feature_std)
+        vq_loss_weight_history.append(vq_loss_weight)
 
         # 每 10 个 epoch 或首尾 epoch 输出日志
         if epoch == 1 or epoch % 10 == 0 or epoch == config.phase1_epochs:
             logger.info(
-                "Epoch %3d/%d — total_loss=%.4f, rec_loss=%.4f, vq_loss=%.4f, token_acc=%.4f, exact_match=%.4f, perplexity=%.4f, used_codes=%d",
+                "Epoch %3d/%d — total_loss=%.4f, rec_loss=%.4f, vq_loss=%.4f, vq_w=%.3f, token_acc=%.4f, exact_match=%.4f, perplexity=%.4f, used_codes=%d",
                 epoch,
                 config.phase1_epochs,
                 avg_loss,
                 avg_rec,
                 avg_vq,
+                vq_loss_weight,
                 token_accuracy,
                 exact_match_rate,
                 code_usage_summary["codebook_perplexity"],
@@ -606,6 +1041,32 @@ def main() -> None:
         "logit_abs_max_history": logit_abs_max_history,
         "z_e_norm_history": z_e_norm_history,
         "quantization_mse_history": quantization_mse_history,
+        "z_e_feature_std_history": z_e_feature_std_history,
+        "vq_loss_weight_history": vq_loss_weight_history,
+        "optimizer_group_learning_rates": {
+            "encoder": encoder_lr,
+            "codebook": codebook_lr,
+            "decoder": decoder_lr,
+        },
+        "paper_consistent_debug": {
+            "decoder_lr_multiplier": PAPER_CONSISTENT_DEBUG["decoder_lr_multiplier"],
+            "grad_clip_max_norm": PAPER_CONSISTENT_DEBUG["grad_clip_max_norm"],
+            "latent_init_max_samples": PAPER_CONSISTENT_DEBUG["latent_init_max_samples"],
+            "latent_init_batch_size": PAPER_CONSISTENT_DEBUG["latent_init_batch_size"],
+            "reward_norm_eps": PAPER_CONSISTENT_DEBUG["reward_norm_eps"],
+            "continuous_pretrain_epochs": PAPER_CONSISTENT_DEBUG["continuous_pretrain_epochs"],
+            "continuous_pretrain_decoder_lr_multiplier": PAPER_CONSISTENT_DEBUG["continuous_pretrain_decoder_lr_multiplier"],
+            "vq_loss_warmup_epochs": PAPER_CONSISTENT_DEBUG["vq_loss_warmup_epochs"],
+            "vq_loss_warmup_start": PAPER_CONSISTENT_DEBUG["vq_loss_warmup_start"],
+            "vq_loss_warmup_end": PAPER_CONSISTENT_DEBUG["vq_loss_warmup_end"],
+            "decoder_parameterization": "film_conditioned_mlp_decoder",
+            "encoder_reward_normalization": "global_train_reward_standardization",
+            "encoder_output_parameterization": "mean_max_temporal_pooling_projection_head",
+            "vq_onset_strategy": "continuous_latent_pretraining_then_vq_finetuning",
+        },
+        "continuous_pretrain_summary": pretrain_summary,
+        "codebook_init_summary": codebook_init_summary,
+        "reward_normalization_summary": reward_norm_summary,
     }
 
     # ----------------------------------------------------------------
@@ -639,6 +1100,12 @@ def main() -> None:
                 "max_positions": config.max_positions,
                 "paper_phase1_reference_train_rows": PAPER_PHASE1_REFERENCE_TRAIN_ROWS,
                 "current_train_rows": train_rows,
+                "paper_consistent_debug": PAPER_CONSISTENT_DEBUG,
+                "reward_normalization_summary": reward_norm_summary,
+                "decoder_parameterization": "film_conditioned_mlp_decoder",
+                "encoder_output_parameterization": "mean_max_temporal_pooling_projection_head",
+                "vq_onset_strategy": "continuous_latent_pretraining_then_vq_finetuning",
+                "continuous_pretrain_summary": pretrain_summary,
             },
         },
         save_path,
