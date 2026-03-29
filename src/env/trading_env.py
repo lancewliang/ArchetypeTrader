@@ -24,10 +24,10 @@ class TradingEnv:
 
     # 各交易对最大持仓量 m
     MAX_POSITIONS: Dict[str, int] = {
-        "BTC": 1,
-        "ETH": 1,
-        "DOT": 1,
-        "BNB": 1,
+        "BTC": 8,
+        "ETH": 100,
+        "DOT": 2500,
+        "BNB": 200,
     }
 
     # Section 3.1: 佣金率 δ = 0.02%
@@ -46,7 +46,9 @@ class TradingEnv:
         prices: np.ndarray,
         pair: str,
         horizon: int = 72,
-        states_dataframe: pl.DataFrame=None,
+        states_dataframe: pl.DataFrame = None,
+        max_positions: Dict[str, int] | None = None,
+        commission_rate: float | None = None,
     ):
         """
         Args:
@@ -55,10 +57,13 @@ class TradingEnv:
             pair: 交易对名称，如 'BTC', 'ETH', 'DOT', 'BNB'
             horizon: 交易周期长度 h，默认 72
             states_dataframe: 对应的 polars DataFrame，可选
+            max_positions: 各交易对最大持仓量映射，可选。未提供时使用论文默认值。
+            commission_rate: 佣金率，可选。未提供时使用论文默认值 0.02%。
         """
-        if pair not in self.MAX_POSITIONS:
+        position_config = max_positions or self.MAX_POSITIONS
+        if pair not in position_config:
             raise ValueError(
-                f"不支持的交易对 '{pair}'，支持: {list(self.MAX_POSITIONS.keys())}"
+                f"不支持的交易对 '{pair}'，支持: {list(position_config.keys())}"
             )
         if states.ndim != 2:
             raise ValueError(f"states 应为 2 维数组，收到 {states.ndim} 维")
@@ -68,6 +73,8 @@ class TradingEnv:
             raise ValueError(
                 f"states 长度 ({states.shape[0]}) 与 prices 长度 ({prices.shape[0]}) 不一致"
             )
+        if horizon <= 0:
+            raise ValueError(f"horizon 必须为正整数，收到 {horizon}")
 
         self.states = states
         self.prices = prices
@@ -75,9 +82,17 @@ class TradingEnv:
         self.horizon = horizon
         self.state_dim = states.shape[1]
         self.states_dataframe = states_dataframe
+        self.max_positions = dict(position_config)
+        self.commission_rate = (
+            float(commission_rate)
+            if commission_rate is not None
+            else float(self.COMMISSION_RATE)
+        )
 
         # Section 3.1: 最大持仓量 m
-        self.m: int = self.MAX_POSITIONS[pair]
+        self.m: int = int(self.max_positions[pair])
+        if self.m <= 0:
+            raise ValueError(f"最大持仓量 m 必须为正整数，收到 m={self.m}")
 
         # 计算可用 horizon 数量
         self.num_horizons = len(states) // horizon
@@ -247,7 +262,6 @@ class TradingEnv:
                 break
 
         if qty_remaining > 0:
-            
             fill_cash += qty_remaining * last_price
         # 价格举例：当前持仓量为 0，目标持仓量为 1，当前价格为 10，如果 通过委托价格9 购买 fillcash 9 slippage 为 -1
         # 价格举例：当前持仓量为 0，目标持仓量为 1，当前价格为 10，如果 通过委托价格11购买 fillcash 11 slippage 为 1
@@ -314,6 +328,6 @@ class TradingEnv:
             slippage = 0.0
 
         # Section 3.1: 佣金 = δ × |ΔP| × price
-        commission = self.COMMISSION_RATE * abs_delta * price
+        commission = self.commission_rate * abs_delta * price
 
         return slippage + commission

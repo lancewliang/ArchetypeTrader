@@ -36,8 +36,9 @@ class Config:
     latent_dim: int = 16  # z_e 维度
     num_archetypes: int = 10  # K = 10
     vq_beta0: float = 0.25  # 承诺损失系数
-    num_trajectories: int = 8000  # 52万行的化差不多哦 52万除以72等于7200. 8000 是一个折中值
+    num_trajectories: int = 15000  # 论文 Phase I 默认采样 30k DP trajectories
     phase1_epochs: int = 100
+    phase1_sampling_seed: int = 42  # Phase I 轨迹采样随机种子，用于结果复现
 
     # Phase II 配置
     phase2_total_steps: int = 8000*100
@@ -118,6 +119,12 @@ def parse_args(argv: list | None = None) -> Config:
     parser.add_argument(
         "--vq-beta0", type=float, default=None, help="VQ 承诺损失系数"
     )
+    parser.add_argument(
+        "--phase1-sampling-seed",
+        type=int,
+        default=None,
+        help="Phase I 轨迹采样随机种子",
+    )
 
     # Phase II
     parser.add_argument(
@@ -174,6 +181,7 @@ def parse_args(argv: list | None = None) -> Config:
         "phase1_epochs": getattr(args, "phase1_epochs", None),
         "latent_dim": getattr(args, "latent_dim", None),
         "vq_beta0": getattr(args, "vq_beta0", None),
+        "phase1_sampling_seed": getattr(args, "phase1_sampling_seed", None),
         "phase2_total_steps": getattr(args, "phase2_total_steps", None),
         "selection_alpha": getattr(args, "selection_alpha", None),
         "phase3_total_steps": getattr(args, "phase3_total_steps", None),
