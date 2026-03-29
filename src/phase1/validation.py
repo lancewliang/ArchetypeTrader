@@ -128,6 +128,52 @@ def _compute_grad_norm(parameters: Iterable[torch.nn.Parameter]) -> float:
     return float(total ** 0.5)
 
 
+def _build_reward_norm_config(model_config: Dict[str, Any], config: Any) -> Dict[str, float]:
+    """从 checkpoint / config 中恢复 reward normalization 配置。"""
+    mode = str(model_config.get("phase1_reward_norm_mode", getattr(config, "phase1_reward_norm_mode", "none")))
+    mean = float(model_config.get("reward_norm_mean", 0.0))
+    std = float(model_config.get("reward_norm_std", 1.0))
+    eps = float(model_config.get("phase1_reward_norm_eps", getattr(config, "phase1_reward_norm_eps", 1e-6)))
+    clip = float(model_config.get("phase1_reward_norm_clip", getattr(config, "phase1_reward_norm_clip", 0.0)))
+    std = max(std, eps)
+    return {"mode": mode, "mean": mean, "std": std, "eps": eps, "clip": clip}
+
+
+def _normalize_reward_tensor(r_demo: torch.Tensor, reward_norm_config: Dict[str, float]) -> torch.Tensor:
+    """按 checkpoint 中记录的方式标准化 encoder 输入 reward。"""
+    if reward_norm_config.get("mode", "none") == "none":
+        return r_demo
+    normalized = (r_demo - reward_norm_config["mean"]) / reward_norm_config["std"]
+    clip = float(reward_norm_config.get("clip", 0.0))
+    if clip > 0:
+        normalized = torch.clamp(normalized, min=-clip, max=clip)
+    return normalized
+
+
+def _compute_latent_dependence_metrics(
+    decoder: VQDecoder,
+    states: torch.Tensor,
+    true_actions: torch.Tensor,
+    z_q_st: torch.Tensor,
+) -> Dict[str, float]:
+    """计算 decoder 对 latent 的依赖监控指标。"""
+    real_logits = decoder(states, z_q_st)
+    real_preds = torch.argmax(real_logits, dim=-1)
+    real_acc = float((real_preds == true_actions).float().mean().item())
+    if states.shape[0] <= 1:
+        shuffled_acc = real_acc
+    else:
+        perm = torch.randperm(states.shape[0], device=states.device)
+        shuffled_logits = decoder(states, z_q_st[perm])
+        shuffled_preds = torch.argmax(shuffled_logits, dim=-1)
+        shuffled_acc = float((shuffled_preds == true_actions).float().mean().item())
+    return {
+        "real_token_accuracy": real_acc,
+        "shuffled_token_accuracy": shuffled_acc,
+        "latent_dependence_gap": real_acc - shuffled_acc,
+    }
+
+
 def replay_rewards_from_actions(
     env: TradingEnv,
     start_index: int,
@@ -532,6 +578,7 @@ def validate_phase1_model(
         "reconstruction": {},
         "codebook_usage": {},
         "latent_geometry": {},
+        "latent_dependence": {},
         "training_monitor_summary": {},
         "bad_case_examples": [],
         "hard_failures": [],
@@ -553,6 +600,7 @@ def validate_phase1_model(
         return report
 
     encoder, codebook, decoder, model_config = _load_phase1_models(checkpoint, device)
+    reward_norm_config = _build_reward_norm_config(model_config, config)
     encoder.eval()
     codebook.eval()
     decoder.eval()
@@ -591,6 +639,9 @@ def validate_phase1_model(
     quantization_distance_values: List[np.ndarray] = []
     logit_abs_max = 0.0
     nearest_neighbor_match_ratio = 0.0
+    latent_dependence_gap_values: List[float] = []
+    latent_real_acc_values: List[float] = []
+    latent_shuffled_acc_values: List[float] = []
     forward_shapes_recorded = False
 
     with torch.no_grad():
@@ -598,13 +649,18 @@ def validate_phase1_model(
             s_demo = s_demo.to(device)
             a_demo = a_demo.to(device)
             r_demo = r_demo.to(device)
+            r_demo_encoder = _normalize_reward_tensor(r_demo, reward_norm_config)
             batch_size = int(s_demo.shape[0])
             batch_tokens = int(a_demo.numel())
 
-            z_e = encoder(s_demo, a_demo, r_demo)
+            z_e = encoder(s_demo, a_demo, r_demo_encoder)
             z_q_st, indices, commitment_loss = codebook.quantize(z_e)
             action_logits = decoder(s_demo, z_q_st)
             preds = torch.argmax(action_logits, dim=-1)
+            latent_dependence = _compute_latent_dependence_metrics(decoder, s_demo, a_demo, z_q_st)
+            latent_dependence_gap_values.append(latent_dependence["latent_dependence_gap"])
+            latent_real_acc_values.append(latent_dependence["real_token_accuracy"])
+            latent_shuffled_acc_values.append(latent_dependence["shuffled_token_accuracy"])
 
             logits_flat = action_logits.reshape(-1, int(model_config["action_dim"]))
             targets_flat = a_demo.reshape(-1)
@@ -727,10 +783,21 @@ def validate_phase1_model(
         "confusion_matrix": confusion.tolist(),
         "per_class_report": _compute_classification_report(confusion),
     }
+    report["latent_dependence"] = {
+        "reward_norm_mode": reward_norm_config["mode"],
+        "reward_norm_mean": reward_norm_config["mean"],
+        "reward_norm_std": reward_norm_config["std"],
+        "reward_norm_clip": reward_norm_config["clip"],
+        "real_token_accuracy": _safe_mean(np.asarray(latent_real_acc_values, dtype=np.float64)),
+        "shuffled_token_accuracy": _safe_mean(np.asarray(latent_shuffled_acc_values, dtype=np.float64)),
+        "latent_dependence_gap": _safe_mean(np.asarray(latent_dependence_gap_values, dtype=np.float64)),
+    }
     if token_accuracy <= flat_baseline_accuracy + 0.01:
         report["soft_warnings"].append(
             "token_accuracy 仅略高于 flat baseline，模型可能主要在预测 flat"
         )
+    if report["latent_dependence"]["latent_dependence_gap"] < 0.01:
+        report["soft_warnings"].append("latent_dependence_gap < 0.01，decoder 可能几乎不使用 z_q")
 
     codebook_entropy = _compute_entropy_from_counts(code_counts)
     codebook_perplexity = float(math.exp(codebook_entropy)) if codebook_entropy > 0 else 1.0

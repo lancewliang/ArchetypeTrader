@@ -4,7 +4,6 @@
 """
 
 import argparse
-import json
 from dataclasses import dataclass, field, fields
 from typing import Dict, List
 
@@ -40,8 +39,23 @@ class Config:
     phase1_epochs: int = 100
     phase1_sampling_seed: int = 42  # Phase I 轨迹采样随机种子，用于结果复现
 
+    # Phase I debug branch 配置
+    phase1_reward_norm_mode: str = "zscore"  # 可选: none / zscore
+    phase1_reward_norm_eps: float = 1e-6
+    phase1_reward_norm_clip: float = 5.0  # >0 时裁剪标准化后的 reward
+    phase1_warm_start_codebook: bool = True
+    phase1_warm_start_batches: int = 16
+    phase1_warm_start_max_samples: int = 8192
+    phase1_dead_code_reinit: bool = True
+    phase1_dead_code_patience: int = 3
+    phase1_dead_code_min_epoch: int = 5
+    phase1_dead_code_max_codes: int = 4
+    phase1_dead_code_reservoir_size: int = 8192
+    phase1_monitor_latent_dependence: bool = True
+    phase1_monitor_batches: int = 2
+
     # Phase II 配置
-    phase2_total_steps: int = 8000*100
+    phase2_total_steps: int = 8000 * 100
     selection_alpha: float = 1.0  # KL 惩罚系数
 
     # Phase III 配置
@@ -78,6 +92,16 @@ class Config:
                 if val is not None:
                     setattr(config, f.name, val)
         return config
+
+
+def _bool_from_cli(value: str) -> bool:
+    """解析命令行中的布尔字符串。"""
+    lowered = value.strip().lower()
+    if lowered in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if lowered in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"无法解析布尔值: {value}")
 
 
 def parse_args(argv: list | None = None) -> Config:
@@ -124,6 +148,85 @@ def parse_args(argv: list | None = None) -> Config:
         type=int,
         default=None,
         help="Phase I 轨迹采样随机种子",
+    )
+    parser.add_argument(
+        "--phase1-reward-norm-mode",
+        type=str,
+        choices=["none", "zscore"],
+        default=None,
+        help="Phase I debug branch: encoder 输入 reward 标准化模式",
+    )
+    parser.add_argument(
+        "--phase1-reward-norm-eps",
+        type=float,
+        default=None,
+        help="Phase I debug branch: reward 标准化数值稳定项",
+    )
+    parser.add_argument(
+        "--phase1-reward-norm-clip",
+        type=float,
+        default=None,
+        help="Phase I debug branch: 标准化后 reward 的绝对值裁剪阈值，<=0 表示不裁剪",
+    )
+    parser.add_argument(
+        "--phase1-warm-start-codebook",
+        type=_bool_from_cli,
+        default=None,
+        help="Phase I debug branch: 是否启用 codebook warm-start 初始化",
+    )
+    parser.add_argument(
+        "--phase1-warm-start-batches",
+        type=int,
+        default=None,
+        help="Phase I debug branch: warm-start 收集 latent 的 batch 数",
+    )
+    parser.add_argument(
+        "--phase1-warm-start-max-samples",
+        type=int,
+        default=None,
+        help="Phase I debug branch: warm-start 最多使用的 latent 样本数",
+    )
+    parser.add_argument(
+        "--phase1-dead-code-reinit",
+        type=_bool_from_cli,
+        default=None,
+        help="Phase I debug branch: 是否启用 dead-code reinit",
+    )
+    parser.add_argument(
+        "--phase1-dead-code-patience",
+        type=int,
+        default=None,
+        help="Phase I debug branch: code 连续多少个 epoch 未被使用后触发重置",
+    )
+    parser.add_argument(
+        "--phase1-dead-code-min-epoch",
+        type=int,
+        default=None,
+        help="Phase I debug branch: 从第几个 epoch 开始允许 dead-code 重置",
+    )
+    parser.add_argument(
+        "--phase1-dead-code-max-codes",
+        type=int,
+        default=None,
+        help="Phase I debug branch: 每个 epoch 最多重置多少个 code",
+    )
+    parser.add_argument(
+        "--phase1-dead-code-reservoir-size",
+        type=int,
+        default=None,
+        help="Phase I debug branch: 每个 epoch 保留多少个 latent 供 dead-code 重置采样",
+    )
+    parser.add_argument(
+        "--phase1-monitor-latent-dependence",
+        type=_bool_from_cli,
+        default=None,
+        help="Phase I debug branch: 是否监控 decoder 对 latent 的依赖程度",
+    )
+    parser.add_argument(
+        "--phase1-monitor-batches",
+        type=int,
+        default=None,
+        help="Phase I debug branch: 每个 epoch 监控 latent dependence 的 batch 数",
     )
 
     # Phase II
@@ -182,6 +285,19 @@ def parse_args(argv: list | None = None) -> Config:
         "latent_dim": getattr(args, "latent_dim", None),
         "vq_beta0": getattr(args, "vq_beta0", None),
         "phase1_sampling_seed": getattr(args, "phase1_sampling_seed", None),
+        "phase1_reward_norm_mode": getattr(args, "phase1_reward_norm_mode", None),
+        "phase1_reward_norm_eps": getattr(args, "phase1_reward_norm_eps", None),
+        "phase1_reward_norm_clip": getattr(args, "phase1_reward_norm_clip", None),
+        "phase1_warm_start_codebook": getattr(args, "phase1_warm_start_codebook", None),
+        "phase1_warm_start_batches": getattr(args, "phase1_warm_start_batches", None),
+        "phase1_warm_start_max_samples": getattr(args, "phase1_warm_start_max_samples", None),
+        "phase1_dead_code_reinit": getattr(args, "phase1_dead_code_reinit", None),
+        "phase1_dead_code_patience": getattr(args, "phase1_dead_code_patience", None),
+        "phase1_dead_code_min_epoch": getattr(args, "phase1_dead_code_min_epoch", None),
+        "phase1_dead_code_max_codes": getattr(args, "phase1_dead_code_max_codes", None),
+        "phase1_dead_code_reservoir_size": getattr(args, "phase1_dead_code_reservoir_size", None),
+        "phase1_monitor_latent_dependence": getattr(args, "phase1_monitor_latent_dependence", None),
+        "phase1_monitor_batches": getattr(args, "phase1_monitor_batches", None),
         "phase2_total_steps": getattr(args, "phase2_total_steps", None),
         "selection_alpha": getattr(args, "selection_alpha", None),
         "phase3_total_steps": getattr(args, "phase3_total_steps", None),
