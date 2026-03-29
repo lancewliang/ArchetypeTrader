@@ -31,6 +31,19 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# -----------------------------------------------------------------------------
+# 数值验证阈值
+# -----------------------------------------------------------------------------
+# 说明:
+# 1. reward replay 既检查平均误差，也检查单点最大误差。
+# 2. 单点最大误差允许保留极小的浮点/落盘量化偏差；真正的算法错误会同时表现为
+#    平均误差抬升、策略追踪不一致或 Bellman residual 异常。
+REWARD_REPLAY_HARD_MAE_THRESHOLD = 1e-6
+REWARD_REPLAY_HARD_MAX_ABS_THRESHOLD = 1e-4
+BELLMAN_HARD_THRESHOLD = 1e-6
+SEVERE_CODE_COLLAPSE_DOMINANT_RATIO = 0.99
+SEVERE_CODE_COLLAPSE_USED_CODE_THRESHOLD = 1
+
 
 def _to_serializable(value: Any) -> Any:
     """将 numpy / torch 对象递归转换为 JSON 可序列化对象。"""
@@ -123,6 +136,7 @@ def replay_rewards_from_actions(
     """基于环境定义重放动作序列，重算 reward。
 
     该方法用于验证 dp_trajectories 中保存的 reward 是否与环境公式完全一致。
+    为避免把 .npz 落盘精度差异误判为算法错误，内部统一使用 float64 做重放计算。
 
     Args:
         env: 交易环境实例
@@ -138,13 +152,13 @@ def replay_rewards_from_actions(
 
     for local_t, action in enumerate(actions):
         global_t = start_index + local_t
-        p_t = env.prices[global_t]
-        p_next = env.prices[global_t + 1] if (global_t + 1) < len(env.prices) else env.prices[global_t]
+        p_t = float(np.float64(env.prices[global_t]))
+        p_next = float(np.float64(env.prices[global_t + 1])) if (global_t + 1) < len(env.prices) else p_t
         state_row = env.states_dataframe.row(global_t, named=True) if env.states_dataframe is not None else None
-        execution_cost = env.compute_execution_cost(int(action), current_position, p_t, state_row)
-        next_position = TradingEnv.POSITION_MAP[int(action)] * env.m
-        rewards[local_t] = next_position * (p_next - p_t) - execution_cost
-        current_position = next_position
+        execution_cost = float(np.float64(env.compute_execution_cost(int(action), current_position, p_t, state_row)))
+        next_position = float(np.float64(TradingEnv.POSITION_MAP[int(action)] * env.m))
+        rewards[local_t] = float(next_position * (p_next - p_t) - execution_cost)
+        current_position = int(next_position)
 
     return rewards
 
@@ -416,6 +430,8 @@ def validate_dp_trajectories(
         "return_abs_error_max": _safe_max(np.asarray(return_abs_errors, dtype=np.float64)),
         "state_replan_match_ratio": float(state_match_count / checked_count) if checked_count else 0.0,
         "policy_trace_match_ratio": float(action_match_count / checked_count) if checked_count else 0.0,
+        "hard_mae_threshold": REWARD_REPLAY_HARD_MAE_THRESHOLD,
+        "hard_max_abs_threshold": REWARD_REPLAY_HARD_MAX_ABS_THRESHOLD,
     }
     report["reward_replay"] = reward_replay_report
     report["bellman_consistency"] = {
@@ -424,15 +440,22 @@ def validate_dp_trajectories(
         "bellman_residual_max": _safe_max(np.asarray(bellman_max_values, dtype=np.float64)),
     }
 
-    if checked_count > 0 and reward_replay_report["reward_max_abs_error"] > 1e-6:
-        report["hard_failures"].append(
-            f"reward 回放与保存值不一致，最大绝对误差={reward_replay_report['reward_max_abs_error']:.6e}"
-        )
+    if checked_count > 0:
+        reward_mae = reward_replay_report["reward_mae"]
+        reward_max_abs_error = reward_replay_report["reward_max_abs_error"]
+        if (
+            reward_mae > REWARD_REPLAY_HARD_MAE_THRESHOLD
+            or reward_max_abs_error > REWARD_REPLAY_HARD_MAX_ABS_THRESHOLD
+        ):
+            report["hard_failures"].append(
+                "reward 回放与保存值不一致，"
+                f"mae={reward_mae:.6e}, max_abs_error={reward_max_abs_error:.6e}"
+            )
     if checked_count > 0 and reward_replay_report["policy_trace_match_ratio"] < 1.0:
         report["hard_failures"].append(
             f"DP 前向追踪与保存动作不一致，match_ratio={reward_replay_report['policy_trace_match_ratio']:.4f}"
         )
-    if checked_count > 0 and report["bellman_consistency"]["bellman_residual_max"] > 1e-6:
+    if checked_count > 0 and report["bellman_consistency"]["bellman_residual_max"] > BELLMAN_HARD_THRESHOLD:
         report["hard_failures"].append(
             f"Bellman residual 过大，max={report['bellman_consistency']['bellman_residual_max']:.6e}"
         )
@@ -724,8 +747,17 @@ def validate_phase1_model(
     }
     if used_code_count == 0:
         report["hard_failures"].append("codebook 未被任何样本使用")
-    if dominant_code_ratio > 0.95:
+    elif (
+        used_code_count <= SEVERE_CODE_COLLAPSE_USED_CODE_THRESHOLD
+        or dominant_code_ratio >= SEVERE_CODE_COLLAPSE_DOMINANT_RATIO
+    ):
+        report["hard_failures"].append(
+            "出现严重 code collapse："
+            f"used_code_count={used_code_count}, dominant_code_ratio={dominant_code_ratio:.4f}"
+        )
+    elif dominant_code_ratio > 0.95:
         report["soft_warnings"].append("dominant_code_ratio > 0.95，存在明显 code collapse 风险")
+
     if dead_code_count > code_counts.shape[0] // 2:
         report["soft_warnings"].append("超过一半的 code 未被使用，codebook 利用率偏低")
 

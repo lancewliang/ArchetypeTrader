@@ -36,7 +36,7 @@ class Config:
     latent_dim: int = 16  # z_e 维度
     num_archetypes: int = 10  # K = 10
     vq_beta0: float = 0.25  # 承诺损失系数
-    num_trajectories: int = 15000  # 论文 Phase I 默认采样 30k DP trajectories
+    num_trajectories: int = 30000  # 论文 Phase I 默认采样 30k DP trajectories
     phase1_epochs: int = 100
     phase1_sampling_seed: int = 42  # Phase I 轨迹采样随机种子，用于结果复现
 

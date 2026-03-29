@@ -333,9 +333,10 @@ class DPPlanner:
             all_rewards.append(r_demo)
 
         result = {
+            # states 保持 float32 以控制轨迹缓存体积；rewards 保持 float64 以便严格验证 Eq.(1) 回放一致性。
             "states": np.array(all_states, dtype=np.float32),
             "actions": np.array(all_actions, dtype=np.int32),
-            "rewards": np.array(all_rewards, dtype=np.float32),
+            "rewards": np.array(all_rewards, dtype=np.float64),
             "sampled_start_indices": sampled_start_indices.astype(np.int64),
             "sampling_seed": np.int64(self.sampling_seed),
             "replace": np.bool_(replace),
@@ -459,7 +460,7 @@ class DPPlanner:
         actions = np.full(
             (num_trajectories, h), self.FLAT_ACTION, dtype=np.int32
         )
-        rewards = np.zeros((num_trajectories, h), dtype=np.float32)
+        rewards = np.zeros((num_trajectories, h), dtype=np.float64)
 
         return {"states": states, "actions": actions, "rewards": rewards}
 
