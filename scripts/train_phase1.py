@@ -19,8 +19,9 @@
 
 import os
 import shutil
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -53,32 +54,126 @@ PAPER_PHASE1_SPEC = {
     "vq_beta0": 0.25,
     "num_trajectories": 30000,
     "phase1_epochs": 100,
+    "pretrain_epochs": 10,
     "discount_factor": 0.99,
     "max_positions": {"BTC": 8, "ETH": 100, "DOT": 2500, "BNB": 200},
 }
 
 
+# ---------------------------------------------------------------------------
+# 数据类：训练指标收集
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EpochMetrics:
+    """单个 epoch 的累积指标。"""
+
+    loss: float = 0.0
+    rec_loss: float = 0.0
+    vq_loss: float = 0.0
+    token_correct: int = 0
+    token_total: int = 0
+    exact_match: int = 0
+    sample_total: int = 0
+    code_counts: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
+    encoder_grad: float = 0.0
+    codebook_grad: float = 0.0
+    decoder_grad: float = 0.0
+    logit_abs_max: float = 0.0
+    z_e_norm_sum: float = 0.0
+    quantization_mse_sum: float = 0.0
+    num_batches: int = 0
+
+    def summarize(self) -> Dict[str, float]:
+        """汇总为 epoch 级别的平均指标。"""
+        nb = max(self.num_batches, 1)
+        ns = max(self.sample_total, 1)
+        nt = max(self.token_total, 1)
+        code_usage = summarize_code_usage(self.code_counts)
+        return {
+            "avg_loss": self.loss / nb,
+            "avg_rec": self.rec_loss / nb,
+            "avg_vq": self.vq_loss / nb,
+            "token_accuracy": float(self.token_correct / nt),
+            "exact_match_rate": float(self.exact_match / ns),
+            "avg_encoder_grad": float(self.encoder_grad / nb),
+            "avg_codebook_grad": float(self.codebook_grad / nb),
+            "avg_decoder_grad": float(self.decoder_grad / nb),
+            "logit_abs_max": self.logit_abs_max,
+            "avg_z_e_norm": float(self.z_e_norm_sum / ns),
+            "avg_quantization_mse": float(self.quantization_mse_sum / ns),
+            **code_usage,
+        }
+
+
+@dataclass
+class TrainingHistory:
+    """训练过程中所有 epoch 的指标历史。"""
+
+    loss: List[float] = field(default_factory=list)
+    rec_loss: List[float] = field(default_factory=list)
+    vq_loss: List[float] = field(default_factory=list)
+    token_accuracy: List[float] = field(default_factory=list)
+    exact_match: List[float] = field(default_factory=list)
+    codebook_perplexity: List[float] = field(default_factory=list)
+    used_code_count: List[int] = field(default_factory=list)
+    dominant_code_ratio: List[float] = field(default_factory=list)
+    encoder_grad_norm: List[float] = field(default_factory=list)
+    codebook_grad_norm: List[float] = field(default_factory=list)
+    decoder_grad_norm: List[float] = field(default_factory=list)
+    logit_abs_max: List[float] = field(default_factory=list)
+    z_e_norm: List[float] = field(default_factory=list)
+    quantization_mse: List[float] = field(default_factory=list)
+
+    def append_from_summary(self, s: Dict[str, float]) -> None:
+        self.loss.append(s["avg_loss"])
+        self.rec_loss.append(s["avg_rec"])
+        self.vq_loss.append(s["avg_vq"])
+        self.token_accuracy.append(s["token_accuracy"])
+        self.exact_match.append(s["exact_match_rate"])
+        self.codebook_perplexity.append(s["codebook_perplexity"])
+        self.used_code_count.append(s["used_code_count"])
+        self.dominant_code_ratio.append(s["dominant_code_ratio"])
+        self.encoder_grad_norm.append(s["avg_encoder_grad"])
+        self.codebook_grad_norm.append(s["avg_codebook_grad"])
+        self.decoder_grad_norm.append(s["avg_decoder_grad"])
+        self.logit_abs_max.append(s["logit_abs_max"])
+        self.z_e_norm.append(s["avg_z_e_norm"])
+        self.quantization_mse.append(s["avg_quantization_mse"])
+
+    def to_dict(self) -> Dict[str, list]:
+        return {
+            "loss_history": self.loss,
+            "rec_loss_history": self.rec_loss,
+            "vq_loss_history": self.vq_loss,
+            "token_accuracy_history": self.token_accuracy,
+            "exact_match_history": self.exact_match,
+            "codebook_perplexity_history": self.codebook_perplexity,
+            "used_code_count_history": self.used_code_count,
+            "dominant_code_ratio_history": self.dominant_code_ratio,
+            "encoder_grad_norm_history": self.encoder_grad_norm,
+            "codebook_grad_norm_history": self.codebook_grad_norm,
+            "decoder_grad_norm_history": self.decoder_grad_norm,
+            "logit_abs_max_history": self.logit_abs_max,
+            "z_e_norm_history": self.z_e_norm,
+            "quantization_mse_history": self.quantization_mse,
+        }
+
+
+# ---------------------------------------------------------------------------
+# 工具函数（保持原有逻辑不变）
+# ---------------------------------------------------------------------------
+
 def set_reproducibility_seed(seed: int) -> None:
-    """设置 Phase I 复现实验所需的随机种子。
-
-    新增该方法是为了把 DP 采样、PyTorch 初始化与 DataLoader shuffle
-    尽量固定下来，减少多次运行间的非必要波动。
-
-    Args:
-        seed: 随机种子
-    """
+    """设置 Phase I 复现实验所需的随机种子。"""
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
-
 def compute_grad_norm(parameters) -> float:
-    """计算参数梯度的全局 L2 范数。
-
-    新增该方法用于训练监控，帮助后续定位梯度爆炸、梯度消失和模块失衡问题。
-    """
+    """计算参数梯度的全局 L2 范数。"""
     total = 0.0
     for param in parameters:
         if param.grad is None:
@@ -86,7 +181,6 @@ def compute_grad_norm(parameters) -> float:
         norm = param.grad.detach().data.norm(2).item()
         total += norm * norm
     return float(total ** 0.5)
-
 
 
 def summarize_code_usage(code_counts: np.ndarray) -> dict:
@@ -114,20 +208,8 @@ def summarize_code_usage(code_counts: np.ndarray) -> dict:
     }
 
 
-
 def assert_paper_phase1_settings(config: Any, pair: str) -> None:
-    """强制检查当前配置是否严格等于论文 Phase I 主实验设置。
-
-    该守卫不改变论文算法，只负责阻止“看起来在复现论文、实际上配置已偏离”的运行。
-    若用户希望做非论文设置实验，应显式修改该守卫或另建 debug 分支，而不是在主线脚本中静默放宽。
-
-    Args:
-        config: 解析后的运行配置。
-        pair: 当前交易对名称。
-
-    Raises:
-        ValueError: 当任一关键配置与论文主实验不一致时抛出。
-    """
+    """强制检查当前配置是否严格等于论文 Phase I 主实验设置。"""
     mismatches: List[str] = []
 
     def _check_exact(name: str, actual: Any, expected: Any) -> None:
@@ -148,6 +230,7 @@ def assert_paper_phase1_settings(config: Any, pair: str) -> None:
     _check_float("vq_beta0", config.vq_beta0, PAPER_PHASE1_SPEC["vq_beta0"])
     _check_exact("num_trajectories", config.num_trajectories, PAPER_PHASE1_SPEC["num_trajectories"])
     _check_exact("phase1_epochs", config.phase1_epochs, PAPER_PHASE1_SPEC["phase1_epochs"])
+    _check_exact("pretrain_epochs", config.pretrain_epochs, PAPER_PHASE1_SPEC["pretrain_epochs"])
     _check_float("discount_factor", config.discount_factor, PAPER_PHASE1_SPEC["discount_factor"])
 
     expected_m = PAPER_PHASE1_SPEC["max_positions"].get(pair)
@@ -162,13 +245,8 @@ def assert_paper_phase1_settings(config: Any, pair: str) -> None:
         )
 
 
-
 def log_training_data_scale(train_rows: int) -> None:
-    """记录当前训练数据规模与论文规模的差异。
-
-    该日志只用于解释“当前是 reduced-data reproduction”，不会阻止训练。
-    论文约使用 140 万行训练数据；用户当前约 52 万行，因此需要把数据规模差异与算法差异分开。
-    """
+    """记录当前训练数据规模与论文规模的差异。"""
     ratio = float(train_rows) / float(PAPER_PHASE1_REFERENCE_TRAIN_ROWS)
     logger.warning(
         "当前训练集行数=%d，论文约使用=%d 行；当前约为论文数据规模的 %.2f%%。"
@@ -179,12 +257,14 @@ def log_training_data_scale(train_rows: int) -> None:
     )
 
 
-
 def expected_num_available_starts(total_rows: int, horizon: int) -> int:
     """计算滑窗采样协议下全部合法起点数量。"""
     return max(total_rows - horizon + 1, 0)
 
 
+# ---------------------------------------------------------------------------
+# 轨迹缓存检查
+# ---------------------------------------------------------------------------
 
 def inspect_trajectory_cache(
     traj_path: str,
@@ -192,21 +272,7 @@ def inspect_trajectory_cache(
     pair: str,
     train_rows: int,
 ) -> Tuple[bool, List[str]]:
-    """检查现有轨迹缓存是否与当前严格论文设置兼容。
-
-    检查项覆盖 pair / horizon / gamma / num_trajectories / sampling_seed /
-    训练集长度 / state_dim / commission_rate / max_position / 算法变体标记，
-    从而避免误复用旧缓存导致“日志看起来一样、实际并未重跑”。
-
-    Args:
-        traj_path: 轨迹缓存路径。
-        config: 当前运行配置。
-        pair: 当前交易对。
-        train_rows: 当前训练集行数。
-
-    Returns:
-        (is_compatible, reasons)
-    """
+    """检查现有轨迹缓存是否与当前严格论文设置兼容。"""
     if not os.path.exists(traj_path):
         return False, ["trajectory cache 文件不存在"]
 
@@ -269,7 +335,6 @@ def inspect_trajectory_cache(
     return len(reasons) == 0, reasons
 
 
-
 def backup_incompatible_cache(traj_path: str, reasons: List[str]) -> str:
     """备份不兼容的旧轨迹缓存，避免被当前严格论文运行误复用。"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -283,36 +348,16 @@ def backup_incompatible_cache(traj_path: str, reasons: List[str]) -> str:
     return backup_path
 
 
+# ---------------------------------------------------------------------------
+# 从 main() 中提取的子流程
+# ---------------------------------------------------------------------------
 
-def main() -> None:
-    # ----------------------------------------------------------------
-    # Step 0: 解析配置
-    # ----------------------------------------------------------------
-    config = parse_args()
-    pair = config.pairs[0]  # 单交易对训练
-    assert_paper_phase1_settings(config, pair)
-    set_reproducibility_seed(config.phase1_sampling_seed)
+def load_data_and_env(config: Any, pair: str) -> Tuple[TradingEnv, int]:
+    """加载特征数据并初始化 TradingEnv。
 
-    logger.info("Phase I 训练开始: pair=%s", pair)
-    logger.info(
-        "严格论文主线配置已通过守卫检查: epochs=%d, batch_size=%d, lr=%.1e, latent_dim=%d, "
-        "num_archetypes=%d, num_trajectories=%d, vq_beta0=%.2f, sampling_seed=%d",
-        config.phase1_epochs,
-        config.batch_size,
-        config.learning_rate,
-        config.latent_dim,
-        config.num_archetypes,
-        config.num_trajectories,
-        config.vq_beta0,
-        config.phase1_sampling_seed,
-    )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("使用设备: %s", device)
-
-    # ----------------------------------------------------------------
-    # Step 1: 加载特征数据，初始化 TradingEnv
-    # ----------------------------------------------------------------
+    Returns:
+        (env, train_rows)
+    """
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
     pipeline = FeaturePipeline(config.data_dir, pair)
     train_df, _, _ = pipeline.get_state_vector()
@@ -322,11 +367,7 @@ def main() -> None:
     prices = train_prices_df["close"].to_numpy()
     train_rows = int(train_states.shape[0])
 
-    logger.info(
-        "训练集: states shape=%s, prices shape=%s",
-        train_states.shape,
-        prices.shape,
-    )
+    logger.info("训练集: states shape=%s, prices shape=%s", train_states.shape, prices.shape)
     log_training_data_scale(train_rows)
 
     available_starts = expected_num_available_starts(train_rows, config.horizon)
@@ -347,18 +388,17 @@ def main() -> None:
     )
 
     logger.info(
-        "TradingEnv 初始化完成 num_horizons = 总行数/切片内行数 = train_states.shape[0]/horizon: "
-        "num_horizons=%d, horizon=%d, max_position=%d, commission_rate=%.6f, available_starts=%d",
-        env.num_horizons,
-        config.horizon,
-        env.m,
-        env.commission_rate,
-        available_starts,
+        "TradingEnv 初始化完成: num_horizons=%d, horizon=%d, max_position=%d, "
+        "commission_rate=%.6f, available_starts=%d",
+        env.num_horizons, config.horizon, env.m, env.commission_rate, available_starts,
     )
+    return env, train_rows
 
-    # ----------------------------------------------------------------
-    # Step 2: 生成 DP 示范轨迹
-    # ----------------------------------------------------------------
+
+def prepare_trajectory_dataset(
+    config: Any, pair: str, env: TradingEnv, train_rows: int,
+) -> Tuple[TrajectoryDataset, str]:
+    """检查缓存 / 生成 DP 示范轨迹，返回 (dataset, traj_path)。"""
     planner = DPPlanner(
         env=env,
         gamma=config.discount_factor,
@@ -367,46 +407,30 @@ def main() -> None:
     )
     traj_path = DPPlanner.build_trajectory_cache_path(config.result_dir, pair)
 
-    need_generate_trajectories = True
     if os.path.exists(traj_path):
         cache_ok, cache_reasons = inspect_trajectory_cache(
-            traj_path=traj_path,
-            config=config,
-            pair=pair,
-            train_rows=train_rows,
+            traj_path=traj_path, config=config, pair=pair, train_rows=train_rows,
         )
         if cache_ok:
             logger.info("发现与当前严格论文设置兼容的轨迹缓存，直接加载: %s", traj_path)
-            dataset = TrajectoryDataset.from_npz(traj_path)
-            need_generate_trajectories = False
-        else:
-            backup_incompatible_cache(traj_path, cache_reasons)
+            return TrajectoryDataset.from_npz(traj_path), traj_path
+        backup_incompatible_cache(traj_path, cache_reasons)
 
-    if need_generate_trajectories:
-        logger.info(
-            "开始生成 DP 示范轨迹: num_trajectories=%d",
-            config.num_trajectories,
-        )
-        trajectories = planner.generate_trajectories(config.num_trajectories)
-        logger.info("DP 轨迹生成完成，创建 Dataset")
-        dataset = TrajectoryDataset(
-            states=trajectories["states"],
-            actions=trajectories["actions"],
-            rewards=trajectories["rewards"],
-        )
-
-    logger.info("Dataset 大小: %d 条轨迹", len(dataset))
-
-    dataloader = DataLoader(
-        dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        drop_last=False,
+    logger.info("开始生成 DP 示范轨迹: num_trajectories=%d", config.num_trajectories)
+    trajectories = planner.generate_trajectories(config.num_trajectories)
+    logger.info("DP 轨迹生成完成，创建 Dataset")
+    dataset = TrajectoryDataset(
+        states=trajectories["states"],
+        actions=trajectories["actions"],
+        rewards=trajectories["rewards"],
     )
+    return dataset, traj_path
 
-    # ----------------------------------------------------------------
-    # Step 3: 初始化 VQ Encoder、Codebook、Decoder
-    # ----------------------------------------------------------------
+
+def build_models(
+    config: Any, device: torch.device,
+) -> Tuple[VQEncoder, VQCodebook, VQDecoder]:
+    """初始化 VQ Encoder、Codebook、Decoder 并移至目标设备。"""
     encoder = VQEncoder(
         state_dim=config.state_dim,
         action_dim=config.action_dim,
@@ -432,185 +456,254 @@ def main() -> None:
         sum(p.numel() for p in codebook.parameters()),
         sum(p.numel() for p in decoder.parameters()),
     )
+    return encoder, codebook, decoder
 
-    # 优化器：联合训练 encoder + codebook + decoder
+
+# ---------------------------------------------------------------------------
+# 单 epoch 训练
+# ---------------------------------------------------------------------------
+
+def _accumulate_batch_metrics(
+    metrics: EpochMetrics,
+    *,
+    total_loss: torch.Tensor,
+    rec_loss: torch.Tensor,
+    vq_loss_val: float,
+    pred_actions: torch.Tensor,
+    a_demo: torch.Tensor,
+    action_logits: torch.Tensor,
+    z_e: torch.Tensor,
+    quantization_mse_val: float,
+    indices: np.ndarray | None,
+    encoder: VQEncoder,
+    codebook: VQCodebook,
+    decoder: VQDecoder,
+) -> None:
+    """将单个 batch 的指标累积到 EpochMetrics 中。"""
+    batch_size = int(a_demo.shape[0])
+
+    metrics.loss += total_loss.item()
+    metrics.rec_loss += rec_loss.item()
+    metrics.vq_loss += vq_loss_val
+    metrics.token_correct += int((pred_actions == a_demo).sum().item())
+    metrics.token_total += int(a_demo.numel())
+    metrics.exact_match += int(torch.all(pred_actions == a_demo, dim=1).sum().item())
+    metrics.sample_total += batch_size
+
+    if indices is not None:
+        metrics.code_counts += np.bincount(indices, minlength=len(metrics.code_counts))
+
+    metrics.logit_abs_max = max(metrics.logit_abs_max, float(action_logits.abs().max().item()))
+    metrics.z_e_norm_sum += float(torch.norm(z_e, dim=1).mean().item()) * batch_size
+    metrics.quantization_mse_sum += quantization_mse_val * batch_size
+
+    metrics.encoder_grad += compute_grad_norm(encoder.parameters())
+    metrics.codebook_grad += compute_grad_norm(codebook.parameters())
+    metrics.decoder_grad += compute_grad_norm(decoder.parameters())
+    metrics.num_batches += 1
+
+
+def train_one_epoch(
+    *,
+    dataloader: DataLoader,
+    encoder: VQEncoder,
+    codebook: VQCodebook,
+    decoder: VQDecoder,
+    optimizer: torch.optim.Optimizer,
+    ce_loss_fn: nn.CrossEntropyLoss,
+    config: Any,
+    device: torch.device,
+    is_phase_a: bool,
+    collect_z_e: bool = False,
+) -> Tuple[EpochMetrics, torch.Tensor | None]:
+    """执行单个 epoch 的训练，返回累积指标。
+
+    Phase A (预训练): 跳过 VQ 量化，仅优化 L_rec。
+    Phase B (VQ 训练): 完整 VQ 流水线，L = L_rec + commitment + β₀ × encoder_commitment。
+
+    Args:
+        collect_z_e: 若为 True，收集所有 batch 的 z_e 用于 k-means 初始化。
+                     仅在 Phase A 最后一个 epoch 使用。
+
+    Returns:
+        metrics: 训练指标
+        z_e_all: 收集的 z_e 样本 (仅 collect_z_e=True 时非 None)
+    """
+    encoder.train()
+    codebook.train()
+    decoder.train()
+
+    metrics = EpochMetrics(
+        code_counts=np.zeros(config.num_archetypes, dtype=np.int64),
+    )
+    z_e_list: List[torch.Tensor] = [] if collect_z_e else []
+    last_z_e: torch.Tensor | None = None
+
+    for s_demo, a_demo, r_demo in dataloader:
+        s_demo = s_demo.to(device)
+        a_demo = a_demo.to(device)
+        r_demo = r_demo.to(device)
+
+        # Encode
+        z_e = encoder(s_demo, a_demo, r_demo)
+
+        if collect_z_e:
+            z_e_list.append(z_e.detach())
+
+        if not is_phase_a:
+            last_z_e = z_e.detach()
+
+        if is_phase_a:
+            # Phase A: bypass VQ, pass z_e directly to decoder
+            z_input = z_e
+            indices_np = None
+            vq_loss_val = 0.0
+            quantization_mse_val = 0.0
+        else:
+            # Phase B: full VQ quantization
+            z_q_st, indices, commitment_loss = codebook.quantize(z_e)
+            z_input = z_q_st
+            indices_np = indices.detach().cpu().numpy()
+
+        # Decode
+        action_logits = decoder(s_demo, z_input)
+        pred_actions = torch.argmax(action_logits, dim=-1)
+
+        # L_rec
+        logits_flat = action_logits.reshape(-1, config.action_dim)
+        targets_flat = a_demo.reshape(-1)
+        rec_loss = ce_loss_fn(logits_flat, targets_flat)
+
+        if is_phase_a:
+            total_loss = rec_loss
+        else:
+            # β₀ × ||z_e - sg[z_q]||²
+            z_q_detached = z_q_st.detach()
+            encoder_commitment = config.vq_beta0 * torch.mean((z_e - z_q_detached) ** 2)
+            total_loss = rec_loss + commitment_loss + encoder_commitment
+            vq_loss_val = commitment_loss.item() + encoder_commitment.item()
+            quantization_mse_val = float(torch.mean((z_e - z_q_detached) ** 2).item())
+
+        optimizer.zero_grad()
+        total_loss.backward()
+
+        # 累积指标（在 step 之前，梯度可用）
+        _accumulate_batch_metrics(
+            metrics,
+            total_loss=total_loss,
+            rec_loss=rec_loss,
+            vq_loss_val=vq_loss_val,
+            pred_actions=pred_actions,
+            a_demo=a_demo,
+            action_logits=action_logits,
+            z_e=z_e,
+            quantization_mse_val=quantization_mse_val,
+            indices=indices_np,
+            encoder=encoder,
+            codebook=codebook,
+            decoder=decoder,
+        )
+
+        optimizer.step()
+
+    z_e_all = torch.cat(z_e_list, dim=0) if collect_z_e and z_e_list else None
+
+    # Phase B: 死码重置
+    if not is_phase_a and last_z_e is not None:
+        codebook.reset_dead_codes(last_z_e, metrics.code_counts)
+
+    return metrics, z_e_all
+
+
+# ---------------------------------------------------------------------------
+# 训练循环
+# ---------------------------------------------------------------------------
+
+def run_training_loop(
+    *,
+    dataloader: DataLoader,
+    encoder: VQEncoder,
+    codebook: VQCodebook,
+    decoder: VQDecoder,
+    config: Any,
+    device: torch.device,
+) -> TrainingHistory:
+    """执行完整的 Phase I 训练循环（Phase A 预训练 + Phase B VQ 训练）。"""
     all_params = (
         list(encoder.parameters())
         + list(codebook.parameters())
         + list(decoder.parameters())
     )
     optimizer = torch.optim.Adam(all_params, lr=config.learning_rate)
-
-    # 重建损失：交叉熵（decoder 输出 logits vs ground-truth actions）
     ce_loss_fn = nn.CrossEntropyLoss()
-
-    # ----------------------------------------------------------------
-    # Step 4: 训练循环 — 100 epochs
-    # 损失函数 L = L_rec + ||sg[z_e] - z_q||² + β₀ × ||z_e - sg[z_q]||²
-    # VQCodebook.quantize() 返回的 commitment_loss = ||sg[z_e] - z_q||²
-    # β₀ × ||z_e - sg[z_q]||² 需要在训练循环中额外计算
-    # ----------------------------------------------------------------
-    loss_history = []
-    rec_loss_history = []
-    vq_loss_history = []
-    token_accuracy_history = []
-    exact_match_history = []
-    codebook_perplexity_history = []
-    used_code_count_history = []
-    dominant_code_ratio_history = []
-    encoder_grad_norm_history = []
-    codebook_grad_norm_history = []
-    decoder_grad_norm_history = []
-    logit_abs_max_history = []
-    z_e_norm_history = []
-    quantization_mse_history = []
+    history = TrainingHistory()
 
     logger.info("开始训练: %d epochs", config.phase1_epochs)
+    logger.info("Phase A (连续潜在预训练): epochs 1-%d, loss=L_rec only", config.pretrain_epochs)
 
     for epoch in tqdm(range(1, config.phase1_epochs + 1), desc="Training Epochs"):
-        encoder.train()
-        codebook.train()
-        decoder.train()
+        is_phase_a = epoch <= config.pretrain_epochs
+        # 在 Phase A 最后一个 epoch 收集 z_e 用于 k-means 初始化
+        collect_z_e = (epoch == config.pretrain_epochs)
 
-        epoch_loss = 0.0
-        epoch_rec_loss = 0.0
-        epoch_vq_loss = 0.0
-        epoch_token_correct = 0
-        epoch_token_total = 0
-        epoch_exact_match = 0
-        epoch_sample_total = 0
-        epoch_code_counts = np.zeros(config.num_archetypes, dtype=np.int64)
-        epoch_encoder_grad = 0.0
-        epoch_codebook_grad = 0.0
-        epoch_decoder_grad = 0.0
-        epoch_logit_abs_max = 0.0
-        epoch_z_e_norm_sum = 0.0
-        epoch_quantization_mse_sum = 0.0
-        num_batches = 0
-
-        for s_demo, a_demo, r_demo in dataloader:
-            s_demo = s_demo.to(device)   # (B, h, state_dim)
-            a_demo = a_demo.to(device)   # (B, h)
-            r_demo = r_demo.to(device)   # (B, h)
-
-            # Phase I, Step 1: Encode
-            z_e = encoder(s_demo, a_demo, r_demo)  # (B, latent_dim)
-
-            # Phase I, Step 2: Quantize
-            z_q_st, indices, commitment_loss = codebook.quantize(z_e)
-            # z_q_st: straight-through (B, latent_dim)
-            # commitment_loss: ||sg[z_e] - z_q||²
-
-            # Phase I, Step 3: Decode
-            action_logits = decoder(s_demo, z_q_st)  # (B, h, action_dim)
-            pred_actions = torch.argmax(action_logits, dim=-1)
-
-            # L_rec: 交叉熵重建损失
-            # reshape for cross-entropy: (B*h, action_dim) vs (B*h,)
-            logits_flat = action_logits.reshape(-1, config.action_dim)
-            targets_flat = a_demo.reshape(-1)
-            rec_loss = ce_loss_fn(logits_flat, targets_flat)
-
-            # β₀ × ||z_e - sg[z_q]||²
-            z_q_detached = z_q_st.detach()  # sg[z_q] — stop gradient on z_q
-            encoder_commitment = config.vq_beta0 * torch.mean(
-                (z_e - z_q_detached) ** 2
+        if epoch == config.pretrain_epochs + 1:
+            logger.info(
+                "Phase B (VQ 训练): epochs %d-%d, full VQ loss",
+                config.pretrain_epochs + 1, config.phase1_epochs,
             )
 
-            # 总损失: L = L_rec + commitment_loss + β₀ × encoder_commitment
-            # = L_rec + ||sg[z_e] - z_q||² + 0.25 × ||z_e - sg[z_q]||²
-            total_loss = rec_loss + commitment_loss + encoder_commitment
+        metrics, z_e_all = train_one_epoch(
+            dataloader=dataloader,
+            encoder=encoder,
+            codebook=codebook,
+            decoder=decoder,
+            optimizer=optimizer,
+            ce_loss_fn=ce_loss_fn,
+            config=config,
+            device=device,
+            is_phase_a=is_phase_a,
+            collect_z_e=collect_z_e,
+        )
 
-            optimizer.zero_grad()
-            total_loss.backward()
+        # Phase A → Phase B 过渡: 用 k-means 初始化码本
+        if collect_z_e and z_e_all is not None:
+            codebook.init_from_data(z_e_all)
 
-            epoch_encoder_grad += compute_grad_norm(encoder.parameters())
-            epoch_codebook_grad += compute_grad_norm(codebook.parameters())
-            epoch_decoder_grad += compute_grad_norm(decoder.parameters())
+        summary = metrics.summarize()
+        history.append_from_summary(summary)
 
-            optimizer.step()
-
-            batch_size = int(s_demo.shape[0])
-            epoch_loss += total_loss.item()
-            epoch_rec_loss += rec_loss.item()
-            epoch_vq_loss += (commitment_loss.item() + encoder_commitment.item())
-            epoch_token_correct += int((pred_actions == a_demo).sum().item())
-            epoch_token_total += int(a_demo.numel())
-            epoch_exact_match += int(torch.all(pred_actions == a_demo, dim=1).sum().item())
-            epoch_sample_total += batch_size
-            epoch_code_counts += np.bincount(indices.detach().cpu().numpy(), minlength=config.num_archetypes)
-            epoch_logit_abs_max = max(epoch_logit_abs_max, float(action_logits.abs().max().item()))
-            epoch_z_e_norm_sum += float(torch.norm(z_e, dim=1).mean().item()) * batch_size
-            epoch_quantization_mse_sum += float(torch.mean((z_e - z_q_detached) ** 2).item()) * batch_size
-            num_batches += 1
-
-        avg_loss = epoch_loss / max(num_batches, 1)
-        avg_rec = epoch_rec_loss / max(num_batches, 1)
-        avg_vq = epoch_vq_loss / max(num_batches, 1)
-        code_usage_summary = summarize_code_usage(epoch_code_counts)
-        token_accuracy = float(epoch_token_correct / max(epoch_token_total, 1))
-        exact_match_rate = float(epoch_exact_match / max(epoch_sample_total, 1))
-        avg_encoder_grad = float(epoch_encoder_grad / max(num_batches, 1))
-        avg_codebook_grad = float(epoch_codebook_grad / max(num_batches, 1))
-        avg_decoder_grad = float(epoch_decoder_grad / max(num_batches, 1))
-        avg_z_e_norm = float(epoch_z_e_norm_sum / max(epoch_sample_total, 1))
-        avg_quantization_mse = float(epoch_quantization_mse_sum / max(epoch_sample_total, 1))
-
-        loss_history.append(avg_loss)
-        rec_loss_history.append(avg_rec)
-        vq_loss_history.append(avg_vq)
-        token_accuracy_history.append(token_accuracy)
-        exact_match_history.append(exact_match_rate)
-        codebook_perplexity_history.append(code_usage_summary["codebook_perplexity"])
-        used_code_count_history.append(code_usage_summary["used_code_count"])
-        dominant_code_ratio_history.append(code_usage_summary["dominant_code_ratio"])
-        encoder_grad_norm_history.append(avg_encoder_grad)
-        codebook_grad_norm_history.append(avg_codebook_grad)
-        decoder_grad_norm_history.append(avg_decoder_grad)
-        logit_abs_max_history.append(epoch_logit_abs_max)
-        z_e_norm_history.append(avg_z_e_norm)
-        quantization_mse_history.append(avg_quantization_mse)
-
-        # 每 10 个 epoch 或首尾 epoch 输出日志
         if epoch == 1 or epoch % 10 == 0 or epoch == config.phase1_epochs:
             logger.info(
-                "Epoch %3d/%d — total_loss=%.4f, rec_loss=%.4f, vq_loss=%.4f, token_acc=%.4f, exact_match=%.4f, perplexity=%.4f, used_codes=%d",
-                epoch,
-                config.phase1_epochs,
-                avg_loss,
-                avg_rec,
-                avg_vq,
-                token_accuracy,
-                exact_match_rate,
-                code_usage_summary["codebook_perplexity"],
-                code_usage_summary["used_code_count"],
+                "Epoch %3d/%d — total_loss=%.4f, rec_loss=%.4f, vq_loss=%.4f, "
+                "token_acc=%.4f, exact_match=%.4f, perplexity=%.4f, used_codes=%d",
+                epoch, config.phase1_epochs,
+                summary["avg_loss"], summary["avg_rec"], summary["avg_vq"],
+                summary["token_accuracy"], summary["exact_match_rate"],
+                summary["codebook_perplexity"], summary["used_code_count"],
             )
 
-        # NaN 检测
-        if np.isnan(avg_loss):
+        if np.isnan(summary["avg_loss"]):
             logger.error("训练 loss 发散 (NaN)，在 epoch %d 终止训练", epoch)
             break
 
-    training_monitor = {
-        "loss_history": loss_history,
-        "rec_loss_history": rec_loss_history,
-        "vq_loss_history": vq_loss_history,
-        "token_accuracy_history": token_accuracy_history,
-        "exact_match_history": exact_match_history,
-        "codebook_perplexity_history": codebook_perplexity_history,
-        "used_code_count_history": used_code_count_history,
-        "dominant_code_ratio_history": dominant_code_ratio_history,
-        "encoder_grad_norm_history": encoder_grad_norm_history,
-        "codebook_grad_norm_history": codebook_grad_norm_history,
-        "decoder_grad_norm_history": decoder_grad_norm_history,
-        "logit_abs_max_history": logit_abs_max_history,
-        "z_e_norm_history": z_e_norm_history,
-        "quantization_mse_history": quantization_mse_history,
-    }
+    return history
 
-    # ----------------------------------------------------------------
-    # Step 5: 保存模型到 result/phase1_archetype_discovery/
-    # ----------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 保存 & 日志
+# ---------------------------------------------------------------------------
+
+def save_checkpoint(
+    *,
+    config: Any,
+    pair: str,
+    encoder: VQEncoder,
+    codebook: VQCodebook,
+    decoder: VQDecoder,
+    history: TrainingHistory,
+    train_rows: int,
+) -> str:
+    """保存模型 checkpoint 到 result/phase1_archetype_discovery/，返回保存路径。"""
     save_dir = os.path.join(config.result_dir, pair, "phase1_archetype_discovery")
     os.makedirs(save_dir, exist_ok=True)
 
@@ -620,8 +713,8 @@ def main() -> None:
             "encoder": encoder.state_dict(),
             "codebook": codebook.state_dict(),
             "decoder": decoder.state_dict(),
-            "loss_history": loss_history,
-            "training_monitor": training_monitor,
+            "loss_history": history.loss,
+            "training_monitor": history.to_dict(),
             "config": {
                 "state_dim": config.state_dim,
                 "action_dim": config.action_dim,
@@ -629,6 +722,7 @@ def main() -> None:
                 "num_archetypes": config.num_archetypes,
                 "lstm_hidden_dim": config.lstm_hidden_dim,
                 "phase1_epochs": config.phase1_epochs,
+                "pretrain_epochs": config.pretrain_epochs,
                 "learning_rate": config.learning_rate,
                 "batch_size": config.batch_size,
                 "vq_beta0": config.vq_beta0,
@@ -644,25 +738,18 @@ def main() -> None:
         save_path,
     )
     logger.info("模型已保存到 %s", save_path)
+    return save_path
 
-    # ----------------------------------------------------------------
-    # Step 6: 执行 Phase I 验证并保存报告
-    # ----------------------------------------------------------------
-    report_path = os.path.join(save_dir, "phase1_validation_report.json")
-    validation_report = validate_phase1_artifacts(
-        config=config,
-        pair=pair,
-        trajectory_path=traj_path,
-        model_path=save_path,
-        report_path=report_path,
-        env=env,
-        device=device,
-        dp_check_limit=256,
-    )
 
-    # ----------------------------------------------------------------
-    # Step 7: 输出训练日志摘要
-    # ----------------------------------------------------------------
+def log_training_summary(
+    pair: str,
+    loss_history: List[float],
+    traj_path: str,
+    save_path: str,
+    report_path: str,
+    validation_report: dict,
+) -> None:
+    """输出训练完成后的日志摘要。"""
     logger.info("=" * 50)
     logger.info("Phase I 训练完成: pair=%s", pair)
     logger.info("最终 loss: %.4f", loss_history[-1] if loss_history else float("nan"))
@@ -680,6 +767,73 @@ def main() -> None:
     if validation_report["status"]["soft_warnings"]:
         logger.warning("Phase I 验证软告警: %s", validation_report["status"]["soft_warnings"])
     logger.info("=" * 50)
+
+
+# ---------------------------------------------------------------------------
+# 入口
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    # Step 0: 解析配置
+    config = parse_args()
+    pair = config.pairs[0]
+    assert_paper_phase1_settings(config, pair)
+    set_reproducibility_seed(config.phase1_sampling_seed)
+
+    logger.info("Phase I 训练开始: pair=%s", pair)
+    logger.info(
+        "严格论文主线配置已通过守卫检查: epochs=%d, batch_size=%d, lr=%.1e, latent_dim=%d, "
+        "num_archetypes=%d, num_trajectories=%d, vq_beta0=%.2f, sampling_seed=%d",
+        config.phase1_epochs, config.batch_size, config.learning_rate, config.latent_dim,
+        config.num_archetypes, config.num_trajectories, config.vq_beta0, config.phase1_sampling_seed,
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("使用设备: %s", device)
+
+    # Step 1: 加载数据 & 环境
+    env, train_rows = load_data_and_env(config, pair)
+
+    # Step 2: 准备轨迹数据集
+    dataset, traj_path = prepare_trajectory_dataset(config, pair, env, train_rows)
+    logger.info("Dataset 大小: %d 条轨迹", len(dataset))
+
+    dataloader = DataLoader(
+        dataset, batch_size=config.batch_size, shuffle=True, drop_last=False,
+    )
+
+    # Step 3: 初始化模型
+    encoder, codebook, decoder = build_models(config, device)
+
+    # Step 4: 训练
+    history = run_training_loop(
+        dataloader=dataloader,
+        encoder=encoder,
+        codebook=codebook,
+        decoder=decoder,
+        config=config,
+        device=device,
+    )
+
+    # Step 5: 保存模型
+    save_path = save_checkpoint(
+        config=config, pair=pair,
+        encoder=encoder, codebook=codebook, decoder=decoder,
+        history=history, train_rows=train_rows,
+    )
+
+    # Step 6: 验证
+    save_dir = os.path.join(config.result_dir, pair, "phase1_archetype_discovery")
+    report_path = os.path.join(save_dir, "phase1_validation_report.json")
+    validation_report = validate_phase1_artifacts(
+        config=config, pair=pair,
+        trajectory_path=traj_path, model_path=save_path,
+        report_path=report_path, env=env, device=device,
+        dp_check_limit=256,
+    )
+
+    # Step 7: 日志摘要
+    log_training_summary(pair, history.loss, traj_path, save_path, report_path, validation_report)
 
 
 if __name__ == "__main__":

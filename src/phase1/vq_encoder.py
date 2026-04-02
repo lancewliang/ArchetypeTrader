@@ -48,17 +48,22 @@ class VQEncoder(nn.Module):
             batch_first=True,
         )
 
-        # 线性投影: 最后隐藏状态 → z_e
+        # Temporal attention pooling: learned attention over all LSTM hidden states
+        # bias=False because softmax is shift-invariant (bias cancels out)
+        self.attn_score = nn.Linear(hidden_dim, 1, bias=False)
+
+        # 线性投影: attention-pooled context → z_e
         self.projection = nn.Linear(hidden_dim, latent_dim)
 
     def forward(self, s_demo: Tensor, a_demo: Tensor, r_demo: Tensor) -> Tensor:
         """编码示范轨迹为连续嵌入 z_e。
 
-        # Section 4.1: LSTM-based encoder
+        # Section 4.1: LSTM-based encoder with temporal attention pooling
         # 1. One-hot 编码 a_demo
         # 2. 拼接 [s_demo, one_hot(a_demo), r_demo] 沿特征维度
-        # 3. 送入 LSTM，取最后隐藏状态
-        # 4. 线性投影到 latent_dim
+        # 3. 送入 LSTM，取全部隐藏状态 H
+        # 4. Temporal attention pooling: alpha = softmax(attn_score(H)), context = sum(alpha * H)
+        # 5. 线性投影到 latent_dim
 
         Args:
             s_demo: 状态序列 (batch, h, state_dim)
@@ -77,12 +82,17 @@ class VQEncoder(nn.Module):
         lstm_input = torch.cat([s_demo, a_onehot, r_expanded], dim=-1)
         # lstm_input: (batch, h, state_dim + action_dim + 1)
 
-        # Step 3: LSTM 编码，取最后隐藏状态
-        _, (h_n, _) = self.lstm(lstm_input)
-        # h_n: (1, batch, hidden_dim) — 单层单向 LSTM
-        last_hidden = h_n.squeeze(0)  # (batch, hidden_dim)
+        # Step 3: LSTM 编码，取全部隐藏状态用于 temporal attention pooling
+        H, _ = self.lstm(lstm_input)
+        # H: (batch, h, hidden_dim) — 所有时间步的隐藏状态
 
-        # Step 4: 线性投影到潜在空间
-        z_e = self.projection(last_hidden)  # (batch, latent_dim)
+        # Step 4: Temporal attention pooling
+        # 计算每个时间步的注意力分数并归一化
+        alpha = torch.softmax(self.attn_score(H), dim=1)  # (batch, h, 1)
+        # 加权求和得到上下文向量
+        context = torch.sum(alpha * H, dim=1)  # (batch, hidden_dim)
+
+        # Step 5: 线性投影到潜在空间
+        z_e = self.projection(context)  # (batch, latent_dim)
 
         return z_e

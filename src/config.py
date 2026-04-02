@@ -39,6 +39,7 @@ class Config:
     num_trajectories: int = 30000  # 论文 Phase I 默认采样 30k DP trajectories
     phase1_epochs: int = 100
     phase1_sampling_seed: int = 42  # Phase I 轨迹采样随机种子，用于结果复现
+    pretrain_epochs: int = 10  # 连续潜在预训练轮数（无 VQ 量化）
 
     # Phase II 配置
     phase2_total_steps: int = 8000*100
@@ -125,6 +126,12 @@ def parse_args(argv: list | None = None) -> Config:
         default=None,
         help="Phase I 轨迹采样随机种子",
     )
+    parser.add_argument(
+        "--pretrain-epochs",
+        type=int,
+        default=None,
+        help="连续潜在预训练轮数",
+    )
 
     # Phase II
     parser.add_argument(
@@ -182,6 +189,7 @@ def parse_args(argv: list | None = None) -> Config:
         "latent_dim": getattr(args, "latent_dim", None),
         "vq_beta0": getattr(args, "vq_beta0", None),
         "phase1_sampling_seed": getattr(args, "phase1_sampling_seed", None),
+        "pretrain_epochs": getattr(args, "pretrain_epochs", None),
         "phase2_total_steps": getattr(args, "phase2_total_steps", None),
         "selection_alpha": getattr(args, "selection_alpha", None),
         "phase3_total_steps": getattr(args, "phase3_total_steps", None),
