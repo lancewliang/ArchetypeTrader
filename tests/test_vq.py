@@ -112,12 +112,18 @@ class TestVQEncoderInit:
         assert enc.lstm.hidden_size == 128
         assert enc.projection.in_features == 128
         assert enc.projection.out_features == 16
+        # Temporal attention pooling layer
+        assert enc.attn_score.in_features == 128
+        assert enc.attn_score.out_features == 1
 
     def test_custom_params(self):
         enc = VQEncoder(state_dim=10, action_dim=5, hidden_dim=64, latent_dim=8)
         assert enc.lstm.input_size == 10 + 5 + 1
         assert enc.lstm.hidden_size == 64
         assert enc.projection.out_features == 8
+        # Temporal attention pooling layer with custom hidden_dim
+        assert enc.attn_score.in_features == 64
+        assert enc.attn_score.out_features == 1
 
 
 class TestVQEncoderForward:
@@ -172,6 +178,71 @@ class TestVQEncoderForward:
         z1 = enc(s1, a, r)
         z2 = enc(s2, a, r)
         assert not torch.allclose(z1, z2)
+
+
+class TestVQEncoderAttentionPooling:
+    """Temporal attention pooling mechanism tests.
+
+    Validates: Requirements 2.1, 2.3, 3.1
+    """
+
+    def test_attention_weights_sum_to_one(self):
+        """Attention weights alpha should sum to 1 along the seq_len dimension."""
+        enc = VQEncoder(state_dim=45)
+        s = torch.randn(4, 72, 45)
+        a = torch.randint(0, 3, (4, 72))
+        r = torch.randn(4, 72)
+
+        # Run LSTM to get H, then compute attention weights
+        a_onehot = torch.nn.functional.one_hot(a.long(), num_classes=3).float()
+        r_expanded = r.unsqueeze(-1)
+        lstm_input = torch.cat([s, a_onehot, r_expanded], dim=-1)
+        with torch.no_grad():
+            H, _ = enc.lstm(lstm_input)
+            alpha = torch.softmax(enc.attn_score(H), dim=1)  # (batch, h, 1)
+
+        # Sum along seq_len dim should be 1 for each batch element
+        alpha_sum = alpha.sum(dim=1)  # (batch, 1)
+        assert torch.allclose(alpha_sum, torch.ones_like(alpha_sum), atol=1e-5), (
+            f"Attention weights do not sum to 1: {alpha_sum}"
+        )
+
+    def test_attention_weights_non_negative(self):
+        """Attention weights (softmax output) should be non-negative."""
+        enc = VQEncoder(state_dim=45)
+        s = torch.randn(4, 72, 45)
+        a = torch.randint(0, 3, (4, 72))
+        r = torch.randn(4, 72)
+
+        a_onehot = torch.nn.functional.one_hot(a.long(), num_classes=3).float()
+        r_expanded = r.unsqueeze(-1)
+        lstm_input = torch.cat([s, a_onehot, r_expanded], dim=-1)
+        with torch.no_grad():
+            H, _ = enc.lstm(lstm_input)
+            alpha = torch.softmax(enc.attn_score(H), dim=1)
+
+        assert (alpha >= 0).all(), "Attention weights contain negative values"
+
+    def test_seq_len_one_produces_valid_output(self):
+        """Edge case: seq_len=1 should produce valid z_e of shape (batch, 16)."""
+        enc = VQEncoder(state_dim=45)
+        s = torch.randn(2, 1, 45)
+        a = torch.randint(0, 3, (2, 1))
+        r = torch.randn(2, 1)
+        z_e = enc(s, a, r)
+        assert z_e.shape == (2, 16)
+
+    def test_gradient_flows_through_attention(self):
+        """Gradients should flow through the attn_score layer."""
+        enc = VQEncoder(state_dim=45)
+        enc.zero_grad()
+        s = torch.randn(2, 72, 45)
+        a = torch.randint(0, 3, (2, 72))
+        r = torch.randn(2, 72)
+        z_e = enc(s, a, r)
+        z_e.sum().backward()
+        assert enc.attn_score.weight.grad is not None
+        assert enc.attn_score.weight.grad.abs().sum() > 0
 
 
 from src.phase1.vq_decoder import VQDecoder
@@ -421,6 +492,210 @@ class TestPropVQLossCorrectness:
         # 总损失分解验证
         total_loss = dummy_rec_loss + commitment_loss + beta0 * encoder_loss
         expected_total = dummy_rec_loss + expected_commitment + beta0 * encoder_loss
+        assert torch.allclose(total_loss, expected_total, atol=1e-5), (
+            f"total_loss={total_loss.item():.6f} != "
+            f"expected_total={expected_total.item():.6f}"
+        )
+
+
+# Feature: vq-code-collapse-fix, Property 1: Bug Condition — Encoder Produces Diverse z_e Vectors
+class TestPropBugConditionDiverseZe:
+    """Property 1: Bug Condition — Encoder Produces Diverse z_e Vectors
+
+    For any batch of distinct demonstration trajectories processed by the encoder,
+    the output z_e vectors SHALL have non-negligible variance across the batch dimension,
+    and when quantized, SHALL map to more than one codebook entry.
+
+    On UNFIXED code this test is EXPECTED TO FAIL — failure confirms the
+    last-hidden-state bottleneck bug exists.
+
+    **Validates: Requirements 2.1, 2.3**
+    """
+
+    @given(
+        batch_size=st.integers(min_value=16, max_value=32),
+        seq_len=st.integers(min_value=1, max_value=72),
+    )
+    @settings(max_examples=50, deadline=None)
+    def test_prop_encoder_produces_diverse_z_e(self, batch_size: int, seq_len: int):
+        encoder = VQEncoder(state_dim=45)
+
+        # Generate diverse random trajectories
+        s_demo = torch.randn(batch_size, seq_len, 45)
+        a_demo = torch.randint(0, 3, (batch_size, seq_len))
+        r_demo = torch.randn(batch_size, seq_len)
+
+        with torch.no_grad():
+            z_e = encoder(s_demo, a_demo, r_demo)
+
+        # z_e variance across the batch dimension should be non-negligible
+        z_e_variance = z_e.var(dim=0).mean()
+        assert z_e_variance.item() > 1e-4, (
+            f"z_e variance too low: {z_e_variance.item():.2e} "
+            f"(batch_size={batch_size}, seq_len={seq_len}). "
+            f"Encoder produces near-constant z_e — last-hidden-state bottleneck bug."
+        )
+
+        # Quantize using a codebook initialized near the z_e distribution
+        # to avoid Voronoi cell artifacts from random codebook init
+        codebook = VQCodebook(num_codes=10, code_dim=16)
+        with torch.no_grad():
+            # Re-initialize codebook embeddings from z_e samples + noise
+            # so entries are spread across the z_e manifold
+            z_e_mean = z_e.mean(dim=0)
+            z_e_std = z_e.std(dim=0).clamp(min=1e-6)
+            codebook.embeddings.weight.copy_(
+                z_e_mean.unsqueeze(0) + z_e_std.unsqueeze(0) * torch.randn(10, 16)
+            )
+            z_q_st, indices, _ = codebook.quantize(z_e)
+        unique_count = len(torch.unique(indices))
+        assert unique_count > 1, (
+            f"All {batch_size} samples map to the same codebook entry "
+            f"(index={indices[0].item()}). unique_count={unique_count}. "
+            f"Complete codebook collapse — confirms the bug."
+        )
+
+
+# Feature: vq-code-collapse-fix, Property 2: Preservation — Output Shape and Gradient Flow Invariants
+class TestPropPreservationShapeGradient:
+    """Property 2: Preservation — Output Shape and Gradient Flow Invariants
+
+    For any input trajectories (s_demo, a_demo, r_demo) with arbitrary batch size
+    and sequence length, the encoder SHALL produce z_e of shape (batch, 16) with
+    gradients flowing through all encoder parameters, and the full pipeline
+    (encoder → codebook → decoder) SHALL produce action logits of shape (batch, h, 3)
+    with the VQ loss formula unchanged during the VQ phase.
+
+    **Validates: Requirements 3.1, 3.2, 3.3, 3.4**
+    """
+
+    @given(
+        batch_size=st.integers(min_value=1, max_value=32),
+        seq_len=st.integers(min_value=1, max_value=72),
+    )
+    @settings(max_examples=50, deadline=None)
+    def test_prop_encoder_output_shape(self, batch_size: int, seq_len: int):
+        """z_e shape is always (batch_size, 16) for arbitrary inputs.
+
+        **Validates: Requirements 3.1**
+        """
+        torch.manual_seed(42)
+        encoder = VQEncoder(state_dim=45)
+
+        s = torch.randn(batch_size, seq_len, 45)
+        a = torch.randint(0, 3, (batch_size, seq_len))
+        r = torch.randn(batch_size, seq_len)
+
+        z_e = encoder(s, a, r)
+        assert z_e.shape == (batch_size, 16), (
+            f"Expected z_e.shape=({batch_size}, 16), got {z_e.shape}"
+        )
+
+    @given(
+        batch_size=st.integers(min_value=1, max_value=32),
+        seq_len=st.integers(min_value=2, max_value=72),
+    )
+    @settings(max_examples=50, deadline=None)
+    def test_prop_gradient_flow_all_encoder_params(self, batch_size: int, seq_len: int):
+        """Gradients exist on all encoder parameters after backward pass.
+
+        Note: seq_len >= 2 so the LSTM recurrent weight (weight_hh_l0) receives
+        non-zero gradients. At seq_len=1 there is no recurrence step, so that
+        weight legitimately has zero gradient.
+
+        **Validates: Requirements 3.1**
+        """
+        torch.manual_seed(42)
+        encoder = VQEncoder(state_dim=45)
+        encoder.zero_grad()
+
+        s = torch.randn(batch_size, seq_len, 45)
+        a = torch.randint(0, 3, (batch_size, seq_len))
+        r = torch.randn(batch_size, seq_len)
+
+        z_e = encoder(s, a, r)
+        loss = z_e.sum()
+        loss.backward()
+
+        for name, param in encoder.named_parameters():
+            assert param.grad is not None, (
+                f"Encoder param '{name}' has no gradient"
+            )
+            assert param.grad.abs().sum() > 0, (
+                f"Encoder param '{name}' has zero gradient"
+            )
+
+    @given(
+        batch_size=st.integers(min_value=1, max_value=32),
+        seq_len=st.integers(min_value=1, max_value=72),
+    )
+    @settings(max_examples=50, deadline=None)
+    def test_prop_full_pipeline_output_shape(self, batch_size: int, seq_len: int):
+        """Full pipeline encoder → codebook → decoder produces (batch, h, 3) logits.
+
+        **Validates: Requirements 3.2, 3.3**
+        """
+        torch.manual_seed(42)
+        encoder = VQEncoder(state_dim=45)
+        codebook = VQCodebook(num_codes=10, code_dim=16)
+        decoder = VQDecoder(state_dim=45)
+
+        s = torch.randn(batch_size, seq_len, 45)
+        a = torch.randint(0, 3, (batch_size, seq_len))
+        r = torch.randn(batch_size, seq_len)
+
+        with torch.no_grad():
+            z_e = encoder(s, a, r)
+            z_q_st, indices, commitment_loss = codebook.quantize(z_e)
+            logits = decoder(s, z_q_st)
+
+        assert z_e.shape == (batch_size, 16), (
+            f"Expected z_e.shape=({batch_size}, 16), got {z_e.shape}"
+        )
+        assert z_q_st.shape == (batch_size, 16), (
+            f"Expected z_q_st.shape=({batch_size}, 16), got {z_q_st.shape}"
+        )
+        assert indices.shape == (batch_size,), (
+            f"Expected indices.shape=({batch_size},), got {indices.shape}"
+        )
+        assert (indices >= 0).all() and (indices < 10).all(), (
+            f"Indices out of range [0, 10): {indices}"
+        )
+        assert logits.shape == (batch_size, seq_len, 3), (
+            f"Expected logits.shape=({batch_size}, {seq_len}, 3), got {logits.shape}"
+        )
+
+    @given(
+        batch_size=st.integers(min_value=1, max_value=32),
+    )
+    @settings(max_examples=50, deadline=None)
+    def test_prop_vq_loss_decomposition_preservation(self, batch_size: int):
+        """VQ loss formula L = L_rec + ||sg[z_e] - z_q||² + β₀ × ||z_e - sg[z_q]||² holds.
+
+        **Validates: Requirements 3.4**
+        """
+        torch.manual_seed(42)
+        codebook = VQCodebook(num_codes=10, code_dim=16)
+        z_e = torch.randn(batch_size, 16, requires_grad=True)
+
+        z_q_st, indices, commitment_loss = codebook.quantize(z_e)
+
+        # Recompute expected components
+        z_q = codebook.embeddings(indices)
+        expected_commitment = torch.mean((z_e.detach() - z_q) ** 2)
+        beta0 = 0.25
+        encoder_commitment = torch.mean((z_e - z_q.detach()) ** 2)
+
+        # Verify commitment_loss matches expected
+        assert torch.allclose(commitment_loss, expected_commitment, atol=1e-5), (
+            f"commitment_loss={commitment_loss.item():.6f} != "
+            f"expected={expected_commitment.item():.6f}"
+        )
+
+        # Verify total loss decomposition
+        dummy_rec_loss = torch.tensor(1.0)
+        total_loss = dummy_rec_loss + commitment_loss + beta0 * encoder_commitment
+        expected_total = dummy_rec_loss + expected_commitment + beta0 * encoder_commitment
         assert torch.allclose(total_loss, expected_total, atol=1e-5), (
             f"total_loss={total_loss.item():.6f} != "
             f"expected_total={expected_total.item():.6f}"

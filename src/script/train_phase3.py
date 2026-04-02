@@ -193,7 +193,6 @@ def run_horizon_with_refinement(
     policy_adapter: PolicyAdapter,
     e_a_sel: np.ndarray,
     device: torch.device,
-    horizon: int,
 ):
     """在一个 horizon 内执行 step 级别的精炼训练。
 
@@ -213,22 +212,21 @@ def run_horizon_with_refinement(
         policy_adapter: 策略适配器
         e_a_sel: 选定原型的嵌入向量 (code_dim,)
         device: 计算设备
-        horizon: horizon 长度
 
     Returns:
-        actual_return: 精炼后的 horizon 总收益 R
-        final_actions: 实际执行的动作序列 (h,)
-        log_probs: 每步的 log_prob 列表
-        values: 每步的 value 列表
-        a_refs: 每步的 a_ref 列表
+        actual_return: 精炼后的完整 horizon 总收益 R
+        log_probs: 每步的 log_prob 列表（仅 RL episode 步）
+        values: 每步的 value 列表（仅 RL episode 步）
+        a_refs: 每步的 a_ref 列表（仅 RL episode 步）
+        adjusted_step: 实际生效调整的步索引，-1 表示无调整
     """
     state = env.reset(horizon_idx)
-    policy_adapter.reset()
 
     h = len(base_actions)
+    has_adjusted = False
+    adjusted_step = -1  # 实际生效调整的步索引，-1 表示无调整
     actual_return = 0.0
     cumulative_reward = 0.0  # R_arche: 逐步累积的实时收益
-    final_actions = []
     log_probs = []
     values = []
     a_refs = []
@@ -271,7 +269,8 @@ def run_horizon_with_refinement(
         a_ref = a_ref_idx.item() - 1  # 0→-1, 1→0, 2→1
 
         # Section 4.3 / Eq. 6: Policy adapter 计算最终动作
-        a_final = policy_adapter.compute_final_action(a_base, a_base_prev, a_ref)
+        prev_has_adjusted = has_adjusted
+        a_final, has_adjusted = policy_adapter.compute_final_action(a_base, a_base_prev, a_ref, has_adjusted)
 
         # 在 env 中执行最终动作
         next_state, reward, done, _ = env.step(a_final)
@@ -279,7 +278,6 @@ def run_horizon_with_refinement(
         cumulative_reward += reward  # 更新 R_arche: 逐步累积实时收益
 
         # 收集训练数据
-        final_actions.append(a_final)
         log_probs.append(log_prob)
         values.append(value.squeeze())
         a_refs.append(a_ref)
@@ -291,7 +289,21 @@ def run_horizon_with_refinement(
         if done:
             break
 
-    return actual_return, final_actions, log_probs, values, a_refs
+        # 论文: "the RL episode terminates as soon as the adapter chooses
+        # a non-zero action"
+        # RL episode 终止，但仍需执行剩余 base actions 以计算完整
+        # horizon return R（用于 Eq.8 的 regret reward）
+        if has_adjusted and not prev_has_adjusted:
+            adjusted_step = step_idx
+            for remaining_idx in range(step_idx + 1, h):
+                a_remaining = int(base_actions[remaining_idx])
+                _, reward_remaining, done_remaining, _ = env.step(a_remaining)
+                actual_return += reward_remaining
+                if done_remaining:
+                    break
+            break
+
+    return actual_return, log_probs, values, a_refs, adjusted_step
 
 
 def main() -> None:
@@ -328,16 +340,12 @@ def main() -> None:
     # Step 2: 加载特征数据，初始化 TradingEnv
     # ----------------------------------------------------------------
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
-    pipeline = FeaturePipeline(config.data_dir, pair, config)
-    states = pipeline.get_state_vector()  # (T, 45)
+    pipeline = FeaturePipeline(config.data_dir, pair)
+    train_df, _, _ = pipeline.get_state_vector()
+    train_prices_df, _, _ = pipeline.get_prices()
 
-    # 使用第一列作为价格代理
-    # [NOTE: 论文未明确指定价格列，使用 states 第 0 列作为价格]
-    prices = states[:, 0].copy()
-
-    # 按时间划分，仅使用训练集
-    train_states, _, _ = pipeline.split_by_date(states)
-    train_prices = prices[: len(train_states)]
+    train_states = train_df.to_numpy()
+    train_prices = train_prices_df["close"].to_numpy()
 
     logger.info(
         "训练集: states shape=%s, prices shape=%s",
@@ -350,6 +358,7 @@ def main() -> None:
         prices=train_prices,
         pair=pair,
         horizon=config.horizon,
+        states_dataframe=train_df,
     )
     logger.info("TradingEnv 初始化完成: train_horizons=%d", train_env.num_horizons)
 
@@ -436,56 +445,63 @@ def main() -> None:
         R_base = compute_base_return(train_env, h_idx, base_actions)
 
         # Section 4.3: 在 horizon 内执行 step 级别精炼
+        policy_adapter = PolicyAdapter()
         (
             R_actual,
-            final_actions,
             log_probs,
             values,
             a_refs,
+            adjusted_step,
         ) = run_horizon_with_refinement(
             env=train_env,
             horizon_idx=h_idx,
             base_actions=base_actions,
             refinement_agent=refinement_agent,
-            policy_adapter=PolicyAdapter(),
+            policy_adapter=policy_adapter,
             e_a_sel=e_a_sel,
             device=device,
-            horizon=h,
         )
 
         # Section 4.3 / Eq. 7: 计算 top-5 hindsight-optimal adaptations
         # O_top5 = {(τ_opt^n, a_opt^n, R_opt^n)}_{n=1}^{5}
+        horizon_states_list = train_env.states_dataframe[start:end].rows(named=True)
         top5 = compute_top5_hindsight_optimal(
             prices=horizon_prices,
             base_actions=base_actions,
             step_idx=0,
             env=train_env,
+            states=horizon_states_list,
         )
         R_1_opt = top5[0][2] if top5 else R_base  # top5 现在是 (τ_opt, a_opt, R_opt) 三元组
 
-        # Section 4.3 / Eq. 9: 构建 hindsight-optimal 动作序列 â_ref
-        # â_ref_τ = a_opt^n if τ = τ_opt^n, else 0
-        # 用于交叉熵监督损失 L(â_ref, π_ref)
+        # Eq.(9): 构建 hindsight-optimal 动作序列 â_ref
+        # â_ref_τ = a_opt^n if τ = τ_opt^n, else 0 (不调整)
+        # 索引映射: a_ref_idx 0→a_ref=-1, 1→a_ref=0, 2→a_ref=1
+        # 默认 index=1 对应 a_ref=0 (不调整)
         h_actual = len(a_refs)
-        optimal_actions = np.zeros(h_actual, dtype=np.int64)  # 默认 a_ref=0 (不调整)
+        optimal_actions = np.ones(h_actual, dtype=np.int64)  # 默认 index=1 (a_ref=0, 不调整)
         if top5:
-            # 使用 top-1 的 (τ_opt, a_opt) 作为监督信号
-            tau_opt, a_opt, _ = top5[0]
-            if tau_opt < h_actual:
-                # a_opt ∈ {-1, 1} → 映射到索引 {0, 2}，加上 0→1 的偏移
-                optimal_actions[tau_opt] = a_opt + 1  # -1→0, 0→1, 1→2
+            # 使用 top-5 的 (τ_opt, a_opt) 构建监督信号
+            # top5 按 return 降序排列，同一 τ 只取最优的
+            for tau_opt, a_opt, _ in top5:
+                if tau_opt < h_actual and optimal_actions[tau_opt] == 1:
+                    # a_opt ∈ {-1, 1} → 索引 {0, 2}
+                    optimal_actions[tau_opt] = a_opt + 1  # -1→0, 1→2
 
-        # Section 4.3: 计算 regret-aware reward for each step
-        # 论文中 regret reward 是 horizon 级别的，分配给有调整的 step
+        # Eq.(8): regret-aware reward 仅在实际生效的调整步赋值
+        # 其余步（包括被 Eq.6 阻止的非零 a_ref）统一为 0
         step_rewards = []
-        for a_ref in a_refs:
-            r_ref = compute_regret_reward(
-                R=R_actual,
-                R_base=R_base,
-                R_1_opt=R_1_opt,
-                a_ref=a_ref,
-                beta1=beta1,
-            )
+        for idx in range(len(a_refs)):
+            if idx == adjusted_step:
+                r_ref = compute_regret_reward(
+                    R=R_actual,
+                    R_base=R_base,
+                    R_1_opt=R_1_opt,
+                    a_ref=a_refs[idx],
+                    beta1=beta1,
+                )
+            else:
+                r_ref = 0.0
             step_rewards.append(r_ref)
 
         # Section 4.3 / Eq. 9: Actor-Critic 更新
@@ -523,7 +539,7 @@ def main() -> None:
             # 重新前向传播以获取 logits
             ce_loss = torch.tensor(0.0, device=device)
             state_replay = train_env.reset(h_idx)
-            policy_adapter_replay = PolicyAdapter()
+            has_adjusted_replay = False
             a_base_prev_replay = int(base_actions[0])
             cumulative_reward_replay = 0.0
 
@@ -553,8 +569,8 @@ def main() -> None:
 
                 # 重放环境步骤以获取正确的下一状态
                 a_ref_r = a_refs[step_idx]
-                a_final_r = policy_adapter_replay.compute_final_action(
-                    a_base_r, a_base_prev_replay, a_ref_r
+                a_final_r, has_adjusted_replay = policy_adapter.compute_final_action(
+                    a_base_r, a_base_prev_replay, a_ref_r, has_adjusted_replay
                 )
                 next_state_r, reward_r, done_r, _ = train_env.step(a_final_r)
                 cumulative_reward_replay += reward_r

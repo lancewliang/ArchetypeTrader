@@ -210,11 +210,11 @@ def run_horizon_inference(
         step_returns: 每步收益列表
     """
     state = env.reset(horizon_idx)
-    policy_adapter.reset()
 
     h = len(base_actions)
     step_returns = []
     a_base_prev = int(base_actions[0])
+    has_adjusted = False
 
     for step_idx in range(h):
         a_base = int(base_actions[step_idx])
@@ -241,7 +241,7 @@ def run_horizon_inference(
             a_ref_idx = torch.argmax(action_probs, dim=-1).item()
             a_ref = a_ref_idx - 1  # 0→-1, 1→0, 2→1
 
-        a_final = policy_adapter.compute_final_action(a_base, a_base_prev, a_ref)
+        a_final, has_adjusted = policy_adapter.compute_final_action(a_base, a_base_prev, a_ref, has_adjusted)
 
         next_state, reward, done, _ = env.step(a_final)
         step_returns.append(reward)
@@ -284,16 +284,12 @@ def evaluate_pair(
 
     # 加载特征数据
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
-    pipeline = FeaturePipeline(config.data_dir, pair, config)
-    states = pipeline.get_state_vector()  # (T, 45)
+    pipeline = FeaturePipeline(config.data_dir, pair)
+    _, _, test_df = pipeline.get_state_vector()
+    _, _, test_prices_df = pipeline.get_prices()
 
-    # 使用第一列作为价格代理
-    # [NOTE: 论文未明确指定价格列，使用 states 第 0 列作为价格]
-    prices = states[:, 0].copy()
-
-    # 按时间划分，使用测试集
-    _, _, test_states = pipeline.split_by_date(states)
-    test_prices = prices[len(states) - len(test_states):]
+    test_states = test_df.to_numpy()
+    test_prices = test_prices_df["close"].to_numpy()
 
     logger.info(
         "测试集: states shape=%s, prices shape=%s",
@@ -307,6 +303,7 @@ def evaluate_pair(
         prices=test_prices,
         pair=pair,
         horizon=config.horizon,
+        states_dataframe=test_df,
     )
     logger.info("TradingEnv 初始化完成: test_horizons=%d", test_env.num_horizons)
 

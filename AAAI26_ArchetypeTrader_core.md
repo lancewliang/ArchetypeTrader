@@ -124,3 +124,29 @@ J' = \mathbb{E}_{\pi_{\omega}^{\mathrm{ref}}} \left[ \sum_{\tau=0}^{h-1} \left( 
 $$
 
 where $\hat{a}_{\tau}^{\mathrm{ref}}$ denotes the optimal adaptation action ($\hat{a}_{\tau}^{\mathrm{ref}} = a_{\mathrm{opt}}^{n}$ if $\tau = \tau_{\mathrm{opt}}^{n}$, and $0$ otherwise), and $L$ is the cross-entropy loss guiding the refinement policy toward optimal behavior. By optimizing this objective, we encourage the policy adapter to perform high-impact adjustments to the base archetype actions, ultimately yielding a more profitable and robust trading strategy.
+
+### Experiment Setup
+Experiments are conducted on 4 RTX-4090 GPUs. All trades incur a commission of $\delta = 0.02\%$, and the max position $m$ varies by asset (BTC 8, ETH 100, DOT 2500, BNB 200). For archetype discovery, we sample 30k DP trajectories (horizon length $h = 72$) and train a 128-unit VQ encoder–decoder (archetype vector dimension=16, number of archetypes $K = 10$, $\beta_0 = 0.25$) for 100 epochs. Specifically, archetype dimension is set smaller than network dimension to create information bottleneck, forcing the VQ module to distill high-level trading strategies. For archetype selection, an RL selector with $\alpha = 1$ is optimized for 3M steps, and the checkpoint with the best validation performance is retained. For archetype refinement, the regret-aware adapter is trained for 1M steps with $\beta_2 = 1$ and asset-specific $\beta_1$ tuned over $\{0.3, 0.5, 0.7\}$ ($0.5$ for BTC/DOT, $0.7$ for ETH/BNB) via validation. We emphasize that all DP modules are applied solely for training and disabled during inference to avoid future information leakage.
+##  References
+Briola, A.; Turiel, J.; Marcaccioli, R.; Cauderan, A.; and Aste, T. 2021. Deep reinforcement learning for active high frequency trading. arXiv preprint arXiv:2101.07107.
+Chordia, T.; Roll, R.; and Subrahmanyam, A. 2002. Order imbalance, liquidity, and market returns. Journal of Financial Economics, 65(1): 111–130.
+Deng, Y.; Bao, F.; Kong, Y.; Ren, Z.; and Dai, Q. 2016. Deep direct reinforcement learning for financial signal representation and trading. IEEE Transactions on Neural Networks and Learning Systems, 28(3): 653–664.
+Hung, N. H. 2016. Various moving average convergence divergence trading strategies: A comparison. Investment Management and Financial Innovations, (13, Iss. 2): 363–369.
+Jia, W.; Chen, W.; Xiong, L.; and Hongyong, S. 2019. Quantitative trading on stock market based on deep reinforcement learning. In 2019 International Joint Conference on Neural Networks (IJCNN), 1–8.
+Kakushadze, Z. 2016. 101 formulaic alphas. Wilmott,2016(84): 72–81.Krug, T.; Dobaj, J.; and Macher, G. 2022. Enforcing network safety-margins in industrial process control using MACD indicators. In European Conference on Software Process Improvement, 401–413. Springer.
+Li, Y.; Zheng, W.; and Zheng, Z. 2019. Deep robust reinforcement learning for practical algorithmic trading. IEEE Access, 7: 108014–108022.
+Liu, X.-Y.; Yang, H.; Chen, Q.; Zhang, R.; Yang, L.; Xiao, B.; and Wang, C. D. 2020a. FinRL: A deep reinforcement learning library for automated stock trading in quantitative finance. arXiv preprint arXiv:2011.09607.
+Liu, Y.; Liu, Q.; Zhao, H.; Pan, Z.; and Liu, C. 2020b. Adaptive quantitative trading: An imitative deep reinforcement learning approach. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 34, 2128–2135.
+Mnih, V.; Kavukcuoglu, K.; Silver, D.; Rusu, A. A.; Veness, J.; Bellemare, M. G.; Graves, A.; Riedmiller, M.; Fidjeland, A. K.; Ostrovski, G.; et al. 2015. Human-level control through deep reinforcement learning. nature, 518(7540):
+529–533.
+Murphy, J. J. 1999. Technical Analysis of the Futures Markets: A Comprehensive Guide to Trading Methods and Applications, New York Institute of Finance. Prentice-Hall. 
+Peebles, W.; and Xie, S. 2023. Scalable diffusion models with transformers. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 4195–4205.
+Pertsch, K.; Lee, Y.; and Lim, J. 2021. Accelerating reinforcement learning with learned skill priors. In Conference on robot learning, 188–204. PMLR.
+Qin, M.; Sun, S.; Zhang, W.; Xia, H.; Wang, X.; and An, B. 2023. Earnhft: Efficient hierarchical reinforcement learning for high frequency trading. arXiv preprint
+arXiv:2309.12891.
+Schulman, J.; Wolski, F.; Dhariwal, P.; Radford, A.; and Klimov, O. 2017. Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347.
+Van Den Oord, A.; Vinyals, O.; et al. 2017. Neural discrete representation learning. Advances in Neural Information Processing Systems, 30.
+Zhang, Z.; Zohren, S.; and Stephen, R. 2020. Deep reinforcement learning for trading. The Journal of Financial Data Science.
+Zhu, T.; and Zhu, W. 2022. Quantitative trading through random perturbation Q-network with nonlinear transaction costs. Stats, 5(2): 546–560.
+Zong, C.; Wang, C.; Qin, M.; Feng, L.; Wang, X.; and An, B. 2024. MacroHFT: Memory augmented context-aware reinforcement learning on high frequency trading. In Proceedings of the 30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining, 4712–4721.
+Zou, J.; Lou, J.; Wang, B.; and Liu, S. 2024. A novel deep reinforcement learning based automated stock trading system using cascaded lstm networks. Expert Systems with Applications, 242: 122801.

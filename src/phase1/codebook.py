@@ -5,11 +5,15 @@
 # 量化: k = argmin_j ||z_e - e_j||², z_q = e_k
 """
 
+import logging
 from typing import Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
+
+logger = logging.getLogger(__name__)
 
 
 class VQCodebook(nn.Module):
@@ -74,3 +78,93 @@ class VQCodebook(nn.Module):
         commitment_loss = torch.mean((z_e.detach() - z_q) ** 2)
 
         return z_q_st, indices, commitment_loss
+
+    # ------------------------------------------------------------------
+    # Codebook collapse 对策
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def init_from_data(self, z_e_samples: Tensor, n_iter: int = 10) -> None:
+        """用 k-means 从 z_e 样本初始化码本向量。
+
+        在 Phase A 结束后、Phase B 开始前调用，使码本向量位于 z_e 分布的
+        实际区域内，避免随机初始化导致的死码问题。
+
+        Args:
+            z_e_samples: 从 Phase A encoder 收集的 z_e 样本 (N, code_dim)
+            n_iter: k-means 迭代次数 (默认 10)
+        """
+        N = z_e_samples.shape[0]
+        K = self.num_codes
+        device = self.embeddings.weight.device
+
+        if N < K:
+            logger.warning(
+                "z_e 样本数 (%d) 少于码本大小 (%d)，跳过 k-means 初始化", N, K,
+            )
+            return
+
+        z = z_e_samples.to(device).float()
+
+        # k-means++ 初始化: 选择分散的初始中心
+        indices = torch.zeros(K, dtype=torch.long, device=device)
+        indices[0] = torch.randint(N, (1,), device=device)
+        for i in range(1, K):
+            dists = torch.cdist(z, z[indices[:i]]).min(dim=1).values  # (N,)
+            probs = dists / dists.sum()
+            indices[i] = torch.multinomial(probs, 1)
+
+        centroids = z[indices].clone()  # (K, code_dim)
+
+        # k-means 迭代
+        for _ in range(n_iter):
+            # 分配
+            dists = torch.cdist(z, centroids)  # (N, K)
+            assignments = dists.argmin(dim=1)  # (N,)
+            # 更新
+            new_centroids = torch.zeros_like(centroids)
+            for k in range(K):
+                mask = assignments == k
+                if mask.any():
+                    new_centroids[k] = z[mask].mean(dim=0)
+                else:
+                    # 空簇: 从最大簇中随机采样一个点
+                    counts = torch.bincount(assignments, minlength=K)
+                    largest = counts.argmax()
+                    pool = z[assignments == largest]
+                    new_centroids[k] = pool[torch.randint(len(pool), (1,))]
+            centroids = new_centroids
+
+        self.embeddings.weight.copy_(centroids)
+        logger.info("码本已通过 k-means 从 %d 个 z_e 样本初始化 (%d 次迭代)", N, n_iter)
+
+    @torch.no_grad()
+    def reset_dead_codes(self, z_e_batch: Tensor, code_counts: np.ndarray) -> int:
+        """将死码重置为当前 z_e 分布中的采样点（加少量噪声）。
+
+        在每个 Phase B epoch 结束后调用。死码定义为 code_counts == 0 的条目。
+
+        Args:
+            z_e_batch: 当前 epoch 最后一个 batch 的 z_e (batch, code_dim)
+            code_counts: 当前 epoch 各码本条目的使用计数 (num_codes,)
+
+        Returns:
+            重置的死码数量
+        """
+        dead_mask = code_counts == 0
+        dead_indices = np.where(dead_mask)[0]
+        if len(dead_indices) == 0:
+            return 0
+
+        device = self.embeddings.weight.device
+        z = z_e_batch.to(device).float()
+        N = z.shape[0]
+
+        for idx in dead_indices:
+            # 从 z_e 中随机采样一个点，加少量噪声
+            sampled = z[torch.randint(N, (1,), device=device)].squeeze(0)
+            noise = torch.randn_like(sampled) * 1e-3
+            self.embeddings.weight.data[idx] = sampled + noise
+
+        logger.info("重置 %d 个死码 (indices=%s)", len(dead_indices), dead_indices.tolist())
+        return len(dead_indices)

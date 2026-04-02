@@ -26,7 +26,7 @@ import sys
 
 import numpy as np
 import torch
-import torch.nn.functional as F
+from tqdm import tqdm
 
 from src.config import parse_args
 from src.data.feature_pipeline import FeaturePipeline
@@ -52,7 +52,7 @@ def load_phase1_model(config, pair: str, device: torch.device):
         decoder: 加载权重后的 VQDecoder（冻结）
     """
     model_path = os.path.join(
-        config.result_dir, "phase1_archetype_discovery", f"{pair}_vq_model.pt"
+        config.result_dir,  pair, "phase1_archetype_discovery", f"{pair}_vq_model.pt"
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -159,158 +159,52 @@ def run_horizon_with_decoder(
     return horizon_return
 
 
-def evaluate_on_validation(
+def run_training_loop(
     agent: SelectionAgent,
+    encoder: VQEncoder,
     codebook: VQCodebook,
     decoder: VQDecoder,
+    train_env: TradingEnv,
     val_env: TradingEnv,
+    demo_states: np.ndarray,
+    demo_actions: np.ndarray,
+    demo_rewards: np.ndarray,
+    optimizer: torch.optim.Optimizer,
+    alpha: float,
+    total_steps: int,
+    val_interval: int,
+    log_interval: int,
+    save_path: str,
+    config,
     device: torch.device,
-) -> float:
-    """在验证集上评估 SelectionAgent，返回平均 horizon return。
-
-    # 需求 5.7: 定期在验证集上评估性能
+) -> tuple[float, list[float], int]:
+    """执行 Phase II 训练循环。
 
     Args:
         agent: SelectionAgent
-        codebook: 冻结的码本
-        decoder: 冻结的 Decoder
+        encoder: 冻结的 VQEncoder
+        codebook: 冻结的 VQCodebook
+        decoder: 冻结的 VQDecoder
+        train_env: 训练集环境
         val_env: 验证集环境
+        demo_states: DP 示范轨迹状态 (N, h, state_dim)
+        demo_actions: DP 示范轨迹动作 (N, h)
+        demo_rewards: DP 示范轨迹奖励 (N, h)
+        optimizer: 优化器
+        alpha: KL 惩罚系数
+        total_steps: 总训练步数
+        val_interval: 验证间隔
+        log_interval: 日志间隔
+        save_path: 最优模型保存路径
+        config: 配置对象
         device: 计算设备
 
     Returns:
-        平均 horizon return
+        best_val_return: 最优验证集 return
+        reward_history: 奖励历史
+        step_count: 实际训练步数
     """
-    agent.eval()
-    total_return = 0.0
-    num_horizons = val_env.num_horizons
-
-    if num_horizons == 0:
-        return 0.0
-
-    for h_idx in range(num_horizons):
-        state = val_env.states[h_idx * val_env.horizon]
-        state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-
-        with torch.no_grad():
-            action_probs, _ = agent(state_t)
-            k = torch.argmax(action_probs, dim=-1).item()
-
-        # 获取选定原型的量化嵌入
-        z_q = codebook.embeddings.weight[k].unsqueeze(0)  # (1, code_dim)
-
-        horizon_ret = run_horizon_with_decoder(val_env, h_idx, decoder, z_q, device)
-        total_return += horizon_ret
-
-    agent.train()
-    return total_return / num_horizons
-
-
-
-def main() -> None:
-    # ----------------------------------------------------------------
-    # Step 0: 解析配置
-    # ----------------------------------------------------------------
-    config = parse_args()
-    pair = config.pairs[0]  # 单交易对训练
-    logger.info("Phase II 训练开始: pair=%s", pair)
-    logger.info(
-        "超参数: total_steps=%d, lr=%.1e, selection_alpha=%.2f, "
-        "num_archetypes=%d, discount_factor=%.2f",
-        config.phase2_total_steps,
-        config.learning_rate,
-        config.selection_alpha,
-        config.num_archetypes,
-        config.discount_factor,
-    )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("使用设备: %s", device)
-
-    # ----------------------------------------------------------------
-    # Step 1: 加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）
-    # ----------------------------------------------------------------
-    encoder, codebook, decoder = load_phase1_model(config, pair, device)
-
-    # ----------------------------------------------------------------
-    # Step 2: 加载特征数据，初始化 TradingEnv
-    # ----------------------------------------------------------------
-    logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
-    pipeline = FeaturePipeline(config.data_dir, pair, config)
-    states = pipeline.get_state_vector()  # (T, 45)
-
-    # 使用第一列作为价格代理
-    # [NOTE: 论文未明确指定价格列，使用 states 第 0 列作为价格]
-    prices = states[:, 0].copy()
-
-    # 按时间划分
-    train_states, val_states, _ = pipeline.split_by_date(states)
-    train_prices = prices[: len(train_states)]
-    val_prices = prices[len(train_states) : len(train_states) + len(val_states)]
-
-    logger.info(
-        "训练集: states shape=%s, 验证集: states shape=%s",
-        train_states.shape,
-        val_states.shape,
-    )
-
-    train_env = TradingEnv(
-        states=train_states,
-        prices=train_prices,
-        pair=pair,
-        horizon=config.horizon,
-    )
-    val_env = TradingEnv(
-        states=val_states,
-        prices=val_prices,
-        pair=pair,
-        horizon=config.horizon,
-    )
-    logger.info(
-        "TradingEnv 初始化完成: train_horizons=%d, val_horizons=%d",
-        train_env.num_horizons,
-        val_env.num_horizons,
-    )
-
-    if train_env.num_horizons == 0:
-        logger.error("训练集 horizon 数量为 0，无法训练")
-        sys.exit(1)
-
-    # ----------------------------------------------------------------
-    # Step 3: 初始化 SelectionAgent
-    # ----------------------------------------------------------------
-    agent = SelectionAgent(
-        state_dim=config.state_dim,
-        num_archetypes=config.num_archetypes,
-    ).to(device)
-
-    logger.info(
-        "SelectionAgent 初始化完成: params=%d",
-        sum(p.numel() for p in agent.parameters()),
-    )
-
-    optimizer = torch.optim.Adam(agent.parameters(), lr=config.learning_rate)
-
-    # ----------------------------------------------------------------
-    # Step 4: 训练循环 — 3M 步（horizon 级别 RL）
-    # Section 4.2: Horizon-level RL
-    # 目标函数 Eq. 5: J = E[Σ γ^t r_sel - α × KL(â_sel || π_sel)]
-    # â_sel 是 VQ encoder 对当前 horizon 示范轨迹分配的 ground-truth archetype label
-    # Policy loss = -log π(k|s) × advantage + α × KL(â_sel || π_sel)
-    # Value loss = (R - V(s))²
-    # ----------------------------------------------------------------
-    alpha = config.selection_alpha  # KL 惩罚系数，默认 1.0
-    gamma = config.discount_factor
-    K = config.num_archetypes
-
-    total_steps = config.phase2_total_steps
-    val_interval = max(train_env.num_horizons, 1000)  # 每遍历一次训练集或 1000 步评估一次
-    log_interval = 100  # 每 100 步输出日志
-
     best_val_return = float("-inf")
-    save_dir = os.path.join(config.result_dir, "phase2_archetype_selection")
-    os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, f"{pair}_selection_agent.pt")
-
     reward_history = []
     step_count = 0
 
@@ -321,55 +215,25 @@ def main() -> None:
         h_idx = np.random.randint(0, train_env.num_horizons)
 
         # 获取 horizon 起始状态
-        h = train_env.horizon
-        start = h_idx * h
-        end = min(start + h, len(train_env.states))
+        start = h_idx * train_env.horizon
         state = train_env.states[start]
         state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         # state_t: (1, state_dim)
 
-        # Section 4.2: 获取 ground-truth archetype label â_sel
-        # 使用冻结的 VQ encoder + codebook 对当前 horizon 的示范数据编码
-        horizon_states = train_env.states[start:end]  # (h, state_dim)
-
-        # 使用 decoder 生成 base actions 作为示范动作（用于 encoder 输入）
-        # 先用 codebook 中所有原型尝试，选择最佳匹配
-        # 简化方案：使用 DP planner 的示范轨迹或直接用 encoder 编码
-        # 这里我们用 encoder 对 horizon 数据编码获取 ground-truth label
+        # Eq.(5): 获取 ground-truth archetype label â_sel
+        # 使用冻结的 VQ encoder + codebook 对该 horizon 的 DP 示范轨迹编码
+        # h_idx 与 demo 轨迹索引 1:1 对齐（dp_planner.generate_trajectories 顺序遍历）
         with torch.no_grad():
-            # 为了获取 ground-truth label，需要示范轨迹
-            # 使用所有 K 个原型的 decoder 输出，选择重建损失最小的作为 â_sel
-            horizon_states_t = torch.tensor(
-                horizon_states, dtype=torch.float32, device=device
-            ).unsqueeze(0)  # (1, h, state_dim)
+            demo_s = torch.tensor(demo_states[h_idx], dtype=torch.float32, device=device).unsqueeze(0)  # (1, h, state_dim)
+            demo_a = torch.tensor(demo_actions[h_idx], dtype=torch.long, device=device).unsqueeze(0)  # (1, h)
+            demo_r = torch.tensor(demo_rewards[h_idx], dtype=torch.float32, device=device).unsqueeze(0)  # (1, h)
 
-            best_label = 0
-            best_loss = float("inf")
-            for ki in range(K):
-                z_qi = codebook.embeddings.weight[ki].unsqueeze(0)  # (1, code_dim)
-                logits_i = decoder(horizon_states_t, z_qi)  # (1, h, action_dim)
-                actions_i = torch.argmax(logits_i, dim=-1).squeeze(0)  # (h,)
-                # 用这些 actions 作为 encoder 输入
-                r_dummy = torch.zeros(1, len(actions_i), device=device)
-                z_e_i = encoder(
-                    horizon_states_t,
-                    actions_i.unsqueeze(0),
-                    r_dummy,
-                )  # (1, latent_dim)
-                _, indices_i, _ = codebook.quantize(z_e_i)
-                # 如果 encoder 将此轨迹映射回原型 ki，说明匹配良好
-                # 使用重建损失作为匹配度量
-                logits_flat = logits_i.reshape(-1, config.action_dim)
-                targets_flat = actions_i.reshape(-1)
-                loss_i = F.cross_entropy(logits_flat, targets_flat).item()
-                if loss_i < best_loss:
-                    best_loss = loss_i
-                    best_label = ki
-
-            # â_sel: ground-truth archetype label (one-hot)
-            gt_label = best_label
+            z_e = encoder(demo_s, demo_a, demo_r)       # (1, latent_dim)
+            _, gt_indices, _ = codebook.quantize(z_e)    # (1,)
+            gt_label = gt_indices.item()
 
         # Section 4.2: Agent 选择原型
+        # 返回所有原型的策略概率和价值函数输出
         action_probs, value = agent(state_t)
         # action_probs: (1, K), value: (1, 1)
 
@@ -380,8 +244,12 @@ def main() -> None:
 
         # 获取选定原型的量化嵌入
         z_q = codebook.embeddings.weight[k.item()].unsqueeze(0)  # (1, code_dim)
-
+        
+        if step_count == 0:
+            logger.info("state_t的形状:%s action_probs的形状:%s value的形状:%s z_q的形状:%s",state_t.shape,action_probs.shape,value.shape,z_q.shape)            
+             
         # Section 4.2: 冻结 Decoder 生成 micro actions → env 执行 → horizon return
+        # horizon return 就是这一个horizon的奖励总和
         horizon_return = run_horizon_with_decoder(
             train_env, h_idx, decoder, z_q, device
         )
@@ -394,7 +262,6 @@ def main() -> None:
 
         # Eq. 5: KL(â_sel || π_sel) — â_sel 是 ground-truth archetype 的 one-hot 分布
         # KL(one_hot(gt) || π) = -log π(gt)（因为 one-hot 分布的熵为 0）
-        gt_label_t = torch.tensor([gt_label], dtype=torch.long, device=device)
         kl_divergence = -torch.log(action_probs[0, gt_label] + 1e-8)
 
         # Policy loss = -log π(k|s) × advantage.detach() + α × KL(â_sel || π_sel)
@@ -457,6 +324,202 @@ def main() -> None:
                     save_path,
                 )
                 logger.info("最优模型已保存到 %s (val_return=%.4f)", save_path, val_return)
+
+    return best_val_return, reward_history, step_count
+
+
+def evaluate_on_validation(
+    agent: SelectionAgent,
+    codebook: VQCodebook,
+    decoder: VQDecoder,
+    val_env: TradingEnv,
+    device: torch.device,
+) -> float:
+    """在验证集上评估 SelectionAgent，返回平均 horizon return。
+
+    # 需求 5.7: 定期在验证集上评估性能
+
+    Args:
+        agent: SelectionAgent
+        codebook: 冻结的码本
+        decoder: 冻结的 Decoder
+        val_env: 验证集环境
+        device: 计算设备
+
+    Returns:
+        平均 horizon return
+    """
+    agent.eval()
+    total_return = 0.0
+    num_horizons = val_env.num_horizons
+
+    if num_horizons == 0:
+        return 0.0
+
+    # 使用 tqdm 显示进度条
+    for h_idx in tqdm(range(num_horizons), desc="验证集评估"):
+        state = val_env.states[h_idx * val_env.horizon]
+        state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+
+        with torch.no_grad():
+            action_probs, _ = agent(state_t)
+            k = torch.argmax(action_probs, dim=-1).item()
+
+        # 获取选定原型的量化嵌入
+        z_q = codebook.embeddings.weight[k].unsqueeze(0)  # (1, code_dim)
+
+        horizon_ret = run_horizon_with_decoder(val_env, h_idx, decoder, z_q, device)
+        total_return += horizon_ret
+
+    agent.train()
+    return total_return / num_horizons
+
+
+
+def main() -> None:
+    # ----------------------------------------------------------------
+    # Step 0: 解析配置
+    # ----------------------------------------------------------------
+    config = parse_args()
+    pair = config.pairs[0]  # 单交易对训练
+    logger.info("Phase II 训练开始: pair=%s", pair)
+    logger.info(
+        "超参数: total_steps=%d, lr=%.1e, selection_alpha=%.2f, "
+        "num_archetypes=%d, discount_factor=%.2f",
+        config.phase2_total_steps,
+        config.learning_rate,
+        config.selection_alpha,
+        config.num_archetypes,
+        config.discount_factor,
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("使用设备: %s", device)
+
+    # ----------------------------------------------------------------
+    # Step 1: 加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）
+    # ----------------------------------------------------------------
+    encoder, codebook, decoder = load_phase1_model(config, pair, device)
+
+    # ----------------------------------------------------------------
+    # Step 2: 加载特征数据，初始化 TradingEnv
+    # ----------------------------------------------------------------
+    logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
+    pipeline = FeaturePipeline(config.data_dir, pair)
+    train_df, val_df, _ = pipeline.get_state_vector()
+    train_prices_df, val_prices_df, _ = pipeline.get_prices()
+
+    train_states = train_df.to_numpy()
+    val_states = val_df.to_numpy()
+    train_prices = train_prices_df["close"].to_numpy()
+    val_prices = val_prices_df["close"].to_numpy()
+
+    logger.info(
+        "训练集: states shape=%s, 验证集: states shape=%s",
+        train_states.shape,
+        val_states.shape,
+    )
+
+    train_env = TradingEnv(
+        states=train_states,
+        prices=train_prices,
+        pair=pair,
+        horizon=config.horizon,
+        states_dataframe=train_df,
+    )
+    val_env = TradingEnv(
+        states=val_states,
+        prices=val_prices,
+        pair=pair,
+        horizon=config.horizon,
+        states_dataframe=val_df,
+    )
+    logger.info(
+        "TradingEnv 初始化完成: train_horizons=%d, val_horizons=%d",
+        train_env.num_horizons,
+        val_env.num_horizons,
+    )
+
+    if train_env.num_horizons == 0:
+        logger.error("训练集 horizon 数量为 0，无法训练")
+        sys.exit(1)
+
+    # ----------------------------------------------------------------
+    # Step 2.5: 加载 DP 示范轨迹（用于 Eq.5 的 ground-truth archetype label）
+    # DP 轨迹文件由 Phase I 的 DPPlanner.generate_trajectories() 生成，
+    # 前 num_horizons 条与训练环境 horizon 索引 1:1 对齐。
+    # ----------------------------------------------------------------
+    traj_path = os.path.join(
+        config.result_dir, pair, "dp_trajectories", f"{pair}_trajectories.npz"
+    )
+    if not os.path.exists(traj_path):
+        raise FileNotFoundError(
+            f"DP 轨迹文件不存在: {traj_path}\n"
+            f"请先运行 Phase I 训练: python scripts/train_phase1.py --pair {pair}"
+        )
+    demo_data = np.load(traj_path)
+    demo_states = demo_data["states"]    # (N, h, state_dim)
+    demo_actions = demo_data["actions"]  # (N, h)
+    demo_rewards = demo_data["rewards"]  # (N, h)
+    logger.info(
+        "DP 示范轨迹加载完成: %d 条, horizon=%d (训练 env horizons=%d)",
+        demo_states.shape[0],
+        demo_states.shape[1],
+        train_env.num_horizons,
+    )
+
+    # ----------------------------------------------------------------
+    # Step 3: 初始化 SelectionAgent
+    # ----------------------------------------------------------------
+    agent = SelectionAgent(
+        state_dim=config.state_dim,
+        num_archetypes=config.num_archetypes,
+    ).to(device)
+
+    logger.info(
+        "SelectionAgent 初始化完成: params=%d",
+        sum(p.numel() for p in agent.parameters()),
+    )
+
+    optimizer = torch.optim.Adam(agent.parameters(), lr=config.learning_rate)
+
+    # ----------------------------------------------------------------
+    # Step 4: 训练循环 — 3M 步（horizon 级别 RL）
+    # Section 4.2: Horizon-level RL
+    # 目标函数 Eq. 5: J = E[Σ γ^t r_sel - α × KL(â_sel || π_sel)]
+    # â_sel 是 VQ encoder 对当前 horizon 示范轨迹分配的 ground-truth archetype label
+    # Policy loss = -log π(k|s) × advantage + α × KL(â_sel || π_sel)
+    # Value loss = (R - V(s))²
+    # ----------------------------------------------------------------
+    alpha = config.selection_alpha  # KL 惩罚系数，默认 1.0
+
+    total_steps = config.phase2_total_steps
+    val_interval = max(train_env.num_horizons, 1000)  # 每遍历一次训练集或 1000 步评估一次
+    log_interval = 100  # 每 100 步输出日志
+
+    save_dir = os.path.join(config.result_dir, pair, "phase2_archetype_selection")
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"{pair}_selection_agent.pt")
+
+    best_val_return, reward_history, step_count = run_training_loop(
+        agent=agent,
+        encoder=encoder,
+        codebook=codebook,
+        decoder=decoder,
+        train_env=train_env,
+        val_env=val_env,
+        demo_states=demo_states,
+        demo_actions=demo_actions,
+        demo_rewards=demo_rewards,
+        optimizer=optimizer,
+        alpha=alpha,
+        total_steps=total_steps,
+        val_interval=val_interval,
+        log_interval=log_interval,
+        save_path=save_path,
+        config=config,
+        device=device,
+    )
 
     # ----------------------------------------------------------------
     # Step 5: 最终保存（如果训练结束时不是最优也保存最终版本）

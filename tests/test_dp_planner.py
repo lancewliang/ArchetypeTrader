@@ -11,8 +11,10 @@
 import itertools
 
 import numpy as np
+import polars as pl
 import pytest
 
+from src.data.feature_pipeline import SINGLE_FEATURES, TREND_FEATURES
 from src.env.trading_env import TradingEnv
 from src.phase1.dp_planner import DPPlanner
 
@@ -32,7 +34,9 @@ def _make_env(
     if horizon is None:
         horizon = T
     states = np.random.RandomState(0).randn(T, state_dim).astype(np.float64)
-    return TradingEnv(states=states, prices=prices, pair=pair, horizon=horizon)
+    feature_cols = SINGLE_FEATURES + TREND_FEATURES
+    states_df = pl.DataFrame(states, schema=feature_cols[:state_dim])
+    return TradingEnv(states=states, prices=prices, pair=pair, horizon=horizon, states_dataframe=states_df)
 
 
 def _count_position_changes(actions: np.ndarray, m: int) -> int:
@@ -55,6 +59,7 @@ def _brute_force_max_reward(
     m: int,
     commission_rate: float = 0.0002,
     gamma: float = 0.99,
+    states: list[dict] | None = None,
 ) -> float:
     """暴力枚举所有满足单次交易约束的动作序列，返回最大总奖励。
 
@@ -66,6 +71,9 @@ def _brute_force_max_reward(
 
     注意：使用折扣因子 γ 与 DP planner 保持一致。
     最后一步动作复制倒数第二步（Algorithm 1, Step 13）。
+
+    Args:
+        states: list[dict] - polars row dicts，用于计算 LOB slippage
     """
     N = len(prices)
     if N == 0:
@@ -110,9 +118,19 @@ def _brute_force_max_reward(
         current_pos = 0  # flat
         for t, a in enumerate(actions):
             new_pos = pos_map[a] * m
-            # 执行损失
-            delta = abs(new_pos - current_pos)
-            cost = commission_rate * delta * prices[t] if delta > 0 else 0.0
+            # 执行损失: slippage + commission
+            delta_pos = new_pos - current_pos
+            if delta_pos != 0:
+                abs_delta = abs(delta_pos)
+                if states is not None:
+                    slippage = TradingEnv.compute_lob_slippage(
+                        delta_pos, states[t], prices[t]
+                    )
+                else:
+                    slippage = 0.0
+                cost = slippage + commission_rate * abs_delta * prices[t]
+            else:
+                cost = 0.0
             # 价差
             p_next = prices[t + 1] if t + 1 < len(prices) else prices[t]
             reward = new_pos * (p_next - prices[t]) - cost
@@ -155,7 +173,7 @@ class TestAllFlatTrajectory:
         env = _make_env(prices, horizon=N)
         planner = DPPlanner(env)
 
-        s_demo, a_demo, r_demo = planner.plan(env.states, prices)
+        s_demo, a_demo, r_demo = planner.plan(env.states_dataframe, prices)
 
         # 全 flat：所有动作应为 1
         np.testing.assert_array_equal(a_demo, np.ones(N, dtype=np.int32))
@@ -169,7 +187,7 @@ class TestAllFlatTrajectory:
         env = _make_env(prices, horizon=N)
         planner = DPPlanner(env)
 
-        _, a_demo, r_demo = planner.plan(env.states, prices)
+        _, a_demo, r_demo = planner.plan(env.states_dataframe, prices)
 
         np.testing.assert_array_equal(a_demo, np.ones(N, dtype=np.int32))
         np.testing.assert_array_almost_equal(r_demo, np.zeros(N))
@@ -258,7 +276,7 @@ class TestSingleTradeConstraint:
         env = _make_env(prices, horizon=N)
         planner = DPPlanner(env)
 
-        _, a_demo, _ = planner.plan(env.states, prices)
+        _, a_demo, _ = planner.plan(env.states_dataframe, prices)
         changes = _count_position_changes(a_demo, env.m)
         assert changes <= 2, f"持仓变化 {changes} 次，超过约束上限 2"
 
@@ -271,7 +289,7 @@ class TestSingleTradeConstraint:
         env = _make_env(prices, horizon=N)
         planner = DPPlanner(env)
 
-        _, a_demo, _ = planner.plan(env.states, prices)
+        _, a_demo, _ = planner.plan(env.states_dataframe, prices)
         changes = _count_position_changes(a_demo, env.m)
         assert changes <= 2
 
@@ -307,7 +325,7 @@ class TestTrajectoryStructure:
         env = _make_env(prices, state_dim=state_dim, horizon=N)
         planner = DPPlanner(env)
 
-        s_demo, a_demo, r_demo = planner.plan(env.states, prices)
+        s_demo, a_demo, r_demo = planner.plan(env.states_dataframe, prices)
 
         assert s_demo.shape == (N, state_dim)
         assert a_demo.shape == (N,)
@@ -322,7 +340,7 @@ class TestTrajectoryStructure:
         env = _make_env(prices, horizon=N)
         planner = DPPlanner(env)
 
-        _, a_demo, _ = planner.plan(env.states, prices)
+        _, a_demo, _ = planner.plan(env.states_dataframe, prices)
 
         assert set(a_demo.tolist()).issubset({0, 1, 2})
 
@@ -361,7 +379,7 @@ class TestTrajectoryStructure:
         env = _make_env(prices, horizon=N)
         planner = DPPlanner(env)
 
-        s_demo, _, _ = planner.plan(env.states, prices)
+        s_demo, _, _ = planner.plan(env.states_dataframe, prices)
 
         np.testing.assert_array_equal(s_demo, env.states)
         # 修改 s_demo 不应影响 env.states
@@ -388,10 +406,10 @@ class TestDPOptimality:
         planner = DPPlanner(env)
         gamma = planner.gamma
 
-        _, a_demo, r_demo = planner.plan(env.states, prices)
+        _, a_demo, r_demo = planner.plan(env.states_dataframe, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
 
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states_dataframe.rows(named=True))
 
         assert abs(dp_reward - bf_reward) < 1e-6, (
             f"seed={seed}: DP reward={dp_reward:.6f} != BF reward={bf_reward:.6f}"
@@ -405,9 +423,9 @@ class TestDPOptimality:
         planner = DPPlanner(env)
         gamma = planner.gamma
 
-        _, a_demo, r_demo = planner.plan(env.states, prices)
+        _, a_demo, r_demo = planner.plan(env.states_dataframe, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states_dataframe.rows(named=True))
 
         assert abs(dp_reward - bf_reward) < 1e-6
 
@@ -419,9 +437,9 @@ class TestDPOptimality:
         planner = DPPlanner(env)
         gamma = planner.gamma
 
-        _, a_demo, r_demo = planner.plan(env.states, prices)
+        _, a_demo, r_demo = planner.plan(env.states_dataframe, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states_dataframe.rows(named=True))
 
         assert abs(dp_reward - bf_reward) < 1e-6
 
@@ -433,9 +451,9 @@ class TestDPOptimality:
         planner = DPPlanner(env)
         gamma = planner.gamma
 
-        _, a_demo, r_demo = planner.plan(env.states, prices)
+        _, a_demo, r_demo = planner.plan(env.states_dataframe, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states_dataframe.rows(named=True))
 
         assert abs(dp_reward - bf_reward) < 1e-6
 
@@ -450,9 +468,9 @@ class TestDPOptimality:
         planner = DPPlanner(env)
         gamma = planner.gamma
 
-        _, a_demo, r_demo = planner.plan(env.states, prices)
+        _, a_demo, r_demo = planner.plan(env.states_dataframe, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states_dataframe.rows(named=True))
 
         assert abs(dp_reward - bf_reward) < 1e-6, (
             f"N=10: DP reward={dp_reward:.6f} != BF reward={bf_reward:.6f}"
@@ -469,9 +487,9 @@ class TestDPOptimality:
         planner = DPPlanner(env)
         gamma = planner.gamma
 
-        _, a_demo, r_demo = planner.plan(env.states, prices)
+        _, a_demo, r_demo = planner.plan(env.states_dataframe, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(N))
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states_dataframe.rows(named=True))
 
         assert abs(dp_reward - bf_reward) < 1e-4, (
             f"ETH: DP reward={dp_reward:.6f} != BF reward={bf_reward:.6f}"
@@ -507,10 +525,12 @@ class TestPropDPSingleTradeConstraint:
         prices = np.maximum(prices, 1.0)
 
         states = rng.randn(h, 45).astype(np.float64)
-        env = TradingEnv(states=states, prices=prices, pair="BTC", horizon=h)
+        feature_cols = SINGLE_FEATURES + TREND_FEATURES
+        states_df = pl.DataFrame(states, schema=feature_cols)
+        env = TradingEnv(states=states, prices=prices, pair="BTC", horizon=h, states_dataframe=states_df)
         planner = DPPlanner(env)
 
-        _, a_demo, _ = planner.plan(env.states, prices)
+        _, a_demo, _ = planner.plan(env.states_dataframe, prices)
         changes = _count_position_changes(a_demo, env.m)
         assert changes <= 2, (
             f"h={h}, seed={seed}: 持仓变化 {changes} 次，超过约束上限 2"
@@ -538,14 +558,16 @@ class TestPropDPOptimality:
         prices = np.maximum(prices, 1.0)
 
         states = rng.randn(h, 45).astype(np.float64)
-        env = TradingEnv(states=states, prices=prices, pair="BTC", horizon=h)
+        feature_cols = SINGLE_FEATURES + TREND_FEATURES
+        states_df = pl.DataFrame(states, schema=feature_cols)
+        env = TradingEnv(states=states, prices=prices, pair="BTC", horizon=h, states_dataframe=states_df)
         planner = DPPlanner(env)
         gamma = planner.gamma
 
-        _, a_demo, r_demo = planner.plan(env.states, prices)
+        _, a_demo, r_demo = planner.plan(env.states_dataframe, prices)
         dp_reward = sum(gamma ** t * r_demo[t] for t in range(h))
 
-        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma)
+        bf_reward = _brute_force_max_reward(prices, m=env.m, gamma=gamma, states=env.states_dataframe.rows(named=True))
 
         assert dp_reward >= bf_reward - 1e-6, (
             f"h={h}, seed={seed}: DP reward={dp_reward:.6f} < BF reward={bf_reward:.6f}"
@@ -574,10 +596,12 @@ class TestPropDPTrajectoryStructure:
 
         state_dim = 45
         states = rng.randn(h, state_dim).astype(np.float64)
-        env = TradingEnv(states=states, prices=prices, pair="BTC", horizon=h)
+        feature_cols = SINGLE_FEATURES + TREND_FEATURES
+        states_df = pl.DataFrame(states, schema=feature_cols)
+        env = TradingEnv(states=states, prices=prices, pair="BTC", horizon=h, states_dataframe=states_df)
         planner = DPPlanner(env)
 
-        s_demo, a_demo, r_demo = planner.plan(env.states, prices)
+        s_demo, a_demo, r_demo = planner.plan(env.states_dataframe, prices)
 
         # s_demo shape (h, state_dim)
         assert s_demo.shape == (h, state_dim), (
