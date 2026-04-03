@@ -17,6 +17,7 @@
 #   python scripts/train_phase1.py --pair ETH --phase1-epochs 50 --batch-size 128
 """
 
+import json
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ from src.data.feature_pipeline import FeaturePipeline
 from src.env.trading_env import TradingEnv
 from src.phase1.codebook import VQCodebook
 from src.phase1.dp_planner import DPPlanner
+from src.phase1.env_validation import run_phase1_env_validation
 from src.phase1.validation import validate_phase1_artifacts
 from src.phase1.vq_decoder import VQDecoder
 from src.phase1.vq_encoder import VQEncoder
@@ -832,7 +834,43 @@ def main() -> None:
         dp_check_limit=256,
     )
 
-    # Step 7: 日志摘要
+    # Step 7: 环境级验证 — 评估 archetype 在真实交易环境中的可用性
+    logger.info("开始 Phase I 环境级验证...")
+    # 加载验证集环境
+    val_pipeline = FeaturePipeline(config.data_dir, pair)
+    _, val_state_df, _ = val_pipeline.get_state_vector()
+    _, val_prices_df, _ = val_pipeline.get_prices()
+    val_env = None
+    if val_state_df is not None and len(val_state_df) >= config.horizon:
+        val_env = TradingEnv(
+            states=val_state_df.to_numpy(),
+            prices=val_prices_df["close"].to_numpy(),
+            pair=pair,
+            horizon=config.horizon,
+            states_dataframe=val_state_df,
+            max_positions=config.max_positions,
+            commission_rate=config.commission_rate,
+        )
+
+    env_report = run_phase1_env_validation(
+        config=config,
+        pair=pair,
+        encoder=encoder,
+        codebook=codebook,
+        decoder=decoder,
+        train_env=env,
+        trajectory_dataset=dataset,
+        device=device,
+        val_env=val_env,
+    )
+
+    # 保存环境级验证报告
+    env_report_path = os.path.join(save_dir, "phase1_env_validation_report.json")
+    with open(env_report_path, "w", encoding="utf-8") as fp:
+        json.dump(env_report, fp, ensure_ascii=False, indent=2, default=str)
+    logger.info("环境级验证报告已保存到 %s", env_report_path)
+
+    # Step 8: 日志摘要
     log_training_summary(pair, history.loss, traj_path, save_path, report_path, validation_report)
 
 

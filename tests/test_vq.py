@@ -326,9 +326,7 @@ class TestVQDecoderForward:
         logits = dec(states, z_q)
         loss = logits.sum()
         loss.backward()
-        # z_q 应有梯度
         assert z_q.grad is not None
-        # MLP 参数应有梯度
         assert dec.mlp[0].weight.grad is not None
         assert dec.mlp[2].weight.grad is not None
 
@@ -343,16 +341,38 @@ class TestVQDecoderForward:
         assert not torch.allclose(logits1, logits2)
 
     def test_same_z_q_broadcast_across_time(self):
-        """同一 z_q 应在所有时间步共享"""
+        """同一 z_q 应在所有时间步共享（MLP 逐步独立）"""
         dec = VQDecoder(state_dim=45)
-        # 使用相同状态在每个时间步，验证 z_q 广播一致
         single_state = torch.randn(1, 1, 45)
         states = single_state.expand(1, 5, 45)
         z_q = torch.randn(1, 16)
         logits = dec(states, z_q)
-        # 所有时间步输入相同 → 输出应相同
+        # MLP 逐步独立，相同输入 → 相同输出
         for t in range(1, 5):
             assert torch.allclose(logits[0, 0], logits[0, t])
+
+    def test_single_trade_constraint_output_shape(self):
+        """single-trade 约束推理输出 shape 正确"""
+        dec = VQDecoder(state_dim=45)
+        dec.eval()
+        states = torch.randn(4, 72, 45)
+        z_q = torch.randn(4, 16)
+        actions = dec.decode_with_single_trade_constraint(states, z_q)
+        assert actions.shape == (4, 72)
+        assert (actions >= 0).all()
+        assert (actions < 3).all()
+
+    def test_single_trade_constraint_max_one_change(self):
+        """single-trade 约束推理结果最多一次动作变化"""
+        dec = VQDecoder(state_dim=45)
+        dec.eval()
+        states = torch.randn(8, 72, 45)
+        z_q = torch.randn(8, 16)
+        actions = dec.decode_with_single_trade_constraint(states, z_q)
+        for b in range(8):
+            seq = actions[b].numpy()
+            changes = sum(1 for i in range(1, len(seq)) if seq[i] != seq[i - 1])
+            assert changes <= 1, f"batch {b}: {changes} changes, expected <= 1"
 
 
 # ============================================================

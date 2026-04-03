@@ -400,7 +400,7 @@ def run_horizon_with_decoder(
 
     with torch.no_grad():
         action_logits = decoder(states_t, z_q)  # (1, h, action_dim)
-        actions = torch.argmax(action_logits, dim=-1).squeeze(0)  # (h,)
+        actions = decoder.decode_with_single_trade_constraint(states_t, z_q).squeeze(0)  # (h,)
         actions_np = actions.detach().cpu().numpy()
 
     # 在 env 中逐步执行 micro actions
