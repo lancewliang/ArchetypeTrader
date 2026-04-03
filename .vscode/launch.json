@@ -16,7 +16,18 @@
             "name": "Python Debugger: train_phase2",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/script/train_phase2.py",
+            "program": "${workspaceFolder}/scripts/train_phase2.py",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "console": "integratedTerminal"
+        },
+                {
+            "name": "Python Debugger: train_phase3",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/train_phase3.py",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"

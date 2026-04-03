@@ -51,9 +51,9 @@ def load_phase1_model(config, pair: str, device: torch.device):
     Returns:
         codebook: 加载权重后的 VQCodebook（冻结）
         decoder: 加载权重后的 VQDecoder（冻结）
-    """
+    """ 
     model_path = os.path.join(
-        config.result_dir, "phase1_archetype_discovery", f"{pair}_vq_model.pt"
+        config.result_dir, f"{pair}","phase1_archetype_discovery", f"{pair}_vq_model.pt"
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
