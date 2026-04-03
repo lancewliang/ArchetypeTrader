@@ -734,26 +734,24 @@ def ppo_update(
             # 总损失仅用于日志记录。
             total_loss = actor_loss + critic_loss
 
-            # Actor 更新：shared + policy_head
+            # 先计算两路梯度，再统一 step，避免 in-place 修改参数后
+            # 第二次 backward 遇到 stale tensor version 的问题。
             optimizer.zero_grad()
+            critic_optimizer.zero_grad()
             actor_loss.backward(retain_graph=True)
+            critic_loss.backward()
 
             policy_grad_norm = _parameter_grad_norm(agent.policy_head.parameters())
             shared_grad_norm = _parameter_grad_norm(agent.shared.parameters())
+            value_grad_norm = _parameter_grad_norm(agent.value_head.parameters())
 
             torch.nn.utils.clip_grad_norm_(
                 list(agent.shared.parameters()) + list(agent.policy_head.parameters()),
                 max_grad_norm,
             )
-            optimizer.step()
-
-            # Critic 更新：value_head only
-            critic_optimizer.zero_grad()
-            critic_loss.backward()
-
-            value_grad_norm = _parameter_grad_norm(agent.value_head.parameters())
-
             torch.nn.utils.clip_grad_norm_(agent.value_head.parameters(), max_grad_norm)
+
+            optimizer.step()
             critic_optimizer.step()
 
             clip_fraction = ((ratio - 1.0).abs() > clip_eps).float().mean()
