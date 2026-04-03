@@ -209,8 +209,8 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
     ppo_epochs = int(_cfg(config, "phase2_ppo_epochs", 4))
     minibatch_size = int(_cfg(config, "phase2_minibatch_size", 256))
     clip_eps = float(_cfg(config, "phase2_clip_eps", 0.2))
-    vf_coef = float(_cfg(config, "phase2_vf_coef", 0.2))
-    ent_coef = float(_cfg(config, "phase2_ent_coef", 0.02))
+    vf_coef = float(_cfg(config, "phase2_vf_coef", 0.001))
+    ent_coef = float(_cfg(config, "phase2_ent_coef", 0.1))
     max_grad_norm = float(_cfg(config, "phase2_max_grad_norm", 1.0))
     log_interval = int(_cfg(config, "phase2_log_interval", 100000))
     eval_max_horizons = _cfg(config, "phase2_eval_max_horizons", None)
@@ -578,6 +578,13 @@ def collect_rollout_batch(
         rollout_details.append(detail)
 
     returns_t = torch.tensor(returns, dtype=torch.float32, device=device)
+
+    # Return 归一化：将 horizon return 标准化到零均值单位方差，
+    # 避免 value loss 因 return 绝对值过大（ETH 持仓 100 × 72 步）而爆炸，
+    # 从而防止 critic 梯度淹没 actor 梯度导致策略坍缩。
+    if batch_size > 1:
+        returns_t = (returns_t - returns_t.mean()) / (returns_t.std(unbiased=False) + 1e-8)
+
     values_t = values.squeeze(-1).detach()
 
     # Section 4.2 / PPO 版本: advantage = R - V(s)
@@ -628,6 +635,7 @@ def collect_rollout_batch(
 def ppo_update(
     agent: SelectionAgent,
     optimizer: torch.optim.Optimizer,
+    critic_optimizer: torch.optim.Optimizer,
     batch: dict[str, Any],
     alpha: float,
     clip_eps: float,
@@ -714,23 +722,39 @@ def ppo_update(
             # one-hot(gt) 对 policy 的 KL，可等价实现为 NLL / cross-entropy。
             imitation_loss = F.nll_loss(torch.log(action_probs + 1e-8), mb_gt_labels)
 
-            # 总损失：PPO policy + critic + entropy + imitation prior。
-            total_loss = (
+            # Actor 损失：PPO policy + entropy + imitation prior。
+            # Critic 损失单独优化，避免 value loss 梯度劫持 shared backbone。
+            actor_loss = (
                 policy_loss
-                + vf_coef * value_loss
                 - ent_coef * entropy
                 + alpha * imitation_loss
             )
+            critic_loss = vf_coef * value_loss
 
+            # 总损失仅用于日志记录。
+            total_loss = actor_loss + critic_loss
+
+            # Actor 更新：shared + policy_head
             optimizer.zero_grad()
-            total_loss.backward()
+            actor_loss.backward(retain_graph=True)
 
             policy_grad_norm = _parameter_grad_norm(agent.policy_head.parameters())
-            value_grad_norm = _parameter_grad_norm(agent.value_head.parameters())
             shared_grad_norm = _parameter_grad_norm(agent.shared.parameters())
 
-            torch.nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(
+                list(agent.shared.parameters()) + list(agent.policy_head.parameters()),
+                max_grad_norm,
+            )
             optimizer.step()
+
+            # Critic 更新：value_head only
+            critic_optimizer.zero_grad()
+            critic_loss.backward()
+
+            value_grad_norm = _parameter_grad_norm(agent.value_head.parameters())
+
+            torch.nn.utils.clip_grad_norm_(agent.value_head.parameters(), max_grad_norm)
+            critic_optimizer.step()
 
             clip_fraction = ((ratio - 1.0).abs() > clip_eps).float().mean()
             approx_kl = (mb_old_log_probs - new_log_probs).mean()
@@ -961,6 +985,7 @@ def save_checkpoint(
     save_path: str,
     agent: SelectionAgent,
     optimizer: torch.optim.Optimizer,
+    critic_optimizer: torch.optim.Optimizer,
     reward_history: list[float],
     best_val_return: float,
     step_count: int,
@@ -982,6 +1007,7 @@ def save_checkpoint(
         {
             "agent": agent.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "critic_optimizer": critic_optimizer.state_dict(),
             "training_rewards": reward_history,
             "best_validation_return": best_val_return,
             "step": step_count,
@@ -1017,6 +1043,7 @@ def run_training_loop(
     demo_actions: np.ndarray,
     demo_rewards: np.ndarray,
     optimizer: torch.optim.Optimizer,
+    critic_optimizer: torch.optim.Optimizer,
     alpha: float,
     total_steps: int,
     val_interval: int,
@@ -1166,6 +1193,7 @@ def run_training_loop(
         last_stats = ppo_update(
             agent=agent,
             optimizer=optimizer,
+            critic_optimizer=critic_optimizer,
             batch=batch,
             alpha=alpha,
             clip_eps=clip_eps,
@@ -1306,6 +1334,7 @@ def run_training_loop(
                     save_path=save_path,
                     agent=agent,
                     optimizer=optimizer,
+                    critic_optimizer=critic_optimizer,
                     reward_history=reward_history,
                     best_val_return=best_val_return,
                     step_count=step_count,
@@ -1427,7 +1456,7 @@ def main() -> None:
     # 前 num_horizons 条与训练环境 horizon 索引 1:1 对齐。
     # ----------------------------------------------------------------
     traj_path = os.path.join(
-        config.result_dir, pair, "dp_trajectories", f"{pair}_trajectories.npz"
+        config.result_dir, pair, "dp_trajectories", f"trajectories.npz"
     )
     if not os.path.exists(traj_path):
         raise FileNotFoundError(
@@ -1465,7 +1494,14 @@ def main() -> None:
         sum(p.numel() for p in agent.parameters()),
     )
 
-    optimizer = torch.optim.Adam(agent.parameters(), lr=config.learning_rate)
+    optimizer = torch.optim.Adam(
+        list(agent.shared.parameters()) + list(agent.policy_head.parameters()),
+        lr=config.learning_rate,
+    )
+    critic_optimizer = torch.optim.Adam(
+        agent.value_head.parameters(),
+        lr=config.learning_rate * 3,  # critic 用更高学习率独立拟合 value
+    )
 
     # ----------------------------------------------------------------
     # Step 4: 训练循环 — horizon 级别 RL（PPO 风格）
@@ -1496,6 +1532,7 @@ def main() -> None:
         demo_actions=demo_actions,
         demo_rewards=demo_rewards,
         optimizer=optimizer,
+        critic_optimizer=critic_optimizer,
         alpha=alpha,
         total_steps=total_steps,
         val_interval=val_interval,
@@ -1511,6 +1548,7 @@ def main() -> None:
         save_path=final_save_path,
         agent=agent,
         optimizer=optimizer,
+        critic_optimizer=critic_optimizer,
         reward_history=reward_history,
         best_val_return=best_val_return,
         step_count=step_count,
