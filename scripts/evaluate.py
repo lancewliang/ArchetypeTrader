@@ -213,6 +213,7 @@ def run_horizon_inference(
     R_arche: float,
     device: torch.device,
     horizon: int,
+    cash: float = 0.0,
 ):
     """在一个 horizon 内执行完整三阶段推理（无梯度）。
 
@@ -220,10 +221,14 @@ def run_horizon_inference(
     # 每个 step: refinement agent 观测 state + context → 输出 a_ref
     #            → policy adapter 计算 final action → env step
 
+    Args:
+        cash: 当前剩余资金（跨 horizon 传递）
+
     Returns:
-        (step_rate_returns, operation_records):
+        (step_rate_returns, operation_records, cash):
             step_rate_returns: 每步收益率列表（r_t = reward_t / portfolio_value_t）
             operation_records: 每步操作详情列表（用于 CSV 导出）
+            cash: horizon 结束后的剩余资金
     """
     ACTION_LABELS = {0: "short", 1: "flat", 2: "long"}
 
@@ -282,6 +287,10 @@ def run_horizon_inference(
         new_position = info["position"]
         delta_position = new_position - old_position
 
+        # 更新资金: 买入扣钱，卖出加钱（含空头）
+        # delta_position > 0 表示买入，cash 减少; < 0 表示卖出，cash 增加
+        cash -= delta_position * exec_price
+
         # 更新平均持仓价格
         if new_position == 0:
             avg_hold_price = 0.0
@@ -301,6 +310,11 @@ def run_horizon_inference(
         else:
             side = "空仓"
 
+        # 持仓总价值 = |仓位| × 当前价格（空头也按绝对值计）
+        holding_value = abs(new_position) * exec_price
+        # 总资产 = 剩余资金 + 持仓总价值
+        total_value = cash + holding_value
+
         operation_records.append({
             "state_index": t,
             "action": a_final,
@@ -309,7 +323,9 @@ def run_horizon_inference(
             "trade_quantity": delta_position,
             "position_after": new_position,
             "avg_hold_price": round(avg_hold_price, 6),
-            "total_value": round(abs(new_position) * exec_price, 6),
+            "cash": round(cash, 6),
+            "holding_value": round(holding_value, 6),
+            "total_value": round(total_value, 6),
             "side": side,
         })
 
@@ -328,7 +344,7 @@ def run_horizon_inference(
         if done:
             break
 
-    return step_rate_returns, operation_records
+    return step_rate_returns, operation_records, cash
 
 
 def evaluate_pair(
@@ -396,6 +412,11 @@ def evaluate_pair(
     all_step_returns = []
     all_operation_records = []
 
+    # 初始资金 = 最大仓位 × 第一行价格
+    initial_capital = float(test_env.m) * float(test_prices[0])
+    cash = initial_capital
+    logger.info("初始资金: %.2f (m=%d × price=%.6f)", initial_capital, test_env.m, test_prices[0])
+
     for h_idx in range(test_env.num_horizons):
         h = test_env.horizon
         start = h_idx * h
@@ -426,7 +447,7 @@ def evaluate_pair(
         R_arche = compute_base_return(test_env, h_idx, base_actions)
 
         # Phase III: Refinement agent 精炼
-        step_returns, op_records = run_horizon_inference(
+        step_returns, op_records, cash = run_horizon_inference(
             env=test_env,
             horizon_idx=h_idx,
             base_actions=base_actions,
@@ -436,6 +457,7 @@ def evaluate_pair(
             R_arche=R_arche,
             device=device,
             horizon=h,
+            cash=cash,
         )
 
         all_step_returns.extend(step_returns)
@@ -464,7 +486,7 @@ def evaluate_pair(
     csv_fields = [
         "state_index", "action", "action_label", "execution_price",
         "trade_quantity", "position_after", "avg_hold_price",
-        "total_value", "side",
+        "cash", "holding_value", "total_value", "side",
     ]
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=csv_fields)
