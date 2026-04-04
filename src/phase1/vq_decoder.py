@@ -65,7 +65,7 @@ class VQDecoder(nn.Module):
     def decode_with_single_trade_constraint(
         self, states: Tensor, z_q: Tensor,
     ) -> Tensor:
-        """推理时使用: 在 logits 上施加 single-trade 约束。
+        """推理时使用: 在 logits 上施加 single-trade 约束（全向量化实现）。
 
         对 MLP 输出的 (h, action_dim) logits，搜索最优的 single-change
         分割点，使得动作序列为 "action_a × t + action_b × (h-t)" 的形式，
@@ -76,6 +76,7 @@ class VQDecoder(nn.Module):
         - 一次变化: 前 t 步动作 a，后 h-t 步动作 b (a ≠ b)
 
         搜索复杂度: O(h × action_dim²)，对 h=72, action_dim=3 可忽略。
+        全部在 GPU tensor 上完成，无 Python 循环和 .item() 调用。
 
         Args:
             states: (batch, h, state_dim)
@@ -88,49 +89,71 @@ class VQDecoder(nn.Module):
         log_probs = torch.log_softmax(logits, dim=-1)  # (batch, h, action_dim)
 
         batch, h, num_actions = log_probs.shape
+        device = logits.device
 
-        # 前缀和: prefix_sum[t, a] = Σ_{i=0}^{t-1} log_prob[i, a]
-        # 即前 t 步全选动作 a 的总 log-probability
+        # 前缀和: prefix_sum[:, t, a] = Σ_{i=0}^{t} log_prob[:, i, a]
         prefix_sum = torch.cumsum(log_probs, dim=1)  # (batch, h, action_dim)
 
-        # suffix_sum[t, a] = Σ_{i=t}^{h-1} log_prob[i, a]
-        # 即从第 t 步到末尾全选动作 a 的总 log-probability
+        # suffix_sum[:, t, a] = Σ_{i=t}^{h-1} log_prob[:, i, a]
         suffix_sum = prefix_sum[:, -1:, :] - prefix_sum + log_probs  # (batch, h, action_dim)
 
-        best_actions = torch.zeros(batch, h, dtype=torch.long, device=logits.device)
+        # ---- 情况 1: 无变化，全程同一个动作 ----
+        # no_change_scores[:, a] = prefix_sum[:, h-1, a]
+        no_change_scores = prefix_sum[:, -1, :]  # (batch, num_actions)
+        no_change_best_score, no_change_best_a = no_change_scores.max(dim=1)  # (batch,)
 
-        for b in range(batch):
-            best_score = float("-inf")
-            best_a1 = 0
-            best_a2 = 0
-            best_t = h  # change point (h 表示无变化)
+        # ---- 情况 2: 在第 t 步变化 (前 t 步 a1, 后 h-t 步 a2, a1 ≠ a2) ----
+        if h > 1:
+            # 对 t=1..h-1, 计算 prefix_sum[:, t-1, a1] + suffix_sum[:, t, a2] 对所有 (a1, a2) 对
+            # prefix_part: (batch, h-1, num_actions) — 取 t=0..h-2 即 prefix_sum[:, 0:h-1, :]
+            prefix_part = prefix_sum[:, :h-1, :]  # (batch, h-1, num_actions)
+            # suffix_part: (batch, h-1, num_actions) — 取 t=1..h-1 即 suffix_sum[:, 1:h, :]
+            suffix_part = suffix_sum[:, 1:, :]  # (batch, h-1, num_actions)
 
-            # 情况 1: 无变化，全程同一个动作
-            for a in range(num_actions):
-                score = prefix_sum[b, h - 1, a].item()
-                if score > best_score:
-                    best_score = score
-                    best_a1 = a
-                    best_a2 = a
-                    best_t = h
+            # combined[:, t, a1, a2] = prefix_part[:, t, a1] + suffix_part[:, t, a2]
+            # shape: (batch, h-1, num_actions, num_actions)
+            combined = prefix_part.unsqueeze(-1) + suffix_part.unsqueeze(-2)
 
-            # 情况 2: 在第 t 步变化 (前 t 步 a1, 后 h-t 步 a2, a1 ≠ a2)
-            for t in range(1, h):
-                for a1 in range(num_actions):
-                    pre_score = prefix_sum[b, t - 1, a1].item()
-                    for a2 in range(num_actions):
-                        if a2 == a1:
-                            continue
-                        post_score = suffix_sum[b, t, a2].item()
-                        score = pre_score + post_score
-                        if score > best_score:
-                            best_score = score
-                            best_a1 = a1
-                            best_a2 = a2
-                            best_t = t
+            # 屏蔽 a1 == a2 的对角线（设为 -inf 使其不会被选中）
+            diag_mask = torch.eye(num_actions, dtype=torch.bool, device=device)  # (A, A)
+            combined.masked_fill_(diag_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
 
-            # 填充动作序列
-            best_actions[b, :best_t] = best_a1
-            best_actions[b, best_t:] = best_a2
+            # 在 (t, a1, a2) 三个维度上找全局最大值
+            # 先展平为 (batch, (h-1)*A*A)，再 argmax
+            flat = combined.reshape(batch, -1)  # (batch, (h-1)*A*A)
+            flat_best_score, flat_best_idx = flat.max(dim=1)  # (batch,)
+
+            # 从 flat index 恢复 (t_idx, a1, a2)
+            a2_size = num_actions
+            a1_size = num_actions
+            best_a2_change = flat_best_idx % a2_size
+            best_a1_change = (flat_best_idx // a2_size) % a1_size
+            best_t_change = flat_best_idx // (a1_size * a2_size)  # 0-indexed → 对应 t=1..h-1
+            best_t_change = best_t_change + 1  # 转为实际 change point (1..h-1)
+
+            # ---- 合并两种情况，选最优 ----
+            use_change = flat_best_score > no_change_best_score  # (batch,)
+        else:
+            # h=1: 只有一步，不可能有 change point
+            use_change = torch.zeros(batch, dtype=torch.bool, device=device)
+            best_a1_change = no_change_best_a
+            best_a2_change = no_change_best_a
+            best_t_change = torch.full_like(no_change_best_a, h)
+
+        best_a1 = torch.where(use_change, best_a1_change, no_change_best_a)  # (batch,)
+        best_a2 = torch.where(use_change, best_a2_change, no_change_best_a)  # (batch,)
+        best_t = torch.where(use_change, best_t_change, torch.full_like(best_t_change, h))  # (batch,)
+
+        # ---- 向量化填充动作序列 ----
+        # time_indices: (1, h) — [0, 1, ..., h-1]
+        time_indices = torch.arange(h, device=device).unsqueeze(0)  # (1, h)
+        # best_t: (batch, 1)
+        best_t_expanded = best_t.unsqueeze(1)  # (batch, 1)
+        # 前 best_t 步填 best_a1，后面填 best_a2
+        best_actions = torch.where(
+            time_indices < best_t_expanded,
+            best_a1.unsqueeze(1).expand(batch, h),
+            best_a2.unsqueeze(1).expand(batch, h),
+        )
 
         return best_actions
