@@ -45,7 +45,7 @@ def load_phase1_model(config, pair: str, device: torch.device):
         decoder: VQDecoder（冻结，eval 模式）
     """
     model_path = os.path.join(
-        config.result_dir, "phase1_archetype_discovery", f"{pair}_vq_model.pt"
+        config.result_dir, f"{pair}","phase1_archetype_discovery", f"{pair}_vq_model.pt"
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -87,7 +87,7 @@ def load_phase2_model(config, pair: str, device: torch.device):
         selection_agent: SelectionAgent（冻结，eval 模式）
     """
     model_path = os.path.join(
-        config.result_dir, "phase2_archetype_selection", f"{pair}_selection_agent.pt"
+        config.result_dir,f"{pair}", "phase2_archetype_selection", f"{pair}_selection_agent.pt"
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -119,6 +119,7 @@ def load_phase3_model(config, pair: str, device: torch.device):
     beta1 = config.refinement_beta1
     model_path = os.path.join(
         config.result_dir,
+        f"{pair}",
         "phase3_archetype_refinement",
         f"{pair}_refinement_agent_beta{beta1}.pt",
     )
@@ -391,30 +392,30 @@ def main() -> None:
     config = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("评估开始，使用设备: %s", device)
-
+    pair = config.pairs[0]
     # 需求 8.9: 保存结果到 result/evaluation/
-    save_dir = os.path.join(config.result_dir, "evaluation")
+    save_dir = os.path.join(config.result_dir, f"{pair}", "evaluation")
     os.makedirs(save_dir, exist_ok=True)
 
     all_results = {}
 
-    for pair in config.pairs:
-        try:
-            result = evaluate_pair(config, pair, device)
-            all_results[pair] = result
+    
+    try:
+        result = evaluate_pair(config, pair, device)
+        all_results[pair] = result
 
-            # 保存单个交易对结果
-            pair_path = os.path.join(save_dir, f"{pair}_results.json")
-            with open(pair_path, "w", encoding="utf-8") as f:
-                json.dump(result, f, indent=2, ensure_ascii=False)
-            logger.info("结果已保存: %s", pair_path)
+        # 保存单个交易对结果
+        pair_path = os.path.join(save_dir, f"{pair}_results.json")
+        with open(pair_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+        logger.info("结果已保存: %s", pair_path)
 
-        except FileNotFoundError as e:
-            logger.error("交易对 %s 评估失败: %s", pair, e)
-            all_results[pair] = {"pair": pair, "error": str(e)}
-        except Exception as e:
-            logger.error("交易对 %s 评估异常: %s", pair, e)
-            all_results[pair] = {"pair": pair, "error": str(e)}
+    except FileNotFoundError as e:
+        logger.error("交易对 %s 评估失败: %s", pair, e)
+        all_results[pair] = {"pair": pair, "error": str(e)}
+    except Exception as e:
+        logger.error("交易对 %s 评估异常: %s", pair, e)
+        all_results[pair] = {"pair": pair, "error": str(e)}
 
     # 保存汇总结果
     summary_path = os.path.join(save_dir, "all_results.json")

@@ -320,3 +320,37 @@ Phase II 的核心问题是 **selector 坍缩**——它学会了选一个"平�
 尽管 selector 坍缩了，验证集 return 378 仍然是正的，说明 Phase I 的 archetype 质量足够好。可以：
 1. 先用当前模型跑 Phase III，看 refinement agent 能否在此基础上进一步改善
 2. 后续优化 Phase II 时，降低 ent_coef 到 0.01-0.03，降低 alpha 到 0.1-0.3
+
+
+---
+
+## Phase III 训练结果
+
+**配置**: 1M steps, beta1=0.5, beta2=1.0, lr=3e-4, discount=0.99
+
+**最终平均奖励 (最近 1000 horizons): 713.2**
+
+总训练步数: 1,000,069, 总 horizon 数: 18,605
+
+---
+
+## 三阶段端到端总结
+
+| 阶段 | 关键指标 | 状态 |
+|---|---|---|
+| Phase I | 9/10 archetype 正收益, diversity 0.53, val oracle 506 | ✓ 可用 |
+| Phase II | val_return 378, selector 坍缩到单一 archetype | ⚠ 可用但有优化空间 |
+| Phase III | 平均奖励 713.2 | ✓ 完成 |
+
+### 核心改动回顾
+
+整个优化过程的关键突破是 **MLP decoder + single-trade 推理约束**（实验 6）：
+- 不改训练过程（保持论文原始 MLP + CrossEntropyLoss）
+- 推理时在 logits 上做 O(h×9) 的最优 single-change-point 搜索
+- 一举解决了 MLP 频繁切换动作的问题，decoded_return 从 -470 翻转到 +1062
+
+### 后续优化方向
+
+1. **Phase II selector 坍缩**: 降低 ent_coef (0.1→0.02), 降低 alpha (1.0→0.3), 提高 vf_coef (0.001→0.25)
+2. **Phase I decoder**: change_point_accuracy 仍只有 13%（raw MLP），如果能提升 MLP 的 per-token 质量，single-trade 约束解码的效果会更好
+3. **评估**: 用 evaluate.py 在测试集上跑完整评估，获取 TR/Sharpe/Calmar/Sortino/MDD 等指标
