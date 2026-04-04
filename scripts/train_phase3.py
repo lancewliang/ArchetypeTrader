@@ -102,7 +102,7 @@ def load_phase2_model(config, pair: str, device: torch.device):
         selection_agent: 加载权重后的 SelectionAgent（冻结）
     """
     model_path = os.path.join(
-        config.result_dir, "phase2_archetype_selection", f"{pair}_selection_agent.pt"
+        config.result_dir, f"{pair}","phase2_archetype_selection", f"{pair}_selection_agent.pt"
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
