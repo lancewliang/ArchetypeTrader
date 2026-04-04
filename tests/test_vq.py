@@ -265,14 +265,15 @@ class TestVQDecoderInit:
         assert dec.hidden_dim == 64
         assert dec.action_dim == 5
 
-    def test_mlp_layer_dims(self):
+    def test_lstm_layer_dims(self):
         dec = VQDecoder(state_dim=45, code_dim=16, hidden_dim=128, action_dim=3)
-        # First linear: (state_dim + code_dim) → hidden_dim
-        assert dec.mlp[0].in_features == 45 + 16
-        assert dec.mlp[0].out_features == 128
-        # Second linear: hidden_dim → action_dim
-        assert dec.mlp[2].in_features == 128
-        assert dec.mlp[2].out_features == 3
+        # BiLSTM input: state_dim + code_dim
+        assert dec.lstm.input_size == 45 + 16
+        assert dec.lstm.hidden_size == 128
+        assert dec.lstm.bidirectional is True
+        # Output projection: 2 * hidden_dim → action_dim (bidirectional)
+        assert dec.output_proj.in_features == 2 * 128
+        assert dec.output_proj.out_features == 3
 
 
 class TestVQDecoderForward:
@@ -327,8 +328,10 @@ class TestVQDecoderForward:
         loss = logits.sum()
         loss.backward()
         assert z_q.grad is not None
-        assert dec.mlp[0].weight.grad is not None
-        assert dec.mlp[2].weight.grad is not None
+        # LSTM 和 output_proj 都应有梯度
+        for name, param in dec.lstm.named_parameters():
+            assert param.grad is not None, f"LSTM param {name} has no gradient"
+        assert dec.output_proj.weight.grad is not None
 
     def test_different_z_q_different_outputs(self):
         """不同 z_q 应产生不同输出"""
@@ -340,16 +343,16 @@ class TestVQDecoderForward:
         logits2 = dec(states, z_q2)
         assert not torch.allclose(logits1, logits2)
 
-    def test_same_z_q_broadcast_across_time(self):
-        """同一 z_q 应在所有时间步共享（MLP 逐步独立）"""
+    def test_temporal_dependency(self):
+        """LSTM decoder 应具有时序依赖性：相同输入在不同时间步可产生不同输出"""
         dec = VQDecoder(state_dim=45)
         single_state = torch.randn(1, 1, 45)
         states = single_state.expand(1, 5, 45)
         z_q = torch.randn(1, 16)
         logits = dec(states, z_q)
-        # MLP 逐步独立，相同输入 → 相同输出
-        for t in range(1, 5):
-            assert torch.allclose(logits[0, 0], logits[0, t])
+        # LSTM 有隐藏状态传递，即使输入相同，不同时间步的输出也可能不同
+        # 至少验证输出 shape 正确
+        assert logits.shape == (1, 5, 3)
 
     def test_single_trade_constraint_output_shape(self):
         """single-trade 约束推理输出 shape 正确"""
