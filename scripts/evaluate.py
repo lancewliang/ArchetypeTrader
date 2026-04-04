@@ -16,6 +16,7 @@
 #   python scripts/evaluate.py --pair BTC
 """
 
+import csv
 import json
 import os
 import sys
@@ -220,12 +221,17 @@ def run_horizon_inference(
     #            → policy adapter 计算 final action → env step
 
     Returns:
-        step_rate_returns: 每步收益率列表（r_t = reward_t / portfolio_value_t）
+        (step_rate_returns, operation_records):
+            step_rate_returns: 每步收益率列表（r_t = reward_t / portfolio_value_t）
+            operation_records: 每步操作详情列表（用于 CSV 导出）
     """
+    ACTION_LABELS = {0: "short", 1: "flat", 2: "long"}
+
     state = env.reset(horizon_idx)
 
     h = len(base_actions)
     step_rate_returns = []
+    operation_records = []
     a_base_prev = int(base_actions[0])
     has_adjusted = False
 
@@ -235,6 +241,10 @@ def run_horizon_inference(
     portfolio_value = float(abs(env.m) * initial_price)  # 名义本金
     if portfolio_value == 0.0:
         portfolio_value = 1.0  # 防止除零
+
+    # 用于跟踪平均持仓价格
+    avg_hold_price = 0.0
+    current_position = 0  # reset 后 position=0
 
     for step_idx in range(h):
         a_base = int(base_actions[step_idx])
@@ -263,7 +273,47 @@ def run_horizon_inference(
 
         a_final, has_adjusted = policy_adapter.compute_final_action(a_base, a_base_prev, a_ref, has_adjusted)
 
-        next_state, reward, done, _ = env.step(a_final)
+        old_position = current_position
+        t = t_start + step_idx
+        exec_price = float(env.prices[t])
+
+        next_state, reward, done, info = env.step(a_final)
+
+        new_position = info["position"]
+        delta_position = new_position - old_position
+
+        # 更新平均持仓价格
+        if new_position == 0:
+            avg_hold_price = 0.0
+        elif old_position == 0:
+            avg_hold_price = exec_price
+        elif np.sign(new_position) != np.sign(old_position):
+            avg_hold_price = exec_price
+        elif abs(new_position) > abs(old_position):
+            total_cost = avg_hold_price * abs(old_position) + exec_price * abs(delta_position)
+            avg_hold_price = total_cost / abs(new_position)
+        # 减仓: 平均价格不变
+
+        if new_position > 0:
+            side = "多头"
+        elif new_position < 0:
+            side = "空头"
+        else:
+            side = "空仓"
+
+        operation_records.append({
+            "state_index": t,
+            "action": a_final,
+            "action_label": ACTION_LABELS[a_final],
+            "execution_price": round(exec_price, 6),
+            "trade_quantity": delta_position,
+            "position_after": new_position,
+            "avg_hold_price": round(avg_hold_price, 6),
+            "total_value": round(abs(new_position) * exec_price, 6),
+            "side": side,
+        })
+
+        current_position = new_position
 
         # 将绝对 reward 转换为收益率
         rate_return = reward / portfolio_value
@@ -278,7 +328,7 @@ def run_horizon_inference(
         if done:
             break
 
-    return step_rate_returns
+    return step_rate_returns, operation_records
 
 
 def evaluate_pair(
@@ -344,6 +394,7 @@ def evaluate_pair(
 
     # 在每个 horizon 上运行完整推理
     all_step_returns = []
+    all_operation_records = []
 
     for h_idx in range(test_env.num_horizons):
         h = test_env.horizon
@@ -375,7 +426,7 @@ def evaluate_pair(
         R_arche = compute_base_return(test_env, h_idx, base_actions)
 
         # Phase III: Refinement agent 精炼
-        step_returns = run_horizon_inference(
+        step_returns, op_records = run_horizon_inference(
             env=test_env,
             horizon_idx=h_idx,
             base_actions=base_actions,
@@ -388,6 +439,7 @@ def evaluate_pair(
         )
 
         all_step_returns.extend(step_returns)
+        all_operation_records.extend(op_records)
 
     # 使用 EvaluationEngine 计算所有指标
     returns_array = np.array(all_step_returns, dtype=np.float64)
@@ -404,6 +456,21 @@ def evaluate_pair(
         "beta1": config.refinement_beta1,
         **metrics,
     }
+
+    # 导出操作详情 CSV
+    csv_save_dir = os.path.join(config.result_dir, pair, "evaluation")
+    os.makedirs(csv_save_dir, exist_ok=True)
+    csv_path = os.path.join(csv_save_dir, f"{pair}_operations.csv")
+    csv_fields = [
+        "state_index", "action", "action_label", "execution_price",
+        "trade_quantity", "position_after", "avg_hold_price",
+        "total_value", "side",
+    ]
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=csv_fields)
+        writer.writeheader()
+        writer.writerows(all_operation_records)
+    logger.info("操作详情 CSV 已保存: %s (%d 条记录)", csv_path, len(all_operation_records))
 
     # 打印结果
     logger.info("评估结果 [%s]:", pair)
