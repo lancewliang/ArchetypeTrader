@@ -27,6 +27,7 @@ import sys
 import numpy as np
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from src.config import parse_args
 from src.data.feature_pipeline import FeaturePipeline
@@ -423,6 +424,8 @@ def main() -> None:
 
     logger.info("开始训练: %d 步", total_steps)
 
+    pbar = tqdm(total=total_steps, desc="Phase III", unit="step", dynamic_ncols=True)
+
     while step_count < total_steps:
         # 随机选择一个训练 horizon
         h_idx = np.random.randint(0, train_env.num_horizons)
@@ -568,25 +571,29 @@ def main() -> None:
             optimizer.step()
 
         # 更新计数器
-        step_count += len(a_refs)
+        steps_this_horizon = len(a_refs)
+        step_count += steps_this_horizon
         horizon_count += 1
         reward_history.append(R_actual)
+        pbar.update(steps_this_horizon)
 
         # 日志输出
         if horizon_count % log_interval == 0:
             recent_rewards = reward_history[-log_interval:]
             avg_reward = np.mean(recent_rewards) if recent_rewards else 0.0
-            logger.info(
+            tqdm.write(
                 "Step %7d/%d (horizon %d) — avg_reward=%.4f, R=%.4f, "
-                "R_base=%.4f, R_1_opt=%.4f, loss=%.4f",
-                step_count,
-                total_steps,
-                horizon_count,
-                avg_reward,
-                R_actual,
-                R_base,
-                R_1_opt,
-                loss.item() if log_probs else 0.0,
+                "R_base=%.4f, R_1_opt=%.4f, loss=%.4f"
+                % (
+                    step_count,
+                    total_steps,
+                    horizon_count,
+                    avg_reward,
+                    R_actual,
+                    R_base,
+                    R_1_opt,
+                    loss.item() if log_probs else 0.0,
+                )
             )
 
         # NaN 检测
@@ -595,6 +602,8 @@ def main() -> None:
                 "训练 loss 发散 (NaN)，在 step %d 终止训练", step_count
             )
             break
+
+    pbar.close()
 
     # ----------------------------------------------------------------
     # Step 5: 保存模型到 result/phase3_archetype_refinement/

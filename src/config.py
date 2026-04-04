@@ -28,7 +28,7 @@ class Config:
     horizon: int = 72  # h = 72 步
     commission_rate: float = 0.0002  # δ = 0.02%
     max_positions: Dict[str, int] = field(
-        default_factory=lambda: {"BTC": 8, "ETH": 100, "DOT": 2500, "BNB": 200}
+        default_factory=lambda: {"BTC": 8, "ETH": 5, "DOT": 2500, "BNB": 200}
     )
 
     # Phase I 配置

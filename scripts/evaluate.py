@@ -433,9 +433,10 @@ def main() -> None:
         try:
             result = evaluate_pair(config, pair, device)
             all_results[pair] = result
-
+            pair_save_dir = os.path.join(config.result_dir, f"{pair}", "evaluation")
+            os.makedirs(pair_save_dir, exist_ok=True)
             # 保存单个交易对结果
-            pair_path = os.path.join(config.result_dir, f"{pair}", "evaluation", f"{pair}_results.json")
+            pair_path = os.path.join(pair_save_dir, f"{pair}_results.json")
             with open(pair_path, "w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2, ensure_ascii=False)
             logger.info("结果已保存: %s", pair_path)
