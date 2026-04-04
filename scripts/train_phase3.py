@@ -400,7 +400,7 @@ def main() -> None:
     total_steps = config.phase3_total_steps
     log_interval = 100  # 每 100 个 horizon 输出日志
 
-    save_dir = os.path.join(config.result_dir, "phase3_archetype_refinement")
+    save_dir = os.path.join(config.result_dir, f"{pair}","phase3_archetype_refinement")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(
         save_dir, f"{pair}_refinement_agent_beta{beta1}.pt"

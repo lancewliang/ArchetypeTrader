@@ -37,7 +37,11 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def load_phase1_model(config, pair: str, device: torch.device):
+def load_phase1_model(config=None, pair: str = "ETH", device: torch.device = None):
+    if config is None:
+        config = parse_args([])
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     """加载 Phase I 模型（码本 + 冻结 Decoder）。
 
     Returns:
@@ -80,7 +84,11 @@ def load_phase1_model(config, pair: str, device: torch.device):
     return codebook, decoder
 
 
-def load_phase2_model(config, pair: str, device: torch.device):
+def load_phase2_model(config=None, pair: str = "ETH", device: torch.device = None):
+    if config is None:
+        config = parse_args([])
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     """加载 Phase II 模型（冻结 SelectionAgent）。
 
     Returns:
@@ -110,7 +118,11 @@ def load_phase2_model(config, pair: str, device: torch.device):
     return selection_agent
 
 
-def load_phase3_model(config, pair: str, device: torch.device):
+def load_phase3_model(config=None, pair: str = "ETH", device: torch.device = None):
+    if config is None:
+        config = parse_args([])
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     """加载 Phase III 模型（RefinementAgent）。
 
     Returns:
@@ -208,14 +220,21 @@ def run_horizon_inference(
     #            → policy adapter 计算 final action → env step
 
     Returns:
-        step_returns: 每步收益列表
+        step_rate_returns: 每步收益率列表（r_t = reward_t / portfolio_value_t）
     """
     state = env.reset(horizon_idx)
 
     h = len(base_actions)
-    step_returns = []
+    step_rate_returns = []
     a_base_prev = int(base_actions[0])
     has_adjusted = False
+
+    # 初始 portfolio value = 持仓市值（用 horizon 起始价格 × max_positions 作为基准）
+    t_start = horizon_idx * env.horizon
+    initial_price = env.prices[t_start]
+    portfolio_value = float(abs(env.m) * initial_price)  # 名义本金
+    if portfolio_value == 0.0:
+        portfolio_value = 1.0  # 防止除零
 
     for step_idx in range(h):
         a_base = int(base_actions[step_idx])
@@ -245,7 +264,13 @@ def run_horizon_inference(
         a_final, has_adjusted = policy_adapter.compute_final_action(a_base, a_base_prev, a_ref, has_adjusted)
 
         next_state, reward, done, _ = env.step(a_final)
-        step_returns.append(reward)
+
+        # 将绝对 reward 转换为收益率
+        rate_return = reward / portfolio_value
+        step_rate_returns.append(rate_return)
+        portfolio_value += reward  # 更新 portfolio value
+        if portfolio_value <= 0.0:
+            portfolio_value = 1e-8  # 防止除零或负值
 
         state = next_state
         a_base_prev = a_base
@@ -253,13 +278,13 @@ def run_horizon_inference(
         if done:
             break
 
-    return step_returns
+    return step_rate_returns
 
 
 def evaluate_pair(
-    config,
-    pair: str,
-    device: torch.device,
+    config=None,
+    pair: str = "ETH",
+    device: torch.device = None,
 ) -> dict:
     """对单个交易对执行完整评估。
 
@@ -274,6 +299,11 @@ def evaluate_pair(
     Returns:
         评估结果字典
     """
+    if config is None:
+        config = parse_args([])
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     logger.info("=" * 50)
     logger.info("评估交易对: %s", pair)
     logger.info("=" * 50)
@@ -392,30 +422,30 @@ def main() -> None:
     config = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("评估开始，使用设备: %s", device)
-    pair = config.pairs[0]
+ 
     # 需求 8.9: 保存结果到 result/evaluation/
-    save_dir = os.path.join(config.result_dir, f"{pair}", "evaluation")
+    save_dir = os.path.join(config.result_dir, "evaluation")
     os.makedirs(save_dir, exist_ok=True)
 
     all_results = {}
 
-    
-    try:
-        result = evaluate_pair(config, pair, device)
-        all_results[pair] = result
+    for pair in config.pairs:
+        try:
+            result = evaluate_pair(config, pair, device)
+            all_results[pair] = result
 
-        # 保存单个交易对结果
-        pair_path = os.path.join(save_dir, f"{pair}_results.json")
-        with open(pair_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2, ensure_ascii=False)
-        logger.info("结果已保存: %s", pair_path)
+            # 保存单个交易对结果
+            pair_path = os.path.join(config.result_dir, f"{pair}", "evaluation", f"{pair}_results.json")
+            with open(pair_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            logger.info("结果已保存: %s", pair_path)
 
-    except FileNotFoundError as e:
-        logger.error("交易对 %s 评估失败: %s", pair, e)
-        all_results[pair] = {"pair": pair, "error": str(e)}
-    except Exception as e:
-        logger.error("交易对 %s 评估异常: %s", pair, e)
-        all_results[pair] = {"pair": pair, "error": str(e)}
+        except FileNotFoundError as e:
+            logger.error("交易对 %s 评估失败: %s", pair, e)
+            all_results[pair] = {"pair": pair, "error": str(e)}
+        except Exception as e:
+            logger.error("交易对 %s 评估异常: %s", pair, e)
+            all_results[pair] = {"pair": pair, "error": str(e)}
 
     # 保存汇总结果
     summary_path = os.path.join(save_dir, "all_results.json")
@@ -423,8 +453,19 @@ def main() -> None:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
     logger.info("汇总结果已保存: %s", summary_path)
 
-    # 打印汇总表格
+    # 打印指标说明
     logger.info("=" * 70)
+    logger.info("指标说明")
+    logger.info("-" * 70)
+    logger.info("  TR   (Total Return)         — 总收益率: 策略在测试期间的累计收益")
+    logger.info("  AVOL (Annual Volatility)    — 年化波动率: 收益率的年化标准差，衡量风险大小")
+    logger.info("  MDD  (Max Drawdown)         — 最大回撤: 从历史峰值到谷值的最大跌幅，衡量最坏亏损")
+    logger.info("  ASR  (Annual Sharpe Ratio)  — 年化夏普比率: 单位总风险的超额收益，越高越好")
+    logger.info("  ACR  (Annual Calmar Ratio)  — 年化卡尔玛比率: 年化收益与最大回撤之比，衡量回撤调整后收益")
+    logger.info("  ASoR (Annual Sortino Ratio) — 年化索提诺比率: 仅考虑下行风险的收益风险比，越高越好")
+    logger.info("=" * 70)
+
+    # 打印汇总表格
     logger.info("评估汇总")
     logger.info("=" * 70)
     logger.info(

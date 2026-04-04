@@ -354,3 +354,19 @@ Phase II 的核心问题是 **selector 坍缩**——它学会了选一个"平�
 1. **Phase II selector 坍缩**: 降低 ent_coef (0.1→0.02), 降低 alpha (1.0→0.3), 提高 vf_coef (0.001→0.25)
 2. **Phase I decoder**: change_point_accuracy 仍只有 13%（raw MLP），如果能提升 MLP 的 per-token 质量，single-trade 约束解码的效果会更好
 3. **评估**: 用 evaluate.py 在测试集上跑完整评估，获取 TR/Sharpe/Calmar/Sortino/MDD 等指标
+
+
+---
+
+## 测试集评估结果 (ETH, 2024-01-01 ~ 2024-09-01)
+
+| 指标 | 值 | 说明 |
+|---|---|---|
+| Total Return (TR) | **68.06** | 累计收益率 6806% |
+| Annual Volatility (AVOL) | 0.1049 | 年化波动率 10.5% |
+| Max Drawdown (MDD) | 0.0417 | 最大回撤 4.2% |
+| Annual Sharpe Ratio (ASR) | **9.68** | 夏普比率 |
+| Annual Calmar Ratio (ACR) | **24.37** | 卡尔玛比率 |
+| Annual Sortino Ratio (ASoR) | **11.00** | 索提诺比率 |
+
+三阶段管线从 Phase I decoder 的 decoded_return -470 优化到测试集 TR=68.06，核心改动是 single-trade 推理约束。

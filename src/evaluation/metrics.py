@@ -35,6 +35,7 @@ class EvaluationEngine:
         """计算总收益率。
 
         TR = Π(1 + r_t) - 1
+        使用 log-sum 避免长序列连乘溢出。
 
         Args:
             returns: 1D 逐步收益序列。
@@ -42,7 +43,8 @@ class EvaluationEngine:
         Returns:
             总收益率。
         """
-        return float(np.prod(1.0 + returns) - 1.0)
+        log_wealth = np.sum(np.log1p(returns))
+        return float(np.exp(log_wealth) - 1.0)
 
     def compute_annual_volatility(self, returns: np.ndarray) -> float:
         """计算年化波动率。
@@ -60,7 +62,8 @@ class EvaluationEngine:
     def compute_max_drawdown(self, returns: np.ndarray) -> float:
         """计算最大回撤。
 
-        基于累积财富曲线计算：MDD = max((peak - trough) / peak)
+        基于对数累积财富曲线计算，避免长序列 cumprod 溢出。
+        MDD = max((peak - trough) / peak) = 1 - exp(min(log_wealth - log_peak))
 
         Args:
             returns: 1D 逐步收益序列。
@@ -68,13 +71,11 @@ class EvaluationEngine:
         Returns:
             最大回撤（非负值）。
         """
-        # 累积财富曲线
-        wealth = np.cumprod(1.0 + returns)
-        # 滚动峰值
-        running_max = np.maximum.accumulate(wealth)
-        # 回撤序列
-        drawdowns = (running_max - wealth) / running_max
-        return float(np.max(drawdowns))
+        log_wealth = np.cumsum(np.log1p(returns))
+        log_peak = np.maximum.accumulate(log_wealth)
+        # log_wealth - log_peak <= 0，对应回撤幅度
+        max_log_dd = float(np.min(log_wealth - log_peak))
+        return float(1.0 - np.exp(max_log_dd))
 
     def compute_annual_sharpe_ratio(self, returns: np.ndarray) -> float:
         """计算年化夏普比率。
