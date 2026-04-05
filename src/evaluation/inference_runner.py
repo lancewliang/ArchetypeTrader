@@ -1,0 +1,309 @@
+"""InferenceRunner — 三阶段推理执行
+
+从 evaluate.py 中抽取 generate_base_actions、compute_base_return、
+run_horizon_inference、evaluate_pair 等核心推理逻辑。
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import os
+from typing import Dict, List, Tuple
+
+import numpy as np
+import torch
+from tqdm import tqdm
+
+from src.config import Config, parse_args
+from src.data.feature_pipeline import FeaturePipeline
+from src.env.trading_env import TradingEnv
+from src.evaluation.metrics import EvaluationEngine
+from src.evaluation.model_loader import load_phase1_model, load_phase2_model, load_phase3_model
+from src.evaluation.portfolio_tracker import PortfolioTracker
+from src.phase1.vq_decoder import VQDecoder
+from src.phase3.policy_adapter import PolicyAdapter
+from src.phase3.refinement_agent import RefinementAgent
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def generate_base_actions(
+    decoder: VQDecoder,
+    z_q: torch.Tensor,
+    horizon_states: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    """使用冻结 Decoder 生成 horizon 内的 base actions。
+
+    Returns:
+        base_actions: (h,) 值域 {0, 1, 2}
+    """
+    states_t = torch.tensor(
+        horizon_states, dtype=torch.float32, device=device,
+    ).unsqueeze(0)
+
+    with torch.no_grad():
+        actions = decoder.decode_with_single_trade_constraint(states_t, z_q).squeeze(0)
+
+    return actions.cpu().numpy()
+
+
+def compute_base_return(
+    env: TradingEnv, horizon_idx: int, base_actions: np.ndarray,
+) -> float:
+    """使用 base actions 在 env 中执行，返回 horizon 总收益 R_base。"""
+    env.reset(horizon_idx)
+    total_return = 0.0
+    for step_idx in range(len(base_actions)):
+        action = int(base_actions[step_idx])
+        _, reward, done, _ = env.step(action)
+        total_return += reward
+        if done:
+            break
+    return total_return
+
+
+def run_horizon_inference(
+    env: TradingEnv,
+    horizon_idx: int,
+    base_actions: np.ndarray,
+    refinement_agent: RefinementAgent,
+    policy_adapter: PolicyAdapter,
+    e_a_sel: np.ndarray,
+    R_arche: float,
+    device: torch.device,
+    horizon: int,
+    tracker: PortfolioTracker,
+) -> List[float]:
+    """在一个 horizon 内执行完整三阶段推理。
+
+    Args:
+        tracker: PortfolioTracker 实例，管理跨 horizon 的资金与持仓
+
+    Returns:
+        step_rate_returns: 每步收益率列表
+    """
+    state = env.reset(horizon_idx)
+    t_start = horizon_idx * env.horizon
+    initial_price = env.prices[t_start]
+
+    # 跨 horizon 平仓清算
+    tracker.settle_previous_horizon(initial_price, t_start)
+
+    h = len(base_actions)
+    step_rate_returns: List[float] = []
+    a_base_prev = int(base_actions[0])
+    has_adjusted = False
+
+    # portfolio value 用于收益率计算
+    portfolio_value = float(abs(env.m) * initial_price)
+    if portfolio_value == 0.0:
+        portfolio_value = 1.0
+
+    current_position = 0
+
+    for step_idx in range(h):
+        a_base = int(base_actions[step_idx])
+
+        # 构建 refinement agent 输入
+        s_ref1 = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+        tau_remain = (h - step_idx) / h
+        context = np.concatenate([
+            e_a_sel,
+            np.array([a_base], dtype=np.float32),
+            np.array([R_arche], dtype=np.float32),
+            np.array([tau_remain], dtype=np.float32),
+        ])
+        s_ref2 = torch.tensor(context, dtype=torch.float32, device=device).unsqueeze(0)
+
+        with torch.no_grad():
+            action_probs, _ = refinement_agent(s_ref1, s_ref2)
+            a_ref_idx = torch.argmax(action_probs, dim=-1).item()
+            a_ref = a_ref_idx - 1
+
+        a_final, has_adjusted = policy_adapter.compute_final_action(
+            a_base, a_base_prev, a_ref, has_adjusted,
+        )
+
+        old_position = current_position
+        t = t_start + step_idx
+        exec_price = float(env.prices[t])
+
+        next_state, reward, done, info = env.step(a_final)
+        new_position = info["position"]
+        delta_position = new_position - old_position
+
+        # 手续费和滑点
+        if delta_position == 0:
+            commission, slippage = 0.0, 0.0
+        else:
+            abs_delta = abs(delta_position)
+            commission = env.commission_rate * abs_delta * exec_price
+            if env.states_dataframe is not None:
+                state_dict = env.states_dataframe.row(t, named=True)
+                slippage = TradingEnv.compute_lob_slippage(delta_position, state_dict, exec_price)
+            else:
+                slippage = 0.0
+
+        # 更新资金
+        tracker.update_cash_for_trade(old_position, new_position, exec_price, t)
+
+        # 记录操作
+        tracker.record_step(t, a_final, exec_price, old_position, new_position, commission, slippage)
+
+        current_position = new_position
+
+        # 收益率
+        rate_return = reward / portfolio_value
+        step_rate_returns.append(rate_return)
+        portfolio_value += reward
+        if portfolio_value <= 0.0:
+            portfolio_value = 1e-8
+
+        state = next_state
+        a_base_prev = a_base
+
+        if done:
+            break
+
+    return step_rate_returns
+
+
+def evaluate_pair(
+    config: Config | None = None,
+    pair: str = "ETH",
+    device: torch.device | None = None,
+) -> dict:
+    """对单个交易对执行完整评估。
+
+    Returns:
+        评估结果字典
+    """
+    if config is None:
+        config = parse_args([])
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    logger.info("=" * 50)
+    logger.info("评估交易对: %s", pair)
+    logger.info("=" * 50)
+
+    # 加载三阶段模型
+    codebook, decoder = load_phase1_model(config, pair, device)
+    selection_agent = load_phase2_model(config, pair, device)
+    refinement_agent = load_phase3_model(config, pair, device)
+
+    # 加载特征数据
+    logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
+    pipeline = FeaturePipeline(config.data_dir, pair)
+    _, _, test_df = pipeline.get_state_vector()
+    _, _, test_prices_df = pipeline.get_prices()
+
+    test_states = test_df.to_numpy()
+    test_prices = test_prices_df["close"].to_numpy()
+
+    logger.info(
+        "测试集: states shape=%s, prices shape=%s",
+        test_states.shape, test_prices.shape,
+    )
+
+    # 创建测试环境
+    test_env = TradingEnv(
+        states=test_states, prices=test_prices,
+        pair=pair, horizon=config.horizon, states_dataframe=test_df,
+    )
+    logger.info("TradingEnv 初始化完成: test_horizons=%d", test_env.num_horizons)
+
+    if test_env.num_horizons == 0:
+        logger.warning("交易对 %s 测试集 horizon 数量为 0，跳过", pair)
+        return {"pair": pair, "error": "no test horizons"}
+
+    # 初始资金
+    initial_capital = float(test_env.m) * float(test_prices[0])
+    tracker = PortfolioTracker(initial_capital)
+    logger.info("初始资金: %.2f (m=%d × price=%.6f)", initial_capital, test_env.m, test_prices[0])
+
+    all_step_returns: List[float] = []
+
+    for h_idx in tqdm(range(test_env.num_horizons), desc=f"评估 {pair}", unit="horizon"):
+        h = test_env.horizon
+        start = h_idx * h
+        end = min(start + h, len(test_env.states))
+        horizon_states = test_env.states[start:end]
+
+        # Phase II: 选择原型
+        state_0 = test_env.states[start]
+        state_0_t = torch.tensor(state_0, dtype=torch.float32, device=device).unsqueeze(0)
+
+        with torch.no_grad():
+            action_probs, _ = selection_agent(state_0_t)
+            k = torch.argmax(action_probs, dim=-1).item()
+
+        e_a_sel_t = codebook.embeddings.weight[k]
+        z_q = e_a_sel_t.unsqueeze(0)
+        e_a_sel = e_a_sel_t.detach().cpu().numpy()
+
+        # Phase I: 生成 base actions
+        base_actions = generate_base_actions(decoder, z_q, horizon_states, device)
+
+        # 计算 R_base
+        R_arche = compute_base_return(test_env, h_idx, base_actions)
+
+        # Phase III: Refinement
+        step_returns = run_horizon_inference(
+            env=test_env,
+            horizon_idx=h_idx,
+            base_actions=base_actions,
+            refinement_agent=refinement_agent,
+            policy_adapter=PolicyAdapter(),
+            e_a_sel=e_a_sel,
+            R_arche=R_arche,
+            device=device,
+            horizon=h,
+            tracker=tracker,
+        )
+        all_step_returns.extend(step_returns)
+
+    # 计算指标
+    returns_array = np.array(all_step_returns, dtype=np.float64)
+    engine = EvaluationEngine(annualization_factor=config.annualization_factor)
+    metrics = engine.evaluate(returns_array)
+
+    result = {
+        "pair": pair,
+        "test_start": config.test_start,
+        "test_end": config.test_end,
+        "num_horizons": test_env.num_horizons,
+        "num_steps": len(all_step_returns),
+        "beta1": config.refinement_beta1,
+        **metrics,
+    }
+
+    # 导出 CSV
+    csv_save_dir = os.path.join(config.result_dir, pair, "evaluation")
+    os.makedirs(csv_save_dir, exist_ok=True)
+    csv_path = os.path.join(csv_save_dir, f"{pair}_operations.csv")
+    csv_fields = [
+        "state_index", "action", "action_label", "execution_price",
+        "trade_quantity", "position_after", "avg_hold_price",
+        "commission", "slippage", "position_change_pnl",
+        "cash", "holding_value", "short_debt", "total_value", "profit", "side",
+    ]
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=csv_fields)
+        writer.writeheader()
+        writer.writerows(tracker.records)
+    logger.info("操作详情 CSV 已保存: %s (%d 条记录)", csv_path, len(tracker.records))
+
+    # 打印结果
+    logger.info("评估结果 [%s]:", pair)
+    logger.info("  Total Return (TR):          %.6f", metrics["total_return"])
+    logger.info("  Annual Volatility (AVOL):   %.6f", metrics["annual_volatility"])
+    logger.info("  Max Drawdown (MDD):         %.6f", metrics["max_drawdown"])
+    logger.info("  Annual Sharpe Ratio (ASR):  %.6f", metrics["annual_sharpe_ratio"])
+    logger.info("  Annual Calmar Ratio (ACR):  %.6f", metrics["annual_calmar_ratio"])
+    logger.info("  Annual Sortino Ratio (ASoR):%.6f", metrics["annual_sortino_ratio"])
+
+    return result
