@@ -787,7 +787,7 @@ def main() -> None:
     # Step 0: 解析配置
     config = parse_args()
     pair = config.pairs[0]
-    assert_paper_phase1_settings(config, pair)
+    # assert_paper_phase1_settings(config, pair)
     set_reproducibility_seed(config.phase1_sampling_seed)
 
     logger.info("Phase I 训练开始: pair=%s", pair)

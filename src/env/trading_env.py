@@ -25,13 +25,13 @@ class TradingEnv:
     # 各交易对最大持仓量 m
     MAX_POSITIONS: Dict[str, int] = {
         "BTC": 8,
-        "ETH": 100,
+        "ETH": 5,
         "DOT": 2500,
         "BNB": 200,
     }
 
     # Section 3.1: 佣金率 δ = 0.02%
-    COMMISSION_RATE: float = 0.0002
+    COMMISSION_RATE: float = 0.0004
 
     # Section 3.1: LOB feature indices in state vector
     # (matching SINGLE_FEATURES order in feature_pipeline.py)

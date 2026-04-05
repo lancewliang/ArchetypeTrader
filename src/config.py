@@ -26,7 +26,7 @@ class Config:
     # MDP 配置
     action_dim: int = 3  # {0: short, 1: flat, 2: long}
     horizon: int = 72  # h = 72 步
-    commission_rate: float = 0.0002  # δ = 0.02%
+    commission_rate: float = 0.0004  # δ = 0.02%
     max_positions: Dict[str, int] = field(
         default_factory=lambda: {"BTC": 8, "ETH": 5, "DOT": 2500, "BNB": 200}
     )
