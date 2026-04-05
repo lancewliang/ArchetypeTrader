@@ -92,12 +92,26 @@ class PortfolioTracker:
 
     def settle_previous_horizon(
         self, price: float, t_start: int,
+        new_first_action: int | None = None,
+        m: int = 0,
+        commission_rate: float = 0.0,
+        slippage: float = 0.0,
     ) -> None:
-        """在新 horizon 开始时，按开盘价清算上一个 horizon 遗留的持仓。
+        """在新 horizon 开始时，根据新 horizon 首个动作决定是否平仓。
+
+        优化逻辑:
+        - 同方向延续 (多→多, 空→空): 跳过平仓，持仓直接延续到新 horizon
+        - 方向改变 (多→空, 空→多, 多→空仓, 空→空仓): 执行平仓并收取手续费+滑点
+        - 无持仓: 无操作
 
         Args:
             price: 新 horizon 的开盘价
             t_start: 新 horizon 的起始全局索引
+            new_first_action: 新 horizon 的第一个动作 {0: short, 1: flat, 2: long}，
+                              None 时退化为强制平仓（向后兼容）
+            m: 最大持仓量，用于判断新方向
+            commission_rate: 佣金率，用于计算平仓手续费
+            slippage: 平仓滑点成本（由调用方通过 LOB 计算）
         """
         s = self.state
         prev_position = s.position
@@ -105,10 +119,29 @@ class PortfolioTracker:
         if prev_position == 0:
             return
 
+        # 判断新 horizon 首个动作的目标方向
+        if new_first_action is not None:
+            direction_map = {0: -1, 1: 0, 2: 1}
+            new_direction = direction_map[new_first_action]
+            prev_direction = 1 if prev_position > 0 else -1
+
+            # 同方向延续: 跳过平仓，持仓直接 carry forward
+            if new_direction == prev_direction:
+                logger.debug(
+                    "[SETTLE] t=%d 同方向延续 (pos=%d, new_action=%d)，跳过平仓",
+                    t_start, prev_position, new_first_action,
+                )
+                return
+
+        # 需要平仓: 计算手续费
+        abs_position = abs(prev_position)
+        commission = round(commission_rate * abs_position * price, 2)
+        total_cost = commission + slippage
+
         if prev_position > 0:
-            # 遗留多头: 按开盘价卖出
-            s.cash += prev_position * price
-            pnl = (price - s.avg_hold_price) * abs(prev_position) if s.avg_hold_price > 0 else 0.0
+            # 遗留多头: 按开盘价卖出，收回现金，扣除手续费+滑点
+            s.cash += prev_position * price - total_cost
+            pnl = (price - s.avg_hold_price) * abs_position if s.avg_hold_price > 0 else 0.0
             total_value = s.cash
             self.records.append(StepRecord(
                 state_index=t_start,
@@ -118,6 +151,8 @@ class PortfolioTracker:
                 trade_quantity=-prev_position,
                 position_after=0,
                 avg_hold_price=0.0,
+                commission=commission,
+                slippage=slippage,
                 position_change_pnl=pnl,
                 cash=s.cash,
                 total_value=total_value,
@@ -125,35 +160,33 @@ class PortfolioTracker:
                 side="空仓",
             ).to_dict())
         else:
-            # 遗留空头: 按开盘价买回平仓
-            close_debt = abs(prev_position) * price
+            # 遗留空头: 按开盘价买回平仓，盈亏结算到 cash，扣除手续费+滑点
+            close_debt = abs_position * price
             pnl = s.short_open_value - close_debt
-            logger.info(
-                "[SETTLE] 空头平仓前: cash=%.2f sov=%.2f close_debt=%.2f pnl=%.2f",
-                s.cash, s.short_open_value, close_debt, pnl,
+            logger.debug(
+                "[SETTLE] 空头平仓前: cash=%.2f sov=%.2f close_debt=%.2f pnl=%.2f cost=%.2f",
+                s.cash, s.short_open_value, close_debt, pnl, total_cost,
             )
-            s.cash += pnl
+            s.cash += pnl - total_cost
             s.short_open_value = 0.0
-            logger.info("[SETTLE] 空头平仓后: cash=%.2f", s.cash)
+            logger.debug("[SETTLE] 空头平仓后: cash=%.2f", s.cash)
             total_value = s.cash
             self.records.append(StepRecord(
                 state_index=t_start,
                 action="settle",
                 action_label="horizon平仓",
                 execution_price=price,
-                trade_quantity=abs(prev_position),
+                trade_quantity=abs_position,
                 position_after=0,
                 avg_hold_price=0.0,
+                commission=commission,
+                slippage=slippage,
                 position_change_pnl=pnl,
                 cash=s.cash,
                 total_value=total_value,
                 profit=total_value - self.initial_capital,
                 side="空仓",
             ).to_dict())
-
-        # env.reset 把内部仓位归零，需要反向调整 cash
-        # 使 cash 反映 "从 prev_position 变为 0" 的资金变动
-        s.cash -= (-prev_position) * price
 
         s.position = 0
         s.avg_hold_price = 0.0
@@ -174,7 +207,7 @@ class PortfolioTracker:
 
         if old_position >= 0 and new_position >= 0:
             s.cash -= delta * exec_price
-            logger.info(
+            logger.debug(
                 "[CASH] t=%d 多头侧: old=%d new=%d delta=%d cash=%.2f",
                 t, old_position, new_position, delta, s.cash,
             )
@@ -204,7 +237,7 @@ class PortfolioTracker:
             )
         elif old_position == 0 and new_position < 0:
             s.short_open_value = abs(new_position) * exec_price
-            logger.info(
+            logger.debug(
                 "[CASH] t=%d 空仓→空头: old=%d new=%d cash=%.2f sov=%.2f",
                 t, old_position, new_position, s.cash, s.short_open_value,
             )
@@ -303,7 +336,11 @@ class PortfolioTracker:
         commission: float,
         slippage: float,
     ) -> None:
-        """处理单步的盈亏、均价更新，并生成操作记录。"""
+        """处理单步的盈亏、均价更新，并生成操作记录。
+
+        手续费 (commission) 和滑点 (slippage) 会从 cash 中扣除，
+        确保 cash / total_value / profit 正确反映交易成本。
+        """
         s = self.state
 
         pnl = self.compute_position_change_pnl(
@@ -313,6 +350,15 @@ class PortfolioTracker:
             old_position, new_position, exec_price, s.avg_hold_price,
         )
         s.position = new_position
+
+        # 从 cash 中扣除交易费用
+        total_cost = commission + slippage
+        if total_cost > 0:
+            s.cash -= total_cost
+            logger.debug(
+                "[FEE] t=%d commission=%.6f slippage=%.6f total=%.6f cash=%.2f",
+                t, commission, slippage, total_cost, s.cash,
+            )
 
         if new_position > 0:
             side = "多头"

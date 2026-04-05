@@ -146,18 +146,21 @@ class TestSettlePreviousHorizon:
         assert len(t.records) == 0
         assert t.state.cash == 1000.0
 
-    def test_long_position_settle(self):
+    def test_long_position_settle_no_action(self):
+        """未提供 new_first_action 时退化为强制平仓（向后兼容）。"""
         t = PortfolioTracker(10000.0)
         t.state.position = 5
         t.state.avg_hold_price = 90.0
         t.settle_previous_horizon(price=100.0, t_start=12)
-        # 应生成一条平仓记录
         assert len(t.records) == 1
         assert t.records[0]["action"] == "settle"
         assert t.state.position == 0
         assert t.state.avg_hold_price == 0.0
+        # 卖出 5 × 100 = 500 回收到 cash（无手续费，因为 commission_rate 默认 0）
+        assert t.state.cash == pytest.approx(10000.0 + 500.0)
 
-    def test_short_position_settle(self):
+    def test_short_position_settle_no_action(self):
+        """未提供 new_first_action 时退化为强制平仓（向后兼容）。"""
         t = PortfolioTracker(10000.0)
         t.state.position = -5
         t.state.short_open_value = 500.0  # 开仓时 5 × 100
@@ -166,6 +169,136 @@ class TestSettlePreviousHorizon:
         assert t.records[0]["action"] == "settle"
         assert t.state.position == 0
         assert t.state.short_open_value == 0.0
+        # 空头平仓盈亏 = sov - close_debt = 500 - 5*90 = 50
+        assert t.state.cash == pytest.approx(10050.0)
+
+    def test_long_to_long_skip_settle(self):
+        """多→多: 同方向延续，跳过平仓。"""
+        t = PortfolioTracker(10000.0)
+        t.state.position = 5
+        t.state.avg_hold_price = 90.0
+        t.state.cash = 9550.0  # 买入花了 450
+        t.settle_previous_horizon(
+            price=100.0, t_start=12,
+            new_first_action=2, m=5, commission_rate=0.0002,
+        )
+        # 不应产生任何记录
+        assert len(t.records) == 0
+        # 持仓和 cash 不变
+        assert t.state.position == 5
+        assert t.state.avg_hold_price == 90.0
+        assert t.state.cash == 9550.0
+
+    def test_short_to_short_skip_settle(self):
+        """空→空: 同方向延续，跳过平仓。"""
+        t = PortfolioTracker(10000.0)
+        t.state.position = -5
+        t.state.short_open_value = 500.0
+        t.state.cash = 10000.0
+        t.settle_previous_horizon(
+            price=90.0, t_start=12,
+            new_first_action=0, m=5, commission_rate=0.0002,
+        )
+        assert len(t.records) == 0
+        assert t.state.position == -5
+        assert t.state.short_open_value == 500.0
+        assert t.state.cash == 10000.0
+
+    def test_long_to_short_settle_with_fee(self):
+        """多→空: 方向改变，平仓并收取手续费+滑点。"""
+        t = PortfolioTracker(10000.0)
+        t.state.position = 5
+        t.state.avg_hold_price = 90.0
+        commission_rate = 0.0002
+        price = 100.0
+        slippage = 0.50
+        expected_commission = round(commission_rate * 5 * price, 2)  # 0.10
+        t.settle_previous_horizon(
+            price=price, t_start=12,
+            new_first_action=0, m=5, commission_rate=commission_rate,
+            slippage=slippage,
+        )
+        assert len(t.records) == 1
+        assert t.records[0]["action"] == "settle"
+        assert t.records[0]["commission"] == pytest.approx(expected_commission)
+        assert t.records[0]["slippage"] == pytest.approx(slippage)
+        assert t.state.position == 0
+        # cash = 10000 + 5*100 - 0.10 - 0.50 = 10499.40
+        assert t.state.cash == pytest.approx(10000.0 + 500.0 - expected_commission - slippage)
+
+    def test_short_to_long_settle_with_fee(self):
+        """空→多: 方向改变，平仓并收取手续费+滑点。"""
+        t = PortfolioTracker(10000.0)
+        t.state.position = -5
+        t.state.short_open_value = 500.0  # 开仓 5 × 100
+        commission_rate = 0.0002
+        price = 90.0
+        slippage = 0.30
+        expected_commission = round(commission_rate * 5 * price, 2)  # 0.09
+        t.settle_previous_horizon(
+            price=price, t_start=12,
+            new_first_action=2, m=5, commission_rate=commission_rate,
+            slippage=slippage,
+        )
+        assert len(t.records) == 1
+        assert t.records[0]["commission"] == pytest.approx(expected_commission)
+        assert t.records[0]["slippage"] == pytest.approx(slippage)
+        assert t.state.position == 0
+        assert t.state.short_open_value == 0.0
+        # pnl = 500 - 5*90 = 50, cash = 10000 + 50 - 0.09 - 0.30
+        assert t.state.cash == pytest.approx(10050.0 - expected_commission - slippage)
+
+    def test_long_to_flat_settle_with_fee(self):
+        """多→空仓: 平仓并收取手续费。"""
+        t = PortfolioTracker(10000.0)
+        t.state.position = 5
+        t.state.avg_hold_price = 100.0
+        commission_rate = 0.0002
+        price = 100.0
+        expected_commission = round(commission_rate * 5 * price, 2)
+        t.settle_previous_horizon(
+            price=price, t_start=12,
+            new_first_action=1, m=5, commission_rate=commission_rate,
+        )
+        assert len(t.records) == 1
+        assert t.state.position == 0
+        assert t.state.cash == pytest.approx(10000.0 + 500.0 - expected_commission)
+
+    def test_short_to_flat_settle_with_fee(self):
+        """空→空仓: 平仓并收取手续费。"""
+        t = PortfolioTracker(10000.0)
+        t.state.position = -5
+        t.state.short_open_value = 500.0
+        commission_rate = 0.0002
+        price = 100.0
+        expected_commission = round(commission_rate * 5 * price, 2)
+        t.settle_previous_horizon(
+            price=price, t_start=12,
+            new_first_action=1, m=5, commission_rate=commission_rate,
+        )
+        assert len(t.records) == 1
+        assert t.state.position == 0
+        # pnl = 500 - 500 = 0, cash = 10000 + 0 - 0.10
+        assert t.state.cash == pytest.approx(10000.0 - expected_commission)
+
+    def test_short_settle_then_open_short_cash_correct(self):
+        """复现 bug: settle 空头后紧接着开空头，cash 不应被额外扣减。
+        使用 new_first_action=0 (short) 时应跳过平仓。"""
+        initial_capital = 187481.0
+        t = PortfolioTracker(initial_capital)
+        t.state.position = -100
+        t.state.short_open_value = 188601.0  # 100 × 1886.01
+        t.state.cash = initial_capital
+
+        # 新 horizon 首个动作也是 short → 跳过平仓
+        t.settle_previous_horizon(
+            price=1878.6, t_start=72,
+            new_first_action=0, m=100, commission_rate=0.0002,
+        )
+        # 同方向延续，不平仓
+        assert t.state.position == -100
+        assert t.state.cash == pytest.approx(initial_capital)
+        assert t.state.short_open_value == pytest.approx(188601.0)
 
 
 class TestUpdateCashForTrade:
@@ -315,6 +448,34 @@ class TestRecordStep:
         assert rec["position_after"] == 5
         assert t.state.position == 5
         assert t.state.avg_hold_price == 100.0
+
+    def test_commission_and_slippage_deducted_from_cash(self):
+        """手续费和滑点应从 cash 中扣除。"""
+        t = PortfolioTracker(10000.0)
+        t.update_cash_for_trade(0, 5, 100.0, 0)  # 买入 5×100=500, cash=9500
+        t.record_step(
+            t=0, a_final=2, exec_price=100.0,
+            old_position=0, new_position=5,
+            commission=1.0, slippage=0.5,
+        )
+        # cash = 9500 - 1.0 - 0.5 = 9498.5
+        assert t.state.cash == pytest.approx(9498.5)
+        rec = t.records[0]
+        assert rec["cash"] == pytest.approx(9498.5)
+        # total_value = cash + holding = 9498.5 + 500 = 9998.5
+        assert rec["total_value"] == pytest.approx(9998.5)
+        # profit = 9998.5 - 10000 = -1.5
+        assert rec["profit"] == pytest.approx(-1.5)
+
+    def test_zero_fee_no_deduction(self):
+        """无费用时 cash 不变。"""
+        t = PortfolioTracker(10000.0)
+        t.record_step(
+            t=0, a_final=1, exec_price=100.0,
+            old_position=0, new_position=0,
+            commission=0.0, slippage=0.0,
+        )
+        assert t.state.cash == pytest.approx(10000.0)
 
 
 # ===========================================================================

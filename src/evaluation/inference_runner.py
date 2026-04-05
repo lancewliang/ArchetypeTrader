@@ -89,8 +89,29 @@ def run_horizon_inference(
     t_start = horizon_idx * env.horizon
     initial_price = env.prices[t_start]
 
-    # 跨 horizon 平仓清算
-    tracker.settle_previous_horizon(initial_price, t_start)
+    # 跨 horizon 智能平仓: 同方向延续时跳过，方向改变时收取手续费+滑点
+    first_action = int(base_actions[0])
+    prev_position = tracker.state.position
+    # 计算平仓滑点（平仓 delta: 多头卖出为负，空头买回为正）
+    settle_slippage = 0.0
+    if prev_position != 0 and env.states_dataframe is not None:
+        settle_delta = -prev_position  # 平仓方向
+        state_dict = env.states_dataframe.row(t_start, named=True)
+        settle_slippage = round(
+            TradingEnv.compute_lob_slippage(settle_delta, state_dict, initial_price), 2,
+        )
+    tracker.settle_previous_horizon(
+        initial_price, t_start,
+        new_first_action=first_action,
+        m=env.m,
+        commission_rate=env.commission_rate,
+        slippage=settle_slippage,
+    )
+
+    # 从 tracker 获取实际持仓（可能因同方向延续而非 0）
+    current_position = tracker.state.position
+    # 同步 env 内部持仓状态
+    env._position = current_position
 
     h = len(base_actions)
     step_rate_returns: List[float] = []
@@ -101,8 +122,6 @@ def run_horizon_inference(
     portfolio_value = float(abs(env.m) * initial_price)
     if portfolio_value == 0.0:
         portfolio_value = 1.0
-
-    current_position = 0
 
     for step_idx in range(h):
         a_base = int(base_actions[step_idx])
@@ -140,10 +159,26 @@ def run_horizon_inference(
             commission, slippage = 0.0, 0.0
         else:
             abs_delta = abs(delta_position)
-            commission = env.commission_rate * abs_delta * exec_price
+            commission = round(env.commission_rate * abs_delta * exec_price, 2)
             if env.states_dataframe is not None:
                 state_dict = env.states_dataframe.row(t, named=True)
-                slippage = TradingEnv.compute_lob_slippage(delta_position, state_dict, exec_price)
+                # 换仓 (多→空 或 空→多) 拆成平仓+开仓两笔，各自独立计算滑点
+                if old_position != 0 and new_position != 0 and (
+                    (old_position > 0) != (new_position > 0)
+                ):
+                    close_delta = -old_position  # 平仓方向
+                    open_delta = new_position    # 开仓方向
+                    slippage_close = TradingEnv.compute_lob_slippage(
+                        close_delta, state_dict, exec_price,
+                    )
+                    slippage_open = TradingEnv.compute_lob_slippage(
+                        open_delta, state_dict, exec_price,
+                    )
+                    slippage = round(slippage_close + slippage_open, 2)
+                else:
+                    slippage = round(TradingEnv.compute_lob_slippage(
+                        delta_position, state_dict, exec_price,
+                    ), 2)
             else:
                 slippage = 0.0
 
@@ -281,21 +316,28 @@ def evaluate_pair(
         **metrics,
     }
 
-    # 导出 CSV
+    # 导出 CSV（每 50000 行一个文件，数字编号）
     csv_save_dir = os.path.join(config.result_dir, pair, "evaluation")
     os.makedirs(csv_save_dir, exist_ok=True)
-    csv_path = os.path.join(csv_save_dir, f"{pair}_operations.csv")
     csv_fields = [
         "state_index", "action", "action_label", "execution_price",
         "trade_quantity", "position_after", "avg_hold_price",
         "commission", "slippage", "position_change_pnl",
         "cash", "holding_value", "short_debt", "total_value", "profit", "side",
     ]
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=csv_fields)
-        writer.writeheader()
-        writer.writerows(tracker.records)
-    logger.info("操作详情 CSV 已保存: %s (%d 条记录)", csv_path, len(tracker.records))
+    chunk_size = 50000
+    total_records = len(tracker.records)
+    num_chunks = (total_records + chunk_size - 1) // chunk_size or 1
+    for chunk_idx in range(num_chunks):
+        start_row = chunk_idx * chunk_size
+        end_row = min(start_row + chunk_size, total_records)
+        csv_path = os.path.join(csv_save_dir, f"{pair}_operations_{chunk_idx + 1}.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=csv_fields)
+            writer.writeheader()
+            writer.writerows(tracker.records[start_row:end_row])
+        logger.info("CSV 已保存: %s (%d 条)", csv_path, end_row - start_row)
+    logger.info("共 %d 条记录，分 %d 个文件", total_records, num_chunks)
 
     # 打印结果
     logger.info("评估结果 [%s]:", pair)
