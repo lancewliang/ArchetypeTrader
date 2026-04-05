@@ -131,6 +131,7 @@ def load_phase3_model(
     context_dim = config.latent_dim + 3
     agent = RefinementAgent(
         market_dim=config.state_dim, context_dim=context_dim,
+        hidden_dim=config.refinement_hidden_dim,
     ).to(device)
     agent.load_state_dict(checkpoint["agent"])
 

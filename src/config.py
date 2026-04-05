@@ -26,9 +26,9 @@ class Config:
     # MDP 配置
     action_dim: int = 3  # {0: short, 1: flat, 2: long}
     horizon: int = 72  # h = 72 步
-    commission_rate: float = 0.0004  # δ = 0.02%
+    commission_rate: float = 0.0002  # δ = 0.02%（论文值）
     max_positions: Dict[str, int] = field(
-        default_factory=lambda: {"BTC": 8, "ETH": 5, "DOT": 2500, "BNB": 200}
+        default_factory=lambda: {"BTC": 8, "ETH": 100, "DOT": 2500, "BNB": 200}
     )
 
     # Phase I 配置
@@ -42,11 +42,12 @@ class Config:
     pretrain_epochs: int = 10  # 连续潜在预训练轮数（无 VQ 量化）
 
     # Phase II 配置
-    phase2_total_steps: int = 8000*100
+    phase2_total_steps: int = 3_000_000
     selection_alpha: float = 1.0  # KL 惩罚系数
 
     # Phase III 配置
     phase3_total_steps: int = 1_000_000
+    refinement_hidden_dim: int = 128  # Refinement Agent 隐藏层维度
     refinement_beta1: float = 0.5  # regret 系数，可选 {0.3, 0.5, 0.7}
     refinement_beta2: float = 1.0  # 策略正则化系数
 

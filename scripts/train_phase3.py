@@ -205,7 +205,8 @@ def run_horizon_with_refinement(
     # 避免重放环境的第二次逐步循环。
     #
     # R_arche_τ = Σ_{i=t}^{τ} r_i^step 逐步累积实时收益（论文定义）
-    # τ_remain = t + h - τ 剩余绝对步数（论文定义）
+    # τ_remain = (h - step_idx) / h 归一化剩余步数（范围 [0, 1]）
+    # R_arche 归一化: 除以 m × p_0（初始名义价值），使输入分布跨交易对稳定
 
     Args:
         env: 交易环境
@@ -241,6 +242,12 @@ def run_horizon_with_refinement(
 
     a_base_prev = int(base_actions[0])  # 初始 a_base_prev 设为第一步的 base action
 
+    # R_arche 归一化分母: m × p_0（初始名义价值）
+    t_start = horizon_idx * env.horizon
+    notional = float(env.m) * float(env.prices[t_start])
+    if notional <= 0.0:
+        notional = 1.0  # 防御性兜底
+
     for step_idx in range(h):
         a_base = int(base_actions[step_idx])
 
@@ -251,13 +258,14 @@ def run_horizon_with_refinement(
         ).unsqueeze(0)  # (1, 45)
 
         # s_ref2 = [e_a_sel (code_dim=16), a_base (1), R_arche (1), τ_remain (1)]
-        # τ_remain = t + h - τ（论文定义：horizon 内剩余的绝对步数）
-        tau_remain = float(h - step_idx)
-        # R_arche_τ = Σ_{i=t}^{τ} r_i^step（逐步累积的实时收益）
+        # τ_remain = (h - step_idx) / h（归一化到 [0, 1]，与推理一致）
+        tau_remain = float(h - step_idx) / h
+        # R_arche_τ = Σ_{i=t}^{τ} r_i^step / (m × p_0)（归一化累积收益）
+        normalized_reward = cumulative_reward / notional
         context = np.concatenate([
             e_a_sel,
             np.array([a_base], dtype=np.float32),
-            np.array([cumulative_reward], dtype=np.float32),
+            np.array([normalized_reward], dtype=np.float32),
             np.array([tau_remain], dtype=np.float32),
         ])  # (code_dim + 3,) = (19,)
         s_ref2 = torch.tensor(
@@ -371,6 +379,8 @@ def main() -> None:
         pair=pair,
         horizon=config.horizon,
         states_dataframe=train_df,
+        max_positions=config.max_positions,
+        commission_rate=config.commission_rate,
     )
     logger.info("TradingEnv 初始化完成: train_horizons=%d", train_env.num_horizons)
 
@@ -388,6 +398,7 @@ def main() -> None:
     refinement_agent = RefinementAgent(
         market_dim=config.state_dim,
         context_dim=context_dim,
+        hidden_dim=config.refinement_hidden_dim,
     ).to(device)
 
     logger.info(
@@ -619,6 +630,7 @@ def main() -> None:
                 "latent_dim": config.latent_dim,
                 "num_archetypes": config.num_archetypes,
                 "phase3_total_steps": config.phase3_total_steps,
+                "refinement_hidden_dim": config.refinement_hidden_dim,
                 "refinement_beta1": beta1,
                 "refinement_beta2": beta2,
                 "learning_rate": config.learning_rate,

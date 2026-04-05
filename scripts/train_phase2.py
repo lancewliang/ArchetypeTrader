@@ -1430,6 +1430,8 @@ def main() -> None:
         pair=pair,
         horizon=config.horizon,
         states_dataframe=train_df,
+        max_positions=config.max_positions,
+        commission_rate=config.commission_rate,
     )
     val_env = TradingEnv(
         states=val_states,
@@ -1437,6 +1439,8 @@ def main() -> None:
         pair=pair,
         horizon=config.horizon,
         states_dataframe=val_df,
+        max_positions=config.max_positions,
+        commission_rate=config.commission_rate,
     )
     logger.info(
         "TradingEnv 初始化完成: train_horizons=%d, val_horizons=%d",

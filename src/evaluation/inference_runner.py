@@ -74,7 +74,6 @@ def run_horizon_inference(
     refinement_agent: RefinementAgent,
     policy_adapter: PolicyAdapter,
     e_a_sel: np.ndarray,
-    R_arche: float,
     device: torch.device,
     horizon: int,
     tracker: PortfolioTracker,
@@ -90,6 +89,11 @@ def run_horizon_inference(
     state = env.reset(horizon_idx)
     t_start = horizon_idx * env.horizon
     initial_price = env.prices[t_start]
+
+    # R_arche 归一化分母: m × p_0（初始名义价值），与训练一致
+    notional = float(env.m) * float(initial_price)
+    if notional <= 0.0:
+        notional = 1.0
 
     # 跨 horizon 智能平仓: 同方向延续时跳过，方向改变时收取手续费+滑点
     first_action = int(base_actions[0])
@@ -119,6 +123,7 @@ def run_horizon_inference(
     step_rate_returns: List[float] = []
     a_base_prev = int(base_actions[0])
     has_adjusted = False
+    cumulative_reward = 0.0  # R_arche: 逐步累积实时收益（与训练一致）
 
     # portfolio value 用于收益率计算: 使用 tracker 的实际总资产
     portfolio_value = tracker.compute_total_value(
@@ -133,10 +138,11 @@ def run_horizon_inference(
         # 构建 refinement agent 输入
         s_ref1 = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         tau_remain = (h - step_idx) / h
+        normalized_reward = cumulative_reward / notional
         context = np.concatenate([
             e_a_sel,
             np.array([a_base], dtype=np.float32),
-            np.array([R_arche], dtype=np.float32),
+            np.array([normalized_reward], dtype=np.float32),
             np.array([tau_remain], dtype=np.float32),
         ])
         s_ref2 = torch.tensor(context, dtype=torch.float32, device=device).unsqueeze(0)
@@ -155,6 +161,7 @@ def run_horizon_inference(
         exec_price = float(env.prices[t])
 
         next_state, reward, done, info = env.step(a_final)
+        cumulative_reward += reward  # 更新 R_arche: 逐步累积实时收益
         new_position = info["position"]
         delta_position = new_position - old_position
 
@@ -255,6 +262,8 @@ def evaluate_pair(
     test_env = TradingEnv(
         states=test_states, prices=test_prices,
         pair=pair, horizon=config.horizon, states_dataframe=test_df,
+        max_positions=config.max_positions,
+        commission_rate=config.commission_rate,
     )
     logger.info("TradingEnv 初始化完成: test_horizons=%d", test_env.num_horizons)
 
@@ -290,9 +299,6 @@ def evaluate_pair(
         # Phase I: 生成 base actions
         base_actions = generate_base_actions(decoder, z_q, horizon_states, device)
 
-        # 计算 R_base
-        R_arche = compute_base_return(test_env, h_idx, base_actions)
-
         # Phase III: Refinement
         step_returns = run_horizon_inference(
             env=test_env,
@@ -301,7 +307,6 @@ def evaluate_pair(
             refinement_agent=refinement_agent,
             policy_adapter=PolicyAdapter(),
             e_a_sel=e_a_sel,
-            R_arche=R_arche,
             device=device,
             horizon=h,
             tracker=tracker,

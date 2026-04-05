@@ -551,7 +551,6 @@ class TestRunHorizonInference:
         e_a_sel = codebook.embeddings.weight[0].detach().cpu().numpy()
         horizon_states = env.states[:HORIZON]
         base_actions = generate_base_actions(decoder, z_q, horizon_states, device)
-        R_arche = compute_base_return(env, 0, base_actions)
 
         initial_capital = float(env.m) * float(env.prices[0])
         tracker = PortfolioTracker(initial_capital)
@@ -563,7 +562,6 @@ class TestRunHorizonInference:
             refinement_agent=refinement_agent,
             policy_adapter=PolicyAdapter(),
             e_a_sel=e_a_sel,
-            R_arche=R_arche,
             device=device,
             horizon=HORIZON,
             tracker=tracker,
@@ -622,12 +620,11 @@ class TestRunHorizonInference:
             z_q = codebook.embeddings.weight[0].unsqueeze(0)
             e_a_sel = codebook.embeddings.weight[0].detach().cpu().numpy()
             base_actions = generate_base_actions(decoder, z_q, horizon_states, device)
-            R_arche = compute_base_return(env, h_idx, base_actions)
 
             step_returns = run_horizon_inference(
                 env=env, horizon_idx=h_idx, base_actions=base_actions,
                 refinement_agent=refinement_agent, policy_adapter=PolicyAdapter(),
-                e_a_sel=e_a_sel, R_arche=R_arche, device=device,
+                e_a_sel=e_a_sel, device=device,
                 horizon=env.horizon, tracker=tracker,
             )
             all_returns.extend(step_returns)
