@@ -1,15 +1,13 @@
-"""VQ Decoder — MLP 动作序列解码器 + Single-Trade 推理约束
+"""VQ Decoder — BiLSTM 动作序列解码器 + Single-Trade 推理约束
 
 # Section 4.1: Decoder
 # p_θd(â_demo | s_demo, z_q)
 #
-# 训练时: MLP 逐步独立预测 action logits，用标准 CrossEntropyLoss 训练。
-#   MLP 对 short/flat/long 的区分能力好，diversity 好。
+# BiLSTM decoder: 双向 LSTM 让 decoder 能同时看到过去和未来的 state 信息，
+# 改善方向性预测（解决单向 LSTM 的 long 坍缩问题）。
 #
-# 推理时: 在 MLP 输出的 logits 上施加 single-trade 约束后处理，
-#   从 logits 中搜索最优的 single-change-point 分割，
-#   把"嘈杂"的逐步预测整理成符合 DP 轨迹结构的动作序列。
-#   这解决了 MLP 频繁切换动作导致执行成本爆炸的问题。
+# 训练时: BiLSTM 逐步预测 action logits，用标准 CrossEntropyLoss 训练。
+# 推理时: 在 BiLSTM 输出的 logits 上施加 single-trade 约束后处理。
 """
 
 import torch
@@ -18,12 +16,16 @@ from torch import Tensor
 
 
 class VQDecoder(nn.Module):
-    """MLP 解码器 + single-trade 推理约束。
+    """BiLSTM 解码器 + single-trade 推理约束。
+
+    论文 Section 4.1: p_θd(â_demo | s_demo, z_q)
+    双向 LSTM 在每个时间步同时利用前向和后向上下文，
+    能更准确地判断 change point 处应该转向 long 还是 short。
 
     Args:
         state_dim: 状态向量维度 (默认 45)
         code_dim: 码本向量维度 (默认 16)
-        hidden_dim: 隐藏层维度 (默认 128)
+        hidden_dim: LSTM 单方向隐藏层维度 (默认 128)
         action_dim: 动作空间大小 (默认 3)
     """
 
@@ -40,11 +42,15 @@ class VQDecoder(nn.Module):
         self.hidden_dim = hidden_dim
         self.action_dim = action_dim
 
-        self.mlp = nn.Sequential(
-            nn.Linear(state_dim + code_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim),
+        # BiLSTM: 双向 LSTM，输出维度 = 2 * hidden_dim
+        self.lstm = nn.LSTM(
+            input_size=state_dim + code_dim,
+            hidden_size=hidden_dim,
+            batch_first=True,
+            bidirectional=True,
         )
+        # 输出投影: 2 * hidden_dim → action_dim
+        self.output_proj = nn.Linear(2 * hidden_dim, action_dim)
 
     def forward(self, states: Tensor, z_q: Tensor) -> Tensor:
         """生成 action logits（训练和推理共用）。
@@ -58,16 +64,21 @@ class VQDecoder(nn.Module):
         """
         batch, h, _ = states.shape
         z_q_expanded = z_q.unsqueeze(1).expand(batch, h, self.code_dim)
-        decoder_input = torch.cat([states, z_q_expanded], dim=-1)
-        return self.mlp(decoder_input)
+        lstm_input = torch.cat([states, z_q_expanded], dim=-1)
+
+        # BiLSTM: 输出包含前向和后向隐藏状态的拼接
+        lstm_out, _ = self.lstm(lstm_input)  # (batch, h, 2 * hidden_dim)
+
+        action_logits = self.output_proj(lstm_out)  # (batch, h, action_dim)
+        return action_logits
 
     @torch.no_grad()
     def decode_with_single_trade_constraint(
         self, states: Tensor, z_q: Tensor,
     ) -> Tensor:
-        """推理时使用: 在 logits 上施加 single-trade 约束。
+        """推理时使用: 在 logits 上施加 single-trade 约束（全向量化实现）。
 
-        对 MLP 输出的 (h, action_dim) logits，搜索最优的 single-change
+        对 BiLSTM 输出的 (h, action_dim) logits，搜索最优的 single-change
         分割点，使得动作序列为 "action_a × t + action_b × (h-t)" 的形式，
         且总 log-probability 最大。
 
@@ -76,6 +87,7 @@ class VQDecoder(nn.Module):
         - 一次变化: 前 t 步动作 a，后 h-t 步动作 b (a ≠ b)
 
         搜索复杂度: O(h × action_dim²)，对 h=72, action_dim=3 可忽略。
+        全部在 GPU tensor 上完成，无 Python 循环和 .item() 调用。
 
         Args:
             states: (batch, h, state_dim)
@@ -88,49 +100,54 @@ class VQDecoder(nn.Module):
         log_probs = torch.log_softmax(logits, dim=-1)  # (batch, h, action_dim)
 
         batch, h, num_actions = log_probs.shape
+        device = logits.device
 
-        # 前缀和: prefix_sum[t, a] = Σ_{i=0}^{t-1} log_prob[i, a]
-        # 即前 t 步全选动作 a 的总 log-probability
+        # 前缀和: prefix_sum[:, t, a] = Σ_{i=0}^{t} log_prob[:, i, a]
         prefix_sum = torch.cumsum(log_probs, dim=1)  # (batch, h, action_dim)
 
-        # suffix_sum[t, a] = Σ_{i=t}^{h-1} log_prob[i, a]
-        # 即从第 t 步到末尾全选动作 a 的总 log-probability
+        # suffix_sum[:, t, a] = Σ_{i=t}^{h-1} log_prob[:, i, a]
         suffix_sum = prefix_sum[:, -1:, :] - prefix_sum + log_probs  # (batch, h, action_dim)
 
-        best_actions = torch.zeros(batch, h, dtype=torch.long, device=logits.device)
+        # ---- 情况 1: 无变化，全程同一个动作 ----
+        no_change_scores = prefix_sum[:, -1, :]  # (batch, num_actions)
+        no_change_best_score, no_change_best_a = no_change_scores.max(dim=1)
 
-        for b in range(batch):
-            best_score = float("-inf")
-            best_a1 = 0
-            best_a2 = 0
-            best_t = h  # change point (h 表示无变化)
+        # ---- 情况 2: 在第 t 步变化 (前 t 步 a1, 后 h-t 步 a2, a1 ≠ a2) ----
+        if h > 1:
+            prefix_part = prefix_sum[:, :h-1, :]  # (batch, h-1, num_actions)
+            suffix_part = suffix_sum[:, 1:, :]  # (batch, h-1, num_actions)
 
-            # 情况 1: 无变化，全程同一个动作
-            for a in range(num_actions):
-                score = prefix_sum[b, h - 1, a].item()
-                if score > best_score:
-                    best_score = score
-                    best_a1 = a
-                    best_a2 = a
-                    best_t = h
+            combined = prefix_part.unsqueeze(-1) + suffix_part.unsqueeze(-2)
 
-            # 情况 2: 在第 t 步变化 (前 t 步 a1, 后 h-t 步 a2, a1 ≠ a2)
-            for t in range(1, h):
-                for a1 in range(num_actions):
-                    pre_score = prefix_sum[b, t - 1, a1].item()
-                    for a2 in range(num_actions):
-                        if a2 == a1:
-                            continue
-                        post_score = suffix_sum[b, t, a2].item()
-                        score = pre_score + post_score
-                        if score > best_score:
-                            best_score = score
-                            best_a1 = a1
-                            best_a2 = a2
-                            best_t = t
+            diag_mask = torch.eye(num_actions, dtype=torch.bool, device=device)
+            combined.masked_fill_(diag_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
 
-            # 填充动作序列
-            best_actions[b, :best_t] = best_a1
-            best_actions[b, best_t:] = best_a2
+            flat = combined.reshape(batch, -1)
+            flat_best_score, flat_best_idx = flat.max(dim=1)
+
+            a2_size = num_actions
+            a1_size = num_actions
+            best_a2_change = flat_best_idx % a2_size
+            best_a1_change = (flat_best_idx // a2_size) % a1_size
+            best_t_change = flat_best_idx // (a1_size * a2_size) + 1
+
+            use_change = flat_best_score > no_change_best_score
+        else:
+            use_change = torch.zeros(batch, dtype=torch.bool, device=device)
+            best_a1_change = no_change_best_a
+            best_a2_change = no_change_best_a
+            best_t_change = torch.full_like(no_change_best_a, h)
+
+        best_a1 = torch.where(use_change, best_a1_change, no_change_best_a)
+        best_a2 = torch.where(use_change, best_a2_change, no_change_best_a)
+        best_t = torch.where(use_change, best_t_change, torch.full_like(best_t_change, h))
+
+        time_indices = torch.arange(h, device=device).unsqueeze(0)
+        best_t_expanded = best_t.unsqueeze(1)
+        best_actions = torch.where(
+            time_indices < best_t_expanded,
+            best_a1.unsqueeze(1).expand(batch, h),
+            best_a2.unsqueeze(1).expand(batch, h),
+        )
 
         return best_actions

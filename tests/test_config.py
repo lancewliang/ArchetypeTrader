@@ -34,7 +34,7 @@ class TestConfigDefaults:
         assert cfg.num_archetypes == 10
         assert cfg.vq_beta0 == 0.25
         assert cfg.num_trajectories == 30000
-        assert cfg.phase1_epochs == 100
+        assert cfg.phase1_epochs == 300
 
     def test_phase2_config(self):
         cfg = Config()

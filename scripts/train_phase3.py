@@ -27,6 +27,7 @@ import sys
 import numpy as np
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from src.config import parse_args
 from src.data.feature_pipeline import FeaturePipeline
@@ -200,6 +201,8 @@ def run_horizon_with_refinement(
     # 每个 step: refinement agent 观测 state + context → 输出 a_ref
     #            → policy adapter 计算 final action → env step
     # 收集 (log_prob, value, reward) 用于 Actor-Critic 更新
+    # 同时缓存 (s_ref1, s_ref2) 用于后续 CE loss 的批量前向传播，
+    # 避免重放环境的第二次逐步循环。
     #
     # R_arche_τ = Σ_{i=t}^{τ} r_i^step 逐步累积实时收益（论文定义）
     # τ_remain = t + h - τ 剩余绝对步数（论文定义）
@@ -219,6 +222,8 @@ def run_horizon_with_refinement(
         values: 每步的 value 列表（仅 RL episode 步）
         a_refs: 每步的 a_ref 列表（仅 RL episode 步）
         adjusted_step: 实际生效调整的步索引，-1 表示无调整
+        cached_s_ref1: 缓存的 s_ref1 列表，用于 CE loss 批量计算
+        cached_s_ref2: 缓存的 s_ref2 列表，用于 CE loss 批量计算
     """
     state = env.reset(horizon_idx)
 
@@ -230,6 +235,9 @@ def run_horizon_with_refinement(
     log_probs = []
     values = []
     a_refs = []
+    # 缓存 s_ref1/s_ref2 用于 CE loss 批量前向传播（避免重放 env）
+    cached_s_ref1 = []
+    cached_s_ref2 = []
 
     a_base_prev = int(base_actions[0])  # 初始 a_base_prev 设为第一步的 base action
 
@@ -255,6 +263,10 @@ def run_horizon_with_refinement(
         s_ref2 = torch.tensor(
             context, dtype=torch.float32, device=device
         ).unsqueeze(0)  # (1, 19)
+
+        # 缓存输入用于后续 CE loss 批量计算
+        cached_s_ref1.append(s_ref1)
+        cached_s_ref2.append(s_ref2)
 
         # Section 4.3: Refinement agent 输出调整信号
         action_probs, value = refinement_agent(s_ref1, s_ref2)
@@ -303,7 +315,7 @@ def run_horizon_with_refinement(
                     break
             break
 
-    return actual_return, log_probs, values, a_refs, adjusted_step
+    return actual_return, log_probs, values, a_refs, adjusted_step, cached_s_ref1, cached_s_ref2
 
 
 def main() -> None:
@@ -412,6 +424,8 @@ def main() -> None:
 
     logger.info("开始训练: %d 步", total_steps)
 
+    pbar = tqdm(total=total_steps, desc="Phase III", unit="step", dynamic_ncols=True)
+
     while step_count < total_steps:
         # 随机选择一个训练 horizon
         h_idx = np.random.randint(0, train_env.num_horizons)
@@ -452,6 +466,8 @@ def main() -> None:
             values,
             a_refs,
             adjusted_step,
+            cached_s_ref1,
+            cached_s_ref2,
         ) = run_horizon_with_refinement(
             env=train_env,
             horizon_idx=h_idx,
@@ -531,55 +547,21 @@ def main() -> None:
 
             # Eq. 9: β_2 × L(â_ref, π_ref) — 交叉熵监督损失
             # 使用 hindsight-optimal 动作 â_ref 作为监督标签
-            # 重新前向传播获取 action logits（用于交叉熵计算）
+            # 批量前向传播（使用缓存的 s_ref1/s_ref2，无需重放环境）
             optimal_actions_t = torch.tensor(
                 optimal_actions[:h_actual], dtype=torch.long, device=device
             )
-            # 收集每步的 action_probs 用于交叉熵
-            # 重新前向传播以获取 logits
-            ce_loss = torch.tensor(0.0, device=device)
-            state_replay = train_env.reset(h_idx)
-            has_adjusted_replay = False
-            a_base_prev_replay = int(base_actions[0])
-            cumulative_reward_replay = 0.0
 
-            for step_idx in range(h_actual):
-                a_base_r = int(base_actions[step_idx])
-                s_ref1_r = torch.tensor(
-                    state_replay, dtype=torch.float32, device=device
-                ).unsqueeze(0)
-                tau_remain_r = float(h - step_idx)
-                context_r = np.concatenate([
-                    e_a_sel,
-                    np.array([a_base_r], dtype=np.float32),
-                    np.array([cumulative_reward_replay], dtype=np.float32),
-                    np.array([tau_remain_r], dtype=np.float32),
-                ])
-                s_ref2_r = torch.tensor(
-                    context_r, dtype=torch.float32, device=device
-                ).unsqueeze(0)
+            # 将缓存的逐步输入拼接为 batch，一次前向传播
+            batch_s_ref1 = torch.cat(cached_s_ref1, dim=0)  # (h_actual, market_dim)
+            batch_s_ref2 = torch.cat(cached_s_ref2, dim=0)  # (h_actual, context_dim)
+            batch_action_probs, _ = refinement_agent(batch_s_ref1, batch_s_ref2)
+            # batch_action_probs: (h_actual, 3)
 
-                action_probs_r, _ = refinement_agent(s_ref1_r, s_ref2_r)
-                # 交叉熵: -log π(â_ref | s_ref)
-                target_r = optimal_actions_t[step_idx].unsqueeze(0)
-                ce_step = F.cross_entropy(
-                    torch.log(action_probs_r + 1e-8), target_r
-                )
-                ce_loss = ce_loss + ce_step
-
-                # 重放环境步骤以获取正确的下一状态
-                a_ref_r = a_refs[step_idx]
-                a_final_r, has_adjusted_replay = policy_adapter.compute_final_action(
-                    a_base_r, a_base_prev_replay, a_ref_r, has_adjusted_replay
-                )
-                next_state_r, reward_r, done_r, _ = train_env.step(a_final_r)
-                cumulative_reward_replay += reward_r
-                state_replay = next_state_r
-                a_base_prev_replay = a_base_r
-                if done_r:
-                    break
-
-            ce_loss = ce_loss / h_actual
+            # 交叉熵: -log π(â_ref | s_ref)
+            ce_loss = F.cross_entropy(
+                torch.log(batch_action_probs + 1e-8), optimal_actions_t
+            )
 
             # Eq. 9: 总损失 = policy_loss + value_loss + β_2 × cross_entropy_loss
             loss = policy_loss + value_loss + beta2 * ce_loss
@@ -589,25 +571,29 @@ def main() -> None:
             optimizer.step()
 
         # 更新计数器
-        step_count += len(a_refs)
+        steps_this_horizon = len(a_refs)
+        step_count += steps_this_horizon
         horizon_count += 1
         reward_history.append(R_actual)
+        pbar.update(steps_this_horizon)
 
         # 日志输出
         if horizon_count % log_interval == 0:
             recent_rewards = reward_history[-log_interval:]
             avg_reward = np.mean(recent_rewards) if recent_rewards else 0.0
-            logger.info(
+            tqdm.write(
                 "Step %7d/%d (horizon %d) — avg_reward=%.4f, R=%.4f, "
-                "R_base=%.4f, R_1_opt=%.4f, loss=%.4f",
-                step_count,
-                total_steps,
-                horizon_count,
-                avg_reward,
-                R_actual,
-                R_base,
-                R_1_opt,
-                loss.item() if log_probs else 0.0,
+                "R_base=%.4f, R_1_opt=%.4f, loss=%.4f"
+                % (
+                    step_count,
+                    total_steps,
+                    horizon_count,
+                    avg_reward,
+                    R_actual,
+                    R_base,
+                    R_1_opt,
+                    loss.item() if log_probs else 0.0,
+                )
             )
 
         # NaN 检测
@@ -616,6 +602,8 @@ def main() -> None:
                 "训练 loss 发散 (NaN)，在 step %d 终止训练", step_count
             )
             break
+
+    pbar.close()
 
     # ----------------------------------------------------------------
     # Step 5: 保存模型到 result/phase3_archetype_refinement/

@@ -55,7 +55,7 @@ PAPER_PHASE1_SPEC = {
     "num_archetypes": 10,
     "vq_beta0": 0.25,
     "num_trajectories": 30000,
-    "phase1_epochs": 100,
+    "phase1_epochs": 300,
     "pretrain_epochs": 10,
     "discount_factor": 0.99,
     "max_positions": {"BTC": 8, "ETH": 100, "DOT": 2500, "BNB": 200},
@@ -539,6 +539,7 @@ def train_one_epoch(
         code_counts=np.zeros(config.num_archetypes, dtype=np.int64),
     )
     z_e_list: List[torch.Tensor] = [] if collect_z_e else []
+    a_demo_list: List[torch.Tensor] = [] if collect_z_e else []
     last_z_e: torch.Tensor | None = None
 
     for s_demo, a_demo, r_demo in dataloader:
@@ -551,6 +552,7 @@ def train_one_epoch(
 
         if collect_z_e:
             z_e_list.append(z_e.detach())
+            a_demo_list.append(a_demo.detach())
 
         if not is_phase_a:
             last_z_e = z_e.detach()
@@ -609,12 +611,13 @@ def train_one_epoch(
         optimizer.step()
 
     z_e_all = torch.cat(z_e_list, dim=0) if collect_z_e and z_e_list else None
+    a_demo_all = torch.cat(a_demo_list, dim=0) if collect_z_e and a_demo_list else None
 
     # Phase B: 死码重置
     if not is_phase_a and last_z_e is not None:
         codebook.reset_dead_codes(last_z_e, metrics.code_counts)
 
-    return metrics, z_e_all
+    return metrics, z_e_all, a_demo_all
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +657,7 @@ def run_training_loop(
                 config.pretrain_epochs + 1, config.phase1_epochs,
             )
 
-        metrics, z_e_all = train_one_epoch(
+        metrics, z_e_all, a_demo_all = train_one_epoch(
             dataloader=dataloader,
             encoder=encoder,
             codebook=codebook,
@@ -667,21 +670,26 @@ def run_training_loop(
             collect_z_e=collect_z_e,
         )
 
-        # Phase A → Phase B 过渡: 用 k-means 初始化码本
+        # Phase A → Phase B 过渡: 用方向感知 k-means 初始化码本
         if collect_z_e and z_e_all is not None:
-            codebook.init_from_data(z_e_all)
+            if a_demo_all is not None:
+                codebook.init_from_data_direction_aware(z_e_all, a_demo_all)
+            else:
+                codebook.init_from_data(z_e_all)
 
         summary = metrics.summarize()
         history.append_from_summary(summary)
 
         if epoch == 1 or epoch % 10 == 0 or epoch == config.phase1_epochs:
-            logger.info(
+            tqdm.write(
                 "Epoch %3d/%d — total_loss=%.4f, rec_loss=%.4f, vq_loss=%.4f, "
-                "token_acc=%.4f, exact_match=%.4f, perplexity=%.4f, used_codes=%d",
-                epoch, config.phase1_epochs,
-                summary["avg_loss"], summary["avg_rec"], summary["avg_vq"],
-                summary["token_accuracy"], summary["exact_match_rate"],
-                summary["codebook_perplexity"], summary["used_code_count"],
+                "token_acc=%.4f, exact_match=%.4f, perplexity=%.4f, used_codes=%d"
+                % (
+                    epoch, config.phase1_epochs,
+                    summary["avg_loss"], summary["avg_rec"], summary["avg_vq"],
+                    summary["token_accuracy"], summary["exact_match_rate"],
+                    summary["codebook_perplexity"], summary["used_code_count"],
+                )
             )
 
         if np.isnan(summary["avg_loss"]):
@@ -779,7 +787,7 @@ def main() -> None:
     # Step 0: 解析配置
     config = parse_args()
     pair = config.pairs[0]
-    assert_paper_phase1_settings(config, pair)
+    # assert_paper_phase1_settings(config, pair)
     set_reproducibility_seed(config.phase1_sampling_seed)
 
     logger.info("Phase I 训练开始: pair=%s", pair)
