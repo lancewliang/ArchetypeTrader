@@ -20,6 +20,7 @@ from src.data.feature_pipeline import FeaturePipeline
 from src.env.trading_env import TradingEnv
 from src.evaluation.metrics import EvaluationEngine
 from src.evaluation.model_loader import load_phase1_model, load_phase2_model, load_phase3_model
+from src.evaluation.bt_verifier import BacktraderVerifier
 from src.evaluation.portfolio_tracker import PortfolioTracker
 from src.phase1.vq_decoder import VQDecoder
 from src.phase3.policy_adapter import PolicyAdapter
@@ -338,6 +339,29 @@ def evaluate_pair(
             writer.writerows(tracker.records[start_row:end_row])
         logger.info("CSV 已保存: %s (%d 条)", csv_path, end_row - start_row)
     logger.info("共 %d 条记录，分 %d 个文件", total_records, num_chunks)
+
+    # Backtrader 交叉验证
+    # prices 需要多一个 bar 用于 bt 偏移对比
+    bt_prices = np.append(test_prices, test_prices[-1])
+    bt_verifier = BacktraderVerifier(
+        records=tracker.records,
+        prices=bt_prices,
+        initial_capital=initial_capital,
+        m=test_env.m,
+        commission_rate=test_env.commission_rate,
+        tolerance=1.0,
+    )
+    bt_report = bt_verifier.run()
+    result["bt_verification"] = {
+        "match": bt_report["match"],
+        "position_mismatches": len(bt_report["mismatches"]),
+        "bt_final_value": bt_report["bt_final_value"],
+        "tracker_final_value": bt_report["tracker_final_value"],
+        "final_value_diff": abs(
+            bt_report["bt_final_value"] - bt_report["tracker_final_value"]
+        ),
+        "summary": bt_report["summary"],
+    }
 
     # 打印结果
     logger.info("评估结果 [%s]:", pair)
