@@ -120,9 +120,11 @@ def run_horizon_inference(
     a_base_prev = int(base_actions[0])
     has_adjusted = False
 
-    # portfolio value 用于收益率计算
-    portfolio_value = float(abs(env.m) * initial_price)
-    if portfolio_value == 0.0:
+    # portfolio value 用于收益率计算: 使用 tracker 的实际总资产
+    portfolio_value = tracker.compute_total_value(
+        current_position, initial_price,
+    )[2]  # total_value
+    if portfolio_value <= 0.0:
         portfolio_value = 1.0
 
     for step_idx in range(h):
@@ -192,10 +194,13 @@ def run_horizon_inference(
 
         current_position = new_position
 
-        # 收益率
-        rate_return = reward / portfolio_value
+        # 收益率: 基于 tracker 实际总资产变动
+        _, _, new_total_value, _ = tracker.compute_total_value(
+            new_position, exec_price,
+        )
+        rate_return = (new_total_value - portfolio_value) / portfolio_value
         step_rate_returns.append(rate_return)
-        portfolio_value += reward
+        portfolio_value = new_total_value
         if portfolio_value <= 0.0:
             portfolio_value = 1e-8
 
@@ -303,6 +308,31 @@ def evaluate_pair(
         )
         all_step_returns.extend(step_returns)
 
+    # 最终平仓: 评估结束时强制平掉所有仓位，收取手续费+滑点
+    final_pos = tracker.state.position
+    if final_pos != 0:
+        last_t = test_env.num_horizons * test_env.horizon - 1
+        last_valid_idx = min(last_t, len(test_prices) - 1)
+        final_price = float(test_prices[last_valid_idx])
+        settle_delta = -final_pos
+        settle_slippage = 0.0
+        if test_env.states_dataframe is not None:
+            state_dict = test_env.states_dataframe.row(last_valid_idx, named=True)
+            settle_slippage = round(
+                TradingEnv.compute_lob_slippage(settle_delta, state_dict, final_price), 2,
+            )
+        # 用最后一个有效 bar 的下一个 index，避免和最后一步 record 冲突
+        # bt_prices 会多加 2 个 bar 来容纳这个 index
+        settle_idx = last_valid_idx + 1
+        tracker.settle_previous_horizon(
+            final_price, settle_idx,
+            new_first_action=1,  # flat
+            m=test_env.m,
+            commission_rate=test_env.commission_rate,
+            slippage=settle_slippage,
+        )
+        logger.info("最终平仓: pos=%d → 0 @ %.6f, 手续费+滑点已扣除", final_pos, final_price)
+
     # 计算指标
     returns_array = np.array(all_step_returns, dtype=np.float64)
     engine = EvaluationEngine(annualization_factor=config.annualization_factor)
@@ -347,7 +377,8 @@ def evaluate_pair(
     result["trade_audit"] = audit_report
 
     # Backtrader 交叉验证: 逐项对比 bt 与 tracker/CSV 的分项数据
-    bt_prices = np.append(test_prices, test_prices[-1])
+    # 多加 2 个 bar: 1 个用于 set_coc 偏移对比，1 个用于最终平仓
+    bt_prices = np.append(test_prices, [test_prices[-1]] * 2)
     bt_verifier = BacktraderVerifier(
         records=tracker.records,
         prices=bt_prices,

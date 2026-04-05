@@ -386,7 +386,7 @@ class BacktraderVerifier:
         logger.info("%-20s %15s %15s", "", "Backtrader", "Tracker")
         logger.info("%-20s %15d %15d", "最终持仓",
                      bt_s["final_position"], trk_s["final_position"])
-        logger.info("%-20s %15.2f %15.2f", "最终现金",
+        logger.info("%-20s %15.2f %15.2f", "最终现金(口径不同)",
                      bt_s["final_cash"], trk_s["final_cash"])
         logger.info("%-20s %15.2f %15.2f", "最终总值",
                      bt_s["final_value"], trk_s["final_value"])
