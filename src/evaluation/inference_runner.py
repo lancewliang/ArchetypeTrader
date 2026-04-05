@@ -22,6 +22,7 @@ from src.evaluation.metrics import EvaluationEngine
 from src.evaluation.model_loader import load_phase1_model, load_phase2_model, load_phase3_model
 from src.evaluation.bt_verifier import BacktraderVerifier
 from src.evaluation.portfolio_tracker import PortfolioTracker
+from src.evaluation.trade_auditor import TradeAuditor
 from src.phase1.vq_decoder import VQDecoder
 from src.phase3.policy_adapter import PolicyAdapter
 from src.phase3.refinement_agent import RefinementAgent
@@ -340,8 +341,12 @@ def evaluate_pair(
         logger.info("CSV 已保存: %s (%d 条)", csv_path, end_row - start_row)
     logger.info("共 %d 条记录，分 %d 个文件", total_records, num_chunks)
 
-    # Backtrader 交叉验证
-    # prices 需要多一个 bar 用于 bt 偏移对比
+    # 交易审计: 详细统计 + 一致性检查
+    auditor = TradeAuditor(tracker.records, initial_capital)
+    audit_report = auditor.audit()
+    result["trade_audit"] = audit_report
+
+    # Backtrader 交叉验证: 逐项对比 bt 与 tracker/CSV 的分项数据
     bt_prices = np.append(test_prices, test_prices[-1])
     bt_verifier = BacktraderVerifier(
         records=tracker.records,
@@ -351,17 +356,8 @@ def evaluate_pair(
         commission_rate=test_env.commission_rate,
         tolerance=1.0,
     )
-    bt_report = bt_verifier.run()
-    result["bt_verification"] = {
-        "match": bt_report["match"],
-        "position_mismatches": len(bt_report["mismatches"]),
-        "bt_final_value": bt_report["bt_final_value"],
-        "tracker_final_value": bt_report["tracker_final_value"],
-        "final_value_diff": abs(
-            bt_report["bt_final_value"] - bt_report["tracker_final_value"]
-        ),
-        "summary": bt_report["summary"],
-    }
+    bt_report = bt_verifier.run(tracker_stats=audit_report["statistics"])
+    result["bt_verification"] = bt_report
 
     # 打印结果
     logger.info("评估结果 [%s]:", pair)

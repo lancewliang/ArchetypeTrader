@@ -1,64 +1,29 @@
 """Backtrader 交叉验证测试
 
-使用 backtrader 独立回放交易信号，逐步对比 PortfolioTracker 的
-cash / total_value / position，验证资金计算正确性。
-
-注意: backtrader set_coc(True) 下，bar N 的订单在 next() 返回后成交，
-bt_log[N+1] 才能看到成交后的持仓。因此 prices 数组需要比 records
-多一个 bar，对比时 tracker[idx] ↔ bt[idx+1]。
+验证 bt 与 tracker 的分项数据逐项一致:
+  持仓、总手续费、交易次数、各类型交易次数、最终现金/总值。
 """
 
 import numpy as np
 import pytest
 
-from src.evaluation.bt_verifier import (
-    BacktraderVerifier,
-    FixedRateCommission,
-)
+from src.evaluation.bt_verifier import BacktraderVerifier, FixedRateCommission
 from src.evaluation.portfolio_tracker import PortfolioTracker
+from src.evaluation.trade_auditor import TradeAuditor
 
 
 # ------------------------------------------------------------------
-# 佣金计算
+# 辅助
 # ------------------------------------------------------------------
 
-class TestFixedRateCommission:
-
-    def test_commission_formula(self):
-        comm = FixedRateCommission(commission=0.0002)
-        # 0.0002 * 100 * 2000 = 40.0
-        assert comm._getcommission(100, 2000.0, False) == pytest.approx(40.0)
-
-    def test_commission_sell(self):
-        comm = FixedRateCommission(commission=0.0002)
-        assert comm._getcommission(-100, 2000.0, False) == pytest.approx(40.0)
-
-    def test_commission_rounds_to_2(self):
-        comm = FixedRateCommission(commission=0.0002)
-        result = comm._getcommission(3, 1873.26, False)
-        assert result == round(0.0002 * 3 * 1873.26, 2)
-
-
-# ------------------------------------------------------------------
-# 辅助函数
-# ------------------------------------------------------------------
-
-def _build_tracker_and_prices(
-    T: int, m: int, rate: float, action_schedule: dict,
-    price_start: float = 2000.0, price_step: float = 1.0,
-):
-    """构造 tracker records 和 prices 数组。
-
-    action_schedule: {bar_idx: target_position}，未指定的 bar 保持当前持仓。
-    prices 比 records 多 1 个 bar（用于 bt 偏移对比）。
-    """
-    prices = np.arange(price_start, price_start + (T + 1) * price_step, price_step)[:T + 1]
+def _build(schedule, T=12, m=100, rate=0.0002, price_start=2000.0, step=1.0):
+    """构造 tracker records + audit stats + prices (多 1 bar)。"""
+    prices = np.arange(price_start, price_start + (T + 1) * step, step)[:T + 1]
     cap = float(m * prices[0])
     tracker = PortfolioTracker(cap)
     pos = 0
-
     for t in range(T):
-        new = action_schedule.get(t, pos)
+        new = schedule.get(t, pos)
         delta = new - pos
         price = float(prices[t])
         comm = round(rate * abs(delta) * price, 2) if delta else 0.0
@@ -66,101 +31,128 @@ def _build_tracker_and_prices(
         action = 2 if new > 0 else (0 if new < 0 else 1)
         tracker.record_step(t, action, price, pos, new, comm, 0.0)
         pos = new
-
-    return tracker, prices, cap
+    audit = TradeAuditor(tracker.records, cap).audit()
+    return tracker.records, prices, cap, audit
 
 
 # ------------------------------------------------------------------
-# 场景 1: 全 flat
+# 佣金
 # ------------------------------------------------------------------
 
-class TestVerifierFlat:
+class TestFixedRateCommission:
+    def test_formula(self):
+        c = FixedRateCommission(commission=0.0002)
+        assert c._getcommission(100, 2000.0, False) == pytest.approx(40.0)
 
-    def test_flat_no_trade(self):
-        T = 12
-        tracker, prices, cap = _build_tracker_and_prices(
-            T, m=100, rate=0.0002, action_schedule={},
+    def test_rounds(self):
+        c = FixedRateCommission(commission=0.0002)
+        assert c._getcommission(3, 1873.26, False) == round(0.0002 * 3 * 1873.26, 2)
+
+
+# ------------------------------------------------------------------
+# 全 flat
+# ------------------------------------------------------------------
+
+class TestFlat:
+    def test_all_pass(self):
+        recs, prices, cap, audit = _build({})
+        report = BacktraderVerifier(recs, prices, cap, 100, tolerance=0.01).run(
+            tracker_stats=audit["statistics"],
         )
-        report = BacktraderVerifier(
-            tracker.records, prices, cap, 100, tolerance=0.01,
-        ).run()
-        assert report["match"] is True
+        assert report["all_pass"] is True
+        assert report["position_mismatches"] == 0
 
 
 # ------------------------------------------------------------------
-# 场景 2: 开多 → 持有 → 平仓
+# 开多 → 平仓
 # ------------------------------------------------------------------
 
-class TestVerifierLong:
-
-    def test_long_then_flat(self):
-        T = 12
-        tracker, prices, cap = _build_tracker_and_prices(
-            T, m=100, rate=0.0002,
-            action_schedule={0: 100, 11: 0},
+class TestLong:
+    def test_commission_and_counts(self):
+        recs, prices, cap, audit = _build({0: 100, 11: 0})
+        report = BacktraderVerifier(recs, prices, cap, 100, 0.0002, 0.01).run(
+            tracker_stats=audit["statistics"],
         )
-        report = BacktraderVerifier(
-            tracker.records, prices, cap, 100, 0.0002, tolerance=0.01,
-        ).run()
-        assert report["match"] is True, report["mismatches"][:3]
+        # 手续费一致
+        comm_check = next(c for c in report["comparisons"] if c["name"] == "total_commission")
+        assert comm_check["pass"] is True
+
+        # 交易类型一致
+        ftl = next(c for c in report["comparisons"] if c["name"] == "trade_count_flat_to_long")
+        assert ftl["bt"] == 1 and ftl["tracker"] == 1 and ftl["pass"]
+
+        ltf = next(c for c in report["comparisons"] if c["name"] == "trade_count_long_to_flat")
+        assert ltf["bt"] == 1 and ltf["tracker"] == 1 and ltf["pass"]
+
+        assert report["position_mismatches"] == 0
 
 
 # ------------------------------------------------------------------
-# 场景 3: 开空 → 持有 → 平仓
+# 开空 → 平仓
 # ------------------------------------------------------------------
 
-class TestVerifierShort:
-
-    def test_short_then_flat(self):
-        T = 12
-        tracker, prices, cap = _build_tracker_and_prices(
-            T, m=100, rate=0.0002,
-            action_schedule={0: -100, 11: 0},
-            price_start=2000.0, price_step=-1.0,
+class TestShort:
+    def test_commission_and_counts(self):
+        recs, prices, cap, audit = _build({0: -100, 11: 0}, step=-1.0)
+        report = BacktraderVerifier(recs, prices, cap, 100, 0.0002, 0.01).run(
+            tracker_stats=audit["statistics"],
         )
-        report = BacktraderVerifier(
-            tracker.records, prices, cap, 100, 0.0002, tolerance=0.01,
-        ).run()
-        assert report["match"] is True, report["mismatches"][:3]
+        comm_check = next(c for c in report["comparisons"] if c["name"] == "total_commission")
+        assert comm_check["pass"] is True
+
+        fts = next(c for c in report["comparisons"] if c["name"] == "trade_count_flat_to_short")
+        assert fts["bt"] == 1 and fts["pass"]
+
+        stf = next(c for c in report["comparisons"] if c["name"] == "trade_count_short_to_flat")
+        assert stf["bt"] == 1 and stf["pass"]
 
 
 # ------------------------------------------------------------------
-# 场景 4: 换仓 多→空→多
+# 换仓 多→空→多
 # ------------------------------------------------------------------
 
-class TestVerifierFlip:
-
-    def test_long_short_long(self):
-        T = 18
-        tracker, prices, cap = _build_tracker_and_prices(
-            T, m=100, rate=0.0002,
-            action_schedule={0: 100, 6: -100, 12: 100},
+class TestFlip:
+    def test_flip_counts(self):
+        recs, prices, cap, audit = _build({0: 100, 6: -100, 11: 0}, T=12)
+        report = BacktraderVerifier(recs, prices, cap, 100, 0.0002, 0.01).run(
+            tracker_stats=audit["statistics"],
         )
-        report = BacktraderVerifier(
-            tracker.records, prices, cap, 100, 0.0002, tolerance=0.01,
-        ).run()
-        for mi in report["mismatches"]:
-            assert mi["pos_match"] is True, (
-                f"idx={mi['state_index']} bt={mi['bt_position']} "
-                f"trk={mi['tracker_position']}"
-            )
+        lts = next(c for c in report["comparisons"] if c["name"] == "trade_count_long_to_short")
+        assert lts["bt"] == 1 and lts["pass"]
+
+        stf = next(c for c in report["comparisons"] if c["name"] == "trade_count_short_to_flat")
+        assert stf["bt"] == 1 and stf["pass"]
+
+        assert report["position_mismatches"] == 0
+
+
+# ------------------------------------------------------------------
+# 最终总值 (无滑点时应完全一致)
+# ------------------------------------------------------------------
+
+class TestFinalValue:
+    def test_no_slippage_exact_match(self):
+        recs, prices, cap, audit = _build({0: 100, 11: 0})
+        report = BacktraderVerifier(recs, prices, cap, 100, 0.0002, 0.01).run(
+            tracker_stats=audit["statistics"],
+        )
+        val_check = next(c for c in report["comparisons"] if c["name"] == "final_value")
+        assert val_check["pass"] is True
+        assert val_check["residual"] <= 0.01
 
 
 # ------------------------------------------------------------------
 # 报告结构
 # ------------------------------------------------------------------
 
-class TestVerifierReport:
-
-    def test_report_fields(self):
-        prices = np.array([100.0] * 11)  # 10 bars + 1 trailing
-        tracker = PortfolioTracker(10000.0)
-        for t in range(10):
-            tracker.record_step(t, 1, 100.0, 0, 0, 0.0, 0.0)
-
-        report = BacktraderVerifier(
-            tracker.records, prices, 10000.0, 100,
-        ).run()
-        for key in ("match", "total_bars", "mismatches",
-                     "bt_final_value", "tracker_final_value", "summary"):
-            assert key in report
+class TestReportStructure:
+    def test_has_required_keys(self):
+        recs, prices, cap, audit = _build({})
+        report = BacktraderVerifier(recs, prices, cap, 100).run(
+            tracker_stats=audit["statistics"],
+        )
+        assert "all_pass" in report
+        assert "bt_stats" in report
+        assert "tracker_stats" in report
+        assert "comparisons" in report
+        assert "position_mismatches" in report

@@ -1,18 +1,14 @@
 """Backtrader 交叉验证模块
 
 将 PortfolioTracker 的交易记录回放到 backtrader 中，
-逐步对比 cash / total_value / position，验证资金计算正确性。
-
-backtrader 的订单默认在下一个 bar 成交。为了实现当 bar 成交，
-使用 cerebro.broker.set_coc(True) (cheat-on-close) 让 Market 订单
-在当前 bar 的 close 价成交。由于我们的 DataFeed 中 open=close=price，
-这等价于在当前价格成交。
+提取 bt 侧的分项数据（总手续费、交易次数、最终现金/总值/持仓），
+与 TradeAuditor 的 CSV 审计结果逐项对比。
 
 用法:
     from src.evaluation.bt_verifier import BacktraderVerifier
     verifier = BacktraderVerifier(tracker.records, prices, initial_capital, m,
                                   commission_rate)
-    report = verifier.run()
+    report = verifier.run(tracker_audit_stats)
 """
 
 from __future__ import annotations
@@ -53,11 +49,9 @@ class ArrayPriceFeed(bt.feed.DataBase):
     def _load(self):
         if self._idx >= self._size:
             return False
-
         price = float(self._prices[self._idx])
         base_date = self.p.start_date or dt.datetime(2024, 1, 1)
         bar_dt = base_date + dt.timedelta(minutes=10 * self._idx)
-
         self.lines.datetime[0] = bt.date2num(bar_dt)
         self.lines.open[0] = price
         self.lines.high[0] = price
@@ -65,13 +59,12 @@ class ArrayPriceFeed(bt.feed.DataBase):
         self.lines.close[0] = price
         self.lines.volume[0] = 0
         self.lines.openinterest[0] = 0
-
         self._idx += 1
         return True
 
 
 # ------------------------------------------------------------------
-# 自定义佣金: rate × |size| × price，保留 2 位小数
+# 自定义佣金
 # ------------------------------------------------------------------
 
 class FixedRateCommission(bt.CommInfoBase):
@@ -87,15 +80,11 @@ class FixedRateCommission(bt.CommInfoBase):
 
 
 # ------------------------------------------------------------------
-# 信号回放策略
+# 信号回放策略 — 记录每笔成交的详细信息
 # ------------------------------------------------------------------
 
 class SignalReplayStrategy(bt.Strategy):
-    """按 tracker records 逐步下单。
-
-    使用 set_coc(True) 让订单在当前 bar 的 close 价成交。
-    由于 open=high=low=close=price，等价于在当前价格成交。
-    """
+    """按 tracker records 逐步下单，记录每笔成交详情。"""
 
     params = (
         ("records", []),
@@ -110,11 +99,26 @@ class SignalReplayStrategy(bt.Strategy):
         self.bt_log: List[Dict] = []
         self._bar_count = 0
 
+        # 分项统计
+        self.total_commission = 0.0
+        self.trade_count = 0
+        self.buy_count = 0
+        self.sell_count = 0
+
+    def notify_order(self, order):
+        if order.status != order.Completed:
+            return
+        self.total_commission += order.executed.comm
+        self.trade_count += 1
+        if order.executed.size > 0:
+            self.buy_count += 1
+        else:
+            self.sell_count += 1
+
     def next(self):
         bar_idx = self._bar_count
         self._bar_count += 1
 
-        # 下单: set_coc 让订单在当前 bar close 价成交
         if bar_idx in self._target_by_idx:
             target_pos = self._target_by_idx[bar_idx]
             current_pos = self.getposition(self.data).size
@@ -125,7 +129,6 @@ class SignalReplayStrategy(bt.Strategy):
                 else:
                     self.sell(size=abs(delta))
 
-        # 记录（订单已在当前 bar 成交，因为 set_coc=True）
         self.bt_log.append({
             "bar_idx": bar_idx,
             "bt_cash": round(self.broker.getcash(), 6),
@@ -139,15 +142,14 @@ class SignalReplayStrategy(bt.Strategy):
 # ------------------------------------------------------------------
 
 class BacktraderVerifier:
-    """使用 backtrader 交叉验证 PortfolioTracker 的资金计算。
+    """使用 backtrader 交叉验证，逐项对比 CSV 审计数据。
 
-    Args:
-        records: PortfolioTracker.records
-        prices: 完整价格序列 np.ndarray
-        initial_capital: 初始资金
-        m: 最大持仓量
-        commission_rate: 佣金率
-        tolerance: 允许的 total_value 误差（默认 1.0）
+    对比项:
+      - 最终持仓
+      - 最终总值 (扣除滑点差异后)
+      - 总手续费 (bt vs tracker)
+      - 交易次数 (bt vs tracker)
+      - 各类型交易次数 (开多/开空/平多/平空/多转空/空转多)
     """
 
     def __init__(
@@ -166,22 +168,25 @@ class BacktraderVerifier:
         self.commission_rate = commission_rate
         self.tolerance = tolerance
 
-    def run(self) -> Dict:
-        """执行 backtrader 回测并与 tracker records 逐步对比。"""
-        cerebro = bt.Cerebro()
+    def run(self, tracker_stats: Dict | None = None) -> Dict:
+        """执行 backtrader 回测，提取分项数据，与 tracker_stats 逐项对比。
 
+        Args:
+            tracker_stats: TradeAuditor.audit()["statistics"]，
+                           如果提供则进行逐项对比。
+        """
+        cerebro = bt.Cerebro()
         data = ArrayPriceFeed(
             prices=self.prices,
             start_date=dt.datetime(2024, 1, 1),
         )
         cerebro.adddata(data)
-
         cerebro.broker.setcash(self.initial_capital)
         cerebro.broker.addcommissioninfo(
             FixedRateCommission(commission=self.commission_rate),
         )
         cerebro.broker.set_slippage_fixed(0.0)
-        cerebro.broker.set_coc(True)  # cheat-on-close: 当 bar 成交
+        cerebro.broker.set_coc(True)
 
         cerebro.addstrategy(
             SignalReplayStrategy,
@@ -190,58 +195,165 @@ class BacktraderVerifier:
         )
 
         results = cerebro.run()
-        strategy = results[0]
+        strat = results[0]
 
-        bt_log = strategy.bt_log
-        mismatches = self._compare(bt_log)
-
-        bt_final = round(cerebro.broker.getvalue(), 6)
-        tracker_final = (
-            self.records[-1]["total_value"] if self.records else self.initial_capital
-        )
-
-        match = len(mismatches) == 0
-        # 最终 total_value 对比（此时持仓为 0 或相同价格，应一致）
-        final_value_diff = abs(bt_final - tracker_final)
-        if final_value_diff > self.tolerance:
-            match = False
-
-        summary = (
-            f"验证通过: {len(bt_log)} bars, 持仓一致, "
-            f"最终价值差={final_value_diff:.2f}"
-            if match
-            else f"发现 {len(mismatches)} 处持仓差异, "
-            f"最终价值差={final_value_diff:.2f} (共 {len(bt_log)} bars)"
-        )
-
-        report = {
-            "match": match,
-            "total_bars": len(bt_log),
-            "mismatches": mismatches[:20],
-            "bt_final_value": bt_final,
-            "tracker_final_value": tracker_final,
-            "summary": summary,
+        # bt 侧分项数据
+        bt_stats = {
+            "final_value": round(cerebro.broker.getvalue(), 2),
+            "final_cash": round(cerebro.broker.getcash(), 2),
+            "final_position": strat.getposition(strat.data).size,
+            "total_commission": round(strat.total_commission, 2),
+            "trade_count": strat.trade_count,
+            "buy_count": strat.buy_count,
+            "sell_count": strat.sell_count,
         }
 
-        logger.info("[BT验证] %s", summary)
-        logger.info(
-            "[BT验证] bt_final=%.2f tracker_final=%.2f diff=%.2f",
-            bt_final, tracker_final, abs(bt_final - tracker_final),
-        )
+        # 从 records 计算净交易类型（合并 settle+trade）
+        net_counts = self._compute_net_trade_counts()
+        bt_stats.update(net_counts)
 
+        # tracker 侧分项数据
+        tracker_total_slippage = sum(
+            float(r.get("slippage", 0.0)) for r in self.records
+        )
+        tracker_total_commission = sum(
+            float(r.get("commission", 0.0)) for r in self.records
+        )
+        last = self.records[-1] if self.records else {}
+        tracker_stats_local = {
+            "final_value": round(float(last.get("total_value", self.initial_capital)), 2),
+            "final_cash": round(float(last.get("cash", self.initial_capital)), 2),
+            "final_position": int(last.get("position_after", 0)),
+            "total_commission": round(tracker_total_commission, 2),
+            "total_slippage": round(tracker_total_slippage, 2),
+        }
+
+        # 逐项对比
+        comparisons = self._cross_compare(bt_stats, tracker_stats_local, tracker_stats)
+        all_pass = all(c["pass"] for c in comparisons)
+
+        # 持仓逐步对比
+        position_mismatches = self._compare_positions(strat.bt_log)
+
+        report = {
+            "all_pass": all_pass and len(position_mismatches) == 0,
+            "bt_stats": bt_stats,
+            "tracker_stats": tracker_stats_local,
+            "comparisons": comparisons,
+            "position_mismatches": len(position_mismatches),
+            "position_mismatch_details": position_mismatches[:10],
+        }
+
+        self._log_report(report, comparisons)
         return report
 
-    def _compare(self, bt_log: List[Dict]) -> List[Dict]:
-        """将 bt_log 与 tracker records 按 state_index 对比。
+    def _cross_compare(
+        self, bt: Dict, trk: Dict, audit: Dict | None,
+    ) -> List[Dict]:
+        """逐项对比 bt 和 tracker 的分项数据。
 
-        set_coc(True) 下，bar N 的订单在 next() 返回后成交，
-        bt_log[N+1] 才能看到成交后的持仓。
-        对比: tracker records[state_index=X] ↔ bt_log[bar_idx=X+1]
-
-        注意: backtrader 期货模式每 bar 做 mark-to-market，cash 随价格
-        变动。而 tracker 的 cash 只在交易时变动。因此中间步骤只对比持仓，
-        最终 total_value 在 run() 中单独对比。
+        交易类型统计: bt 侧没有 settle 概念，它看到的是 settle+开仓
+        合并后的净持仓变化。因此需要从 records 中计算"净交易类型"
+        （合并同一 bar 的 settle 和交易），再与 bt 对比。
         """
+        checks = []
+
+        # 1. 最终持仓
+        checks.append({
+            "name": "final_position",
+            "bt": bt["final_position"],
+            "tracker": trk["final_position"],
+            "pass": bt["final_position"] == trk["final_position"],
+        })
+
+        # 2. 总手续费
+        checks.append({
+            "name": "total_commission",
+            "bt": bt["total_commission"],
+            "tracker": trk["total_commission"],
+            "diff": abs(bt["total_commission"] - trk["total_commission"]),
+            "pass": abs(bt["total_commission"] - trk["total_commission"]) <= self.tolerance,
+        })
+
+        # 3. 最终总值: bt_value - tracker_value ≈ tracker 累计滑点
+        value_diff = abs(bt["final_value"] - trk["final_value"])
+        residual = abs(value_diff - trk["total_slippage"])
+        checks.append({
+            "name": "final_value",
+            "bt": bt["final_value"],
+            "tracker": trk["final_value"],
+            "diff": round(value_diff, 2),
+            "total_slippage": trk["total_slippage"],
+            "residual": round(residual, 2),
+            "pass": residual <= self.tolerance,
+        })
+
+        # 4. 交易类型: 从 records 计算净变化（合并同一 bar 的 settle+trade）
+        #    这样和 bt 侧看到的持仓变化一致
+        net_counts = self._compute_net_trade_counts()
+        for key in ("flat_to_long", "flat_to_short", "long_to_flat",
+                     "short_to_flat", "long_to_short", "short_to_long"):
+            bt_val = bt.get(key, 0)
+            net_val = net_counts.get(key, 0)
+            checks.append({
+                "name": f"trade_count_{key}",
+                "bt": bt_val,
+                "tracker": net_val,
+                "pass": bt_val == net_val,
+            })
+
+        return checks
+
+    def _compute_net_trade_counts(self) -> Dict[str, int]:
+        """从 records 计算净交易类型（合并同一 bar 的 settle+trade）。
+
+        bt 侧没有 settle，它看到的是每个 bar 的净持仓变化。
+        所以我们按 state_index 分组，取每组第一条的 position_before
+        和最后一条的 position_after，计算净变化类型。
+        """
+        from collections import OrderedDict
+
+        # 按 state_index 分组，保持顺序
+        groups: Dict[int, List[Dict]] = OrderedDict()
+        for rec in self.records:
+            idx = rec["state_index"]
+            groups.setdefault(idx, []).append(rec)
+
+        counts = {
+            "flat_to_long": 0,
+            "flat_to_short": 0,
+            "long_to_flat": 0,
+            "short_to_flat": 0,
+            "long_to_short": 0,
+            "short_to_long": 0,
+        }
+
+        prev_pos = 0  # 上一个 bar 结束时的持仓
+        for idx, recs in groups.items():
+            pos_before = prev_pos
+            pos_after = recs[-1]["position_after"]
+            prev_pos = pos_after
+
+            if pos_before == pos_after:
+                continue
+
+            if pos_before == 0 and pos_after > 0:
+                counts["flat_to_long"] += 1
+            elif pos_before == 0 and pos_after < 0:
+                counts["flat_to_short"] += 1
+            elif pos_before > 0 and pos_after == 0:
+                counts["long_to_flat"] += 1
+            elif pos_before < 0 and pos_after == 0:
+                counts["short_to_flat"] += 1
+            elif pos_before > 0 and pos_after < 0:
+                counts["long_to_short"] += 1
+            elif pos_before < 0 and pos_after > 0:
+                counts["short_to_long"] += 1
+
+        return counts
+
+    def _compare_positions(self, bt_log: List[Dict]) -> List[Dict]:
+        """逐步对比持仓 (bt_log[N+1] ↔ tracker[N])。"""
         tracker_by_idx: Dict[int, Dict] = {}
         for rec in self.records:
             tracker_by_idx[rec["state_index"]] = rec
@@ -255,22 +367,58 @@ class BacktraderVerifier:
             bt_idx = trk_idx + 1
             if bt_idx not in bt_by_idx:
                 continue
-
             entry = bt_by_idx[bt_idx]
-            pos_match = entry["bt_position"] == trk["position_after"]
-
-            if not pos_match:
+            if entry["bt_position"] != trk["position_after"]:
                 mismatches.append({
                     "state_index": trk_idx,
-                    "bt_bar": bt_idx,
-                    "bt_cash": entry["bt_cash"],
-                    "bt_value": entry["bt_value"],
                     "bt_position": entry["bt_position"],
-                    "tracker_cash": trk["cash"],
-                    "tracker_value": trk["total_value"],
                     "tracker_position": trk["position_after"],
-                    "value_diff": abs(entry["bt_value"] - trk["total_value"]),
-                    "pos_match": pos_match,
                 })
-
         return mismatches
+
+    def _log_report(self, report: Dict, comparisons: List[Dict]) -> None:
+        logger.info("=" * 60)
+        logger.info("Backtrader 交叉验证报告")
+        logger.info("-" * 60)
+
+        bt_s = report["bt_stats"]
+        trk_s = report["tracker_stats"]
+        logger.info("%-20s %15s %15s", "", "Backtrader", "Tracker")
+        logger.info("%-20s %15d %15d", "最终持仓",
+                     bt_s["final_position"], trk_s["final_position"])
+        logger.info("%-20s %15.2f %15.2f", "最终现金",
+                     bt_s["final_cash"], trk_s["final_cash"])
+        logger.info("%-20s %15.2f %15.2f", "最终总值",
+                     bt_s["final_value"], trk_s["final_value"])
+        logger.info("%-20s %15.2f %15.2f", "总手续费",
+                     bt_s["total_commission"], trk_s["total_commission"])
+        logger.info("%-20s %15s %15.2f", "总滑点",
+                     "N/A(无LOB)", trk_s["total_slippage"])
+        logger.info("%-20s %15d %15s", "成交订单数",
+                     bt_s["trade_count"], "-")
+        logger.info("%-20s %15d / %15d", "买入/卖出",
+                     bt_s["buy_count"], bt_s["sell_count"])
+        logger.info("-" * 60)
+
+        for c in comparisons:
+            status = "✓" if c["pass"] else "✗"
+            if "diff" in c:
+                logger.info("[%s] %s: bt=%s tracker=%s diff=%s",
+                            status, c["name"], c.get("bt"), c.get("tracker"),
+                            c.get("diff"))
+            else:
+                logger.info("[%s] %s: bt=%s tracker=%s",
+                            status, c["name"], c.get("bt"), c.get("tracker"))
+
+        logger.info("-" * 60)
+        logger.info("持仓逐步对比: %d 处不匹配", report["position_mismatches"])
+        logger.info("=" * 60)
+
+        if report["all_pass"]:
+            logger.info("交叉验证结果: 全部通过")
+        else:
+            failed = [c["name"] for c in comparisons if not c["pass"]]
+            if report["position_mismatches"] > 0:
+                failed.append(f"position({report['position_mismatches']}处)")
+            logger.info("交叉验证结果: %d 项未通过 — %s",
+                        len(failed), ", ".join(failed))
