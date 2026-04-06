@@ -80,14 +80,15 @@ def load_phase1_model(config, pair: str, device: torch.device):
 
     codebook = VQCodebook(
         num_codes=config.num_archetypes, code_dim=config.latent_dim,
+        use_ema=False,
     ).to(device)
-    codebook.load_state_dict(ckpt["codebook"])
+    codebook.load_state_dict(ckpt["codebook"], strict=False)
 
     decoder = VQDecoder(
         state_dim=config.state_dim, code_dim=config.latent_dim,
         hidden_dim=config.lstm_hidden_dim, action_dim=config.action_dim,
     ).to(device)
-    decoder.load_state_dict(ckpt["decoder"])
+    decoder.load_state_dict(ckpt["decoder"], strict=False)
 
     for p in codebook.parameters():
         p.requires_grad = False

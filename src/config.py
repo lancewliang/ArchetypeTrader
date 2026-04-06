@@ -40,6 +40,9 @@ class Config:
     phase1_epochs: int = 300
     phase1_sampling_seed: int = 42  # Phase I 轨迹采样随机种子，用于结果复现
     pretrain_epochs: int = 10  # 连续潜在预训练轮数（无 VQ 量化）
+    change_point_weight: float = 5.0  # change point 处 loss 权重倍数（温和引导）
+    use_ema_codebook: bool = True  # 是否使用 EMA 更新码本
+    ema_decay: float = 0.99  # EMA 衰减率
 
     # Phase II 配置
     phase2_total_steps: int = 3_000_000

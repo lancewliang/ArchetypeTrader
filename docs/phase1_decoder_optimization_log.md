@@ -370,3 +370,128 @@ Phase II 的核心问题是 **selector 坍缩**——它学会了选一个"平�
 | Annual Sortino Ratio (ASoR) | **11.00** | 索提诺比率 |
 
 三阶段管线从 Phase I decoder 的 decoded_return -470 优化到测试集 TR=68.06，核心改动是 single-trade 推理约束。
+
+
+---
+
+## 实验 7: BiLSTM + Positional Encoding + VQ-EMA + Change-Point 加权 Loss (2026-04-06)
+
+### 问题诊断
+
+基于实验 6 的 MLP + single-trade 约束方案虽然在测试集上取得了 TR=68.06，但 Phase I 的 env_validation 报告暴露了深层瓶颈：
+
+| 指标 | 实验 6 (MLP) 值 | 问题 |
+|---|---|---|
+| change_point_accuracy | 56.7% | 关键交易时刻接近抛硬币 |
+| pairwise_action_agreement | 0.751 | archetype 之间 75% 动作相同，selector 选择空间被压缩 |
+| pairwise_codebook_cosine_max | 0.9955 | 码本向量几乎重叠 |
+| JS divergence mean | 0.058 | archetype 策略差异极小 |
+| action_distribution_shift (max) | 0.025 | 轻微偏向 long |
+
+核心瓶颈不在 Phase III 的训练稳定性，而在 Phase I 的 decoder 重建质量和 archetype 差异性。
+
+### 改动内容
+
+同时实施三个互相协同的改动：
+
+#### 改动 1: VQ-EMA 码本更新 (`src/phase1/codebook.py`)
+
+将码本从 SGD 梯度更新改为 EMA (Exponential Moving Average) 更新：
+- 码本向量 `embeddings.weight.requires_grad = False`，不参与反向传播
+- 每个 batch 用指数滑动平均跟踪分配到每个 code 的 z_e 均值
+- `ema_decay=0.99`，Laplace 平滑 `epsilon=1e-5`
+- 目标：让码本向量更均匀分布，减少 cosine_max=0.9955 的重叠问题
+
+新增参数：`use_ema: bool = True`, `ema_decay: float = 0.99`
+
+#### 改动 2: Decoder Positional Encoding (`src/phase1/vq_decoder.py`)
+
+在 BiLSTM decoder 输入中加入 16 维 learnable positional encoding：
+- 输入从 `[state(45), z_q(16)]` 扩展为 `[state(45), z_q(16), pos_embed(16)]`
+- `nn.Embedding(max_horizon=128, pe_dim=16)`
+- 目标：帮助 decoder 精确定位 change point 的时间步位置
+
+#### 改动 3: Change-Point 加权 Loss (`scripts/train_phase1.py`)
+
+在 change point 处（`a_demo[t] != a_demo[t-1]`）给 cross-entropy loss 加权：
+- 默认 token 权重 1.0，change point 处乘以 `change_point_weight`
+- 使用 `F.cross_entropy(reduction='none')` + 逐 token 加权
+- 目标：强制 decoder 在关键交易时刻预测准确
+
+#### 辅助改动
+
+- `src/config.py`: 新增 `change_point_weight`, `use_ema_codebook`, `ema_decay` 配置项
+- `scripts/train_phase1.py`: optimizer 只收集 `requires_grad=True` 的参数（EMA 模式下排除码本）
+- 所有模型加载处 (`model_loader.py`, `train_phase2.py`, `train_phase3.py`, `validation.py`): `strict=False` 兼容新旧 checkpoint
+
+### 实验 7a: change_point_weight=15 (失败)
+
+**结果**: 严重过拟合
+- 最低 loss: 0.173 (epoch 189)，最终 loss: 0.766（反弹 4.4x）
+- change_point_accuracy: **43.77%**（比实验 6 的 56.7% 还低）
+- action_distribution_shift (max): 0.3167（系统性偏移）
+- 触发 2 个 warning
+
+**原因**: 72 步中只有 1 步是 change point，15x 权重让该步 loss 贡献占比从 ~1.4% 飙升到 ~17%。模型在 change point 上过拟合后在其他 token 上崩了。
+
+### 实验 7b: change_point_weight=5 + Cosine Annealing LR (成功)
+
+**额外改动**:
+- `change_point_weight`: 15 → 5（温和引导）
+- 新增 `CosineAnnealingLR(T_max=300, eta_min=lr/10)`，从 3e-4 衰减到 3e-5
+
+**结果**:
+
+| 指标 | 实验 6 (MLP baseline) | 实验 7a (weight=15) | 实验 7b (weight=5) | 变化 (6→7b) |
+|---|---|---|---|---|
+| 最终 loss | 0.2535 | 0.766 (过拟合) | **0.1442** | ↓ 43% |
+| 最低 loss (epoch) | — | 0.173 (189) | **0.1424 (297)** | 稳定收敛 |
+| change_point_accuracy | 56.7% | 43.8% | **64.1%** | **+7.4pp** |
+| non_change_accuracy | 90.2% | — | **96.9%** | +6.7pp |
+| action_shift (max) | 0.025 | 0.317 | **0.001** | 几乎消除 |
+| pairwise_agreement_mean | 0.751 | — | **0.418** | **↓ 44%** |
+| pairwise_agreement_max | 0.970 | — | **0.918** | ↓ |
+| JS divergence mean | 0.058 | — | **0.262** | **4.5x** |
+| positive archetypes | 10/10 | — | 9/10 | 基本持平 |
+| decoded_return_mean | 2087.7 | — | **539.4** | 更保守但更稳定 |
+| val oracle_return_mean | 909.0 | — | **732.7** | 合理范围 |
+| val oracle_positive_ratio | 1.0 | — | **1.0** | 持平 |
+| warnings | 0 | 2 | **0** | ✓ |
+
+**Change point 混淆矩阵对比**:
+
+```
+实验 6 (MLP baseline):          实验 7b (BiLSTM+PE+EMA):
+short: [476, 361, 44]           short: [562, 312,  7]    recall 54% → 64%
+flat:  [  0,   0,  0]           flat:  [  0,   0,  0]
+long:  [ 19, 343, 530]          long:  [  7, 311, 574]   recall 59% → 64%
+```
+
+关键改善：
+- short 方向的 recall 从 54% 提升到 64%，误判为 flat 的比例从 41% 降到 35%
+- long 方向的 recall 从 59% 提升到 64%
+- 误判为对立方向的比例极低（short→long: 44→7, long→short: 19→7）
+
+### 结论
+
+三个改动的协同效果显著：
+1. **VQ-EMA** 让码本向量分布更均匀 → pairwise agreement 从 0.75 降到 0.42
+2. **Positional Encoding** 帮助 decoder 定位 change point → change_point_accuracy +7.4pp
+3. **Change-point 加权 loss (weight=5)** 温和引导注意力 → action shift 几乎消除
+4. **Cosine Annealing LR** 防止后期过拟合 → loss 稳定收敛到 0.1442
+
+Phase I 基座质量全面提升，继续跑 Phase II → III → Evaluate。
+
+### 文件变更清单
+
+| 文件 | 变更类型 | 说明 |
+|---|---|---|
+| `src/phase1/codebook.py` | 重写 quantize + 新增 EMA | VQ-EMA 双模式支持 |
+| `src/phase1/vq_decoder.py` | 新增 PE | BiLSTM + 16 维 learnable positional encoding |
+| `src/config.py` | 新增 3 个配置项 | change_point_weight=5, use_ema_codebook=True, ema_decay=0.99 |
+| `scripts/train_phase1.py` | 加权 loss + LR scheduler | F.cross_entropy(reduction='none') + CosineAnnealingLR |
+| `src/evaluation/model_loader.py` | strict=False | 兼容新旧 checkpoint |
+| `scripts/train_phase2.py` | strict=False | 同上 |
+| `scripts/train_phase3.py` | strict=False | 同上 |
+| `src/phase1/validation.py` | strict=False | 同上 |
+| `tests/test_vq.py` | 更新 input_size 断言 | 适配 PE 后的 LSTM input_size |

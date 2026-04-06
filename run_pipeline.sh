@@ -7,6 +7,9 @@
 # ============================================================
 set -euo pipefail
 
+# --- 将项目根目录加入 PYTHONPATH ---
+export PYTHONPATH="${PYTHONPATH:-}:$(cd "$(dirname "$0")" && pwd)"
+
 # --- 配置 ---
 PAIR="${1:-ETH}"                          # 默认 ETH，可通过第一个参数指定
 LOG_DIR="logs"

@@ -1,8 +1,12 @@
-"""VQ Codebook — 向量量化码本模块
+"""VQ Codebook — 向量量化码本模块 (EMA + SGD 双模式)
 
 # Phase I, Section 4.1: 可学习码本
 # ε = {e_0, ..., e_{K-1}}, K=10, 维度 16
 # 量化: k = argmin_j ||z_e - e_j||², z_q = e_k
+#
+# 增强: 支持 EMA (Exponential Moving Average) 更新码本向量 (VQ-VAE-2 风格)。
+# EMA 模式下码本不通过梯度更新，而是用指数滑动平均跟踪分配到每个 code 的
+# z_e 均值，收敛更稳定、codebook 利用率更高。
 """
 
 import logging
@@ -19,30 +23,48 @@ logger = logging.getLogger(__name__)
 class VQCodebook(nn.Module):
     """向量量化码本，维护 K 个可学习原型向量。
 
-    # 论文 Section 4.1: 可学习码本
-    # ε = {e_0, ..., e_{K-1}}, K=10, 维度 16
-    # 量化: k = argmin_j ||z_e - e_j||², z_q = e_k
+    支持两种更新模式:
+    - SGD 模式 (use_ema=False): 原始 VQ-VAE，码本通过 commitment loss 梯度更新
+    - EMA 模式 (use_ema=True): VQ-VAE-2 风格，码本通过指数滑动平均更新，
+      收敛更稳定，codebook 利用率更高
 
     Args:
         num_codes: 原型数量 K (默认 10)
         code_dim: 码本向量维度 (默认 16)
+        use_ema: 是否使用 EMA 更新码本 (默认 True)
+        ema_decay: EMA 衰减率 γ (默认 0.99)
+        ema_epsilon: Laplace 平滑防止除零 (默认 1e-5)
     """
 
-    def __init__(self, num_codes: int = 10, code_dim: int = 16) -> None:
+    def __init__(
+        self,
+        num_codes: int = 10,
+        code_dim: int = 16,
+        use_ema: bool = True,
+        ema_decay: float = 0.99,
+        ema_epsilon: float = 1e-5,
+    ) -> None:
         super().__init__()
         self.num_codes = num_codes
         self.code_dim = code_dim
+        self.use_ema = use_ema
+        self.ema_decay = ema_decay
+        self.ema_epsilon = ema_epsilon
+
         self.embeddings = nn.Embedding(num_codes, code_dim)
+
+        if use_ema:
+            # EMA 模式: 码本权重不参与梯度更新
+            self.embeddings.weight.requires_grad = False
+            # 注册 EMA 缓冲区 (不参与 state_dict 的梯度，但会被保存/加载)
+            self.register_buffer("_ema_cluster_size", torch.zeros(num_codes))
+            self.register_buffer("_ema_embed_sum", self.embeddings.weight.clone())
 
     def quantize(self, z_e: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         """向量量化：最近邻查找 + straight-through estimator。
 
-        # Phase I, Step 3: 向量量化最近邻查找
-        # 1. 计算距离 ||z_e - e_j||² for all j
-        # 2. 找最近邻 k = argmin_j distances
-        # 3. z_q = embeddings[k]
-        # 4. straight-through: z_q_st = z_e + (z_q - z_e).detach()
-        # 5. commitment_loss = ||z_e.detach() - z_q||²
+        EMA 模式下，在训练时自动更新码本向量（无需梯度）。
+        SGD 模式下行为与原始实现完全一致。
 
         Args:
             z_e: 编码器输出的连续嵌入 (batch, code_dim)
@@ -51,33 +73,78 @@ class VQCodebook(nn.Module):
             z_q_st: 量化后的嵌入，带 straight-through 梯度 (batch, code_dim)
             indices: 选中的码本索引 (batch,)
             commitment_loss: 码本承诺损失标量
+                EMA 模式: 仅 encoder commitment (β₀ × ||z_e - sg[z_q]||²)
+                SGD 模式: codebook commitment (||sg[z_e] - z_q||²)
         """
-        # 码本权重 (num_codes, code_dim)
         codebook = self.embeddings.weight
 
-        # Step 1: 计算 ||z_e - e_j||² = ||z_e||² - 2 * z_e · e_j + ||e_j||²
-        # 展开平方距离以避免显式广播
+        # 计算距离 ||z_e - e_j||²
         distances = (
             torch.sum(z_e ** 2, dim=1, keepdim=True)
             - 2 * z_e @ codebook.t()
             + torch.sum(codebook ** 2, dim=1, keepdim=False)
-        )  # (batch, num_codes)
+        )
 
-        # Step 2: 最近邻查找
-        indices = torch.argmin(distances, dim=1)  # (batch,)
+        # 最近邻查找
+        indices = torch.argmin(distances, dim=1)
+        z_q = self.embeddings(indices)
 
-        # Step 3: 取出量化向量
-        z_q = self.embeddings(indices)  # (batch, code_dim)
+        # EMA 更新码本 (仅训练时)
+        if self.use_ema and self.training:
+            self._ema_update(z_e, indices)
 
-        # Step 4: Straight-through estimator
-        # 前向传播使用 z_q，反向传播梯度流过 z_e
+        # Straight-through estimator
         z_q_st = z_e + (z_q - z_e).detach()
 
-        # Step 5: Commitment loss = ||z_e.detach() - z_q||²
-        # [NOTE: 完整 VQ 损失还包含 β₀ × ||z_e - sg[z_q]||²，在训练循环中计算]
-        commitment_loss = torch.mean((z_e.detach() - z_q) ** 2)
+        # Commitment loss
+        if self.use_ema:
+            # EMA 模式: 只需 encoder commitment，码本自己通过 EMA 更新
+            # 返回 0 作为 codebook loss，encoder commitment 在训练循环中计算
+            commitment_loss = torch.tensor(0.0, device=z_e.device)
+        else:
+            # SGD 模式: ||sg[z_e] - z_q||²
+            commitment_loss = torch.mean((z_e.detach() - z_q) ** 2)
 
         return z_q_st, indices, commitment_loss
+
+    @torch.no_grad()
+    def _ema_update(self, z_e: Tensor, indices: Tensor) -> None:
+        """EMA 更新码本向量。
+
+        对每个 code k:
+          N_k ← γ × N_k + (1-γ) × n_k        (n_k = 分配到 k 的样本数)
+          m_k ← γ × m_k + (1-γ) × Σ z_e[i]   (对所有分配到 k 的 z_e 求和)
+          e_k ← m_k / (N_k + ε)               (Laplace 平滑)
+        """
+        # one-hot 编码: (batch, num_codes)
+        onehot = torch.zeros(
+            indices.shape[0], self.num_codes,
+            device=z_e.device, dtype=z_e.dtype,
+        )
+        onehot.scatter_(1, indices.unsqueeze(1), 1.0)
+
+        # 当前 batch 的统计量
+        batch_cluster_size = onehot.sum(dim=0)          # (num_codes,)
+        batch_embed_sum = onehot.t() @ z_e              # (num_codes, code_dim)
+
+        # EMA 更新
+        self._ema_cluster_size.mul_(self.ema_decay).add_(
+            batch_cluster_size, alpha=1.0 - self.ema_decay,
+        )
+        self._ema_embed_sum.mul_(self.ema_decay).add_(
+            batch_embed_sum, alpha=1.0 - self.ema_decay,
+        )
+
+        # Laplace 平滑后更新码本
+        n = self._ema_cluster_size.sum()
+        cluster_size_smoothed = (
+            (self._ema_cluster_size + self.ema_epsilon)
+            / (n + self.num_codes * self.ema_epsilon)
+            * n
+        )
+        self.embeddings.weight.data.copy_(
+            self._ema_embed_sum / cluster_size_smoothed.unsqueeze(1)
+        )
 
     # ------------------------------------------------------------------
     # Codebook collapse 对策

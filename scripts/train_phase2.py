@@ -300,8 +300,9 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
     codebook = VQCodebook(
         num_codes=config.num_archetypes,
         code_dim=config.latent_dim,
+        use_ema=False,
     ).to(device)
-    codebook.load_state_dict(checkpoint["codebook"])
+    codebook.load_state_dict(checkpoint["codebook"], strict=False)
 
     # 初始化并加载 Decoder
     decoder = VQDecoder(
@@ -310,7 +311,7 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
         hidden_dim=config.lstm_hidden_dim,
         action_dim=config.action_dim,
     ).to(device)
-    decoder.load_state_dict(checkpoint["decoder"])
+    decoder.load_state_dict(checkpoint["decoder"], strict=False)
 
     # 需求 5.3: 冻结 Encoder、Codebook 和 Decoder — 不参与梯度更新
     for param in encoder.parameters():

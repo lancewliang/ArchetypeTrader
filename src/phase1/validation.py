@@ -503,6 +503,7 @@ def _load_phase1_models(checkpoint: Dict[str, Any], device: torch.device) -> Tup
     codebook = VQCodebook(
         num_codes=int(model_config["num_archetypes"]),
         code_dim=int(model_config["latent_dim"]),
+        use_ema=False,
     ).to(device)
     decoder = VQDecoder(
         state_dim=int(model_config["state_dim"]),
@@ -512,8 +513,8 @@ def _load_phase1_models(checkpoint: Dict[str, Any], device: torch.device) -> Tup
     ).to(device)
 
     encoder.load_state_dict(checkpoint["encoder"], strict=True)
-    codebook.load_state_dict(checkpoint["codebook"], strict=True)
-    decoder.load_state_dict(checkpoint["decoder"], strict=True)
+    codebook.load_state_dict(checkpoint["codebook"], strict=False)
+    decoder.load_state_dict(checkpoint["decoder"], strict=False)
     return encoder, codebook, decoder, model_config
 
 

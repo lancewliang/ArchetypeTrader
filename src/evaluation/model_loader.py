@@ -49,8 +49,9 @@ def load_phase1_model(
 
     codebook = VQCodebook(
         num_codes=config.num_archetypes, code_dim=config.latent_dim,
+        use_ema=False,  # 推理时不需要 EMA
     ).to(device)
-    codebook.load_state_dict(checkpoint["codebook"])
+    codebook.load_state_dict(checkpoint["codebook"], strict=False)
 
     decoder = VQDecoder(
         state_dim=config.state_dim,
@@ -58,7 +59,7 @@ def load_phase1_model(
         hidden_dim=config.lstm_hidden_dim,
         action_dim=config.action_dim,
     ).to(device)
-    decoder.load_state_dict(checkpoint["decoder"])
+    decoder.load_state_dict(checkpoint["decoder"], strict=False)
 
     for p in codebook.parameters():
         p.requires_grad = False

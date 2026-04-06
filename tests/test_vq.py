@@ -267,8 +267,8 @@ class TestVQDecoderInit:
 
     def test_lstm_layer_dims(self):
         dec = VQDecoder(state_dim=45, code_dim=16, hidden_dim=128, action_dim=3)
-        # BiLSTM input: state_dim + code_dim
-        assert dec.lstm.input_size == 45 + 16
+        # BiLSTM input: state_dim + code_dim + pe_dim
+        assert dec.lstm.input_size == 45 + 16 + 16
         assert dec.lstm.hidden_size == 128
         assert dec.lstm.bidirectional is True
         # Output projection: 2 * hidden_dim → action_dim (bidirectional)

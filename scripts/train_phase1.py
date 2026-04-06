@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -443,6 +444,8 @@ def build_models(
     codebook = VQCodebook(
         num_codes=config.num_archetypes,
         code_dim=config.latent_dim,
+        use_ema=config.use_ema_codebook,
+        ema_decay=config.ema_decay,
     ).to(device)
 
     decoder = VQDecoder(
@@ -573,10 +576,25 @@ def train_one_epoch(
         action_logits = decoder(s_demo, z_input)
         pred_actions = torch.argmax(action_logits, dim=-1)
 
-        # L_rec
+        # L_rec with change-point weighting
+        # change points: 位置 t 处 a_demo[:, t] != a_demo[:, t-1]
+        # 这些位置决定了整个 horizon 的盈亏方向，给予更高权重
         logits_flat = action_logits.reshape(-1, config.action_dim)
         targets_flat = a_demo.reshape(-1)
-        rec_loss = ce_loss_fn(logits_flat, targets_flat)
+
+        batch_size_cur = a_demo.shape[0]
+        h_len = a_demo.shape[1]
+
+        # 构建逐 token 权重: 默认 1.0，change point 处乘以 change_point_weight
+        token_weights = torch.ones(batch_size_cur, h_len, device=device)
+        if h_len >= 2:
+            change_mask = (a_demo[:, 1:] != a_demo[:, :-1])  # (batch, h-1)
+            token_weights[:, 1:] += change_mask.float() * (config.change_point_weight - 1.0)
+        weights_flat = token_weights.reshape(-1)
+
+        # 加权 cross-entropy
+        per_token_loss = F.cross_entropy(logits_flat, targets_flat, reduction='none')
+        rec_loss = (per_token_loss * weights_flat).mean()
 
         if is_phase_a:
             total_loss = rec_loss
@@ -634,12 +652,17 @@ def run_training_loop(
     device: torch.device,
 ) -> TrainingHistory:
     """执行完整的 Phase I 训练循环（Phase A 预训练 + Phase B VQ 训练）。"""
-    all_params = (
+    # EMA 模式下码本不参与梯度更新，只收集有梯度的参数
+    trainable_params = [p for p in (
         list(encoder.parameters())
         + list(codebook.parameters())
         + list(decoder.parameters())
+    ) if p.requires_grad]
+    optimizer = torch.optim.Adam(trainable_params, lr=config.learning_rate)
+    # Cosine annealing: 从 lr 衰减到 lr/10，防止后期过拟合
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config.phase1_epochs, eta_min=config.learning_rate / 10,
     )
-    optimizer = torch.optim.Adam(all_params, lr=config.learning_rate)
     ce_loss_fn = nn.CrossEntropyLoss()
     history = TrainingHistory()
 
@@ -695,6 +718,8 @@ def run_training_loop(
         if np.isnan(summary["avg_loss"]):
             logger.error("训练 loss 发散 (NaN)，在 epoch %d 终止训练", epoch)
             break
+
+        scheduler.step()
 
     return history
 
