@@ -11,7 +11,7 @@ set -euo pipefail
 export PYTHONPATH="${PYTHONPATH:-}:$(cd "$(dirname "$0")" && pwd)"
 
 # --- 配置 ---
-PAIR="${1:-ETH}"                          # 默认 ETH，可通过第一个参数指定
+PAIR="${1:-AL}"                          # 默认 ETH，可通过第一个参数指定
 LOG_DIR="logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${LOG_DIR}/${PAIR}_pipeline_${TIMESTAMP}.log"

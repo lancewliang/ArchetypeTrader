@@ -69,7 +69,7 @@ class ArrayPriceFeed(bt.feed.DataBase):
 
 class FixedRateCommission(bt.CommInfoBase):
     params = (
-        ("commission", 0.0002),
+        ("commission", 0.0003),
         ("stocklike", False),
         ("commtype", bt.CommInfoBase.COMM_PERC),
         ("percabs", True),
@@ -158,7 +158,7 @@ class BacktraderVerifier:
         prices: np.ndarray,
         initial_capital: float,
         m: int,
-        commission_rate: float = 0.0002,
+        commission_rate: float = 0.0003,
         tolerance: float = 1.0,
     ) -> None:
         self.records = records

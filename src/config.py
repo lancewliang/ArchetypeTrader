@@ -16,7 +16,7 @@ class Config:
     # 数据配置
     data_dir: str = "data"
     result_dir: str = "result"
-    pairs: List[str] = field(default_factory=lambda: ["ETH"])
+    pairs: List[str] = field(default_factory=lambda: [ "AL","ETH"])
 
     # 特征维度
     single_feature_dim: int = 36
@@ -26,9 +26,9 @@ class Config:
     # MDP 配置
     action_dim: int = 3  # {0: short, 1: flat, 2: long}
     horizon: int = 72  # h = 72 步
-    commission_rate: float = 0.0002  # δ = 0.02%（论文值）
+    commission_rate: float = 0.0003  # δ = 0.02%（论文值）
     max_positions: Dict[str, int] = field(
-        default_factory=lambda: {"BTC": 8, "ETH": 100, "DOT": 2500, "BNB": 200}
+        default_factory=lambda: { "ETH": 100, "AL": 10}
     )
 
     # Phase I 配置

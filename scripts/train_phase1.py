@@ -49,7 +49,7 @@ PAPER_PHASE1_SPEC = {
     "state_dim": 45,
     "action_dim": 3,
     "horizon": 72,
-    "commission_rate": 0.0002,
+    "commission_rate": 0.0003,
     "lstm_hidden_dim": 128,
     "latent_dim": 16,
     "num_archetypes": 10,
@@ -58,7 +58,7 @@ PAPER_PHASE1_SPEC = {
     "phase1_epochs": 300,
     "pretrain_epochs": 10,
     "discount_factor": 0.99,
-    "max_positions": {"BTC": 8, "ETH": 100, "DOT": 2500, "BNB": 200},
+    "max_positions": { "ETH": 100, "AL": 10},
 }
 
 
