@@ -30,8 +30,8 @@ class TradingEnv:
         "BNB": 200,
     }
 
-    # Section 3.1: 佣金率 δ = 0.02%
-    COMMISSION_RATE: float = 0.0004
+    # Section 3.1: 佣金率 δ = 0.02%（论文值）
+    COMMISSION_RATE: float = 0.0002
 
     # Section 3.1: LOB feature indices in state vector
     # (matching SINGLE_FEATURES order in feature_pipeline.py)

@@ -138,24 +138,33 @@ def _run_policy_on_horizons(
     device: torch.device,
     selected_archetypes: np.ndarray,
 ) -> dict[str, Any]:
-    """在给定 horizons 上执行指定 archetype 选择结果，并汇总诊断指标。"""
+    """在给定 horizons 上执行指定 archetype 选择结果，并汇总诊断指标。
+
+    性能优化: 使用 batch_decode_actions + vectorized_execute_horizons
+    替代逐 horizon 的 Python 循环。
+    """
     if len(horizon_indices) != len(selected_archetypes):
         raise ValueError(
             f"horizon_indices 和 selected_archetypes 长度不一致: {len(horizon_indices)} vs {len(selected_archetypes)}"
         )
 
-    horizon_details: list[dict[str, Any]] = []
-    for h_idx, archetype_idx in zip(horizon_indices.tolist(), selected_archetypes.tolist()):
-        z_q = codebook.embeddings.weight[int(archetype_idx)].unsqueeze(0)
-        detail = run_horizon_with_decoder(
-            env=env,
-            horizon_idx=int(h_idx),
-            decoder=decoder,
-            z_q=z_q,
-            device=device,
-            return_details=True,
-        )
-        horizon_details.append(detail)
+    archetype_t = torch.tensor(selected_archetypes, dtype=torch.long, device=device)
+
+    all_actions_np = batch_decode_actions(
+        decoder=decoder,
+        codebook=codebook,
+        env=env,
+        horizon_indices=horizon_indices,
+        archetype_indices=archetype_t,
+        device=device,
+    )
+
+    _, horizon_details = vectorized_execute_horizons(
+        env=env,
+        horizon_indices=horizon_indices,
+        all_actions=all_actions_np,
+        need_diagnostics=True,
+    )
 
     metrics = _aggregate_execution_diagnostics(horizon_details)
     metrics["selected_histogram"] = _format_histogram_from_counts(
@@ -345,7 +354,7 @@ def run_horizon_with_decoder(
     # 4. 在 env 中逐步执行，累计 horizon return
 
     功能说明:
-        该函数负责把“高层 archetype 决策”真正落地为一个 horizon 内的
+        该函数负责把"高层 archetype 决策"真正落地为一个 horizon 内的
         低层执行收益：先用 decoder 生成整段 micro action，再逐步喂给 env，
         最终得到该 horizon 的累计回报。
 
@@ -417,7 +426,7 @@ def run_horizon_with_decoder(
         price = float(info.get("price", 0.0))
         delta_position = int(new_position - old_position)
 
-        commission = float(env.COMMISSION_RATE * abs(delta_position) * price)
+        commission = float(env.commission_rate * abs(delta_position) * price)
         commission = min(commission, execution_cost)
         slippage = max(0.0, execution_cost - commission)
         gross_pnl = float(reward + execution_cost)
@@ -443,6 +452,175 @@ def run_horizon_with_decoder(
     if return_details:
         return stats
     return float(stats["horizon_return"])
+def batch_decode_actions(
+    decoder: VQDecoder,
+    codebook: VQCodebook,
+    env: TradingEnv,
+    horizon_indices: np.ndarray,
+    archetype_indices: torch.Tensor,
+    device: torch.device,
+) -> np.ndarray:
+    """批量 decoder 推理：一次前向传播为所有 horizon 生成 micro actions。
+
+    功能说明:
+        将 B 个 horizon 的状态序列和对应的 archetype embedding 拼成一个 batch，
+        通过一次 decoder forward + single-trade constraint 得到所有 micro actions，
+        避免逐 horizon 调用 decoder 的 Python 循环开销。
+
+    Args:
+        decoder: 冻结的 VQ Decoder
+        codebook: 冻结的 VQCodebook
+        env: 交易环境（用于读取 states）
+        horizon_indices: (B,) horizon 索引
+        archetype_indices: (B,) 选定的 archetype 索引 (torch.Tensor on device)
+        device: 计算设备
+
+    Returns:
+        actions_np: (B, h) 所有 horizon 的 micro action 序列
+    """
+    h = env.horizon
+    B = len(horizon_indices)
+
+    # 收集所有 horizon 的状态序列: (B, h, state_dim)
+    all_states = np.empty((B, h, env.state_dim), dtype=np.float32)
+    for i, h_idx in enumerate(horizon_indices):
+        start = int(h_idx) * h
+        end = min(start + h, len(env.states))
+        actual_len = end - start
+        all_states[i, :actual_len] = env.states[start:end]
+        if actual_len < h:
+            all_states[i, actual_len:] = env.states[end - 1]
+
+    states_t = torch.tensor(all_states, dtype=torch.float32, device=device)  # (B, h, state_dim)
+
+    # 批量获取 archetype embeddings: (B, code_dim)
+    z_q_batch = codebook.embeddings.weight[archetype_indices.long()]  # (B, code_dim)
+
+    with torch.no_grad():
+        actions = decoder.decode_with_single_trade_constraint(states_t, z_q_batch)  # (B, h)
+
+    return actions.detach().cpu().numpy()
+def vectorized_execute_horizons(
+    env: TradingEnv,
+    horizon_indices: np.ndarray,
+    all_actions: np.ndarray,
+    need_diagnostics: bool = True,
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    """向量化执行多个 horizon 的 micro actions，返回 horizon returns 和诊断。
+
+    功能说明:
+        对 B 个 horizon 同时计算 reward，核心计算（持仓映射、价差、佣金）
+        全部用 NumPy 向量化完成，避免逐步 env.step() 的 Python 循环。
+
+        LOB slippage 仍需逐行查 DataFrame（因为 polars row dict 无法批量化），
+        但持仓变化/佣金/reward 的主体计算已完全向量化。
+
+    Args:
+        env: 交易环境
+        horizon_indices: (B,) horizon 索引
+        all_actions: (B, h) micro action 序列
+        need_diagnostics: 是否计算详细诊断统计（False 时只返回 horizon_return）
+
+    Returns:
+        returns: (B,) 每个 horizon 的总收益
+        details: 长度 B 的诊断字典列表（need_diagnostics=False 时为仅含 horizon_return 的简化字典）
+    """
+    B = len(horizon_indices)
+    h = env.horizon
+    m = env.m
+
+    # 持仓方向映射: action {0,1,2} → direction {-1,0,1}
+    DIRECTION_MAP = np.array([-1, 0, 1], dtype=np.int64)  # action 0→-1, 1→0, 2→1
+
+    # (B, h) → 目标持仓序列
+    directions = DIRECTION_MAP[all_actions]  # (B, h)
+    positions = directions * m  # (B, h) 目标持仓
+
+    # 前一步持仓: 第 0 步的前一步持仓为 0（flat）
+    prev_positions = np.zeros_like(positions)
+    prev_positions[:, 1:] = positions[:, :-1]
+
+    # 持仓变化量
+    delta_positions = positions - prev_positions  # (B, h) 有符号
+    abs_delta = np.abs(delta_positions)  # (B, h)
+
+    # 价格序列: 每个 horizon 的 h 步价格和 h 步 next_price
+    starts = (horizon_indices * h).astype(np.int64)  # (B,)
+    price_indices = starts[:, None] + np.arange(h, dtype=np.int64)[None, :]  # (B, h)
+    next_indices = np.minimum(price_indices + 1, len(env.prices) - 1)  # (B, h)
+
+    prices = env.prices[price_indices]  # (B, h)
+    next_prices = env.prices[next_indices]  # (B, h)
+    price_diff = next_prices - prices  # (B, h)
+
+    # 佣金: δ × |ΔP| × price
+    commissions = env.commission_rate * abs_delta * prices  # (B, h)
+
+    # LOB slippage: 需要逐行查 DataFrame（无法完全向量化）
+    slippages = np.zeros((B, h), dtype=np.float64)
+    if env.states_dataframe is not None:
+        # 只对持仓变化的步骤计算 slippage
+        change_mask = delta_positions != 0
+        for bi in range(B):
+            for ti in range(h):
+                if change_mask[bi, ti]:
+                    global_t = int(price_indices[bi, ti])
+                    state_dict = env.states_dataframe.row(global_t, named=True)
+                    slippages[bi, ti] = TradingEnv.compute_lob_slippage(
+                        int(delta_positions[bi, ti]), state_dict, float(prices[bi, ti])
+                    )
+
+    # 总执行损失
+    execution_costs = slippages + commissions  # (B, h)
+
+    # Eq. 1: r_step_t = P_t × (p_{t+1} - p_t) - O_t
+    rewards = positions * price_diff - execution_costs  # (B, h)
+
+    # horizon returns
+    horizon_returns = rewards.sum(axis=1)  # (B,)
+
+    if not need_diagnostics:
+        # 快速路径: 只返回 horizon_return，跳过所有诊断统计
+        details = [{"horizon_return": float(horizon_returns[i])} for i in range(B)]
+        return horizon_returns, details
+
+    # 完整诊断统计
+    gross_pnl = (rewards + execution_costs).sum(axis=1)  # (B,)
+    exec_cost_total = execution_costs.sum(axis=1)  # (B,)
+    commission_total = commissions.sum(axis=1)  # (B,)
+    slippage_total = slippages.sum(axis=1)  # (B,)
+    turnover_total = abs_delta.sum(axis=1).astype(np.float64)  # (B,)
+
+    # 持仓变化次数
+    position_changed = (delta_positions != 0)  # (B, h)
+    num_position_changes = position_changed.sum(axis=1)  # (B,)
+
+    # direct flips: old != 0 and new != 0 and sign(old) != sign(new)
+    old_nonzero = prev_positions != 0
+    new_nonzero = positions != 0
+    sign_diff = np.sign(prev_positions) != np.sign(positions)
+    num_direct_flips = (old_nonzero & new_nonzero & sign_diff).sum(axis=1)  # (B,)
+
+    # decoder action histogram per horizon
+    details: list[dict[str, Any]] = []
+    for i in range(B):
+        action_hist = [0, 0, 0]
+        for a in range(3):
+            action_hist[a] = int(np.sum(all_actions[i] == a))
+        details.append({
+            "horizon_return": float(horizon_returns[i]),
+            "gross_pnl": float(gross_pnl[i]),
+            "execution_cost_total": float(exec_cost_total[i]),
+            "commission_total": float(commission_total[i]),
+            "slippage_total": float(slippage_total[i]),
+            "num_position_changes": int(num_position_changes[i]),
+            "num_direct_flips": int(num_direct_flips[i]),
+            "turnover_total": float(turnover_total[i]),
+            "num_steps": h,
+            "decoder_action_histogram": action_hist,
+        })
+
+    return horizon_returns, details
 
 
 def get_horizon_start_states(env: TradingEnv, horizon_indices: np.ndarray) -> np.ndarray:
@@ -506,6 +684,7 @@ def collect_rollout_batch(
     demo_rewards: np.ndarray,
     batch_size: int,
     device: torch.device,
+    need_diagnostics: bool = True,
 ) -> dict[str, Any]:
     """采集一批 horizon-level rollout，用于 PPO 更新。
 
@@ -526,9 +705,20 @@ def collect_rollout_batch(
         - 高层奖励: r_sel = Σ step_reward over horizon；
         - ground-truth label: â_sel = VQ encoder + codebook(demo chunk)。
 
+    性能优化:
+        - batch decoder: 一次前向传播为所有 horizon 生成 micro actions，
+          避免逐 horizon 调用 decoder 的 Python 循环开销；
+        - vectorized env: 持仓映射/价差/佣金全部 NumPy 向量化，
+          仅 LOB slippage 仍需逐行查 DataFrame；
+        - need_diagnostics: 非日志步跳过诊断统计，减少不必要的计算。
+
     实现说明:
         advantage 这里采用简化的一步形式 advantage = return - value，
         更接近原始代码结构；虽然不是全量 GAE，但已经满足 PPO 风格更新所需。
+
+    Args:
+        need_diagnostics: 是否计算完整诊断统计。False 时跳过 histogram/agreement
+            等开销较大的统计，仅保留 horizon_return 用于 PPO 更新。
 
     Returns:
         dict[str, Any]: PPO 更新所需的一批张量和 rollout 诊断信息。
@@ -563,21 +753,25 @@ def collect_rollout_batch(
             device,
         )
 
-    returns: list[float] = []
-    rollout_details: list[dict[str, Any]] = []
-    for i, h_idx in enumerate(horizon_indices):
-        # 获取选定原型的量化嵌入；对应论文中的 e_{a_sel}。
-        z_q = codebook.embeddings.weight[actions[i].item()].unsqueeze(0)  # (1, code_dim)
+    # ---- 批量 decoder 推理: 一次前向传播生成所有 horizon 的 micro actions ----
+    all_actions_np = batch_decode_actions(
+        decoder=decoder,
+        codebook=codebook,
+        env=train_env,
+        horizon_indices=horizon_indices,
+        archetype_indices=actions,
+        device=device,
+    )  # (batch_size, h)
 
-        # Section 4.2: 冻结 Decoder 生成 micro actions → env 执行 → horizon return
-        # horizon return 就是这一个 horizon 的奖励总和。
-        detail = run_horizon_with_decoder(
-            train_env, int(h_idx), decoder, z_q, device, return_details=True
-        )
-        returns.append(float(detail["horizon_return"]))
-        rollout_details.append(detail)
+    # ---- 向量化 env 执行: NumPy 批量计算 reward ----
+    horizon_returns_np, rollout_details = vectorized_execute_horizons(
+        env=train_env,
+        horizon_indices=horizon_indices,
+        all_actions=all_actions_np,
+        need_diagnostics=need_diagnostics,
+    )
 
-    returns_t = torch.tensor(returns, dtype=torch.float32, device=device)
+    returns_t = torch.tensor(horizon_returns_np, dtype=torch.float32, device=device)
 
     # Return 归一化：将 horizon return 标准化到零均值单位方差，
     # 避免 value loss 因 return 绝对值过大（ETH 持仓 100 × 72 步）而爆炸，
@@ -598,28 +792,34 @@ def collect_rollout_batch(
             advantages_t - advantages_t.mean()
         ) / (advantages_t.std(unbiased=False) + 1e-8)
 
-    actions_np = actions.detach().cpu().numpy()
-    greedy_np = greedy_actions.detach().cpu().numpy()
-    gt_np = gt_labels.detach().cpu().numpy()
+    # ---- 诊断统计: 仅在 need_diagnostics=True 时计算完整指标 ----
+    if need_diagnostics:
+        actions_np = actions.detach().cpu().numpy()
+        greedy_np = greedy_actions.detach().cpu().numpy()
+        gt_np = gt_labels.detach().cpu().numpy()
 
-    diagnostics = _aggregate_execution_diagnostics(rollout_details)
-    diagnostics.update(
-        {
-            "raw_adv_mean": float(raw_advantages_t.mean().item()) if raw_advantages_t.numel() > 0 else 0.0,
-            "raw_adv_std": float(raw_advantages_t.std(unbiased=False).item()) if raw_advantages_t.numel() > 0 else 0.0,
-            "sampled_archetype_histogram": _format_histogram_from_counts(
-                _histogram_counts(actions_np, agent.num_archetypes)
-            ),
-            "greedy_archetype_histogram": _format_histogram_from_counts(
-                _histogram_counts(greedy_np, agent.num_archetypes)
-            ),
-            "gt_label_histogram": _format_histogram_from_counts(
-                _histogram_counts(gt_np, agent.num_archetypes)
-            ),
-            "sampled_gt_agreement": float(np.mean(actions_np == gt_np)) if gt_np.size > 0 else 0.0,
-            "greedy_gt_agreement": float(np.mean(greedy_np == gt_np)) if gt_np.size > 0 else 0.0,
+        diagnostics = _aggregate_execution_diagnostics(rollout_details)
+        diagnostics.update(
+            {
+                "raw_adv_mean": float(raw_advantages_t.mean().item()) if raw_advantages_t.numel() > 0 else 0.0,
+                "raw_adv_std": float(raw_advantages_t.std(unbiased=False).item()) if raw_advantages_t.numel() > 0 else 0.0,
+                "sampled_archetype_histogram": _format_histogram_from_counts(
+                    _histogram_counts(actions_np, agent.num_archetypes)
+                ),
+                "greedy_archetype_histogram": _format_histogram_from_counts(
+                    _histogram_counts(greedy_np, agent.num_archetypes)
+                ),
+                "gt_label_histogram": _format_histogram_from_counts(
+                    _histogram_counts(gt_np, agent.num_archetypes)
+                ),
+                "sampled_gt_agreement": float(np.mean(actions_np == gt_np)) if gt_np.size > 0 else 0.0,
+                "greedy_gt_agreement": float(np.mean(greedy_np == gt_np)) if gt_np.size > 0 else 0.0,
+            }
+        )
+    else:
+        diagnostics = {
+            "avg_return": float(horizon_returns_np.mean()),
         }
-    )
 
     return {
         "states": states_t,
@@ -799,7 +999,10 @@ def evaluate_on_validation(
         archetype（argmax），再通过 frozen decoder 执行整段微动作并累加收益。
 
         除平均 return 外，还额外输出 gross pnl / execution cost / turnover /
-        direct flips / archetype histogram 等诊断项，便于区分“方向错”和“成本过高”。
+        direct flips / archetype histogram 等诊断项，便于区分"方向错"和"成本过高"。
+
+    性能优化: 使用 batch_decode_actions + vectorized_execute_horizons
+    替代逐 horizon 的 Python 循环。
 
     论文相关:
         - 对应 Section 4.2 的 inference 过程；
@@ -822,32 +1025,39 @@ def evaluate_on_validation(
     num_horizons = val_env.num_horizons
 
     if num_horizons == 0:
+        agent.train()
         return {"avg_return": 0.0, "selected_histogram": "[]"}
 
     if max_horizons is not None:
         num_horizons = min(num_horizons, int(max_horizons))
 
-    selected_archetypes: list[int] = []
-    horizon_details: list[dict[str, Any]] = []
+    horizon_indices = np.arange(num_horizons, dtype=np.int64)
 
-    # 使用 tqdm 显示进度条
-    for h_idx in tqdm(range(num_horizons), desc="验证集评估"):
-        state = val_env.states[h_idx * val_env.horizon]
-        state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+    # 批量获取所有 horizon 起始状态
+    states_np = get_horizon_start_states(val_env, horizon_indices)
+    states_t = torch.tensor(states_np, dtype=torch.float32, device=device)
 
-        with torch.no_grad():
-            action_probs, _ = agent(state_t)
-            k = torch.argmax(action_probs, dim=-1).item()
+    with torch.no_grad():
+        action_probs, _ = agent(states_t)
+        selected_archetypes = torch.argmax(action_probs, dim=-1).detach().cpu().numpy()
 
-        selected_archetypes.append(int(k))
+    # 批量 decoder + 向量化执行
+    archetype_t = torch.tensor(selected_archetypes, dtype=torch.long, device=device)
+    all_actions_np = batch_decode_actions(
+        decoder=decoder,
+        codebook=codebook,
+        env=val_env,
+        horizon_indices=horizon_indices,
+        archetype_indices=archetype_t,
+        device=device,
+    )
 
-        # 获取选定原型的量化嵌入
-        z_q = codebook.embeddings.weight[k].unsqueeze(0)  # (1, code_dim)
-
-        detail = run_horizon_with_decoder(
-            val_env, h_idx, decoder, z_q, device, return_details=True
-        )
-        horizon_details.append(detail)
+    _, horizon_details = vectorized_execute_horizons(
+        env=val_env,
+        horizon_indices=horizon_indices,
+        all_actions=all_actions_np,
+        need_diagnostics=True,
+    )
 
     metrics = _aggregate_execution_diagnostics(horizon_details)
     metrics["selected_histogram"] = _format_histogram_from_counts(
@@ -1153,6 +1363,14 @@ def run_training_loop(
     while step_count < total_steps:
         current_batch_size = min(rollout_batch_size, total_steps - step_count)
 
+        # 降低诊断频率: 仅在即将输出日志、首批、或最后一批时计算完整诊断，
+        # 其余步骤跳过 histogram/agreement 等开销较大的统计。
+        is_first_batch = (step_count == 0)
+        is_log_step = (step_count + current_batch_size >= next_log_step)
+        is_val_step = (step_count + current_batch_size >= next_val_step)
+        is_last_batch = (step_count + current_batch_size >= total_steps)
+        need_diag = is_first_batch or is_log_step or is_val_step or is_last_batch
+
         batch = collect_rollout_batch(
             agent=agent,
             encoder=encoder,
@@ -1164,8 +1382,10 @@ def run_training_loop(
             demo_rewards=demo_rewards,
             batch_size=current_batch_size,
             device=device,
+            need_diagnostics=need_diag,
         )
-        last_batch_diag = batch["diagnostics"]
+        if need_diag:
+            last_batch_diag = batch["diagnostics"]
 
         if step_count == 0:
             logger.info(
@@ -1430,6 +1650,8 @@ def main() -> None:
         pair=pair,
         horizon=config.horizon,
         states_dataframe=train_df,
+        max_positions=config.max_positions,
+        commission_rate=config.commission_rate,
     )
     val_env = TradingEnv(
         states=val_states,
@@ -1437,6 +1659,8 @@ def main() -> None:
         pair=pair,
         horizon=config.horizon,
         states_dataframe=val_df,
+        max_positions=config.max_positions,
+        commission_rate=config.commission_rate,
     )
     logger.info(
         "TradingEnv 初始化完成: train_horizons=%d, val_horizons=%d",

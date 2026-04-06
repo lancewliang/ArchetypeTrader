@@ -185,7 +185,7 @@ The test suite covers all components with property-based tests using [Hypothesis
 | State dim | 45 (36 + 9) | 45 | Matches paper |
 | Action space | {short, flat, long} | {0, 1, 2} | Matches paper |
 | Horizon h | 72 | 72 | Matches paper |
-| Commission rate delta | 0.0004 | 0.0002 | **Differs** — see Deviations |
+| Commission rate delta | 0.0002 | 0.0002 | Matches paper |
 | Codebook size K | 10 | 10 | Matches paper |
 | Latent dim | 16 | 16 | Matches paper |
 | LSTM hidden dim | 128 | 128 | Matches paper |
@@ -201,7 +201,7 @@ The test suite covers all components with property-based tests using [Hypothesis
 | Pair | Code Max Position (m) | Paper Max Position (m) | Notes |
 |---|---|---|---|
 | BTC/USDT | 8 | 8 | Matches |
-| ETH/USDT | 5 | 100 | **Differs** — see Deviations |
+| ETH/USDT | 100 | 100 | Matches |
 | DOT/USDT | 2500 | 2500 | Matches |
 | BNB/USDT | 200 | 200 | Matches |
 
@@ -234,25 +234,29 @@ This section documents all known differences between the current codebase and th
 
 | Aspect | Paper | Code | Type |
 |---|---|---|---|
-| tau_remain definition | tau_remain = t + h - tau (absolute remaining steps) | Training: `float(h - step_idx)` (absolute). Inference: `(h - step_idx) / h` (normalized to [0,1]). **Train/inference mismatch.** | Bug |
-| Objective function | Eq. (9): J' = E[sum gamma^tau * r_ref - beta2 * L(a_hat_ref, pi_ref)] | `loss = policy_loss + value_loss + beta2 * ce_loss`, where policy_loss = -log_prob * advantage (Actor-Critic), value_loss = MSE(V, G). Paper does not mention value loss term explicitly | Enhancement |
+| tau_remain definition | tau_remain = t + h - tau (absolute remaining steps) | Both training and inference use normalized `(h - step_idx) / h` ∈ [0, 1] | Design change |
+| R_arche normalization | Raw cumulative reward | Normalized by `notional = m × p_0` (initial position value) for stable input distribution across assets | Enhancement |
+| Network architecture | Not specified | 3-layer MLP (hidden_dim=128) with residual connection + LayerNorm, AdaLN conditioning | Enhancement |
+| Objective function | Eq. (9): J' = E[sum gamma^tau * r_ref - beta2 * L(a_hat_ref, pi_ref)] | PPO clipped surrogate + vf_coef × value_loss + beta2 × ce_loss - ent_coef × entropy, with gradient clipping | Enhancement |
 | RL episode termination | Terminates when adapter chooses non-zero action | Consistent with paper. Remaining steps executed with base actions to compute full horizon return R for Eq. (8) | Matches |
 
 ### Global / Config
 
 | Aspect | Paper | Code | Type |
 |---|---|---|---|
-| Commission rate delta | 0.0002 (0.02%) | `config.py` default = 0.0004 (0.04%). `TradingEnv` class default = 0.0002. **Inconsistency between config and env class.** | Bug |
-| ETH max position | 100 | 5 (in `config.py`) | Config mismatch |
+| Commission rate delta | 0.0002 (0.02%) | `config.py` default = 0.0002. `TradingEnv` class default = 0.0002. All env constructors receive `commission_rate=config.commission_rate` | Matches |
+| ETH max position | 100 | 100 (in `config.py` and `TradingEnv`) | Matches |
 | LOB slippage | Mentioned as execution loss O_t, no implementation detail | Full 5-level LOB walk implementation: walks ask/bid book levels, fills at each price, computes slippage = fill_cash - abs_delta * mark_price. Handles partial fills and direct flips (long->short split into close+open) | Enhancement |
 | Evaluation infrastructure | Not discussed | Full evaluation pipeline: PortfolioTracker (cross-horizon cash/position management), TradeAuditor (statistics + consistency checks), BacktraderVerifier (independent cross-validation via Backtrader replay) | Enhancement |
 | Trajectory caching | Not discussed | DP trajectories cached as `.npz` with full metadata (pair, horizon, gamma, seed, data shape). Incompatible caches auto-detected and backed up | Enhancement |
 
-### Summary of Known Bugs
+### Summary of Resolved Bugs
 
-1. **tau_remain normalization mismatch**: Training uses absolute step count `float(h - step_idx)`, but inference normalizes to `(h - step_idx) / h`. This means the refinement agent sees different input distributions at train vs. test time.
-2. **Commission rate inconsistency**: `Config.commission_rate` defaults to 0.0004, but `TradingEnv.COMMISSION_RATE` class constant is 0.0002. Which value is used depends on whether `commission_rate` is passed to the env constructor.
-3. **ETH max position**: `Config.max_positions["ETH"]` is set to 5, while the paper specifies 100.
+The following issues from earlier versions have been fixed:
+
+1. **tau_remain normalization** (fixed): Both training and inference now use normalized `(h - step_idx) / h` ∈ [0, 1].
+2. **Commission rate consistency** (fixed): `Config.commission_rate` and `TradingEnv.COMMISSION_RATE` both default to 0.0002. All env constructors explicitly pass `commission_rate=config.commission_rate`.
+3. **ETH max position** (fixed): `Config.max_positions["ETH"]` is now 100, matching the paper.
 
 ## Citation
 
