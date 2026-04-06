@@ -417,7 +417,7 @@ def run_horizon_with_decoder(
         price = float(info.get("price", 0.0))
         delta_position = int(new_position - old_position)
 
-        commission = float(env.COMMISSION_RATE * abs(delta_position) * price)
+        commission = float(env.commission_rate * abs(delta_position) * price)
         commission = min(commission, execution_cost)
         slippage = max(0.0, execution_cost - commission)
         gross_pnl = float(reward + execution_cost)
