@@ -8,6 +8,8 @@ import json
 from dataclasses import dataclass, field, fields
 from typing import Dict, List
 
+from src.data.feature_pipeline import FIXED_FEATURES, resolve_cycle_features
+
 
 @dataclass
 class Config:
@@ -19,9 +21,7 @@ class Config:
     pairs: List[str] = field(default_factory=lambda: [ "AL","ETH"])
 
     # 特征维度
-    single_feature_dim: int = 36
-    trend_feature_dim: int = 9
-    state_dim: int = 45  # single + trend
+    cycle_feature_sets: List[str] = field(default_factory=list)
 
     # MDP 配置
     action_dim: int = 3  # {0: short, 1: flat, 2: long}
@@ -72,6 +72,24 @@ class Config:
     # 评估
     annualization_factor: int = 52560  # 10分钟级别年化因子
 
+    @property
+    def cycle_features(self) -> List[str]:
+        """根据配置选择 short/middle/long cycle 特征。"""
+        return resolve_cycle_features(self.cycle_feature_sets)
+
+    @property
+    def fixed_feature_dim(self) -> int:
+        return len(FIXED_FEATURES)
+
+    @property
+    def cycle_feature_dim(self) -> int:
+        return len(self.cycle_features)
+
+    @property
+    def state_dim(self) -> int:
+        """状态维度 = fixed features + selected cycle features。"""
+        return self.fixed_feature_dim + self.cycle_feature_dim
+
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Config":
         """从已解析的 argparse.Namespace 创建 Config 实例。
@@ -101,6 +119,12 @@ def parse_args(argv: list | None = None) -> Config:
     # 数据配置
     parser.add_argument("--data-dir", type=str, default=None, help="数据根目录")
     parser.add_argument("--result-dir", type=str, default=None, help="结果输出目录")
+    parser.add_argument(
+        "--cycle-feature-sets",
+        type=str,
+        default=None,
+        help="启用的周期特征组，逗号分隔，可选 short,middle,long",
+    )
     parser.add_argument(
         "--pair",
         type=str,
@@ -180,6 +204,20 @@ def parse_args(argv: list | None = None) -> Config:
         args.pairs = [args.pair]
     else:
         args.pairs = None
+
+    if args.cycle_feature_sets is not None:
+        parsed_cycle_sets = [
+            item.strip() for item in args.cycle_feature_sets.split(",") if item.strip()
+        ]
+        valid_sets = {"short", "middle", "long"}
+        invalid_sets = sorted(set(parsed_cycle_sets) - valid_sets)
+        if invalid_sets:
+            parser.error(
+                f"--cycle-feature-sets 包含无效值: {invalid_sets}，可选: {sorted(valid_sets)}"
+            )
+        args.cycle_feature_sets = parsed_cycle_sets
+    else:
+        args.cycle_feature_sets = ["short"]
 
     # 清理 argparse 添加的 pair 属性（非 Config 字段）
     delattr(args, "pair")

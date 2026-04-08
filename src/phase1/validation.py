@@ -838,7 +838,9 @@ def validate_phase1_artifacts(
     try:
         if env is None:
             logger.info("Phase I 验证: 重新加载训练特征与 TradingEnv")
-            pipeline = FeaturePipeline(config.data_dir, pair)
+            pipeline = FeaturePipeline(
+                config.data_dir, pair, cycle_features=config.cycle_features,
+            )
             train_df, _, _ = pipeline.get_state_vector()
             train_prices_df, _, _ = pipeline.get_prices()
             env = TradingEnv(

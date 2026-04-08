@@ -14,7 +14,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from src.data.feature_pipeline import SINGLE_FEATURES, TREND_FEATURES
+from src.data.feature_pipeline import FIXED_FEATURES
 from src.env.trading_env import TradingEnv
 from src.phase1.dp_planner import DPPlanner
 
@@ -25,7 +25,7 @@ from src.phase1.dp_planner import DPPlanner
 
 def _make_env(
     prices: np.ndarray,
-    state_dim: int = 45,
+    state_dim: int = len(FIXED_FEATURES),
     pair: str = "BTC",
     horizon: int | None = None,
 ) -> TradingEnv:
@@ -34,7 +34,7 @@ def _make_env(
     if horizon is None:
         horizon = T
     states = np.random.RandomState(0).randn(T, state_dim).astype(np.float64)
-    feature_cols = SINGLE_FEATURES + TREND_FEATURES
+    feature_cols = FIXED_FEATURES
     states_df = pl.DataFrame(states, schema=feature_cols[:state_dim])
     return TradingEnv(states=states, prices=prices, pair=pair, horizon=horizon, states_dataframe=states_df)
 
@@ -524,9 +524,8 @@ class TestPropDPSingleTradeConstraint:
         prices = 100.0 + np.cumsum(rng.randn(h) * 5)
         prices = np.maximum(prices, 1.0)
 
-        states = rng.randn(h, 45).astype(np.float64)
-        feature_cols = SINGLE_FEATURES + TREND_FEATURES
-        states_df = pl.DataFrame(states, schema=feature_cols)
+        states = rng.randn(h, len(FIXED_FEATURES)).astype(np.float64)
+        states_df = pl.DataFrame(states, schema=FIXED_FEATURES)
         env = TradingEnv(states=states, prices=prices, pair="BTC", horizon=h, states_dataframe=states_df)
         planner = DPPlanner(env)
 
@@ -557,9 +556,8 @@ class TestPropDPOptimality:
         prices = 100.0 + np.cumsum(rng.randn(h) * 5)
         prices = np.maximum(prices, 1.0)
 
-        states = rng.randn(h, 45).astype(np.float64)
-        feature_cols = SINGLE_FEATURES + TREND_FEATURES
-        states_df = pl.DataFrame(states, schema=feature_cols)
+        states = rng.randn(h, len(FIXED_FEATURES)).astype(np.float64)
+        states_df = pl.DataFrame(states, schema=FIXED_FEATURES)
         env = TradingEnv(states=states, prices=prices, pair="BTC", horizon=h, states_dataframe=states_df)
         planner = DPPlanner(env)
         gamma = planner.gamma
@@ -594,10 +592,9 @@ class TestPropDPTrajectoryStructure:
         prices = 100.0 + np.cumsum(rng.randn(h) * 5)
         prices = np.maximum(prices, 1.0)
 
-        state_dim = 45
+        state_dim = len(FIXED_FEATURES)
         states = rng.randn(h, state_dim).astype(np.float64)
-        feature_cols = SINGLE_FEATURES + TREND_FEATURES
-        states_df = pl.DataFrame(states, schema=feature_cols)
+        states_df = pl.DataFrame(states, schema=FIXED_FEATURES[:state_dim])
         env = TradingEnv(states=states, prices=prices, pair="BTC", horizon=h, states_dataframe=states_df)
         planner = DPPlanner(env)
 

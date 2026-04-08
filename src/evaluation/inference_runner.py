@@ -246,7 +246,9 @@ def evaluate_pair(
 
     # 加载特征数据
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
-    pipeline = FeaturePipeline(config.data_dir, pair)
+    pipeline = FeaturePipeline(
+        config.data_dir, pair, cycle_features=config.cycle_features,
+    )
     _, _, test_df = pipeline.get_state_vector()
     _, _, test_prices_df = pipeline.get_prices()
 

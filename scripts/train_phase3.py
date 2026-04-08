@@ -482,7 +482,9 @@ def main() -> None:
 
     # --- 数据 & 环境 ---
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
-    pipeline = FeaturePipeline(config.data_dir, pair)
+    pipeline = FeaturePipeline(
+        config.data_dir, pair, cycle_features=config.cycle_features,
+    )
     train_df, _, _ = pipeline.get_state_vector()
     train_prices_df, _, _ = pipeline.get_prices()
 

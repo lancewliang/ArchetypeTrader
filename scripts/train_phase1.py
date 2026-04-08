@@ -45,8 +45,7 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 PAPER_PHASE1_REFERENCE_TRAIN_ROWS = 1_400_000
-PAPER_PHASE1_SPEC = {
-    "state_dim": 45,
+PAPER_PHASE1_SPEC = { 
     "action_dim": 3,
     "horizon": 72,
     "commission_rate": 0.0003,
@@ -222,7 +221,6 @@ def assert_paper_phase1_settings(config: Any, pair: str) -> None:
         if not np.isclose(actual, expected, atol=atol, rtol=0.0):
             mismatches.append(f"{name}: actual={actual}, expected={expected}")
 
-    _check_exact("state_dim", config.state_dim, PAPER_PHASE1_SPEC["state_dim"])
     _check_exact("action_dim", config.action_dim, PAPER_PHASE1_SPEC["action_dim"])
     _check_exact("horizon", config.horizon, PAPER_PHASE1_SPEC["horizon"])
     _check_float("commission_rate", config.commission_rate, PAPER_PHASE1_SPEC["commission_rate"])
@@ -361,7 +359,9 @@ def load_data_and_env(config: Any, pair: str) -> Tuple[TradingEnv, int]:
         (env, train_rows)
     """
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
-    pipeline = FeaturePipeline(config.data_dir, pair)
+    pipeline = FeaturePipeline(
+        config.data_dir, pair, cycle_features=config.cycle_features,
+    )
     train_df, _, _ = pipeline.get_state_vector()
     train_prices_df, _, _ = pipeline.get_prices()
 

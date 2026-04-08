@@ -10,7 +10,11 @@ import polars as pl
 import pyarrow.feather as pa_feather
 import pytest
 
-from src.data.feature_pipeline import FeaturePipeline, SINGLE_FEATURES, TREND_FEATURES
+from src.data.feature_pipeline import (
+    FIXED_FEATURES,
+    FeaturePipeline,
+    resolve_cycle_features,
+)
 
 
 class TestGetStateVector:
@@ -20,16 +24,18 @@ class TestGetStateVector:
     def tmp_feather_dir(self):
         """创建临时目录，包含有效的 feather 文件。"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            feature_cols = SINGLE_FEATURES + TREND_FEATURES + ["close"]
+            pair_dir = f"{tmpdir}/ETH"
+            os.makedirs(pair_dir, exist_ok=True)
+            feature_cols = FIXED_FEATURES + resolve_cycle_features(["short", "middle", "long"])
             n_rows = 1000
             data = {col: list(range(n_rows)) for col in feature_cols}
             train_df = pl.DataFrame(data)
             val_df = pl.DataFrame({col: list(range(1000, 1500)) for col in feature_cols})
             test_df = pl.DataFrame({col: list(range(1500, 2000)) for col in feature_cols})
 
-            pa_feather.write_feather(train_df.to_arrow(), f"{tmpdir}/df_train.feather")
-            pa_feather.write_feather(val_df.to_arrow(), f"{tmpdir}/df_val.feather")
-            pa_feather.write_feather(test_df.to_arrow(), f"{tmpdir}/df_test.feather")
+            pa_feather.write_feather(train_df.to_arrow(), f"{pair_dir}/df_train.feather")
+            pa_feather.write_feather(val_df.to_arrow(), f"{pair_dir}/df_val.feather")
+            pa_feather.write_feather(test_df.to_arrow(), f"{pair_dir}/df_test.feather")
 
             yield tmpdir, train_df, val_df, test_df
 
@@ -38,9 +44,9 @@ class TestGetStateVector:
         fp = FeaturePipeline(tmpdir, "ETH")
         train, val, test = fp.get_state_vector()
 
-        assert train.shape == (1000, 45)
-        assert val.shape == (500, 45)
-        assert test.shape == (500, 45)
+        assert train.shape == (1000, len(FIXED_FEATURES))
+        assert val.shape == (500, len(FIXED_FEATURES))
+        assert test.shape == (500, len(FIXED_FEATURES))
 
     def test_returns_polars_dataframes(self, tmp_feather_dir):
         tmpdir, _, _, _ = tmp_feather_dir
@@ -56,9 +62,9 @@ class TestGetStateVector:
         fp = FeaturePipeline(tmpdir, "ETH")
         train, val, test = fp.get_state_vector()
 
-        assert train[SINGLE_FEATURES[0]][0] == 0
-        assert val[SINGLE_FEATURES[0]][0] == 1000
-        assert test[SINGLE_FEATURES[0]][0] == 1500
+        assert train[FIXED_FEATURES[0]][0] == 0
+        assert val[FIXED_FEATURES[0]][0] == 1000
+        assert test[FIXED_FEATURES[0]][0] == 1500
 
     def test_train_largest(self, tmp_feather_dir):
         tmpdir, _, _, _ = tmp_feather_dir
@@ -67,6 +73,16 @@ class TestGetStateVector:
 
         assert train.height > val.height
         assert train.height > test.height
+
+    def test_cycle_features_are_appended_when_selected(self, tmp_feather_dir):
+        tmpdir, _, _, _ = tmp_feather_dir
+        cycle_features = resolve_cycle_features(["short", "middle"])
+
+        fp = FeaturePipeline(tmpdir, "ETH", cycle_features=cycle_features)
+        train, _, _ = fp.get_state_vector()
+
+        assert train.shape == (1000, len(FIXED_FEATURES) + len(cycle_features))
+        assert train.columns == FIXED_FEATURES + cycle_features
 
 
 class TestSplitIntoHorizons:
@@ -113,7 +129,7 @@ class TestWithActualData:
         reason="实际 feather 文件不存在",
     )
     def test_load_actual_data(self):
-        fp = FeaturePipeline("data/ETH", "ETH")
+        fp = FeaturePipeline("data", "ETH")
         train, val, test = fp.get_state_vector()
 
         assert isinstance(train, pl.DataFrame)
@@ -132,7 +148,7 @@ class TestGetPrices:
         reason="实际 feather 文件不存在",
     )
     def test_get_prices_returns_three_datasets(self):
-        fp = FeaturePipeline("data/ETH", "ETH")
+        fp = FeaturePipeline("data", "ETH")
         train_p, val_p, test_p = fp.get_prices()
 
         assert "close" in train_p.columns

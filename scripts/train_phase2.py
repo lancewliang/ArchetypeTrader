@@ -1629,7 +1629,9 @@ def main() -> None:
     # Step 2: 加载特征数据，初始化 TradingEnv
     # ----------------------------------------------------------------
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
-    pipeline = FeaturePipeline(config.data_dir, pair)
+    pipeline = FeaturePipeline(
+        config.data_dir, pair, cycle_features=config.cycle_features,
+    )
     train_df, val_df, _ = pipeline.get_state_vector()
     train_prices_df, val_prices_df, _ = pipeline.get_prices()
 
