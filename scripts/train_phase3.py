@@ -66,7 +66,7 @@ class RolloutResult:
 def load_phase1_model(config, pair: str, device: torch.device):
     """加载并冻结 Phase I 模型（码本 + Decoder）。"""
     model_path = os.path.join(
-        config.result_dir, pair, "phase1_archetype_discovery",
+        config.get_stage_result_dir(pair, "phase1_archetype_discovery"),
         f"{pair}_vq_model.pt",
     )
     if not os.path.exists(model_path):
@@ -103,7 +103,7 @@ def load_phase1_model(config, pair: str, device: torch.device):
 def load_phase2_model(config, pair: str, device: torch.device):
     """加载并冻结 Phase II 模型（SelectionAgent）。"""
     model_path = os.path.join(
-        config.result_dir, pair, "phase2_archetype_selection",
+        config.get_stage_result_dir(pair, "phase2_archetype_selection"),
         f"{pair}_selection_agent.pt",
     )
     if not os.path.exists(model_path):
@@ -475,6 +475,7 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("使用设备: %s", device)
+    logger.info("结果目录批次: %s", config.train_batch_id)
 
     # --- 加载冻结模型 ---
     codebook, decoder = load_phase1_model(config, pair, device)
@@ -531,7 +532,7 @@ def main() -> None:
 
     # --- 输出路径 ---
     save_dir = os.path.join(
-        config.result_dir, pair, "phase3_archetype_refinement",
+        config.get_stage_result_dir(pair, "phase3_archetype_refinement"),
     )
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(

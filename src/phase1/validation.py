@@ -812,9 +812,17 @@ def validate_phase1_artifacts(
 ) -> Dict[str, Any]:
     """统一验证 Phase I 产物，并保存 phase1_validation_report.json。"""
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    trajectory_path = trajectory_path or DPPlanner.build_trajectory_cache_path(config.result_dir, pair)
-    model_path = model_path or os.path.join(config.result_dir, pair, "phase1_archetype_discovery", f"{pair}_vq_model.pt")
-    report_path = report_path or os.path.join(config.result_dir, pair, "phase1_archetype_discovery", "phase1_validation_report.json")
+    trajectory_path = trajectory_path or DPPlanner.build_trajectory_cache_path(
+        config.result_dir, pair, config.train_batch_id,
+    )
+    model_path = model_path or os.path.join(
+        config.get_stage_result_dir(pair, "phase1_archetype_discovery"),
+        f"{pair}_vq_model.pt",
+    )
+    report_path = report_path or os.path.join(
+        config.get_stage_result_dir(pair, "phase1_archetype_discovery"),
+        "phase1_validation_report.json",
+    )
 
     report: Dict[str, Any] = {
         "pair": pair,

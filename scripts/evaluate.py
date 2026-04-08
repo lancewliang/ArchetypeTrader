@@ -24,8 +24,9 @@ def main() -> None:
     config = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("评估开始，使用设备: %s", device)
+    logger.info("结果目录批次: %s", config.train_batch_id)
 
-    save_dir = os.path.join(config.result_dir, "evaluation")
+    save_dir = os.path.join(config.get_batch_result_dir(), "evaluation")
     os.makedirs(save_dir, exist_ok=True)
 
     all_results = {}
@@ -34,7 +35,7 @@ def main() -> None:
         try:
             result = evaluate_pair(config, pair, device)
             all_results[pair] = result
-            pair_save_dir = os.path.join(config.result_dir, pair, "evaluation")
+            pair_save_dir = config.get_stage_result_dir(pair, "evaluation")
             os.makedirs(pair_save_dir, exist_ok=True)
             pair_path = os.path.join(pair_save_dir, f"{pair}_results.json")
             with open(pair_path, "w", encoding="utf-8") as f:

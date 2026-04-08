@@ -405,9 +405,12 @@ def prepare_trajectory_dataset(
         env=env,
         gamma=config.discount_factor,
         result_dir=config.result_dir,
+        train_batch_id=config.train_batch_id,
         sampling_seed=config.phase1_sampling_seed,
     )
-    traj_path = DPPlanner.build_trajectory_cache_path(config.result_dir, pair)
+    traj_path = DPPlanner.build_trajectory_cache_path(
+        config.result_dir, pair, config.train_batch_id,
+    )
 
     if os.path.exists(traj_path):
         cache_ok, cache_reasons = inspect_trajectory_cache(
@@ -714,7 +717,7 @@ def save_checkpoint(
     train_rows: int,
 ) -> str:
     """保存模型 checkpoint 到 result/phase1_archetype_discovery/，返回保存路径。"""
-    save_dir = os.path.join(config.result_dir, pair, "phase1_archetype_discovery")
+    save_dir = config.get_stage_result_dir(pair, "phase1_archetype_discovery")
     os.makedirs(save_dir, exist_ok=True)
 
     save_path = os.path.join(save_dir, f"{pair}_vq_model.pt")
@@ -741,6 +744,7 @@ def save_checkpoint(
                 "discount_factor": config.discount_factor,
                 "commission_rate": config.commission_rate,
                 "max_positions": config.max_positions,
+                "train_batch_id": config.train_batch_id,
                 "paper_phase1_reference_train_rows": PAPER_PHASE1_REFERENCE_TRAIN_ROWS,
                 "current_train_rows": train_rows,
             },
@@ -791,6 +795,7 @@ def main() -> None:
     set_reproducibility_seed(config.phase1_sampling_seed)
 
     logger.info("Phase I 训练开始: pair=%s", pair)
+    logger.info("结果目录批次: %s", config.train_batch_id)
     logger.info(
         "严格论文主线配置已通过守卫检查: epochs=%d, batch_size=%d, lr=%.1e, latent_dim=%d, "
         "num_archetypes=%d, num_trajectories=%d, vq_beta0=%.2f, sampling_seed=%d",
@@ -833,7 +838,7 @@ def main() -> None:
     )
 
     # Step 6: 验证
-    save_dir = os.path.join(config.result_dir, pair, "phase1_archetype_discovery")
+    save_dir = config.get_stage_result_dir(pair, "phase1_archetype_discovery")
     report_path = os.path.join(save_dir, "phase1_validation_report.json")
     validation_report = validate_phase1_artifacts(
         config=config, pair=pair,
@@ -845,11 +850,18 @@ def main() -> None:
     # Step 7: 环境级验证 — 评估 archetype 在真实交易环境中的可用性
     logger.info("开始 Phase I 环境级验证...")
     # 加载验证集环境
-    val_pipeline = FeaturePipeline(config.data_dir, pair)
+    val_pipeline = FeaturePipeline(
+        config.data_dir, pair, cycle_features=config.cycle_features,
+    )
     _, val_state_df, _ = val_pipeline.get_state_vector()
     _, val_prices_df, _ = val_pipeline.get_prices()
     val_env = None
     if val_state_df is not None and len(val_state_df) >= config.horizon:
+        if val_state_df.width != config.state_dim:
+            raise ValueError(
+                "验证集 state_dim 与当前配置不一致: "
+                f"actual={val_state_df.width}, expected={config.state_dim}"
+            )
         val_env = TradingEnv(
             states=val_state_df.to_numpy(),
             prices=val_prices_df["close"].to_numpy(),

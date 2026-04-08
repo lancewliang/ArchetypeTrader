@@ -47,6 +47,7 @@ class DPPlanner:
         env: TradingEnv,
         gamma: float = 0.99,
         result_dir: str = "result",
+        train_batch_id: str = "default",
         sampling_seed: int = 42,
     ):
         """
@@ -54,6 +55,7 @@ class DPPlanner:
             env: MDP 交易环境实例，提供奖励计算和持仓映射。
             gamma: 折扣因子 γ，默认 0.99（与论文 Algorithm 1 一致）。
             result_dir: 轨迹缓存输出目录根路径。
+            train_batch_id: 训练批次号，用于隔离并行任务结果目录。
             sampling_seed: Phase I 轨迹采样随机种子，用于结果复现。
         """
         self.env = env
@@ -62,6 +64,7 @@ class DPPlanner:
         self.m = env.m  # 最大持仓量
         self.gamma = gamma
         self.result_dir = result_dir
+        self.train_batch_id = train_batch_id
         self.sampling_seed = sampling_seed
 
     # ------------------------------------------------------------------
@@ -69,7 +72,11 @@ class DPPlanner:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def build_trajectory_cache_path(result_dir: str, pair: str) -> str:
+    def build_trajectory_cache_path(
+        result_dir: str,
+        pair: str,
+        train_batch_id: str = "default",
+    ) -> str:
         """构造 Phase I 轨迹缓存路径。
 
         新增该方法的目的是统一训练脚本和 DP 规划器对缓存路径的定义，
@@ -78,11 +85,14 @@ class DPPlanner:
         Args:
             result_dir: 结果输出目录根路径
             pair: 交易对名称
+            train_batch_id: 训练批次号
 
         Returns:
             统一的轨迹缓存文件路径
         """
-        return os.path.join(result_dir, pair, "dp_trajectories", "trajectories.npz")
+        return os.path.join(
+            result_dir, pair, train_batch_id, "dp_trajectories", "trajectories.npz"
+        )
 
     def plan(
         self,
@@ -480,7 +490,9 @@ class DPPlanner:
         Args:
             trajectories: 轨迹字典，除 states/actions/rewards 外，也可包含采样元数据。
         """
-        save_path = self.build_trajectory_cache_path(self.result_dir, self.pair)
+        save_path = self.build_trajectory_cache_path(
+            self.result_dir, self.pair, self.train_batch_id,
+        )
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         np.savez(save_path, **trajectories)
         logger.info("轨迹已保存到 %s", save_path)

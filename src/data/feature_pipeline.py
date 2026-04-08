@@ -93,8 +93,8 @@ CYCLE_FEATURES = {
 }
 
 # Backward-compatible alias retained for tests/imports that still reference it.
-SINGLE_FEATURES = FIXED_FEATURES
-TREND_FEATURES: list[str] = []
+ 
+ 
 
 
 def _dedupe_preserve_order(columns: Iterable[str]) -> list[str]:

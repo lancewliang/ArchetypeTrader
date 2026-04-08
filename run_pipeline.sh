@@ -11,8 +11,9 @@ set -euo pipefail
 export PYTHONPATH="${PYTHONPATH:-}:$(cd "$(dirname "$0")" && pwd)"
 
 # --- 配置 ---
-PAIR="${1:-AL}"                          # 默认 ETH，可通过第一个参数指定
-LOG_DIR="logs"
+PAIR="${1:-AL}"  
+BATCH_ID="${2:-batch_001}"                        # 默认 ETH，可通过第一个参数指定
+LOG_DIR="logs/${PAIR}/${BATCH_ID}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${LOG_DIR}/${PAIR}_pipeline_${TIMESTAMP}.log"
 
@@ -33,25 +34,25 @@ EXTRA_ARGS="${@:2}"
 # --- Phase I: Archetype Discovery ---
 echo ""
 echo ">>> [Phase I] 开始训练 — $(date '+%H:%M:%S')"
-python scripts/train_phase1.py --pair "${PAIR}" ${EXTRA_ARGS}
+python scripts/train_phase1.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" ${EXTRA_ARGS}
 echo ">>> [Phase I] 完成 — $(date '+%H:%M:%S')"
 
 # --- Phase II: Archetype Selection ---
 echo ""
 echo ">>> [Phase II] 开始训练 — $(date '+%H:%M:%S')"
-python scripts/train_phase2.py --pair "${PAIR}" ${EXTRA_ARGS}
+python scripts/train_phase2.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" ${EXTRA_ARGS}
 echo ">>> [Phase II] 完成 — $(date '+%H:%M:%S')"
 
 # --- Phase III: Archetype Refinement ---
 echo ""
 echo ">>> [Phase III] 开始训练 — $(date '+%H:%M:%S')"
-python scripts/train_phase3.py --pair "${PAIR}" ${EXTRA_ARGS}
+python scripts/train_phase3.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" ${EXTRA_ARGS}
 echo ">>> [Phase III] 完成 — $(date '+%H:%M:%S')"
 
 # --- Evaluate ---
 echo ""
 echo ">>> [Evaluate] 开始评估 — $(date '+%H:%M:%S')"
-python scripts/evaluate.py --pair "${PAIR}" ${EXTRA_ARGS}
+python scripts/evaluate.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" ${EXTRA_ARGS}
 echo ">>> [Evaluate] 完成 — $(date '+%H:%M:%S')"
 
 echo ""

@@ -36,7 +36,8 @@ def load_phase1_model(
         device = _default_device()
 
     model_path = os.path.join(
-        config.result_dir, pair, "phase1_archetype_discovery", f"{pair}_vq_model.pt",
+        config.get_stage_result_dir(pair, "phase1_archetype_discovery"),
+        f"{pair}_vq_model.pt",
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -81,7 +82,8 @@ def load_phase2_model(
         device = _default_device()
 
     model_path = os.path.join(
-        config.result_dir, pair, "phase2_archetype_selection", f"{pair}_selection_agent.pt",
+        config.get_stage_result_dir(pair, "phase2_archetype_selection"),
+        f"{pair}_selection_agent.pt",
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -116,7 +118,7 @@ def load_phase3_model(
 
     beta1 = config.refinement_beta1
     model_path = os.path.join(
-        config.result_dir, pair, "phase3_archetype_refinement",
+        config.get_stage_result_dir(pair, "phase3_archetype_refinement"),
         f"{pair}_refinement_agent_beta{beta1}.pt",
     )
     if not os.path.exists(model_path):

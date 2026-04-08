@@ -87,6 +87,11 @@ def _decode_horizon(
     device: torch.device,
 ) -> np.ndarray:
     """用 frozen decoder 生成一个 horizon 的动作序列。"""
+    if horizon_states.ndim != 2 or horizon_states.shape[1] != decoder.state_dim:
+        raise ValueError(
+            "decoder 输入状态维度不匹配: "
+            f"actual={tuple(horizon_states.shape)}, expected=(*, {decoder.state_dim})"
+        )
     states_t = torch.tensor(
         horizon_states, dtype=torch.float32, device=device
     ).unsqueeze(0)

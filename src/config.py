@@ -5,6 +5,7 @@
 
 import argparse
 import json
+import os
 from dataclasses import dataclass, field, fields
 from typing import Dict, List
 
@@ -18,6 +19,7 @@ class Config:
     # 数据配置
     data_dir: str = "data"
     result_dir: str = "result"
+    train_batch_id: str = "default"
     pairs: List[str] = field(default_factory=lambda: [ "AL","ETH"])
 
     # 特征维度
@@ -90,6 +92,18 @@ class Config:
         """状态维度 = fixed features + selected cycle features。"""
         return self.fixed_feature_dim + self.cycle_feature_dim
 
+    def get_batch_result_dir(self) -> str:
+        """批次级结果目录: result/批次号。"""
+        return os.path.join(self.result_dir, self.train_batch_id)
+
+    def get_pair_result_dir(self, pair: str) -> str:
+        """交易对 + 批次级结果目录: result/品种/批次号。"""
+        return os.path.join(self.result_dir, pair, self.train_batch_id)
+
+    def get_stage_result_dir(self, pair: str, stage_name: str) -> str:
+        """阶段结果目录: result/品种/批次号/阶段目录。"""
+        return os.path.join(self.get_pair_result_dir(pair), stage_name)
+
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Config":
         """从已解析的 argparse.Namespace 创建 Config 实例。
@@ -119,6 +133,12 @@ def parse_args(argv: list | None = None) -> Config:
     # 数据配置
     parser.add_argument("--data-dir", type=str, default=None, help="数据根目录")
     parser.add_argument("--result-dir", type=str, default=None, help="结果输出目录")
+    parser.add_argument(
+        "--train-batch-id",
+        type=str,
+        default=None,
+        help="训练批次号，用于隔离并行任务结果目录",
+    )
     parser.add_argument(
         "--cycle-feature-sets",
         type=str,
@@ -219,6 +239,16 @@ def parse_args(argv: list | None = None) -> Config:
     else:
         args.cycle_feature_sets = ["short"]
 
+    if args.train_batch_id is not None:
+        args.train_batch_id = args.train_batch_id.strip()
+        if not args.train_batch_id:
+            parser.error("--train-batch-id 不能为空")
+        invalid_separators = [os.sep]
+        if os.altsep:
+            invalid_separators.append(os.altsep)
+        if any(sep in args.train_batch_id for sep in invalid_separators):
+            parser.error("--train-batch-id 不能包含路径分隔符")
+
     # 清理 argparse 添加的 pair 属性（非 Config 字段）
     delattr(args, "pair")
 
@@ -226,6 +256,7 @@ def parse_args(argv: list | None = None) -> Config:
     _remap = {
         "data_dir": getattr(args, "data_dir", None),
         "result_dir": getattr(args, "result_dir", None),
+        "train_batch_id": getattr(args, "train_batch_id", None),
         "commission_rate": getattr(args, "commission_rate", None),
         "num_archetypes": getattr(args, "num_archetypes", None),
         "num_trajectories": getattr(args, "num_trajectories", None),

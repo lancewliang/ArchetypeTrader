@@ -356,7 +356,7 @@ def evaluate_pair(
     }
 
     # 导出 CSV（每 50000 行一个文件，数字编号）
-    csv_save_dir = os.path.join(config.result_dir, pair, "evaluation")
+    csv_save_dir = config.get_stage_result_dir(pair, "evaluation")
     os.makedirs(csv_save_dir, exist_ok=True)
     csv_fields = [
         "state_index", "action", "action_label", "execution_price",

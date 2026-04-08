@@ -282,9 +282,7 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
         decoder: 加载权重后的 VQDecoder（冻结）
     """
     model_path = os.path.join(
-        config.result_dir,
-        pair,
-        "phase1_archetype_discovery",
+        config.get_stage_result_dir(pair, "phase1_archetype_discovery"),
         f"{pair}_vq_model.pt",
     )
     if not os.path.exists(model_path):
@@ -1619,6 +1617,7 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("使用设备: %s", device)
+    logger.info("结果目录批次: %s", config.train_batch_id)
 
     # ----------------------------------------------------------------
     # Step 1: 加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）
@@ -1680,7 +1679,7 @@ def main() -> None:
     # 前 num_horizons 条与训练环境 horizon 索引 1:1 对齐。
     # ----------------------------------------------------------------
     traj_path = os.path.join(
-        config.result_dir, pair, "dp_trajectories", f"trajectories.npz"
+        config.get_stage_result_dir(pair, "dp_trajectories"), "trajectories.npz",
     )
     if not os.path.exists(traj_path):
         raise FileNotFoundError(
@@ -1741,7 +1740,7 @@ def main() -> None:
     val_interval = max(train_env.num_horizons, train_env.num_horizons*10)  # 每遍历一次训练集或步评估一次
     log_interval = int(ppo_hparams["log_interval"])
 
-    save_dir = os.path.join(config.result_dir, pair, "phase2_archetype_selection")
+    save_dir = config.get_stage_result_dir(pair, "phase2_archetype_selection")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f"{pair}_selection_agent.pt")
 
