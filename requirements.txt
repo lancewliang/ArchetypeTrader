@@ -7,3 +7,4 @@ polars>=0.20.0
 # pandas>=2.0.0
 tqdm>=4.64.0
 #pytorch 2.9.1
+pandas>=2.0.0
