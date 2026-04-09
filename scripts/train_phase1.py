@@ -418,7 +418,7 @@ def prepare_trajectory_dataset(
         )
         if cache_ok:
             logger.info("发现与当前严格论文设置兼容的轨迹缓存，直接加载: %s", traj_path)
-            return TrajectoryDataset.from_npz(traj_path), traj_path
+            return TrajectoryDataset.from_npz(traj_path, normalize=True), traj_path
         backup_incompatible_cache(traj_path, cache_reasons)
 
     logger.info("开始生成 DP 示范轨迹: num_trajectories=%d", config.num_trajectories)
@@ -428,6 +428,7 @@ def prepare_trajectory_dataset(
         states=trajectories["states"],
         actions=trajectories["actions"],
         rewards=trajectories["rewards"],
+        normalize=True,
     )
     return dataset, traj_path
 
@@ -715,42 +716,46 @@ def save_checkpoint(
     decoder: VQDecoder,
     history: TrainingHistory,
     train_rows: int,
+    norm_stats: dict | None = None,
 ) -> str:
     """保存模型 checkpoint 到 result/phase1_archetype_discovery/，返回保存路径。"""
     save_dir = config.get_stage_result_dir(pair, "phase1_archetype_discovery")
     os.makedirs(save_dir, exist_ok=True)
 
     save_path = os.path.join(save_dir, f"{pair}_vq_model.pt")
-    torch.save(
-        {
-            "encoder": encoder.state_dict(),
-            "codebook": codebook.state_dict(),
-            "decoder": decoder.state_dict(),
-            "loss_history": history.loss,
-            "training_monitor": history.to_dict(),
-            "config": {
-                "state_dim": config.state_dim,
-                "action_dim": config.action_dim,
-                "latent_dim": config.latent_dim,
-                "num_archetypes": config.num_archetypes,
-                "lstm_hidden_dim": config.lstm_hidden_dim,
-                "phase1_epochs": config.phase1_epochs,
-                "pretrain_epochs": config.pretrain_epochs,
-                "learning_rate": config.learning_rate,
-                "batch_size": config.batch_size,
-                "vq_beta0": config.vq_beta0,
-                "num_trajectories": config.num_trajectories,
-                "phase1_sampling_seed": config.phase1_sampling_seed,
-                "discount_factor": config.discount_factor,
-                "commission_rate": config.commission_rate,
-                "max_positions": config.max_positions,
-                "train_batch_id": config.train_batch_id,
-                "paper_phase1_reference_train_rows": PAPER_PHASE1_REFERENCE_TRAIN_ROWS,
-                "current_train_rows": train_rows,
-            },
+    checkpoint_data = {
+        "encoder": encoder.state_dict(),
+        "codebook": codebook.state_dict(),
+        "decoder": decoder.state_dict(),
+        "loss_history": history.loss,
+        "training_monitor": history.to_dict(),
+        "config": {
+            "state_dim": config.state_dim,
+            "action_dim": config.action_dim,
+            "latent_dim": config.latent_dim,
+            "num_archetypes": config.num_archetypes,
+            "lstm_hidden_dim": config.lstm_hidden_dim,
+            "phase1_epochs": config.phase1_epochs,
+            "pretrain_epochs": config.pretrain_epochs,
+            "learning_rate": config.learning_rate,
+            "batch_size": config.batch_size,
+            "vq_beta0": config.vq_beta0,
+            "num_trajectories": config.num_trajectories,
+            "phase1_sampling_seed": config.phase1_sampling_seed,
+            "discount_factor": config.discount_factor,
+            "commission_rate": config.commission_rate,
+            "max_positions": config.max_positions,
+            "train_batch_id": config.train_batch_id,
+            "paper_phase1_reference_train_rows": PAPER_PHASE1_REFERENCE_TRAIN_ROWS,
+            "current_train_rows": train_rows,
         },
-        save_path,
-    )
+    }
+    if norm_stats is not None:
+        checkpoint_data["norm_stats"] = {
+            k: v.tolist() if hasattr(v, 'tolist') else float(v)
+            for k, v in norm_stats.items()
+        }
+    torch.save(checkpoint_data, save_path)
     logger.info("模型已保存到 %s", save_path)
     return save_path
 
@@ -835,6 +840,7 @@ def main() -> None:
         config=config, pair=pair,
         encoder=encoder, codebook=codebook, decoder=decoder,
         history=history, train_rows=train_rows,
+        norm_stats=dataset.norm_stats,
     )
 
     # Step 6: 验证

@@ -570,7 +570,7 @@ def validate_phase1_model(
     if not report["checkpoint_integrity"]["action_dim_match"]:
         report["hard_failures"].append("checkpoint.action_dim 与当前 config 不一致")
 
-    dataset = TrajectoryDataset.from_npz(trajectory_path)
+    dataset = TrajectoryDataset.from_npz(trajectory_path, normalize=True)
     dataloader = DataLoader(dataset, batch_size=512, shuffle=False, drop_last=False)
     ce_loss_fn = nn.CrossEntropyLoss()
 

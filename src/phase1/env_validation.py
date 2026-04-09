@@ -85,6 +85,7 @@ def _decode_horizon(
     z_q: torch.Tensor,
     horizon_states: np.ndarray,
     device: torch.device,
+    normalizer: TrajectoryDataset | None = None,
 ) -> np.ndarray:
     """用 frozen decoder 生成一个 horizon 的动作序列。"""
     if horizon_states.ndim != 2 or horizon_states.shape[1] != decoder.state_dim:
@@ -92,6 +93,8 @@ def _decode_horizon(
             "decoder 输入状态维度不匹配: "
             f"actual={tuple(horizon_states.shape)}, expected=(*, {decoder.state_dim})"
         )
+    if normalizer is not None:
+        horizon_states = normalizer.normalize_states(horizon_states)
     states_t = torch.tensor(
         horizon_states, dtype=torch.float32, device=device
     ).unsqueeze(0)
@@ -163,7 +166,10 @@ def validate_archetype_env_returns(
             end = min(start + h, len(env.states))
             horizon_states = env.states[start:end]
             z_q = codebook.embeddings.weight[k].unsqueeze(0)
-            decoded_actions = _decode_horizon(decoder, z_q, horizon_states, device)
+            decoded_actions = _decode_horizon(
+                decoder, z_q, horizon_states, device,
+                normalizer=trajectory_dataset,
+            )
             dec_result = _run_actions_in_env(env, idx, decoded_actions)
 
             archetype_returns[k].append(dec_result["total_return"])
@@ -232,6 +238,7 @@ def validate_archetype_diversity(
     env: TradingEnv,
     device: torch.device,
     sample_horizons: int = 128,
+    normalizer: TrajectoryDataset | None = None,
 ) -> Dict[str, Any]:
     """检查不同 archetype 是否真的产生不同的交易策略。
 
@@ -262,7 +269,10 @@ def validate_archetype_diversity(
         all_actions = np.zeros((K, actual_h), dtype=np.int64)
         for k in range(K):
             z_q = codebook.embeddings.weight[k].unsqueeze(0)
-            all_actions[k] = _decode_horizon(decoder, z_q, horizon_states, device)
+            all_actions[k] = _decode_horizon(
+                decoder, z_q, horizon_states, device,
+                normalizer=normalizer,
+            )
             for a in range(3):
                 per_archetype_action_dist[k, a] += np.sum(all_actions[k] == a)
             per_archetype_total_tokens[k] += actual_h
@@ -409,6 +419,7 @@ def validate_val_env_returns(
     val_env: TradingEnv,
     device: torch.device,
     max_horizons: int = 256,
+    normalizer: TrajectoryDataset | None = None,
 ) -> Dict[str, Any]:
     """在验证集环境中评估每个 archetype 的 return（无需 DP 轨迹）。
 
@@ -434,7 +445,10 @@ def validate_val_env_returns(
         horizon_returns = []
         for k in range(K):
             z_q = codebook.embeddings.weight[k].unsqueeze(0)
-            actions = _decode_horizon(decoder, z_q, horizon_states, device)
+            actions = _decode_horizon(
+                decoder, z_q, horizon_states, device,
+                normalizer=normalizer,
+            )
             result = _run_actions_in_env(val_env, h_idx, actions)
             per_archetype_returns[k].append(result["total_return"])
             horizon_returns.append(result["total_return"])
@@ -666,6 +680,7 @@ def run_phase1_env_validation(
         decoder=decoder,
         env=train_env,
         device=device,
+        normalizer=trajectory_dataset,
     )
     report["archetype_diversity"] = diversity
     report["all_warnings"].extend(diversity.get("warnings", []))
@@ -725,6 +740,7 @@ def run_phase1_env_validation(
             decoder=decoder,
             val_env=val_env,
             device=device,
+            normalizer=trajectory_dataset,
         )
         report["val_env_returns"] = val_returns
         report["all_warnings"].extend(val_returns.get("warnings", []))
