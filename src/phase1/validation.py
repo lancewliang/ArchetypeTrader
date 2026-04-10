@@ -844,6 +844,14 @@ def validate_phase1_artifacts(
     }
 
     try:
+        # 读取缓存元数据里的 commission_rate，作为 DP 验证阶段的权威值。
+        # DP trajectory 生成时用的 dp_commission_rate 与训练/评估用的 commission_rate
+        # 可能不一致；若 DP 验证使用另一个费率，reward 回放与 DP 重跑会全部失配。
+        cached_commission_rate: float | None = None
+        with np.load(trajectory_path, allow_pickle=False) as _cache_data:
+            if "commission_rate" in _cache_data.files:
+                cached_commission_rate = float(np.asarray(_cache_data["commission_rate"]).reshape(()).item())
+
         if env is None:
             logger.info("Phase I 验证: 重新加载训练特征与 TradingEnv")
             pipeline = FeaturePipeline(
@@ -851,6 +859,11 @@ def validate_phase1_artifacts(
             )
             train_df, _, _ = pipeline.get_state_vector()
             train_prices_df, _, _ = pipeline.get_prices()
+            env_commission = (
+                cached_commission_rate
+                if cached_commission_rate is not None
+                else float(getattr(config, "dp_commission_rate", config.commission_rate))
+            )
             env = TradingEnv(
                 states=train_df.to_numpy(),
                 prices=train_prices_df["close"].to_numpy(),
@@ -858,13 +871,36 @@ def validate_phase1_artifacts(
                 horizon=config.horizon,
                 states_dataframe=train_df,
                 max_positions=config.max_positions,
-                commission_rate=config.commission_rate,
+                commission_rate=env_commission,
+            )
+
+        # 若调用方传入的 env 的 commission_rate 与轨迹缓存不一致，克隆一个带正确费率的 env
+        # 专供 DP 验证使用；原 env 不被修改。
+        dp_env = env
+        if (
+            cached_commission_rate is not None
+            and abs(float(env.commission_rate) - cached_commission_rate) > 1e-12
+        ):
+            logger.warning(
+                "validate_phase1_artifacts: 传入 env.commission_rate=%.6f 与轨迹缓存 commission_rate=%.6f 不一致，"
+                "为 DP 验证克隆一致费率的临时 env。",
+                float(env.commission_rate),
+                cached_commission_rate,
+            )
+            dp_env = TradingEnv(
+                states=env.states,
+                prices=env.prices,
+                pair=env.pair,
+                horizon=env.horizon,
+                states_dataframe=env.states_dataframe,
+                max_positions=env.max_positions,
+                commission_rate=cached_commission_rate,
             )
 
         dp_report = validate_dp_trajectories(
             config=config,
             pair=pair,
-            env=env,
+            env=dp_env,
             trajectory_path=trajectory_path,
             dp_check_limit=dp_check_limit,
         )
