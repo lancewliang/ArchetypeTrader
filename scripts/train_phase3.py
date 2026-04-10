@@ -501,7 +501,7 @@ def main() -> None:
         horizon=config.horizon,
         states_dataframe=train_df,
         max_positions=config.max_positions,
-        commission_rate=config.commission_rate,
+        commission_rate=config.train_commission_rate,
     )
     logger.info("TradingEnv: train_horizons=%d", train_env.num_horizons)
     if train_env.num_horizons == 0:

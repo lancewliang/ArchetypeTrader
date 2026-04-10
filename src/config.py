@@ -28,7 +28,9 @@ class Config:
     # MDP 配置
     action_dim: int = 3  # {0: short, 1: flat, 2: long}
     horizon: int = 72  # h = 72 步
-    commission_rate: float = 0.0003  # δ = 0.02%（论文值）
+    commission_rate: float = 0.0003  # δ = 0.03%（真实佣金率，用于 evaluation）
+    dp_commission_rate: float = 0.001  # DP planner 用 0.1%（高门槛筛选高利润轨迹）
+    train_commission_rate: float = 0.0006  # Phase 1/2/3 训练用 0.06%（2× 真实费率，留安全边际）
     max_positions: Dict[str, int] = field(
         default_factory=lambda: { "ETH": 100, "AL": 10}
     )

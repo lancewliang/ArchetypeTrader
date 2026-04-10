@@ -287,7 +287,7 @@ def inspect_trajectory_cache(
         "num_available_starts": int(expected_starts),
         "training_rows": int(train_rows),
         "state_dim": int(config.state_dim),
-        "commission_rate": float(config.commission_rate),
+        "commission_rate": float(config.dp_commission_rate),
         "max_position": int(config.max_positions[pair]),
         "algorithm_variant": "paper_single_change",
     }
@@ -386,23 +386,38 @@ def load_data_and_env(config: Any, pair: str) -> Tuple[TradingEnv, int]:
         horizon=config.horizon,
         states_dataframe=train_df,
         max_positions=config.max_positions,
-        commission_rate=config.commission_rate,
+        commission_rate=config.train_commission_rate,
+    )
+
+    # DP planner 用更高的费率筛选高利润轨迹
+    dp_env = TradingEnv(
+        states=train_states,
+        prices=prices,
+        pair=pair,
+        horizon=config.horizon,
+        states_dataframe=train_df,
+        max_positions=config.max_positions,
+        commission_rate=config.dp_commission_rate,
     )
 
     logger.info(
         "TradingEnv 初始化完成: num_horizons=%d, horizon=%d, max_position=%d, "
-        "commission_rate=%.6f, available_starts=%d",
-        env.num_horizons, config.horizon, env.m, env.commission_rate, available_starts,
+        "train_commission_rate=%.6f, dp_commission_rate=%.6f, available_starts=%d",
+        env.num_horizons, config.horizon, env.m,
+        env.commission_rate, dp_env.commission_rate, available_starts,
     )
-    return env, train_rows
+    return env, dp_env, train_rows
 
 
 def prepare_trajectory_dataset(
-    config: Any, pair: str, env: TradingEnv, train_rows: int,
+    config: Any, pair: str, dp_env: TradingEnv, train_rows: int,
 ) -> Tuple[TrajectoryDataset, str]:
-    """检查缓存 / 生成 DP 示范轨迹，返回 (dataset, traj_path)。"""
+    """检查缓存 / 生成 DP 示范轨迹，返回 (dataset, traj_path)。
+
+    使用 dp_env（高费率环境）生成轨迹，筛选出高利润交易模式。
+    """
     planner = DPPlanner(
-        env=env,
+        env=dp_env,
         gamma=config.discount_factor,
         result_dir=config.result_dir,
         train_batch_id=config.train_batch_id,
@@ -744,6 +759,8 @@ def save_checkpoint(
             "phase1_sampling_seed": config.phase1_sampling_seed,
             "discount_factor": config.discount_factor,
             "commission_rate": config.commission_rate,
+                "dp_commission_rate": config.dp_commission_rate,
+                "train_commission_rate": config.train_commission_rate,
             "max_positions": config.max_positions,
             "train_batch_id": config.train_batch_id,
             "paper_phase1_reference_train_rows": PAPER_PHASE1_REFERENCE_TRAIN_ROWS,
@@ -812,10 +829,10 @@ def main() -> None:
     logger.info("使用设备: %s", device)
 
     # Step 1: 加载数据 & 环境
-    env, train_rows = load_data_and_env(config, pair)
+    env, dp_env, train_rows = load_data_and_env(config, pair)
 
-    # Step 2: 准备轨迹数据集
-    dataset, traj_path = prepare_trajectory_dataset(config, pair, env, train_rows)
+    # Step 2: 准备轨迹数据集（用 dp_env 的高费率筛选高利润轨迹）
+    dataset, traj_path = prepare_trajectory_dataset(config, pair, dp_env, train_rows)
     logger.info("Dataset 大小: %d 条轨迹", len(dataset))
 
     dataloader = DataLoader(
@@ -875,7 +892,7 @@ def main() -> None:
             horizon=config.horizon,
             states_dataframe=val_state_df,
             max_positions=config.max_positions,
-            commission_rate=config.commission_rate,
+            commission_rate=config.train_commission_rate,
         )
 
     env_report = run_phase1_env_validation(
