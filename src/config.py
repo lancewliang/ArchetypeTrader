@@ -48,6 +48,7 @@ class Config:
     # Phase II 配置
     phase2_total_steps: int = 3_000_000
     selection_alpha: float = 1.0  # KL 惩罚系数
+    phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
 
     # Phase III 配置
     phase3_total_steps: int = 1_000_000
@@ -192,6 +193,12 @@ def parse_args(argv: list | None = None) -> Config:
     parser.add_argument(
         "--selection-alpha", type=float, default=None, help="KL 惩罚系数"
     )
+    parser.add_argument(
+        "--phase2-stop-on-unhealthy",
+        action="store_true",
+        default=None,
+        help="若 Phase II 结束验证健康度非 healthy，则以非 0 状态退出（阻止进入 Phase III）",
+    )
 
     # Phase III
     parser.add_argument(
@@ -269,6 +276,7 @@ def parse_args(argv: list | None = None) -> Config:
         "pretrain_epochs": getattr(args, "pretrain_epochs", None),
         "phase2_total_steps": getattr(args, "phase2_total_steps", None),
         "selection_alpha": getattr(args, "selection_alpha", None),
+        "phase2_stop_on_unhealthy": getattr(args, "phase2_stop_on_unhealthy", None),
         "phase3_total_steps": getattr(args, "phase3_total_steps", None),
         "batch_size": getattr(args, "batch_size", None),
         "discount_factor": getattr(args, "discount_factor", None),

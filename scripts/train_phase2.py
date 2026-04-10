@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from typing import Any
@@ -1047,6 +1048,28 @@ def evaluate_on_validation(
     return metrics
 
 
+def _phase2_health_status(metrics: dict[str, Any]) -> tuple[str, str]:
+    """给出 Phase II 验证结果的健康度标签与说明。"""
+    avg_return = float(metrics.get("avg_return", 0.0))
+    avg_cost = float(metrics.get("avg_execution_cost", 0.0))
+
+    if avg_return < 0.0:
+        return (
+            "bad_negative_return",
+            "验证集平均 return 为负，说明第二阶段策略当前方向存在明显问题；直接进入第三阶段通常难以彻底修复。",
+        )
+
+    # “微弱收益”判定: 收益仅与执行成本同量级，边际非常薄
+    weak_threshold = max(1e-8, abs(avg_cost))
+    if avg_return <= weak_threshold:
+        return (
+            "weak_edge",
+            "验证集收益仅与执行成本同量级，属于微弱优势；建议先继续打磨第二阶段再进入第三阶段。",
+        )
+
+    return ("healthy", "验证集收益明显高于执行成本，第二阶段模型整体健康。")
+
+
 def evaluate_training_subset_diagnostics(
     agent: SelectionAgent,
     encoder: VQEncoder,
@@ -1771,6 +1794,96 @@ def main() -> None:
     )
     logger.info("最终模型已保存到 %s", final_save_path)
 
+    # ----------------------------------------------------------------
+    # Step 5: 训练结束后立即做一次验证集评估（best/final 对照）
+    # 目标: 在进入 Phase III 前确认 Phase II 模型是否健康
+    # ----------------------------------------------------------------
+    eval_max_horizons = ppo_hparams["eval_max_horizons"]
+
+    final_val_metrics = evaluate_on_validation(
+        agent=agent,
+        codebook=codebook,
+        decoder=decoder,
+        val_env=val_env,
+        device=device,
+        max_horizons=eval_max_horizons,
+    )
+    final_val_return = float(final_val_metrics["avg_return"])
+
+    best_val_metrics: dict[str, Any]
+    if os.path.exists(save_path):
+        best_ckpt = torch.load(save_path, map_location=device, weights_only=False)
+        best_agent = SelectionAgent(
+            state_dim=config.state_dim,
+            num_archetypes=config.num_archetypes,
+        ).to(device)
+        best_agent.load_state_dict(best_ckpt["agent"])
+        best_agent.eval()
+        best_val_metrics = evaluate_on_validation(
+            agent=best_agent,
+            codebook=codebook,
+            decoder=decoder,
+            val_env=val_env,
+            device=device,
+            max_horizons=eval_max_horizons,
+        )
+    else:
+        logger.warning("未找到最优 checkpoint: %s，将使用最终模型验证结果替代", save_path)
+        best_val_metrics = dict(final_val_metrics)
+
+    best_status, best_status_msg = _phase2_health_status(best_val_metrics)
+    final_status, final_status_msg = _phase2_health_status(final_val_metrics)
+
+    logger.info(
+        "Phase II 结束验证（BEST）: avg_return=%.4f, gross=%.4f, cost=%.4f, turnover=%.4f, flips=%.4f, selected=%s",
+        float(best_val_metrics.get("avg_return", 0.0)),
+        float(best_val_metrics.get("avg_gross_pnl", 0.0)),
+        float(best_val_metrics.get("avg_execution_cost", 0.0)),
+        float(best_val_metrics.get("avg_turnover", 0.0)),
+        float(best_val_metrics.get("avg_direct_flips", 0.0)),
+        best_val_metrics.get("selected_histogram", "[]"),
+    )
+    logger.info("Phase II 结束验证（BEST）健康度: %s — %s", best_status, best_status_msg)
+
+    logger.info(
+        "Phase II 结束验证（FINAL）: avg_return=%.4f, gross=%.4f, cost=%.4f, turnover=%.4f, flips=%.4f, selected=%s",
+        float(final_val_metrics.get("avg_return", 0.0)),
+        float(final_val_metrics.get("avg_gross_pnl", 0.0)),
+        float(final_val_metrics.get("avg_execution_cost", 0.0)),
+        float(final_val_metrics.get("avg_turnover", 0.0)),
+        float(final_val_metrics.get("avg_direct_flips", 0.0)),
+        final_val_metrics.get("selected_histogram", "[]"),
+    )
+    logger.info("Phase II 结束验证（FINAL）健康度: %s — %s", final_status, final_status_msg)
+
+    if best_status != "healthy":
+        logger.warning(
+            "Phase II 最优模型健康度=%s。建议先修正第二阶段，再投入第三阶段训练。",
+            best_status,
+        )
+
+    phase2_report = {
+        "pair": pair,
+        "step_count": int(step_count),
+        "eval_max_horizons": eval_max_horizons,
+        "best_checkpoint_path": save_path,
+        "final_checkpoint_path": final_save_path,
+        "best_checkpoint_validation": {
+            **best_val_metrics,
+            "health_status": best_status,
+            "health_message": best_status_msg,
+        },
+        "final_checkpoint_validation": {
+            **final_val_metrics,
+            "health_status": final_status,
+            "health_message": final_status_msg,
+        },
+    }
+    phase2_report_path = os.path.join(save_dir, f"{pair}_phase2_validation_report.json")
+    with open(phase2_report_path, "w", encoding="utf-8") as f:
+        json.dump(phase2_report, f, ensure_ascii=False, indent=2)
+    logger.info("Phase II 结束验证报告已保存到 %s", phase2_report_path)
+
     logger.info("=" * 50)
     logger.info("Phase II 训练完成: pair=%s", pair)
     logger.info("总训练步数: %d", step_count)
@@ -1778,10 +1891,18 @@ def main() -> None:
         "最终平均奖励 (最近 1000 步): %.4f",
         np.mean(reward_history[-1000:]) if reward_history else float("nan"),
     )
-    logger.info("最优验证集 return: %.4f", best_val_return)
+    logger.info("训练期间最优验证集 return: %.4f", best_val_return)
+    logger.info("结束时 FINAL 模型验证集 return: %.4f", final_val_return)
     logger.info("最优模型路径: %s", save_path)
     logger.info("最终模型路径: %s", final_save_path)
     logger.info("=" * 50)
+
+    if bool(getattr(config, "phase2_stop_on_unhealthy", False)) and best_status != "healthy":
+        logger.error(
+            "已启用 --phase2-stop-on-unhealthy，且 Phase II 最优模型健康度=%s，训练流程在 Phase II 后终止。",
+            best_status,
+        )
+        sys.exit(2)
 
 
 if __name__ == "__main__":
