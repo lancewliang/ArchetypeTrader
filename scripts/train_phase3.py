@@ -38,6 +38,7 @@ from src.phase3.refinement_agent import RefinementAgent
 from src.phase3.policy_adapter import PolicyAdapter
 from src.phase3.regret_reward import compute_regret_reward, compute_top5_hindsight_optimal
 from src.utils.logger import get_logger
+from src.utils.normalizer import StateNormalizer
 
 logger = get_logger(__name__)
 
@@ -64,7 +65,7 @@ class RolloutResult:
 # ---------------------------------------------------------------------------
 
 def load_phase1_model(config, pair: str, device: torch.device):
-    """加载并冻结 Phase I 模型（码本 + Decoder）。"""
+    """加载并冻结 Phase I 模型（码本 + Decoder）+ 归一化统计量。"""
     model_path = os.path.join(
         config.get_stage_result_dir(pair, "phase1_archetype_discovery"),
         f"{pair}_vq_model.pt",
@@ -96,8 +97,12 @@ def load_phase1_model(config, pair: str, device: torch.device):
     codebook.eval()
     decoder.eval()
 
+    normalizer = StateNormalizer.from_checkpoint_dict(ckpt)
+    if normalizer is not None:
+        logger.info("Phase I 归一化统计量已加载")
+
     logger.info("Phase I 模型加载完成，Codebook 和 Decoder 已冻结")
-    return codebook, decoder
+    return codebook, decoder, normalizer
 
 
 def load_phase2_model(config, pair: str, device: torch.device):
@@ -478,7 +483,7 @@ def main() -> None:
     logger.info("结果目录批次: %s", config.train_batch_id)
 
     # --- 加载冻结模型 ---
-    codebook, decoder = load_phase1_model(config, pair, device)
+    codebook, decoder, normalizer = load_phase1_model(config, pair, device)
     selection_agent = load_phase2_model(config, pair, device)
 
     # --- 数据 & 环境 ---
@@ -490,7 +495,7 @@ def main() -> None:
     train_prices_df, _, _ = pipeline.get_prices()
 
     train_env = TradingEnv(
-        states=train_df.to_numpy(),
+        states=normalizer.normalize_states(train_df.to_numpy()) if normalizer else train_df.to_numpy(),
         prices=train_prices_df["close"].to_numpy(),
         pair=pair,
         horizon=config.horizon,

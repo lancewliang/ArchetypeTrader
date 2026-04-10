@@ -106,6 +106,14 @@ def run_horizon_inference(
         settle_slippage = round(
             TradingEnv.compute_lob_slippage(settle_delta, state_dict, initial_price), 2,
         )
+
+    # settle 前记录 portfolio_value，以便将 settle 成本计入收益率
+    pre_settle_value = tracker.compute_total_value(
+        prev_position, initial_price,
+    )[2]
+    if pre_settle_value <= 0.0:
+        pre_settle_value = 1.0
+
     tracker.settle_previous_horizon(
         initial_price, t_start,
         new_first_action=first_action,
@@ -131,6 +139,11 @@ def run_horizon_inference(
     )[2]  # total_value
     if portfolio_value <= 0.0:
         portfolio_value = 1.0
+
+    # 将 settle 产生的成本（手续费+滑点）计入收益率序列
+    if abs(portfolio_value - pre_settle_value) > 1e-6:
+        settle_return = (portfolio_value - pre_settle_value) / pre_settle_value
+        step_rate_returns.append(settle_return)
 
     for step_idx in range(h):
         a_base = int(base_actions[step_idx])
@@ -240,7 +253,7 @@ def evaluate_pair(
     logger.info("=" * 50)
 
     # 加载三阶段模型
-    codebook, decoder = load_phase1_model(config, pair, device)
+    codebook, decoder, normalizer = load_phase1_model(config, pair, device)
     selection_agent = load_phase2_model(config, pair, device)
     refinement_agent = load_phase3_model(config, pair, device)
 
@@ -254,6 +267,10 @@ def evaluate_pair(
 
     test_states = test_df.to_numpy()
     test_prices = test_prices_df["close"].to_numpy()
+
+    # 归一化 states（与 Phase 1 训练一致）
+    if normalizer is not None:
+        test_states = normalizer.normalize_states(test_states)
 
     logger.info(
         "测试集: states shape=%s, prices shape=%s",
@@ -328,9 +345,13 @@ def evaluate_pair(
             settle_slippage = round(
                 TradingEnv.compute_lob_slippage(settle_delta, state_dict, final_price), 2,
             )
-        # 用最后一个有效 bar 的下一个 index，避免和最后一步 record 冲突
-        # bt_prices 会多加 2 个 bar 来容纳这个 index
         settle_idx = last_valid_idx + 1
+
+        # 记录平仓前的 portfolio_value
+        pre_final_value = tracker.compute_total_value(final_pos, final_price)[2]
+        if pre_final_value <= 0.0:
+            pre_final_value = 1.0
+
         tracker.settle_previous_horizon(
             final_price, settle_idx,
             new_first_action=1,  # flat
@@ -339,6 +360,12 @@ def evaluate_pair(
             slippage=settle_slippage,
         )
         logger.info("最终平仓: pos=%d → 0 @ %.6f, 手续费+滑点已扣除", final_pos, final_price)
+
+        # 将最终平仓成本计入收益率
+        post_final_value = tracker.compute_total_value(0, final_price)[2]
+        if abs(post_final_value - pre_final_value) > 1e-6:
+            final_settle_return = (post_final_value - pre_final_value) / pre_final_value
+            all_step_returns.append(final_settle_return)
 
     # 计算指标
     returns_array = np.array(all_step_returns, dtype=np.float64)

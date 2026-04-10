@@ -51,6 +51,7 @@ from src.phase1.vq_decoder import VQDecoder
 from src.phase1.vq_encoder import VQEncoder
 from src.phase2.selection_agent import SelectionAgent
 from src.utils.logger import get_logger
+from src.utils.normalizer import StateNormalizer
 
 logger = get_logger(__name__)
 
@@ -258,28 +259,10 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
 
 
 def load_phase1_model(config: Any, pair: str, device: torch.device):
-    """加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）。
-
-    # 需求 7.4: 前置阶段模型文件不存在时抛出明确错误
-    # 需求 5.3: 冻结 Decoder 参数
-
-    功能说明:
-        读取 Phase I 训练好的 VQEncoder / VQCodebook / VQDecoder。
-        在 Phase II 中，这三部分都作为“已学习好的 archetype prior”使用，
-        不再参与梯度更新。
-
-    论文相关:
-        - Phase I 对应 Archetype Discovery；
-        - Phase II 对应 Archetype Selection；
-        - Section 4.2 明确要求：selector 选出 archetype 后，
-          由 frozen decoder p_theta_d(a_base | s, e_{a_sel}) 生成 micro actions；
-        - 同时，ground-truth archetype label â_sel 由冻结 encoder + codebook
-          对当前 horizon 的 demonstration chunk 编码得到，对应论文 Eq.(5)。
+    """加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）+ 归一化统计量。
 
     Returns:
-        encoder: 加载权重后的 VQEncoder（冻结，用于获取 ground-truth archetype label）
-        codebook: 加载权重后的 VQCodebook（冻结）
-        decoder: 加载权重后的 VQDecoder（冻结）
+        encoder, codebook, decoder, normalizer
     """
     model_path = os.path.join(
         config.get_stage_result_dir(pair, "phase1_archetype_discovery"),
@@ -294,7 +277,6 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
     logger.info("加载 Phase I 模型: %s", model_path)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
-    # 初始化并加载 Encoder（用于获取 ground-truth archetype label）
     encoder = VQEncoder(
         state_dim=config.state_dim,
         action_dim=config.action_dim,
@@ -303,14 +285,12 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
     ).to(device)
     encoder.load_state_dict(checkpoint["encoder"])
 
-    # 初始化并加载 Codebook
     codebook = VQCodebook(
         num_codes=config.num_archetypes,
         code_dim=config.latent_dim,
     ).to(device)
     codebook.load_state_dict(checkpoint["codebook"])
 
-    # 初始化并加载 Decoder
     decoder = VQDecoder(
         state_dim=config.state_dim,
         code_dim=config.latent_dim,
@@ -319,7 +299,6 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
     ).to(device)
     decoder.load_state_dict(checkpoint["decoder"])
 
-    # 需求 5.3: 冻结 Encoder、Codebook 和 Decoder — 不参与梯度更新
     for param in encoder.parameters():
         param.requires_grad = False
     for param in codebook.parameters():
@@ -331,8 +310,14 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
     codebook.eval()
     decoder.eval()
 
+    normalizer = StateNormalizer.from_checkpoint_dict(checkpoint)
+    if normalizer is not None:
+        logger.info("Phase I 归一化统计量已加载")
+    else:
+        logger.warning("Phase I checkpoint 中无 norm_stats，跳过归一化")
+
     logger.info("Phase I 模型加载完成，Encoder、Codebook 和 Decoder 已冻结")
-    return encoder, codebook, decoder
+    return encoder, codebook, decoder, normalizer
 
 
 def run_horizon_with_decoder(
@@ -342,6 +327,7 @@ def run_horizon_with_decoder(
     z_q: torch.Tensor,
     device: torch.device,
     return_details: bool = False,
+    normalizer: StateNormalizer | None = None,
 ) -> float | dict[str, Any]:
     """使用冻结 Decoder 在一个 horizon 内执行交易，返回 horizon 总收益。
 
@@ -399,9 +385,14 @@ def run_horizon_with_decoder(
     end = min(start + h, len(env.states))
     horizon_states = env.states[start:end]  # (h, state_dim)
 
+    # 归一化 states 后再喂给 decoder
+    norm_states = horizon_states
+    if normalizer is not None:
+        norm_states = normalizer.normalize_states(horizon_states)
+
     # Decoder 批量生成 action logits
     states_t = torch.tensor(
-        horizon_states, dtype=torch.float32, device=device
+        norm_states, dtype=torch.float32, device=device
     ).unsqueeze(0)
     # states_t: (1, h, state_dim)
 
@@ -457,21 +448,12 @@ def batch_decode_actions(
     horizon_indices: np.ndarray,
     archetype_indices: torch.Tensor,
     device: torch.device,
+    normalizer: StateNormalizer | None = None,
 ) -> np.ndarray:
-    """批量 decoder 推理：一次前向传播为所有 horizon 生成 micro actions。
-
-    功能说明:
-        将 B 个 horizon 的状态序列和对应的 archetype embedding 拼成一个 batch，
-        通过一次 decoder forward + single-trade constraint 得到所有 micro actions，
-        避免逐 horizon 调用 decoder 的 Python 循环开销。
+    """批量解码: 对一批 horizon 用对应 archetype 生成 micro actions。
 
     Args:
-        decoder: 冻结的 VQ Decoder
-        codebook: 冻结的 VQCodebook
-        env: 交易环境（用于读取 states）
-        horizon_indices: (B,) horizon 索引
-        archetype_indices: (B,) 选定的 archetype 索引 (torch.Tensor on device)
-        device: 计算设备
+        normalizer: 若提供，对 env.states 做归一化后再喂给 decoder。
 
     Returns:
         actions_np: (B, h) 所有 horizon 的 micro action 序列
@@ -479,7 +461,6 @@ def batch_decode_actions(
     h = env.horizon
     B = len(horizon_indices)
 
-    # 收集所有 horizon 的状态序列: (B, h, state_dim)
     all_states = np.empty((B, h, env.state_dim), dtype=np.float32)
     for i, h_idx in enumerate(horizon_indices):
         start = int(h_idx) * h
@@ -489,13 +470,15 @@ def batch_decode_actions(
         if actual_len < h:
             all_states[i, actual_len:] = env.states[end - 1]
 
-    states_t = torch.tensor(all_states, dtype=torch.float32, device=device)  # (B, h, state_dim)
+    if normalizer is not None:
+        all_states = normalizer.normalize_states(all_states)
 
-    # 批量获取 archetype embeddings: (B, code_dim)
-    z_q_batch = codebook.embeddings.weight[archetype_indices.long()]  # (B, code_dim)
+    states_t = torch.tensor(all_states, dtype=torch.float32, device=device)
+
+    z_q_batch = codebook.embeddings.weight[archetype_indices.long()]
 
     with torch.no_grad():
-        actions = decoder.decode_with_single_trade_constraint(states_t, z_q_batch)  # (B, h)
+        actions = decoder.decode_with_single_trade_constraint(states_t, z_q_batch)
 
     return actions.detach().cpu().numpy()
 def vectorized_execute_horizons(
@@ -621,19 +604,16 @@ def vectorized_execute_horizons(
     return horizon_returns, details
 
 
-def get_horizon_start_states(env: TradingEnv, horizon_indices: np.ndarray) -> np.ndarray:
-    """获取一批 horizon 的起始状态。
-
-    功能说明:
-        将一组 horizon index 映射到对应的首 bar 状态，用于构建 selector 的
-        batch 输入。
-
-    论文相关:
-        Section 4.2 明确规定高层状态 s_sel 定义为当前 horizon 第一根 bar 的
-        状态向量，因此这里严格按 horizon 起点取状态，而不是取整段序列。
-    """
+def get_horizon_start_states(
+    env: TradingEnv, horizon_indices: np.ndarray,
+    normalizer: StateNormalizer | None = None,
+) -> np.ndarray:
+    """获取一批 horizon 的起始状态（归一化后）。"""
     start_indices = horizon_indices * env.horizon
-    return env.states[start_indices]
+    states = env.states[start_indices]
+    if normalizer is not None:
+        states = normalizer.normalize_states(states)
+    return states
 
 
 def get_ground_truth_labels(
@@ -1622,7 +1602,7 @@ def main() -> None:
     # ----------------------------------------------------------------
     # Step 1: 加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）
     # ----------------------------------------------------------------
-    encoder, codebook, decoder = load_phase1_model(config, pair, device)
+    encoder, codebook, decoder, normalizer = load_phase1_model(config, pair, device)
 
     # ----------------------------------------------------------------
     # Step 2: 加载特征数据，初始化 TradingEnv
@@ -1638,6 +1618,11 @@ def main() -> None:
     val_states = val_df.to_numpy()
     train_prices = train_prices_df["close"].to_numpy()
     val_prices = val_prices_df["close"].to_numpy()
+
+    # 归一化 states（与 Phase 1 训练一致）
+    if normalizer is not None:
+        train_states = normalizer.normalize_states(train_states)
+        val_states = normalizer.normalize_states(val_states)
 
     logger.info(
         "训练集: states shape=%s, 验证集: states shape=%s",
@@ -1691,6 +1676,12 @@ def main() -> None:
     demo_states = demo_data["states"]    # (N, h, state_dim)
     demo_actions = demo_data["actions"]  # (N, h)
     demo_rewards = demo_data["rewards"]  # (N, h)
+
+    # 归一化 demo 数据（与 Phase 1 训练时一致）
+    if normalizer is not None:
+        demo_states = normalizer.normalize_states(demo_states)
+        demo_rewards = normalizer.normalize_rewards(demo_rewards)
+
     logger.info(
         "DP 示范轨迹加载完成: %d 条, horizon=%d (训练 env horizons=%d)",
         demo_states.shape[0],
