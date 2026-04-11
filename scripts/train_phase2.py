@@ -223,7 +223,7 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
     vf_coef = float(_cfg(config, "phase2_vf_coef", 0.001))
     ent_coef = float(_cfg(config, "phase2_ent_coef", 0.1))
     max_grad_norm = float(_cfg(config, "phase2_max_grad_norm", 1.0))
-    log_interval = int(_cfg(config, "phase2_log_interval", 100000))
+    log_interval = int(_cfg(config, "phase2_log_interval", 1000000))
     eval_max_horizons = _cfg(config, "phase2_eval_max_horizons", None)
     diagnostic_horizons = int(_cfg(config, "phase2_diagnostic_horizons", 128))
 
@@ -791,6 +791,7 @@ def collect_rollout_batch(
                 "gt_label_histogram": _format_histogram_from_counts(
                     _histogram_counts(gt_np, agent.num_archetypes)
                 ),
+                # gt_agree: selector 与 VQ encoder label 的一致性（诊断用）
                 "sampled_gt_agreement": float(np.mean(actions_np == gt_np)) if gt_np.size > 0 else 0.0,
                 "greedy_gt_agreement": float(np.mean(greedy_np == gt_np)) if gt_np.size > 0 else 0.0,
             }
@@ -899,8 +900,7 @@ def ppo_update(
 
             # Eq.(5): KL(â_sel || π_sel)，advantage-weighted 版本：
             # 只对 advantage > 0 的样本施加 imitation 正则，
-            # 避免把 policy 拉向 DP 建议但 env 收益为负的 archetype，
-            # 从而让 RL 信号在 weak_edge 区域能主导更新方向。
+            # 避免把 policy 拉向 DP 建议但 env 收益为负的 archetype。
             pos_mask = (mb_advantages > 0).float()  # (mb,)
             per_sample_nll = F.nll_loss(
                 torch.log(action_probs + 1e-8), mb_gt_labels, reduction="none"
@@ -1757,7 +1757,7 @@ def main() -> None:
     # ----------------------------------------------------------------
     alpha = config.selection_alpha  # KL / imitation 惩罚系数
     total_steps = int(config.phase2_total_steps)
-    val_interval = max(train_env.num_horizons, train_env.num_horizons*10)  # 每遍历一次训练集或步评估一次
+    val_interval = max(train_env.num_horizons, train_env.num_horizons*200)  # 每遍历一次训练集或步评估一次
     log_interval = int(ppo_hparams["log_interval"])
 
     save_dir = config.get_stage_result_dir(pair, "phase2_archetype_selection")

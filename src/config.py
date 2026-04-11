@@ -29,8 +29,8 @@ class Config:
     action_dim: int = 3  # {0: short, 1: flat, 2: long}
     horizon: int = 72  # h = 72 步
     commission_rate: float = 0.0003  # δ = 0.03%（真实佣金率，用于 evaluation）
-    dp_commission_rate: float = 0.0005  # DP planner 用 0.1%（高门槛筛选高利润轨迹）
-    train_commission_rate: float = 0.0003  # Phase 1/2/3 训练用 0.06%（2× 真实费率，留安全边际）
+    dp_commission_rate: float = 0.0008  # DP planner 用 0.1%（高门槛筛选高利润轨迹）
+    train_commission_rate: float = 0.0008  # Phase 1/2/3 训练用 0.06%（2× 真实费率，留安全边际）
     max_positions: Dict[str, int] = field(
         default_factory=lambda: { "ETH": 100, "AL": 10}
     )
@@ -49,6 +49,16 @@ class Config:
     phase2_total_steps: int = 3_000_000
     selection_alpha: float = 1.0  # KL 惩罚系数
     phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
+    phase2_rollout_batch_size: int = 1024
+    phase2_ppo_epochs: int = 4
+    phase2_minibatch_size: int = 256
+    phase2_clip_eps: float = 0.2
+    phase2_vf_coef: float = 0.001
+    phase2_ent_coef: float = 0.1
+    phase2_max_grad_norm: float = 1.0
+    phase2_log_interval: int = 1000000
+    phase2_eval_max_horizons: int | None = None
+    phase2_diagnostic_horizons: int = 128
 
     # Phase III 配置
     phase3_total_steps: int = 1_000_000
@@ -194,6 +204,66 @@ def parse_args(argv: list | None = None) -> Config:
         "--selection-alpha", type=float, default=None, help="KL 惩罚系数"
     )
     parser.add_argument(
+        "--phase2-rollout-batch-size",
+        type=int,
+        default=None,
+        help="每次 PPO rollout 采样的 horizon 数量",
+    )
+    parser.add_argument(
+        "--phase2-ppo-epochs",
+        type=int,
+        default=None,
+        help="每个 rollout 的 PPO 更新轮数",
+    )
+    parser.add_argument(
+        "--phase2-minibatch-size",
+        type=int,
+        default=None,
+        help="PPO 更新时的 minibatch 大小",
+    )
+    parser.add_argument(
+        "--phase2-clip-eps",
+        type=float,
+        default=None,
+        help="PPO 裁剪阈值 epsilon",
+    )
+    parser.add_argument(
+        "--phase2-vf-coef",
+        type=float,
+        default=None,
+        help="PPO value loss 系数",
+    )
+    parser.add_argument(
+        "--phase2-ent-coef",
+        type=float,
+        default=None,
+        help="PPO 熵正则系数",
+    )
+    parser.add_argument(
+        "--phase2-max-grad-norm",
+        type=float,
+        default=None,
+        help="PPO 梯度裁剪阈值",
+    )
+    parser.add_argument(
+        "--phase2-log-interval",
+        type=int,
+        default=None,
+        help="Phase II 日志打印间隔（步数）",
+    )
+    parser.add_argument(
+        "--phase2-eval-max-horizons",
+        type=int,
+        default=None,
+        help="Phase II 验证时最多评估的 horizon 数",
+    )
+    parser.add_argument(
+        "--phase2-diagnostic-horizons",
+        type=int,
+        default=None,
+        help="Phase II 训练诊断采样的 horizon 数",
+    )
+    parser.add_argument(
         "--phase2-stop-on-unhealthy",
         action="store_true",
         default=None,
@@ -246,7 +316,7 @@ def parse_args(argv: list | None = None) -> Config:
             )
         args.cycle_feature_sets = parsed_cycle_sets
     else:
-        args.cycle_feature_sets = ["short"]
+        args.cycle_feature_sets = ["middle"]
 
     if args.train_batch_id is not None:
         args.train_batch_id = args.train_batch_id.strip()
@@ -276,6 +346,16 @@ def parse_args(argv: list | None = None) -> Config:
         "pretrain_epochs": getattr(args, "pretrain_epochs", None),
         "phase2_total_steps": getattr(args, "phase2_total_steps", None),
         "selection_alpha": getattr(args, "selection_alpha", None),
+        "phase2_rollout_batch_size": getattr(args, "phase2_rollout_batch_size", None),
+        "phase2_ppo_epochs": getattr(args, "phase2_ppo_epochs", None),
+        "phase2_minibatch_size": getattr(args, "phase2_minibatch_size", None),
+        "phase2_clip_eps": getattr(args, "phase2_clip_eps", None),
+        "phase2_vf_coef": getattr(args, "phase2_vf_coef", None),
+        "phase2_ent_coef": getattr(args, "phase2_ent_coef", None),
+        "phase2_max_grad_norm": getattr(args, "phase2_max_grad_norm", None),
+        "phase2_log_interval": getattr(args, "phase2_log_interval", None),
+        "phase2_eval_max_horizons": getattr(args, "phase2_eval_max_horizons", None),
+        "phase2_diagnostic_horizons": getattr(args, "phase2_diagnostic_horizons", None),
         "phase2_stop_on_unhealthy": getattr(args, "phase2_stop_on_unhealthy", None),
         "phase3_total_steps": getattr(args, "phase3_total_steps", None),
         "batch_size": getattr(args, "batch_size", None),

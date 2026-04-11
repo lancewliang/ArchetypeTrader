@@ -129,6 +129,16 @@ class TestParseArgs:
         assert cfg.phase2_total_steps == 100000
         assert cfg.phase3_total_steps == 50000
 
+    def test_phase2_ppo_hparams_override(self):
+        cfg = parse_args([
+            "--phase2-rollout-batch-size", "2048",
+            "--phase2-ppo-epochs", "8",
+            "--phase2-ent-coef", "0.02",
+        ])
+        assert cfg.phase2_rollout_batch_size == 2048
+        assert cfg.phase2_ppo_epochs == 8
+        assert cfg.phase2_ent_coef == 0.02
+
     def test_commission_rate_override(self):
         cfg = parse_args(["--commission-rate", "0.001"])
         assert cfg.commission_rate == 0.001

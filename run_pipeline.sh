@@ -40,7 +40,7 @@ echo ">>> [Phase I] 完成 — $(date '+%H:%M:%S')"
 # --- Phase II: Archetype Selection ---
 echo ""
 echo ">>> [Phase II] 开始训练 — $(date '+%H:%M:%S')"
-python scripts/train_phase2.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" ${EXTRA_ARGS}
+python scripts/train_phase2.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" --selection-alpha 1.0 --phase2-ent-coef 0.02 --phase2-ppo-epochs 8 --phase2-rollout-batch-size 2048 ${EXTRA_ARGS}
 echo ">>> [Phase II] 完成 — $(date '+%H:%M:%S')"
 
 # --- Phase III: Archetype Refinement ---
