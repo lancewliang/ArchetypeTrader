@@ -538,19 +538,60 @@ def vectorized_execute_horizons(
     # 佣金: δ × |ΔP| × price
     commissions = env.commission_rate * abs_delta * prices  # (B, h)
 
-    # LOB slippage: 需要逐行查 DataFrame（无法完全向量化）
+    # LOB slippage: 预提取所有涉及时间步的 LOB 数组，消除逐行 Polars row 查找
     slippages = np.zeros((B, h), dtype=np.float64)
     if env.states_dataframe is not None:
-        # 只对持仓变化的步骤计算 slippage
         change_mask = delta_positions != 0
-        for bi in range(B):
-            for ti in range(h):
-                if change_mask[bi, ti]:
+
+        # 收集所有需要计算 slippage 的全局时间步索引（去重）
+        # price_indices shape (B, h)，flatten 后取唯一值，避免重复提取
+        all_global_t = price_indices[change_mask]  # 只取有持仓变化的位置
+        if all_global_t.size > 0:
+            unique_ts = np.unique(all_global_t)
+
+            # 一次性从 DataFrame 提取所有需要的行的 LOB 列为 NumPy 数组
+            # 用 polars 的列式 select + to_numpy，比逐行 .row() 快一个数量级
+            lob_df = env.states_dataframe[unique_ts.tolist()]
+            ap = lob_df.select(TradingEnv.LOB_ASK_PRICE_COLS).to_numpy()  # (U, 5)
+            as_ = lob_df.select(TradingEnv.LOB_ASK_SIZE_COLS).to_numpy()  # (U, 5)
+            bp = lob_df.select(TradingEnv.LOB_BID_PRICE_COLS).to_numpy()  # (U, 5)
+            bs = lob_df.select(TradingEnv.LOB_BID_SIZE_COLS).to_numpy()   # (U, 5)
+
+            # 建立 global_t → 数组行索引的映射，O(1) 查找
+            t_to_row = {int(t): i for i, t in enumerate(unique_ts)}
+
+            for bi in range(B):
+                for ti in range(h):
+                    if not change_mask[bi, ti]:
+                        continue
                     global_t = int(price_indices[bi, ti])
-                    state_dict = env.states_dataframe.row(global_t, named=True)
-                    slippages[bi, ti] = TradingEnv.compute_lob_slippage(
-                        int(delta_positions[bi, ti]), state_dict, float(prices[bi, ti])
-                    )
+                    row = t_to_row[global_t]
+                    dp = int(delta_positions[bi, ti])
+                    mark = float(prices[bi, ti])
+                    abs_dp = abs(dp)
+
+                    # 5-level LOB walk（纯 NumPy 数组索引，无 dict 查找）
+                    lvl_p = ap[row] if dp > 0 else bp[row]
+                    lvl_s = as_[row] if dp > 0 else bs[row]
+
+                    qty = float(abs_dp)
+                    fill_cash = 0.0
+                    last_p = mark
+                    for lv in range(5):
+                        lp, ls = float(lvl_p[lv]), float(lvl_s[lv])
+                        if lp <= 0 or ls <= 0:
+                            continue
+                        last_p = lp
+                        fill_qty = min(qty, ls)
+                        fill_cash += fill_qty * lp
+                        qty -= fill_qty
+                        if qty <= 0:
+                            break
+                    if qty > 0:
+                        fill_cash += qty * last_p
+
+                    slip = (fill_cash - abs_dp * mark) if dp > 0 else (abs_dp * mark - fill_cash)
+                    slippages[bi, ti] = max(slip, 0.0)
 
     # 总执行损失
     execution_costs = slippages + commissions  # (B, h)
@@ -1096,10 +1137,19 @@ def evaluate_training_subset_diagnostics(
         - gt oracle 是否明显高于 learned；
         - best fixed archetype 是否已经为负。
 
+    性能优化:
+        原实现对 learned / random / oracle / K 个 fixed 分别调用 _run_policy_on_horizons，
+        共 K+3 次 batch_decode_actions + vectorized_execute_horizons。
+        改为把所有策略的 actions 堆叠成 ((K+3)×subset_size,) 的大批量，
+        一次 batch_decode_actions + 一次 vectorized_execute_horizons 完成，
+        decoder 前向和 LOB slippage 预提取各只做一次。
+
     论文相关:
         这一步并不改变论文算法本身，而是对 Section 4.2 的 archetype selector
         做工程诊断，帮助判断瓶颈在 selector 还是在 frozen archetype 基座。
     """
+    K = codebook.embeddings.weight.size(0)  # archetype 数量
+
     subset_size = min(int(diagnostic_horizons), train_env.num_horizons)
     if subset_size <= 0:
         return {
@@ -1116,6 +1166,7 @@ def evaluate_training_subset_diagnostics(
     horizon_indices = np.random.choice(train_env.num_horizons, size=subset_size, replace=False)
     horizon_indices = np.asarray(horizon_indices, dtype=np.int64)
 
+    # --- 计算各策略的 archetype 选择 ---
     states_np = get_horizon_start_states(train_env, horizon_indices)
     states_t = torch.tensor(states_np, dtype=torch.float32, device=device)
     with torch.no_grad():
@@ -1123,58 +1174,67 @@ def evaluate_training_subset_diagnostics(
         learned_actions = torch.argmax(action_probs, dim=-1).detach().cpu().numpy()
 
     gt_labels = get_ground_truth_labels(
-        encoder=encoder,
-        codebook=codebook,
-        demo_states=demo_states,
-        demo_actions=demo_actions,
-        demo_rewards=demo_rewards,
-        horizon_indices=horizon_indices,
-        device=device,
+        encoder=encoder, codebook=codebook,
+        demo_states=demo_states, demo_actions=demo_actions, demo_rewards=demo_rewards,
+        horizon_indices=horizon_indices, device=device,
     ).detach().cpu().numpy()
 
-    learned_metrics = _run_policy_on_horizons(
-        codebook=codebook,
-        decoder=decoder,
-        env=train_env,
-        horizon_indices=horizon_indices,
-        device=device,
-        selected_archetypes=learned_actions,
-    )
-
     rng = np.random.default_rng(12345)
-    random_actions = rng.integers(0, codebook.embeddings.weight.size(0), size=subset_size, dtype=np.int64)
-    random_metrics = _run_policy_on_horizons(
-        codebook=codebook,
-        decoder=decoder,
-        env=train_env,
-        horizon_indices=horizon_indices,
-        device=device,
-        selected_archetypes=random_actions,
-    )
+    random_actions = rng.integers(0, K, size=subset_size, dtype=np.int64)
 
-    oracle_metrics = _run_policy_on_horizons(
-        codebook=codebook,
-        decoder=decoder,
-        env=train_env,
-        horizon_indices=horizon_indices,
+    # fixed_actions[k] = 全部选第 k 个 archetype，shape (K, subset_size)
+    fixed_actions_all = np.stack(
+        [np.full(subset_size, k, dtype=np.int64) for k in range(K)], axis=0
+    )  # (K, subset_size)
+
+    # --- 把所有策略的 actions 拼成一个大批量，一次 decode + execute ---
+    # 顺序: [learned, random, oracle, fixed_0, fixed_1, ..., fixed_{K-1}]
+    # 每段长度均为 subset_size，总长度 = (K+3) × subset_size
+    all_archetypes = np.concatenate(
+        [learned_actions, random_actions, gt_labels] + list(fixed_actions_all),
+        axis=0,
+    )  # ((K+3) × subset_size,)
+
+    tiled_horizon_indices = np.tile(horizon_indices, K + 3)  # ((K+3) × subset_size,)
+
+    archetype_t = torch.tensor(all_archetypes, dtype=torch.long, device=device)
+
+    # 一次 batch_decode_actions：decoder 前向只跑一次
+    all_actions_np = batch_decode_actions(
+        decoder=decoder, codebook=codebook, env=train_env,
+        horizon_indices=tiled_horizon_indices,
+        archetype_indices=archetype_t,
         device=device,
-        selected_archetypes=gt_labels,
-    )
+    )  # ((K+3)×subset_size, h)
+
+    # 一次 vectorized_execute_horizons：LOB 预提取只做一次
+    horizon_returns_np, horizon_details = vectorized_execute_horizons(
+        env=train_env,
+        horizon_indices=tiled_horizon_indices,
+        all_actions=all_actions_np,
+        need_diagnostics=True,
+    )  # ((K+3)×subset_size,)
+
+    # --- 按段切分结果 ---
+    def _slice_metrics(start: int) -> dict[str, Any]:
+        """取第 start 段（长度 subset_size）的诊断指标。"""
+        seg = slice(start * subset_size, (start + 1) * subset_size)
+        return _aggregate_execution_diagnostics(horizon_details[seg])
+
+    learned_metrics = _slice_metrics(0)
+    random_metrics  = _slice_metrics(1)
+    oracle_metrics  = _slice_metrics(2)
 
     fixed_returns: list[float] = []
-    for archetype_idx in range(codebook.embeddings.weight.size(0)):
-        fixed_actions = np.full(subset_size, archetype_idx, dtype=np.int64)
-        fixed_metrics = _run_policy_on_horizons(
-            codebook=codebook,
-            decoder=decoder,
-            env=train_env,
-            horizon_indices=horizon_indices,
-            device=device,
-            selected_archetypes=fixed_actions,
-        )
-        fixed_returns.append(float(fixed_metrics["avg_return"]))
+    for k in range(K):
+        fixed_returns.append(float(_slice_metrics(3 + k)["avg_return"]))
 
     best_fixed_idx = int(np.argmax(fixed_returns)) if fixed_returns else -1
+
+    # selected_histogram 需要单独计算（_aggregate_execution_diagnostics 不含）
+    learned_metrics["selected_histogram"] = _format_histogram_from_counts(
+        _histogram_counts(learned_actions, K)
+    )
 
     return {
         "num_horizons": subset_size,
@@ -1186,7 +1246,7 @@ def evaluate_training_subset_diagnostics(
         "learned_gt_agreement": float(np.mean(learned_actions == gt_labels)) if gt_labels.size > 0 else 0.0,
         "learned_selected_histogram": learned_metrics["selected_histogram"],
         "oracle_label_histogram": _format_histogram_from_counts(
-            _histogram_counts(gt_labels, codebook.embeddings.weight.size(0))
+            _histogram_counts(gt_labels, K)
         ),
         "fixed_returns": "[" + ", ".join(f"{idx}:{ret:.4f}" for idx, ret in enumerate(fixed_returns)) + "]",
         "learned_avg_gross_pnl": float(learned_metrics["avg_gross_pnl"]),

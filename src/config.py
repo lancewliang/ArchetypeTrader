@@ -49,9 +49,9 @@ class Config:
     phase2_total_steps: int = 3_000_000
     selection_alpha: float = 1.0  # KL 惩罚系数
     phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
-    phase2_rollout_batch_size: int = 1024
-    phase2_ppo_epochs: int = 4
-    phase2_minibatch_size: int = 256
+    phase2_rollout_batch_size: int = 4096
+    phase2_ppo_epochs: int = 16
+    phase2_minibatch_size: int = 512
     phase2_clip_eps: float = 0.2
     phase2_vf_coef: float = 0.001
     phase2_ent_coef: float = 0.1
@@ -62,6 +62,7 @@ class Config:
 
     # Phase III 配置
     phase3_total_steps: int = 1_000_000
+    phase3_num_envs: int = 16            # 每轮并行收集的 horizon 数，增大可提升 GPU 利用率
     refinement_hidden_dim: int = 128  # Refinement Agent 隐藏层维度
     refinement_beta1: float = 0.5  # regret 系数，可选 {0.3, 0.5, 0.7}
     refinement_beta2: float = 1.0  # 策略正则化系数
@@ -275,6 +276,10 @@ def parse_args(argv: list | None = None) -> Config:
         "--phase3-total-steps", type=int, default=None, help="Phase III 总训练步数"
     )
     parser.add_argument(
+        "--phase3-num-envs", type=int, default=None,
+        help="Phase III 每轮并行收集的 horizon 数 (默认 8)",
+    )
+    parser.add_argument(
         "--beta1",
         type=float,
         default=None,
@@ -358,6 +363,7 @@ def parse_args(argv: list | None = None) -> Config:
         "phase2_diagnostic_horizons": getattr(args, "phase2_diagnostic_horizons", None),
         "phase2_stop_on_unhealthy": getattr(args, "phase2_stop_on_unhealthy", None),
         "phase3_total_steps": getattr(args, "phase3_total_steps", None),
+        "phase3_num_envs": getattr(args, "phase3_num_envs", None),
         "batch_size": getattr(args, "batch_size", None),
         "discount_factor": getattr(args, "discount_factor", None),
     }
