@@ -98,6 +98,11 @@ class TrajectoryDataset(Dataset):
         self.actions = torch.as_tensor(actions, dtype=torch.long)
         self.rewards = torch.as_tensor(rewards, dtype=torch.float32)
 
+        # 滑窗采样的真实起点索引（由 DPPlanner 生成时写入 npz）
+        # shape (N,)，值为原始时间序列中的绝对行索引
+        # 若未提供（旧格式 npz 或手动构造），则为 None
+        self.sampled_start_indices: np.ndarray | None = None
+
     def normalize_states(self, raw_states: np.ndarray) -> np.ndarray:
         """用本数据集的统计量归一化外部 states（如 env.states）。"""
         if self.norm_stats is None:
@@ -131,10 +136,13 @@ class TrajectoryDataset(Dataset):
         if missing:
             raise KeyError(f".npz 文件缺少必要的键: {missing}，可用的键: {list(data.keys())}")
 
-        return cls(
+        dataset = cls(
             states=data["states"],
             actions=data["actions"],
             rewards=data["rewards"],
             normalize=normalize,
             norm_stats=norm_stats,
         )
+        if "sampled_start_indices" in data:
+            dataset.sampled_start_indices = data["sampled_start_indices"].astype(np.int64)
+        return dataset

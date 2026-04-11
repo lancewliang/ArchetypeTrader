@@ -852,6 +852,25 @@ def validate_phase1_artifacts(
             if "commission_rate" in _cache_data.files:
                 cached_commission_rate = float(np.asarray(_cache_data["commission_rate"]).reshape(()).item())
 
+            # 前置 state_dim 硬检查：在任何 DP 回放或 np.allclose 之前就报错，
+            # 避免出现难以理解的 shape 不匹配（如 (72,40) vs (72,24)）。
+            if "states" in _cache_data.files:
+                cached_states = _cache_data["states"]
+                if cached_states.ndim == 3:
+                    cache_state_dim = int(cached_states.shape[2])
+                    config_state_dim = int(config.state_dim)
+                    if cache_state_dim != config_state_dim:
+                        msg = (
+                            f"state_dim 不匹配: 轨迹缓存={cache_state_dim}, "
+                            f"当前 config={config_state_dim}。"
+                            f"请检查 cycle_features 配置是否与生成缓存时一致。"
+                        )
+                        logger.error("validate_phase1_artifacts: %s", msg)
+                        report["status"]["hard_failures"].append(msg)
+                        report["status"]["overall_passed"] = False
+                        save_phase1_validation_report(report_path, report)
+                        return report
+
         if env is None:
             logger.info("Phase I 验证: 重新加载训练特征与 TradingEnv")
             pipeline = FeaturePipeline(

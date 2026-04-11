@@ -897,9 +897,15 @@ def ppo_update(
             value_pred = values.squeeze(-1)
             value_loss = F.mse_loss(value_pred, mb_returns)
 
-            # Eq.(5): KL(â_sel || π_sel)
-            # one-hot(gt) 对 policy 的 KL，可等价实现为 NLL / cross-entropy。
-            imitation_loss = F.nll_loss(torch.log(action_probs + 1e-8), mb_gt_labels)
+            # Eq.(5): KL(â_sel || π_sel)，advantage-weighted 版本：
+            # 只对 advantage > 0 的样本施加 imitation 正则，
+            # 避免把 policy 拉向 DP 建议但 env 收益为负的 archetype，
+            # 从而让 RL 信号在 weak_edge 区域能主导更新方向。
+            pos_mask = (mb_advantages > 0).float()  # (mb,)
+            per_sample_nll = F.nll_loss(
+                torch.log(action_probs + 1e-8), mb_gt_labels, reduction="none"
+            )  # (mb,)
+            imitation_loss = (pos_mask * per_sample_nll).sum() / (pos_mask.sum() + 1e-8)
 
             # Actor 损失：PPO policy + entropy + imitation prior。
             # Critic 损失单独优化，避免 value loss 梯度劫持 shared backbone。
