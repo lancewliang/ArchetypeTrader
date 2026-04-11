@@ -71,7 +71,7 @@ def run_horizon_inference(
     env: TradingEnv,
     horizon_idx: int,
     base_actions: np.ndarray,
-    refinement_agent: RefinementAgent,
+    refinement_agent: RefinementAgent | None,
     policy_adapter: PolicyAdapter,
     e_a_sel: np.ndarray,
     device: torch.device,
@@ -81,6 +81,7 @@ def run_horizon_inference(
     """在一个 horizon 内执行完整三阶段推理。
 
     Args:
+        refinement_agent: Phase III 精炼模型；为 None 时跳过精炼，直接执行 base actions。
         tracker: PortfolioTracker 实例，管理跨 horizon 的资金与持仓
 
     Returns:
@@ -161,9 +162,12 @@ def run_horizon_inference(
         s_ref2 = torch.tensor(context, dtype=torch.float32, device=device).unsqueeze(0)
 
         with torch.no_grad():
-            action_probs, _ = refinement_agent(s_ref1, s_ref2)
-            a_ref_idx = torch.argmax(action_probs, dim=-1).item()
-            a_ref = a_ref_idx - 1
+            if refinement_agent is not None:
+                action_probs, _ = refinement_agent(s_ref1, s_ref2)
+                a_ref_idx = torch.argmax(action_probs, dim=-1).item()
+                a_ref = a_ref_idx - 1
+            else:
+                a_ref = 0  # 不调整，直接沿用 base action
 
         a_final, has_adjusted = policy_adapter.compute_final_action(
             a_base, a_base_prev, a_ref, has_adjusted,
@@ -237,8 +241,18 @@ def evaluate_pair(
     config: Config | None = None,
     pair: str = "ETH",
     device: torch.device | None = None,
+    split: str = "test",
+    output_subdir: str | None = None,
+    with_phase3: bool = True,
 ) -> dict:
     """对单个交易对执行完整评估。
+
+    Args:
+        split: 数据集划分，"val" 或 "test"（默认 "test"）。
+        output_subdir: CSV 和 JSON 的输出子目录名，默认为 "evaluation_{split}"。
+                       传入 "phase2_eval_val" 等可避免不同阶段的结果互相覆盖。
+        with_phase3: 是否加载并使用 Phase III refinement 模型（默认 True）。
+                     Phase II 结束后评估时传 False，跳过 refinement 直接执行 base actions。
 
     Returns:
         评估结果字典
@@ -247,23 +261,34 @@ def evaluate_pair(
         config = parse_args([])
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if split not in ("val", "test"):
+        raise ValueError(f"split 必须为 'val' 或 'test'，收到: {split!r}")
 
     logger.info("=" * 50)
-    logger.info("评估交易对: %s", pair)
+    logger.info("评估交易对: %s [split=%s]", pair, split)
     logger.info("=" * 50)
 
-    # 加载三阶段模型
+    # 加载模型：始终加载 phase1+2；phase3 由 with_phase3 参数显式控制
     codebook, decoder, normalizer = load_phase1_model(config, pair, device)
     selection_agent = load_phase2_model(config, pair, device)
-    refinement_agent = load_phase3_model(config, pair, device)
+    if with_phase3:
+        refinement_agent = load_phase3_model(config, pair, device)
+    else:
+        refinement_agent = None
+        logger.info("with_phase3=False，跳过 Phase III 模型加载，直接执行 base actions")
 
     # 加载特征数据
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
     pipeline = FeaturePipeline(
         config.data_dir, pair, cycle_features=config.cycle_features,
     )
-    _, _, test_df = pipeline.get_state_vector()
-    _, _, test_prices_df = pipeline.get_prices()
+    train_df, val_df, test_df = pipeline.get_state_vector()
+    train_prices_df, val_prices_df, test_prices_df = pipeline.get_prices()
+
+    if split == "val":
+        test_df = val_df
+        test_prices_df = val_prices_df
+    # split == "test" 已是默认值，无需额外赋值
 
     test_states = test_df.to_numpy()
     test_prices = test_prices_df["close"].to_numpy()
@@ -318,7 +343,7 @@ def evaluate_pair(
         # Phase I: 生成 base actions
         base_actions = generate_base_actions(decoder, z_q, horizon_states, device)
 
-        # Phase III: Refinement
+        # Phase III: Refinement（val split 时 refinement_agent 为 None，直接用 base actions）
         step_returns = run_horizon_inference(
             env=test_env,
             horizon_idx=h_idx,
@@ -374,8 +399,9 @@ def evaluate_pair(
 
     result = {
         "pair": pair,
-        "test_start": config.test_start,
-        "test_end": config.test_end,
+        "split": split,
+        "data_start": config.val_start if split == "val" else config.test_start,
+        "data_end": config.val_end if split == "val" else config.test_end,
         "num_horizons": test_env.num_horizons,
         "num_steps": len(all_step_returns),
         "beta1": config.refinement_beta1,
@@ -383,7 +409,9 @@ def evaluate_pair(
     }
 
     # 导出 CSV（每 50000 行一个文件，数字编号）
-    csv_save_dir = config.get_stage_result_dir(pair, "evaluation")
+    csv_save_dir = config.get_stage_result_dir(
+        pair, output_subdir if output_subdir else f"evaluation_{split}"
+    )
     os.makedirs(csv_save_dir, exist_ok=True)
     csv_fields = [
         "state_index", "action", "action_label", "execution_price",
@@ -433,4 +461,141 @@ def evaluate_pair(
     logger.info("  Annual Calmar Ratio (ACR):  %.6f", metrics["annual_calmar_ratio"])
     logger.info("  Annual Sortino Ratio (ASoR):%.6f", metrics["annual_sortino_ratio"])
 
+    return result
+
+
+def evaluate_pair_dp(
+    config: Config,
+    pair: str,
+    device: torch.device,
+    split: str = "val",
+    output_subdir: str | None = None,
+) -> dict:
+    """在指定 split 上用 DP 逐 horizon 规划，用 PortfolioTracker 口径计算累计利润。
+
+    用途：与 evaluate_pair 的结果做同口径对比，衡量模型与 DP 上界的差距。
+
+    Args:
+        split: "val" 或 "test"
+        output_subdir: 输出子目录，默认 "dp_{split}"
+    """
+    from src.phase1.dp_planner import DPPlanner
+
+    if split not in ("val", "test"):
+        raise ValueError(f"split 必须为 'val' 或 'test'，收到: {split!r}")
+
+    logger.info("=" * 50)
+    logger.info("DP 基准评估: %s [split=%s]", pair, split)
+    logger.info("=" * 50)
+
+    pipeline = FeaturePipeline(config.data_dir, pair, cycle_features=config.cycle_features)
+    _, val_df, test_df = pipeline.get_state_vector()
+    _, val_prices_df, test_prices_df = pipeline.get_prices()
+
+    df = val_df if split == "val" else test_df
+    prices_df = val_prices_df if split == "val" else test_prices_df
+
+    states = df.to_numpy()
+    prices = prices_df["close"].to_numpy()
+
+    # DP 不需要归一化（直接用原始价格计算奖励）
+    env = TradingEnv(
+        states=states, prices=prices,
+        pair=pair, horizon=config.horizon, states_dataframe=df,
+        max_positions=config.max_positions,
+        commission_rate=config.commission_rate,
+    )
+    logger.info("TradingEnv: %s horizons=%d", split, env.num_horizons)
+
+    if env.num_horizons == 0:
+        return {"pair": pair, "split": split, "mode": "dp", "error": f"no {split} horizons"}
+
+    planner = DPPlanner(
+        env=env,
+        gamma=config.discount_factor,
+        result_dir=config.result_dir,
+        train_batch_id=config.train_batch_id,
+        sampling_seed=getattr(config, "phase1_sampling_seed", 42),
+    )
+
+    initial_capital = float(env.m) * float(prices[0])
+    tracker = PortfolioTracker(initial_capital)
+    logger.info("初始资金: %.2f", initial_capital)
+
+    all_step_returns: List[float] = []
+
+    for h_idx in tqdm(range(env.num_horizons), desc=f"DP {split} {pair}", unit="horizon"):
+        h = env.horizon
+        start = h_idx * h
+        end = min(start + h, len(states))
+        horizon_states_df = df[start:end]
+        horizon_prices = prices[start:end + 1]  # +1 for next-step price
+
+        _, dp_actions, _ = planner.plan(horizon_states_df, horizon_prices)
+
+        # 用 run_horizon_inference 的 tracker 逻辑执行 DP actions
+        # 复用 base_actions 路径（refinement_agent=None）
+        step_returns = run_horizon_inference(
+            env=env,
+            horizon_idx=h_idx,
+            base_actions=dp_actions,
+            refinement_agent=None,
+            policy_adapter=PolicyAdapter(),
+            e_a_sel=np.zeros(config.latent_dim, dtype=np.float32),
+            device=device,
+            horizon=h,
+            tracker=tracker,
+        )
+        all_step_returns.extend(step_returns)
+
+    # 最终平仓
+    final_pos = tracker.state.position
+    if final_pos != 0:
+        last_valid_idx = min(env.num_horizons * env.horizon - 1, len(prices) - 1)
+        final_price = float(prices[last_valid_idx])
+        settle_slippage = 0.0
+        if env.states_dataframe is not None:
+            state_dict = env.states_dataframe.row(last_valid_idx, named=True)
+            settle_slippage = round(
+                TradingEnv.compute_lob_slippage(-final_pos, state_dict, final_price), 2,
+            )
+        pre_final_value = tracker.compute_total_value(final_pos, final_price)[2]
+        if pre_final_value <= 0.0:
+            pre_final_value = 1.0
+        tracker.settle_previous_horizon(
+            final_price, last_valid_idx + 1,
+            new_first_action=1,
+            m=env.m,
+            commission_rate=env.commission_rate,
+            slippage=settle_slippage,
+        )
+        post_final_value = tracker.compute_total_value(0, final_price)[2]
+        if abs(post_final_value - pre_final_value) > 1e-6:
+            all_step_returns.append((post_final_value - pre_final_value) / pre_final_value)
+
+    returns_array = np.array(all_step_returns, dtype=np.float64)
+    engine = EvaluationEngine(annualization_factor=config.annualization_factor)
+    metrics = engine.evaluate(returns_array)
+
+    subdir = output_subdir or f"dp_{split}"
+    result = {
+        "pair": pair,
+        "split": split,
+        "mode": "dp",
+        "data_start": config.val_start if split == "val" else config.test_start,
+        "data_end": config.val_end if split == "val" else config.test_end,
+        "num_horizons": env.num_horizons,
+        "num_steps": len(all_step_returns),
+        **metrics,
+    }
+
+    save_dir = config.get_stage_result_dir(pair, subdir)
+    os.makedirs(save_dir, exist_ok=True)
+    result_path = os.path.join(save_dir, f"{pair}_dp_results.json")
+    with open(result_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+
+    logger.info("DP 评估结果 [%s/%s]: TR=%.4f, ASR=%.4f, MDD=%.4f",
+                pair, split, metrics["total_return"], metrics["annual_sharpe_ratio"],
+                metrics["max_drawdown"])
     return result
