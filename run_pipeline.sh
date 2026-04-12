@@ -28,37 +28,37 @@ echo " 开始时间: $(date '+%Y-%m-%d %H:%M:%S')"
 echo " 日志文件: ${LOG_FILE}"
 echo "========================================================"
 
-# 传递额外参数（跳过第一个 PAIR 参数）
-EXTRA_ARGS="${@:2}"
+# 传递额外参数（跳过 PAIR 和 BATCH_ID 两个位置参数）
+EXTRA_ARGS=("${@:3}")
 
 # --- Phase I: Archetype Discovery ---
 echo ""
 echo ">>> [Phase I] 开始训练 — $(date '+%H:%M:%S')"
-python scripts/train_phase1.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" ${EXTRA_ARGS}
+python scripts/train_phase1.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" "${EXTRA_ARGS[@]}"
 echo ">>> [Phase I] 完成 — $(date '+%H:%M:%S')"
 
 # --- Phase II: Archetype Selection ---
 echo ""
 echo ">>> [Phase II] 开始训练 — $(date '+%H:%M:%S')"
-python scripts/train_phase2.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" --selection-alpha 1.0 --phase2-ent-coef 0.02 ${EXTRA_ARGS}
+python scripts/train_phase2.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" --selection-alpha 1.0 --phase2-ent-coef 0.02 "${EXTRA_ARGS[@]}"
 echo ">>> [Phase II] 完成 — $(date '+%H:%M:%S')"
 
 # --- Phase II 后评估: val + test（无 Phase III，用 base actions 直接执行）---
 echo ""
 echo ">>> [Evaluate after Phase II] val + test — $(date '+%H:%M:%S')"
-python scripts/evaluate.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" --split val test --stage-label phase2_eval --with-dp ${EXTRA_ARGS}
+python scripts/evaluate.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" --split val test --stage-label phase2_eval --with-dp "${EXTRA_ARGS[@]}"
 echo ">>> [Evaluate after Phase II] 完成 — $(date '+%H:%M:%S')"
 
 # --- Phase III: Archetype Refinement ---
 echo ""
 echo ">>> [Phase III] 开始训练 — $(date '+%H:%M:%S')"
-python scripts/train_phase3.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" ${EXTRA_ARGS}
+python scripts/train_phase3.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" "${EXTRA_ARGS[@]}"
 echo ">>> [Phase III] 完成 — $(date '+%H:%M:%S')"
 
 # --- Evaluate ---
 echo ""
 echo ">>> [Evaluate after Phase III] val + test — $(date '+%H:%M:%S')"
-python scripts/evaluate.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" --split val test --stage-label phase3_eval ${EXTRA_ARGS}
+python scripts/evaluate.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" --split val test --stage-label phase3_eval "${EXTRA_ARGS[@]}"
 echo ">>> [Evaluate] 完成 — $(date '+%H:%M:%S')"
 
 echo ""

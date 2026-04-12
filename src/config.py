@@ -10,7 +10,8 @@ from dataclasses import dataclass, field, fields
 from typing import Dict, List
 
 from src.data.feature_pipeline import FIXED_FEATURES, resolve_cycle_features
-
+from src.utils.logger import get_logger
+logger = get_logger(__name__)
 
 @dataclass
 class Config:
@@ -302,7 +303,7 @@ def parse_args(argv: list | None = None) -> Config:
     )
 
     args = parser.parse_args(argv)
-
+    
     # --pair 覆盖 pairs 列表为单元素
     if args.pair is not None:
         args.pairs = [args.pair]
@@ -370,5 +371,5 @@ def parse_args(argv: list | None = None) -> Config:
     for k, v in _remap.items():
         if v is not None:
             setattr(args, k, v)
-
+    logger.info(f"Config: {args}")
     return Config.from_args(args)

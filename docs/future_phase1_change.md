@@ -85,3 +85,12 @@ DP 轨迹的 single-trade 结构是 [flat...flat, action, action...action]。可
 
 特征增强是零风险改动，直接给 decoder 更好的输入信号来判断 change point 方向
 Decoder 加 reward 修复了 encoder-decoder 之间的信息不对称，让 decoder 不用从 z_q 里"猜" reward 信息
+
+
+
+dp优化
+增大或多尺度化 horizon
+把 gamma 往 1 调近一点做对照实验
+放宽 single-trade 约束，允许 2 次或更多 change
+给窗口末端加 continuation value，而不是把窗口外价值当 0
+降低下游 imitation 权重，让 RL 学会偏离 DP 先验
