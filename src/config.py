@@ -50,7 +50,7 @@ class Config:
     phase2_total_steps: int = 3_000_000
     selection_alpha: float = 1.0  # KL 惩罚系数
     phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
-    phase2_rollout_batch_size: int = 4096
+    phase2_rollout_batch_size: int = 2048
     phase2_ppo_epochs: int = 16
     phase2_minibatch_size: int = 512
     phase2_clip_eps: float = 0.2

@@ -44,6 +44,7 @@ from src.phase2.selection_agent import SelectionAgent
 from src.phase3.refinement_agent import RefinementAgent
 from src.phase3.policy_adapter import PolicyAdapter
 from src.phase3.regret_reward import compute_regret_reward, compute_top5_hindsight_optimal
+from src.utils.gpu_guard import log_and_guard_gpu_memory, reset_gpu_peak_memory_stats
 from src.utils.logger import get_logger
 from src.utils.normalizer import StateNormalizer
 
@@ -578,10 +579,13 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("使用设备: %s", device)
     logger.info("结果目录批次: %s", config.train_batch_id)
+    reset_gpu_peak_memory_stats(device)
+    log_and_guard_gpu_memory(logger, stage="Phase III startup", device=device, force_log=False)
 
     # --- 加载冻结模型 ---
     codebook, decoder, normalizer = load_phase1_model(config, pair, device)
     selection_agent = load_phase2_model(config, pair, device)
+    log_and_guard_gpu_memory(logger, stage="Phase III after frozen model load", device=device, force_log=False)
 
     # --- 数据 & 环境 ---
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
@@ -601,6 +605,7 @@ def main() -> None:
         commission_rate=config.train_commission_rate,
     )
     logger.info("TradingEnv: train_horizons=%d", train_env.num_horizons)
+    log_and_guard_gpu_memory(logger, stage="Phase III after env init", device=device, force_log=False)
     if train_env.num_horizons == 0:
         logger.error("训练集 horizon 数量为 0，无法训练")
         sys.exit(1)
@@ -617,6 +622,7 @@ def main() -> None:
         sum(p.numel() for p in refinement_agent.parameters()),
         config.state_dim, context_dim,
     )
+    log_and_guard_gpu_memory(logger, stage="Phase III after agent init", device=device, force_log=False)
 
     optimizer = torch.optim.Adam(
         refinement_agent.parameters(), lr=config.learning_rate,
@@ -732,6 +738,12 @@ def main() -> None:
         if not batch_returns_t:
             continue
 
+        force_gpu_log = (
+            horizon_count == 0
+            or ((horizon_count + len(batch_returns_t)) % log_interval == 0)
+            or (step_count + steps_this_round >= total_steps)
+        )
+
         # ===================================================================
         # 更新阶段: 把 num_envs 个 horizon 的数据合并成一个大 batch，做一次 PPO
         #
@@ -745,6 +757,15 @@ def main() -> None:
         s_ref1_t       = torch.cat(batch_s_ref1_all)      # (N, market_dim)
         s_ref2_t       = torch.cat(batch_s_ref2_all)      # (N, context_dim)
         optimal_actions_t = torch.cat(batch_optimal_actions)  # (N,)
+        log_and_guard_gpu_memory(
+            logger,
+            stage=(
+                "Phase III after batch assembly"
+                f"(step={step_count}, steps_this_round={steps_this_round}, horizons={len(batch_returns_t)})"
+            ),
+            device=device,
+            force_log=force_gpu_log,
+        )
 
         # Advantage 归一化: 减均值除标准差，稳定训练
         advantages = returns_t - old_values_t
@@ -759,6 +780,15 @@ def main() -> None:
             clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef,
             beta2=beta2, max_grad_norm=max_grad_norm,
             ppo_epochs=ppo_epochs,
+        )
+        log_and_guard_gpu_memory(
+            logger,
+            stage=(
+                "Phase III after ppo_update"
+                f"(step={step_count}, steps_this_round={steps_this_round}, horizons={len(batch_returns_t)})"
+            ),
+            device=device,
+            force_log=force_gpu_log,
         )
 
         if np.isnan(last_loss):

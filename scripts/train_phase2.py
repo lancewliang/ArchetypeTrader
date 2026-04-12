@@ -51,6 +51,7 @@ from src.phase1.codebook import VQCodebook
 from src.phase1.vq_decoder import VQDecoder
 from src.phase1.vq_encoder import VQEncoder
 from src.phase2.selection_agent import SelectionAgent
+from src.utils.gpu_guard import log_and_guard_gpu_memory, reset_gpu_peak_memory_stats
 from src.utils.logger import get_logger
 from src.utils.normalizer import StateNormalizer
 
@@ -1451,6 +1452,12 @@ def run_training_loop(
             device=device,
             need_diagnostics=need_diag,
         )
+        log_and_guard_gpu_memory(
+            logger,
+            stage=f"Phase II rollout_batch(step={step_count}, batch={current_batch_size})",
+            device=device,
+            force_log=need_diag,
+        )
         if need_diag:
             last_batch_diag = batch["diagnostics"]
 
@@ -1488,6 +1495,12 @@ def run_training_loop(
             minibatch_size=minibatch_size,
             max_grad_norm=max_grad_norm,
             device=device,
+        )
+        log_and_guard_gpu_memory(
+            logger,
+            stage=f"Phase II ppo_update(step={step_count}, batch={current_batch_size})",
+            device=device,
+            force_log=need_diag,
         )
 
         batch_returns = batch["returns"].detach().cpu().tolist()
@@ -1687,11 +1700,14 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("使用设备: %s", device)
     logger.info("结果目录批次: %s", config.train_batch_id)
+    reset_gpu_peak_memory_stats(device)
+    log_and_guard_gpu_memory(logger, stage="Phase II startup", device=device, force_log=True)
 
     # ----------------------------------------------------------------
     # Step 1: 加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）
     # ----------------------------------------------------------------
     encoder, codebook, decoder, normalizer = load_phase1_model(config, pair, device)
+    log_and_guard_gpu_memory(logger, stage="Phase II after Phase I model load", device=device, force_log=True)
 
     # ----------------------------------------------------------------
     # Step 2: 加载特征数据，初始化 TradingEnv
@@ -1742,6 +1758,7 @@ def main() -> None:
         train_env.num_horizons,
         val_env.num_horizons,
     )
+    log_and_guard_gpu_memory(logger, stage="Phase II after env init", device=device, force_log=False)
 
     if train_env.num_horizons == 0:
         logger.error("训练集 horizon 数量为 0，无法训练")
@@ -1777,6 +1794,7 @@ def main() -> None:
         demo_states.shape[1],
         train_env.num_horizons,
     )
+    log_and_guard_gpu_memory(logger, stage="Phase II after demo load", device=device, force_log=False)
 
     if demo_states.shape[0] < train_env.num_horizons:
         raise ValueError(
@@ -1796,6 +1814,7 @@ def main() -> None:
         "SelectionAgent 初始化完成: params=%d",
         sum(p.numel() for p in agent.parameters()),
     )
+    log_and_guard_gpu_memory(logger, stage="Phase II after agent init", device=device, force_log=True)
 
     optimizer = torch.optim.Adam(
         list(agent.shared.parameters()) + list(agent.policy_head.parameters()),
