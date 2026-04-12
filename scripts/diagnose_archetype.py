@@ -6,9 +6,11 @@
 3. selector 的概率分布熵（是否过于自信/随机）
 4. 每个 archetype 对应的 decoder 输出动作分布（long/flat/short 比例）
 5. 亏损 horizon 的 archetype 分布 vs 盈利 horizon 的分布
+6. k=8 被选时的市场特征 vs 其他 archetype（判断是否真的是震荡行情）
 
 用法:
-    python scripts/diagnose_archetype.py --pair AL --batch_id batch_001 --split val
+    python scripts/diagnose_archetype.py --pair AL --batch-id batch_001 --split val
+    python scripts/diagnose_archetype.py --pair AL --batch-id batch_001 --split val --focus-k 8
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ def parse_args():
     p.add_argument("--pair", default="AL")
     p.add_argument("--batch-id", default="batch_001", dest="batch_id")
     p.add_argument("--split", default="val", choices=["val", "test"])
+    p.add_argument("--focus-k", type=int, default=8, dest="focus_k",
+                   help="重点分析的 archetype index（默认 8）")
     return p.parse_args()
 
 
@@ -44,6 +48,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pair = args.pair
     split = args.split
+    focus_k = args.focus_k
 
     print(f"\n{'='*60}")
     print(f"Archetype 诊断: {pair} [{split}]  batch={args.batch_id}")
@@ -85,6 +90,13 @@ def main():
     archetype_chosen = []                   # 每个 horizon 选的 k
     archetype_action_dist = defaultdict(lambda: np.zeros(3))  # k -> [short, flat, long] counts
 
+    # 用于市场特征对比: 记录每个 horizon 起始 bar 的原始特征（未归一化）
+    # 关注价格动量、波动率代理指标
+    horizon_raw_features = []   # list of dict，每个 horizon 一条
+
+    # 加载原始（未归一化）数据用于特征分析
+    raw_states = df.to_numpy()  # 原始未归一化
+
     for h_idx in tqdm(range(env.num_horizons), desc="诊断中", unit="horizon"):
         h = config.horizon
         start = h_idx * h
@@ -117,6 +129,49 @@ def main():
         # 动作分布统计
         for a in base_actions:
             archetype_action_dist[k][int(a)] += 1
+
+        # 收集原始市场特征（用 horizon 内所有 bar 计算统计量）
+        raw_h = raw_states[start:end]  # (h, feature_dim)
+        col_names = df.columns
+        close_idx = col_names.index("close") if "close" in col_names else 0
+        prices_h = raw_h[:, close_idx]
+
+        # 价格动量: horizon 内价格变化幅度
+        price_range_pct = (prices_h.max() - prices_h.min()) / (prices_h.mean() + 1e-8)
+        # 方向性: 终价 vs 初价
+        price_direction = (prices_h[-1] - prices_h[0]) / (prices_h[0] + 1e-8)
+        # 波动率代理: 逐步收益率的标准差
+        step_rets = np.diff(prices_h) / (prices_h[:-1] + 1e-8)
+        volatility = float(step_rets.std()) if len(step_rets) > 1 else 0.0
+        # 趋势强度: |方向| / 波动范围
+        trend_strength = abs(price_direction) / (price_range_pct + 1e-8)
+
+        # 成交量相关（如果有）
+        vol_idx = col_names.index("total_trade_volume") if "total_trade_volume" in col_names else None
+        avg_volume = float(raw_h[:, vol_idx].mean()) if vol_idx is not None else 0.0
+
+        # LOB 不平衡（bid1_size vs ask1_size）
+        bid1_idx = col_names.index("bid1_size") if "bid1_size" in col_names else None
+        ask1_idx = col_names.index("ask1_size") if "ask1_size" in col_names else None
+        if bid1_idx is not None and ask1_idx is not None:
+            bid1 = raw_h[:, bid1_idx].mean()
+            ask1 = raw_h[:, ask1_idx].mean()
+            lob_imbalance = float((bid1 - ask1) / (bid1 + ask1 + 1e-8))
+        else:
+            lob_imbalance = 0.0
+
+        horizon_raw_features.append({
+            "h_idx": h_idx,
+            "k": k,
+            "h_return": h_return,
+            "price_range_pct": float(price_range_pct),
+            "price_direction": float(price_direction),
+            "volatility": float(volatility),
+            "trend_strength": float(trend_strength),
+            "avg_volume": avg_volume,
+            "lob_imbalance": lob_imbalance,
+            "entropy": entropy,
+        })
 
     archetype_chosen = np.array(archetype_chosen)
     archetype_probs_entropy = np.array(archetype_probs_entropy)
@@ -213,6 +268,87 @@ def main():
     print(f"  最常选 archetype: k={dominant_k}  freq={dominant_freq:.1f}%")
     if dominant_freq > 50:
         print(f"  ⚠️  selector 严重坍缩到 k={dominant_k}，多样性不足")
+
+    # ---- 【6】focus_k 市场特征对比分析 ----
+    feat_keys = ["price_range_pct", "price_direction", "volatility", "trend_strength",
+                 "avg_volume", "lob_imbalance"]
+    feat_labels = {
+        "price_range_pct":  "价格振幅%    (高=波动大)",
+        "price_direction":  "价格方向     (正=上涨,负=下跌)",
+        "volatility":       "逐步波动率   (高=震荡)",
+        "trend_strength":   "趋势强度     (高=趋势,低=震荡)",
+        "avg_volume":       "平均成交量",
+        "lob_imbalance":    "LOB不平衡    (正=买压,负=卖压)",
+    }
+
+    focus_rows = [r for r in horizon_raw_features if r["k"] == focus_k]
+    other_rows  = [r for r in horizon_raw_features if r["k"] != focus_k]
+
+    print(f"\n{'='*60}")
+    print(f"【6】k={focus_k} 市场特征对比 (k={focus_k} vs 其他所有 archetype)")
+    print(f"{'='*60}")
+    print(f"  k={focus_k} 样本数: {len(focus_rows)}   其他: {len(other_rows)}\n")
+
+    print(f"  {'特征':<30}  {'k='+str(focus_k)+' 均值':>12}  {'其他均值':>10}  {'差异':>10}  结论")
+    print(f"  {'-'*80}")
+    for fk in feat_keys:
+        fv_focus = np.array([r[fk] for r in focus_rows])
+        fv_other = np.array([r[fk] for r in other_rows])
+        m_focus = fv_focus.mean()
+        m_other = fv_other.mean()
+        diff_pct = (m_focus - m_other) / (abs(m_other) + 1e-10) * 100
+        if fk == "trend_strength":
+            verdict = "✓ 确实震荡" if m_focus < m_other * 0.8 else ("✗ 趋势行情" if m_focus > m_other * 1.2 else "≈ 相近")
+        elif fk == "volatility":
+            verdict = "✓ 低波动" if m_focus < m_other * 0.8 else ("✗ 高波动" if m_focus > m_other * 1.2 else "≈ 相近")
+        elif fk == "price_range_pct":
+            verdict = "✓ 窄幅震荡" if m_focus < m_other * 0.8 else ("✗ 宽幅波动" if m_focus > m_other * 1.2 else "≈ 相近")
+        else:
+            verdict = ""
+        label = feat_labels[fk]
+        print(f"  {label:<30}  {m_focus:>12.6f}  {m_other:>10.6f}  {diff_pct:>+9.1f}%  {verdict}")
+
+    # k=focus_k 内部：盈利 vs 亏损 horizon 的特征差异
+    focus_win  = [r for r in focus_rows if r["h_return"] >= 0]
+    focus_loss = [r for r in focus_rows if r["h_return"] < 0]
+    print(f"\n  k={focus_k} 内部: 盈利 {len(focus_win)} 次 vs 亏损 {len(focus_loss)} 次")
+    if focus_win and focus_loss:
+        print(f"\n  {'特征':<30}  {'盈利均值':>10}  {'亏损均值':>10}  差异")
+        print(f"  {'-'*65}")
+        for fk in feat_keys:
+            mw = np.mean([r[fk] for r in focus_win])
+            ml = np.mean([r[fk] for r in focus_loss])
+            diff_pct = (mw - ml) / (abs(ml) + 1e-10) * 100
+            print(f"  {feat_labels[fk]:<30}  {mw:>10.6f}  {ml:>10.6f}  {diff_pct:>+8.1f}%")
+
+    # 价格方向分布对比
+    print(f"\n  k={focus_k} 被选时的价格方向分布:")
+    focus_dirs = np.array([r["price_direction"] for r in focus_rows])
+    print(f"    上涨 horizon (dir>0.001): {np.sum(focus_dirs > 0.001)} 次 "
+          f"({np.mean(focus_dirs > 0.001)*100:.1f}%)")
+    print(f"    下跌 horizon (dir<-0.001): {np.sum(focus_dirs < -0.001)} 次 "
+          f"({np.mean(focus_dirs < -0.001)*100:.1f}%)")
+    print(f"    横盘 horizon: {np.sum(np.abs(focus_dirs) <= 0.001)} 次 "
+          f"({np.mean(np.abs(focus_dirs) <= 0.001)*100:.1f}%)")
+
+    other_dirs = np.array([r["price_direction"] for r in other_rows])
+    print(f"\n  其他 archetype 被选时的价格方向分布:")
+    print(f"    上涨 horizon (dir>0.001): {np.sum(other_dirs > 0.001)} 次 "
+          f"({np.mean(other_dirs > 0.001)*100:.1f}%)")
+    print(f"    下跌 horizon (dir<-0.001): {np.sum(other_dirs < -0.001)} 次 "
+          f"({np.mean(other_dirs < -0.001)*100:.1f}%)")
+    print(f"    横盘 horizon: {np.sum(np.abs(other_dirs) <= 0.001)} 次 "
+          f"({np.mean(np.abs(other_dirs) <= 0.001)*100:.1f}%)")
+
+    # 关键：k=focus_k 被选时有多少 horizon 其实有明显趋势
+    mismatched = [r for r in focus_rows if abs(r["price_direction"]) > 0.002]
+    print(f"\n  ⚠️  k={focus_k} 被选但价格方向明显(|dir|>0.2%): {len(mismatched)} 次 "
+          f"({len(mismatched)/max(len(focus_rows),1)*100:.1f}%)")
+    if mismatched:
+        mm_returns = np.array([r["h_return"] for r in mismatched])
+        print(f"     这些 horizon 的平均 return: {mm_returns.mean():.2f}  "
+              f"(亏损比例: {np.mean(mm_returns < 0)*100:.1f}%)")
+        print(f"     → 这部分是 selector 误判，把趋势行情当成震荡行情处理")
 
 
 if __name__ == "__main__":
