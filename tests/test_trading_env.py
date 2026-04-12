@@ -7,7 +7,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from src.data.feature_pipeline import SINGLE_FEATURES, TREND_FEATURES
+from src.data.feature_pipeline import FIXED_FEATURES
 from src.env.trading_env import TradingEnv
 
 
@@ -17,7 +17,7 @@ from src.env.trading_env import TradingEnv
 
 def _make_env(
     T: int = 144,
-    state_dim: int = 45,
+    state_dim: int = len(FIXED_FEATURES),
     pair: str = "BTC",
     horizon: int = 72,
     price_start: float = 50000.0,
@@ -27,7 +27,7 @@ def _make_env(
     rng = np.random.RandomState(42)
     states = rng.randn(T, state_dim).astype(np.float64)
     prices = np.arange(price_start, price_start + T * price_step, price_step)[:T]
-    feature_cols = SINGLE_FEATURES + TREND_FEATURES
+    feature_cols = FIXED_FEATURES
     states_df = pl.DataFrame(states, schema=feature_cols[:state_dim])
     return TradingEnv(states=states, prices=prices, pair=pair, horizon=horizon, states_dataframe=states_df)
 
@@ -54,13 +54,13 @@ class TestInit:
             assert env.m == TradingEnv.MAX_POSITIONS[pair]
 
     def test_invalid_pair_raises(self):
-        states = np.zeros((144, 45))
+        states = np.zeros((144, len(FIXED_FEATURES)))
         prices = np.zeros(144)
         with pytest.raises(ValueError, match="不支持的交易对"):
             TradingEnv(states, prices, pair="XRP")
 
     def test_states_prices_length_mismatch(self):
-        states = np.zeros((100, 45))
+        states = np.zeros((100, len(FIXED_FEATURES)))
         prices = np.zeros(50)
         with pytest.raises(ValueError, match="不一致"):
             TradingEnv(states, prices, pair="BTC")
@@ -166,7 +166,7 @@ class TestReward:
     def test_flat_position_zero_reward_no_cost(self):
         """flat 持仓 + flat 动作 → 奖励 ≈ 0（无持仓收益，无执行损失）"""
         T = 144
-        states = np.zeros((T, 45))
+        states = np.zeros((T, len(FIXED_FEATURES)))
         prices = np.ones(T) * 100.0
         env = TradingEnv(states, prices, pair="BTC")
         env.reset(0)
@@ -176,7 +176,7 @@ class TestReward:
     def test_long_position_price_increase(self):
         """long 持仓 + 价格上涨 → 正奖励（扣除执行损失）"""
         T = 144
-        states = np.zeros((T, 45))
+        states = np.zeros((T, len(FIXED_FEATURES)))
         prices = np.zeros(T)
         prices[0] = 100.0
         prices[1] = 110.0
@@ -194,7 +194,7 @@ class TestReward:
     def test_short_position_price_decrease(self):
         """short 持仓 + 价格下跌 → 正奖励"""
         T = 144
-        states = np.zeros((T, 45))
+        states = np.zeros((T, len(FIXED_FEATURES)))
         prices = np.zeros(T)
         prices[0] = 100.0
         prices[1] = 90.0
@@ -211,7 +211,7 @@ class TestReward:
     def test_reward_formula_eq1(self):
         """直接验证 Eq. 1: r = P_t × (p_{t+1} - p_t) - O_t"""
         T = 144
-        states = np.zeros((T, 45))
+        states = np.zeros((T, len(FIXED_FEATURES)))
         prices = np.linspace(100, 200, T)
         env = TradingEnv(states, prices, pair="ETH")
         env.reset(0)
@@ -315,7 +315,7 @@ def _make_prop_env(
     horizon: int,
     prices: np.ndarray | None = None,
     T: int | None = None,
-    state_dim: int = 45,
+    state_dim: int = len(FIXED_FEATURES),
 ) -> TradingEnv:
     """Helper to create a TradingEnv for property tests.
 
@@ -330,8 +330,7 @@ def _make_prop_env(
         prices = np.linspace(100.0, 200.0, T_actual)
     rng = np.random.RandomState(0)
     states = rng.randn(T_actual, state_dim).astype(np.float64)
-    feature_cols = SINGLE_FEATURES + TREND_FEATURES
-    states_df = pl.DataFrame(states, schema=feature_cols)
+    states_df = pl.DataFrame(states, schema=FIXED_FEATURES[:state_dim])
     return TradingEnv(states=states, prices=prices, pair=pair, horizon=horizon, states_dataframe=states_df)
 
 

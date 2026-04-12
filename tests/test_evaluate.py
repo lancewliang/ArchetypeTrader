@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from src.config import Config
-from src.data.feature_pipeline import SINGLE_FEATURES, TREND_FEATURES
+from src.data.feature_pipeline import FIXED_FEATURES
 from src.env.trading_env import TradingEnv
 from src.evaluation.portfolio_tracker import (
     PortfolioTracker,
@@ -34,7 +34,7 @@ from src.phase3.refinement_agent import RefinementAgent
 # Fixtures
 # ---------------------------------------------------------------------------
 
-STATE_DIM = 45
+STATE_DIM = len(FIXED_FEATURES)
 HORIZON = 12
 NUM_ARCHETYPES = 4
 LATENT_DIM = 8
@@ -51,7 +51,7 @@ def _make_env(
     rng = np.random.RandomState(42)
     states = rng.randn(T, STATE_DIM).astype(np.float64)
     prices = np.arange(price_start, price_start + T * price_step, price_step)[:T]
-    feature_cols = SINGLE_FEATURES + TREND_FEATURES
+    feature_cols = FIXED_FEATURES
     states_df = pl.DataFrame(states, schema=feature_cols[:STATE_DIM])
     return TradingEnv(
         states=states, prices=prices, pair=pair, horizon=horizon,
@@ -525,8 +525,7 @@ class TestComputeBaseReturn:
         T = 24
         states = np.random.randn(T, STATE_DIM)
         prices = np.linspace(100, 200, T)
-        feature_cols = SINGLE_FEATURES + TREND_FEATURES
-        states_df = pl.DataFrame(states, schema=feature_cols[:STATE_DIM])
+        states_df = pl.DataFrame(states, schema=FIXED_FEATURES[:STATE_DIM])
         env = TradingEnv(states=states, prices=prices, pair="ETH", horizon=12, states_dataframe=states_df)
         actions = np.full(12, 2, dtype=np.int64)  # 全 long
         ret = compute_base_return(env, 0, actions)

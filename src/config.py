@@ -5,9 +5,13 @@
 
 import argparse
 import json
+import os
 from dataclasses import dataclass, field, fields
 from typing import Dict, List
 
+from src.data.feature_pipeline import FIXED_FEATURES, resolve_cycle_features
+from src.utils.logger import get_logger
+logger = get_logger(__name__)
 
 @dataclass
 class Config:
@@ -16,19 +20,20 @@ class Config:
     # 数据配置
     data_dir: str = "data"
     result_dir: str = "result"
-    pairs: List[str] = field(default_factory=lambda: ["ETH"])
+    train_batch_id: str = "default"
+    pairs: List[str] = field(default_factory=lambda: [ "AL","ETH"])
 
     # 特征维度
-    single_feature_dim: int = 36
-    trend_feature_dim: int = 9
-    state_dim: int = 45  # single + trend
+    cycle_feature_sets: List[str] = field(default_factory=list)
 
     # MDP 配置
     action_dim: int = 3  # {0: short, 1: flat, 2: long}
     horizon: int = 72  # h = 72 步
-    commission_rate: float = 0.0002  # δ = 0.02%（论文值）
+    commission_rate: float = 0.0003  # δ = 0.03%（真实佣金率，用于 evaluation）
+    dp_commission_rate: float = 0.0008  # DP planner 用 0.1%（高门槛筛选高利润轨迹）
+    train_commission_rate: float = 0.0008  # Phase 1/2/3 训练用 0.06%（2× 真实费率，留安全边际）
     max_positions: Dict[str, int] = field(
-        default_factory=lambda: {"BTC": 8, "ETH": 5, "DOT": 2500, "BNB": 200}
+        default_factory=lambda: { "ETH": 100, "AL": 10}
     )
 
     # Phase I 配置
@@ -44,9 +49,21 @@ class Config:
     # Phase II 配置
     phase2_total_steps: int = 3_000_000
     selection_alpha: float = 1.0  # KL 惩罚系数
+    phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
+    phase2_rollout_batch_size: int = 2048
+    phase2_ppo_epochs: int = 16
+    phase2_minibatch_size: int = 512
+    phase2_clip_eps: float = 0.2
+    phase2_vf_coef: float = 0.001
+    phase2_ent_coef: float = 0.1
+    phase2_max_grad_norm: float = 1.0
+    phase2_log_interval: int = 1000000
+    phase2_eval_max_horizons: int | None = None
+    phase2_diagnostic_horizons: int = 128
 
     # Phase III 配置
     phase3_total_steps: int = 1_000_000
+    phase3_num_envs: int = 16            # 每轮并行收集的 horizon 数，增大可提升 GPU 利用率
     refinement_hidden_dim: int = 128  # Refinement Agent 隐藏层维度
     refinement_beta1: float = 0.5  # regret 系数，可选 {0.3, 0.5, 0.7}
     refinement_beta2: float = 1.0  # 策略正则化系数
@@ -71,6 +88,36 @@ class Config:
 
     # 评估
     annualization_factor: int = 52560  # 10分钟级别年化因子
+
+    @property
+    def cycle_features(self) -> List[str]:
+        """根据配置选择 short/middle/long cycle 特征。"""
+        return resolve_cycle_features(self.cycle_feature_sets)
+
+    @property
+    def fixed_feature_dim(self) -> int:
+        return len(FIXED_FEATURES)
+
+    @property
+    def cycle_feature_dim(self) -> int:
+        return len(self.cycle_features)
+
+    @property
+    def state_dim(self) -> int:
+        """状态维度 = fixed features + selected cycle features。"""
+        return self.fixed_feature_dim + self.cycle_feature_dim
+
+    def get_batch_result_dir(self) -> str:
+        """批次级结果目录: result/批次号。"""
+        return os.path.join(self.result_dir, self.train_batch_id)
+
+    def get_pair_result_dir(self, pair: str) -> str:
+        """交易对 + 批次级结果目录: result/品种/批次号。"""
+        return os.path.join(self.result_dir, pair, self.train_batch_id)
+
+    def get_stage_result_dir(self, pair: str, stage_name: str) -> str:
+        """阶段结果目录: result/品种/批次号/阶段目录。"""
+        return os.path.join(self.get_pair_result_dir(pair), stage_name)
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Config":
@@ -101,6 +148,18 @@ def parse_args(argv: list | None = None) -> Config:
     # 数据配置
     parser.add_argument("--data-dir", type=str, default=None, help="数据根目录")
     parser.add_argument("--result-dir", type=str, default=None, help="结果输出目录")
+    parser.add_argument(
+        "--train-batch-id",
+        type=str,
+        default=None,
+        help="训练批次号，用于隔离并行任务结果目录",
+    )
+    parser.add_argument(
+        "--cycle-feature-sets",
+        type=str,
+        default=None,
+        help="启用的周期特征组，逗号分隔，可选 short,middle,long",
+    )
     parser.add_argument(
         "--pair",
         type=str,
@@ -146,10 +205,80 @@ def parse_args(argv: list | None = None) -> Config:
     parser.add_argument(
         "--selection-alpha", type=float, default=None, help="KL 惩罚系数"
     )
+    parser.add_argument(
+        "--phase2-rollout-batch-size",
+        type=int,
+        default=None,
+        help="每次 PPO rollout 采样的 horizon 数量",
+    )
+    parser.add_argument(
+        "--phase2-ppo-epochs",
+        type=int,
+        default=None,
+        help="每个 rollout 的 PPO 更新轮数",
+    )
+    parser.add_argument(
+        "--phase2-minibatch-size",
+        type=int,
+        default=None,
+        help="PPO 更新时的 minibatch 大小",
+    )
+    parser.add_argument(
+        "--phase2-clip-eps",
+        type=float,
+        default=None,
+        help="PPO 裁剪阈值 epsilon",
+    )
+    parser.add_argument(
+        "--phase2-vf-coef",
+        type=float,
+        default=None,
+        help="PPO value loss 系数",
+    )
+    parser.add_argument(
+        "--phase2-ent-coef",
+        type=float,
+        default=None,
+        help="PPO 熵正则系数",
+    )
+    parser.add_argument(
+        "--phase2-max-grad-norm",
+        type=float,
+        default=None,
+        help="PPO 梯度裁剪阈值",
+    )
+    parser.add_argument(
+        "--phase2-log-interval",
+        type=int,
+        default=None,
+        help="Phase II 日志打印间隔（步数）",
+    )
+    parser.add_argument(
+        "--phase2-eval-max-horizons",
+        type=int,
+        default=None,
+        help="Phase II 验证时最多评估的 horizon 数",
+    )
+    parser.add_argument(
+        "--phase2-diagnostic-horizons",
+        type=int,
+        default=None,
+        help="Phase II 训练诊断采样的 horizon 数",
+    )
+    parser.add_argument(
+        "--phase2-stop-on-unhealthy",
+        action="store_true",
+        default=None,
+        help="若 Phase II 结束验证健康度非 healthy，则以非 0 状态退出（阻止进入 Phase III）",
+    )
 
     # Phase III
     parser.add_argument(
         "--phase3-total-steps", type=int, default=None, help="Phase III 总训练步数"
+    )
+    parser.add_argument(
+        "--phase3-num-envs", type=int, default=None,
+        help="Phase III 每轮并行收集的 horizon 数 (默认 8)",
     )
     parser.add_argument(
         "--beta1",
@@ -174,12 +303,36 @@ def parse_args(argv: list | None = None) -> Config:
     )
 
     args = parser.parse_args(argv)
-
+    
     # --pair 覆盖 pairs 列表为单元素
     if args.pair is not None:
         args.pairs = [args.pair]
     else:
         args.pairs = None
+
+    if args.cycle_feature_sets is not None:
+        parsed_cycle_sets = [
+            item.strip() for item in args.cycle_feature_sets.split(",") if item.strip()
+        ]
+        valid_sets = {"short", "middle", "long"}
+        invalid_sets = sorted(set(parsed_cycle_sets) - valid_sets)
+        if invalid_sets:
+            parser.error(
+                f"--cycle-feature-sets 包含无效值: {invalid_sets}，可选: {sorted(valid_sets)}"
+            )
+        args.cycle_feature_sets = parsed_cycle_sets
+    else:
+        args.cycle_feature_sets = ["middle"]
+
+    if args.train_batch_id is not None:
+        args.train_batch_id = args.train_batch_id.strip()
+        if not args.train_batch_id:
+            parser.error("--train-batch-id 不能为空")
+        invalid_separators = [os.sep]
+        if os.altsep:
+            invalid_separators.append(os.altsep)
+        if any(sep in args.train_batch_id for sep in invalid_separators):
+            parser.error("--train-batch-id 不能包含路径分隔符")
 
     # 清理 argparse 添加的 pair 属性（非 Config 字段）
     delattr(args, "pair")
@@ -188,6 +341,7 @@ def parse_args(argv: list | None = None) -> Config:
     _remap = {
         "data_dir": getattr(args, "data_dir", None),
         "result_dir": getattr(args, "result_dir", None),
+        "train_batch_id": getattr(args, "train_batch_id", None),
         "commission_rate": getattr(args, "commission_rate", None),
         "num_archetypes": getattr(args, "num_archetypes", None),
         "num_trajectories": getattr(args, "num_trajectories", None),
@@ -198,12 +352,24 @@ def parse_args(argv: list | None = None) -> Config:
         "pretrain_epochs": getattr(args, "pretrain_epochs", None),
         "phase2_total_steps": getattr(args, "phase2_total_steps", None),
         "selection_alpha": getattr(args, "selection_alpha", None),
+        "phase2_rollout_batch_size": getattr(args, "phase2_rollout_batch_size", None),
+        "phase2_ppo_epochs": getattr(args, "phase2_ppo_epochs", None),
+        "phase2_minibatch_size": getattr(args, "phase2_minibatch_size", None),
+        "phase2_clip_eps": getattr(args, "phase2_clip_eps", None),
+        "phase2_vf_coef": getattr(args, "phase2_vf_coef", None),
+        "phase2_ent_coef": getattr(args, "phase2_ent_coef", None),
+        "phase2_max_grad_norm": getattr(args, "phase2_max_grad_norm", None),
+        "phase2_log_interval": getattr(args, "phase2_log_interval", None),
+        "phase2_eval_max_horizons": getattr(args, "phase2_eval_max_horizons", None),
+        "phase2_diagnostic_horizons": getattr(args, "phase2_diagnostic_horizons", None),
+        "phase2_stop_on_unhealthy": getattr(args, "phase2_stop_on_unhealthy", None),
         "phase3_total_steps": getattr(args, "phase3_total_steps", None),
+        "phase3_num_envs": getattr(args, "phase3_num_envs", None),
         "batch_size": getattr(args, "batch_size", None),
         "discount_factor": getattr(args, "discount_factor", None),
     }
     for k, v in _remap.items():
         if v is not None:
             setattr(args, k, v)
-
+    logger.info(f"Config: {args}")
     return Config.from_args(args)

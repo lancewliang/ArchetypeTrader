@@ -16,6 +16,7 @@ from src.phase1.vq_decoder import VQDecoder
 from src.phase2.selection_agent import SelectionAgent
 from src.phase3.refinement_agent import RefinementAgent
 from src.utils.logger import get_logger
+from src.utils.normalizer import StateNormalizer
 
 logger = get_logger(__name__)
 
@@ -28,15 +29,16 @@ def load_phase1_model(
     config: Config | None = None,
     pair: str = "ETH",
     device: torch.device | None = None,
-) -> Tuple[VQCodebook, VQDecoder]:
-    """加载 Phase I 模型（码本 + 冻结 Decoder）。"""
+) -> Tuple[VQCodebook, VQDecoder, StateNormalizer | None]:
+    """加载 Phase I 模型（码本 + 冻结 Decoder）+ 归一化统计量。"""
     if config is None:
         config = parse_args([])
     if device is None:
         device = _default_device()
 
     model_path = os.path.join(
-        config.result_dir, pair, "phase1_archetype_discovery", f"{pair}_vq_model.pt",
+        config.get_stage_result_dir(pair, "phase1_archetype_discovery"),
+        f"{pair}_vq_model.pt",
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -66,7 +68,12 @@ def load_phase1_model(
         p.requires_grad = False
     codebook.eval()
     decoder.eval()
-    return codebook, decoder
+
+    normalizer = StateNormalizer.from_checkpoint_dict(checkpoint)
+    if normalizer is not None:
+        logger.info("Phase I 归一化统计量已加载")
+
+    return codebook, decoder, normalizer
 
 
 def load_phase2_model(
@@ -81,7 +88,8 @@ def load_phase2_model(
         device = _default_device()
 
     model_path = os.path.join(
-        config.result_dir, pair, "phase2_archetype_selection", f"{pair}_selection_agent.pt",
+        config.get_stage_result_dir(pair, "phase2_archetype_selection"),
+        f"{pair}_selection_agent.pt",
     )
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -116,7 +124,7 @@ def load_phase3_model(
 
     beta1 = config.refinement_beta1
     model_path = os.path.join(
-        config.result_dir, pair, "phase3_archetype_refinement",
+        config.get_stage_result_dir(pair, "phase3_archetype_refinement"),
         f"{pair}_refinement_agent_beta{beta1}.pt",
     )
     if not os.path.exists(model_path):

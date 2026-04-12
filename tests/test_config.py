@@ -1,6 +1,7 @@
 """Tests for src/config.py — Config dataclass and CLI argument parsing."""
 
 from src.config import Config, parse_args
+from src.data.feature_pipeline import FIXED_FEATURES, resolve_cycle_features
 
 
 class TestConfigDefaults:
@@ -8,23 +9,24 @@ class TestConfigDefaults:
 
     def test_data_paths(self):
         cfg = Config()
-        assert cfg.data_dir == "data/feature_list"
+        assert cfg.data_dir == "data"
         assert cfg.result_dir == "result"
-        assert cfg.pairs == ["BTC", "ETH", "DOT", "BNB"]
+        assert cfg.pairs == ["AL", "ETH"]
 
     def test_feature_dims(self):
         cfg = Config()
-        assert cfg.single_feature_dim == 36
-        assert cfg.trend_feature_dim == 9
-        assert cfg.state_dim == 45
+
+        assert cfg.fixed_feature_dim == len(FIXED_FEATURES)
+        assert cfg.cycle_feature_dim == 0
+        assert cfg.state_dim == len(FIXED_FEATURES)
 
     def test_mdp_config(self):
         cfg = Config()
         assert cfg.action_dim == 3
         assert cfg.horizon == 72
-        assert cfg.commission_rate == 0.0002
+        assert cfg.commission_rate == 0.0003
         assert cfg.max_positions == {
-            "BTC": 8, "ETH": 100, "DOT": 2500, "BNB": 200
+            "ETH": 100, "AL": 10
         }
 
     def test_phase1_config(self):
@@ -74,7 +76,7 @@ class TestParseArgs:
         cfg = parse_args([])
         assert cfg.learning_rate == 3e-4
         assert cfg.batch_size == 256
-        assert cfg.pairs == ["BTC", "ETH", "DOT", "BNB"]
+        assert cfg.pairs == ["AL", "ETH"]
 
     def test_pair_override(self):
         cfg = parse_args(["--pair", "BTC"])
@@ -127,6 +129,16 @@ class TestParseArgs:
         assert cfg.phase2_total_steps == 100000
         assert cfg.phase3_total_steps == 50000
 
+    def test_phase2_ppo_hparams_override(self):
+        cfg = parse_args([
+            "--phase2-rollout-batch-size", "2048",
+            "--phase2-ppo-epochs", "8",
+            "--phase2-ent-coef", "0.02",
+        ])
+        assert cfg.phase2_rollout_batch_size == 2048
+        assert cfg.phase2_ppo_epochs == 8
+        assert cfg.phase2_ent_coef == 0.02
+
     def test_commission_rate_override(self):
         cfg = parse_args(["--commission-rate", "0.001"])
         assert cfg.commission_rate == 0.001
@@ -138,6 +150,12 @@ class TestParseArgs:
     def test_phase1_epochs_override(self):
         cfg = parse_args(["--phase1-epochs", "50"])
         assert cfg.phase1_epochs == 50
+
+    def test_cycle_feature_sets_override(self):
+        cfg = parse_args(["--cycle-feature-sets", "short,long"])
+        assert cfg.cycle_feature_sets == ["short", "long"]
+        assert cfg.cycle_features == resolve_cycle_features(["short", "long"])
+        assert cfg.state_dim == len(FIXED_FEATURES) + len(cfg.cycle_features)
 
 
 class TestConfigFromArgs:

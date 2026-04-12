@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from typing import Any
@@ -50,7 +51,9 @@ from src.phase1.codebook import VQCodebook
 from src.phase1.vq_decoder import VQDecoder
 from src.phase1.vq_encoder import VQEncoder
 from src.phase2.selection_agent import SelectionAgent
+from src.utils.gpu_guard import log_and_guard_gpu_memory, reset_gpu_peak_memory_stats
 from src.utils.logger import get_logger
+from src.utils.normalizer import StateNormalizer
 
 logger = get_logger(__name__)
 
@@ -221,7 +224,7 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
     vf_coef = float(_cfg(config, "phase2_vf_coef", 0.001))
     ent_coef = float(_cfg(config, "phase2_ent_coef", 0.1))
     max_grad_norm = float(_cfg(config, "phase2_max_grad_norm", 1.0))
-    log_interval = int(_cfg(config, "phase2_log_interval", 100000))
+    log_interval = int(_cfg(config, "phase2_log_interval", 1000000))
     eval_max_horizons = _cfg(config, "phase2_eval_max_horizons", None)
     diagnostic_horizons = int(_cfg(config, "phase2_diagnostic_horizons", 128))
 
@@ -258,33 +261,13 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
 
 
 def load_phase1_model(config: Any, pair: str, device: torch.device):
-    """加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）。
-
-    # 需求 7.4: 前置阶段模型文件不存在时抛出明确错误
-    # 需求 5.3: 冻结 Decoder 参数
-
-    功能说明:
-        读取 Phase I 训练好的 VQEncoder / VQCodebook / VQDecoder。
-        在 Phase II 中，这三部分都作为“已学习好的 archetype prior”使用，
-        不再参与梯度更新。
-
-    论文相关:
-        - Phase I 对应 Archetype Discovery；
-        - Phase II 对应 Archetype Selection；
-        - Section 4.2 明确要求：selector 选出 archetype 后，
-          由 frozen decoder p_theta_d(a_base | s, e_{a_sel}) 生成 micro actions；
-        - 同时，ground-truth archetype label â_sel 由冻结 encoder + codebook
-          对当前 horizon 的 demonstration chunk 编码得到，对应论文 Eq.(5)。
+    """加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）+ 归一化统计量。
 
     Returns:
-        encoder: 加载权重后的 VQEncoder（冻结，用于获取 ground-truth archetype label）
-        codebook: 加载权重后的 VQCodebook（冻结）
-        decoder: 加载权重后的 VQDecoder（冻结）
+        encoder, codebook, decoder, normalizer
     """
     model_path = os.path.join(
-        config.result_dir,
-        pair,
-        "phase1_archetype_discovery",
+        config.get_stage_result_dir(pair, "phase1_archetype_discovery"),
         f"{pair}_vq_model.pt",
     )
     if not os.path.exists(model_path):
@@ -296,7 +279,6 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
     logger.info("加载 Phase I 模型: %s", model_path)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
-    # 初始化并加载 Encoder（用于获取 ground-truth archetype label）
     encoder = VQEncoder(
         state_dim=config.state_dim,
         action_dim=config.action_dim,
@@ -305,14 +287,12 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
     ).to(device)
     encoder.load_state_dict(checkpoint["encoder"])
 
-    # 初始化并加载 Codebook
     codebook = VQCodebook(
         num_codes=config.num_archetypes,
         code_dim=config.latent_dim,
     ).to(device)
     codebook.load_state_dict(checkpoint["codebook"])
 
-    # 初始化并加载 Decoder
     decoder = VQDecoder(
         state_dim=config.state_dim,
         code_dim=config.latent_dim,
@@ -321,7 +301,6 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
     ).to(device)
     decoder.load_state_dict(checkpoint["decoder"])
 
-    # 需求 5.3: 冻结 Encoder、Codebook 和 Decoder — 不参与梯度更新
     for param in encoder.parameters():
         param.requires_grad = False
     for param in codebook.parameters():
@@ -333,8 +312,14 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
     codebook.eval()
     decoder.eval()
 
+    normalizer = StateNormalizer.from_checkpoint_dict(checkpoint)
+    if normalizer is not None:
+        logger.info("Phase I 归一化统计量已加载")
+    else:
+        logger.warning("Phase I checkpoint 中无 norm_stats，跳过归一化")
+
     logger.info("Phase I 模型加载完成，Encoder、Codebook 和 Decoder 已冻结")
-    return encoder, codebook, decoder
+    return encoder, codebook, decoder, normalizer
 
 
 def run_horizon_with_decoder(
@@ -344,6 +329,7 @@ def run_horizon_with_decoder(
     z_q: torch.Tensor,
     device: torch.device,
     return_details: bool = False,
+    normalizer: StateNormalizer | None = None,
 ) -> float | dict[str, Any]:
     """使用冻结 Decoder 在一个 horizon 内执行交易，返回 horizon 总收益。
 
@@ -401,9 +387,14 @@ def run_horizon_with_decoder(
     end = min(start + h, len(env.states))
     horizon_states = env.states[start:end]  # (h, state_dim)
 
+    # 归一化 states 后再喂给 decoder
+    norm_states = horizon_states
+    if normalizer is not None:
+        norm_states = normalizer.normalize_states(horizon_states)
+
     # Decoder 批量生成 action logits
     states_t = torch.tensor(
-        horizon_states, dtype=torch.float32, device=device
+        norm_states, dtype=torch.float32, device=device
     ).unsqueeze(0)
     # states_t: (1, h, state_dim)
 
@@ -459,21 +450,12 @@ def batch_decode_actions(
     horizon_indices: np.ndarray,
     archetype_indices: torch.Tensor,
     device: torch.device,
+    normalizer: StateNormalizer | None = None,
 ) -> np.ndarray:
-    """批量 decoder 推理：一次前向传播为所有 horizon 生成 micro actions。
-
-    功能说明:
-        将 B 个 horizon 的状态序列和对应的 archetype embedding 拼成一个 batch，
-        通过一次 decoder forward + single-trade constraint 得到所有 micro actions，
-        避免逐 horizon 调用 decoder 的 Python 循环开销。
+    """批量解码: 对一批 horizon 用对应 archetype 生成 micro actions。
 
     Args:
-        decoder: 冻结的 VQ Decoder
-        codebook: 冻结的 VQCodebook
-        env: 交易环境（用于读取 states）
-        horizon_indices: (B,) horizon 索引
-        archetype_indices: (B,) 选定的 archetype 索引 (torch.Tensor on device)
-        device: 计算设备
+        normalizer: 若提供，对 env.states 做归一化后再喂给 decoder。
 
     Returns:
         actions_np: (B, h) 所有 horizon 的 micro action 序列
@@ -481,7 +463,6 @@ def batch_decode_actions(
     h = env.horizon
     B = len(horizon_indices)
 
-    # 收集所有 horizon 的状态序列: (B, h, state_dim)
     all_states = np.empty((B, h, env.state_dim), dtype=np.float32)
     for i, h_idx in enumerate(horizon_indices):
         start = int(h_idx) * h
@@ -491,13 +472,15 @@ def batch_decode_actions(
         if actual_len < h:
             all_states[i, actual_len:] = env.states[end - 1]
 
-    states_t = torch.tensor(all_states, dtype=torch.float32, device=device)  # (B, h, state_dim)
+    if normalizer is not None:
+        all_states = normalizer.normalize_states(all_states)
 
-    # 批量获取 archetype embeddings: (B, code_dim)
-    z_q_batch = codebook.embeddings.weight[archetype_indices.long()]  # (B, code_dim)
+    states_t = torch.tensor(all_states, dtype=torch.float32, device=device)
+
+    z_q_batch = codebook.embeddings.weight[archetype_indices.long()]
 
     with torch.no_grad():
-        actions = decoder.decode_with_single_trade_constraint(states_t, z_q_batch)  # (B, h)
+        actions = decoder.decode_with_single_trade_constraint(states_t, z_q_batch)
 
     return actions.detach().cpu().numpy()
 def vectorized_execute_horizons(
@@ -556,19 +539,60 @@ def vectorized_execute_horizons(
     # 佣金: δ × |ΔP| × price
     commissions = env.commission_rate * abs_delta * prices  # (B, h)
 
-    # LOB slippage: 需要逐行查 DataFrame（无法完全向量化）
+    # LOB slippage: 预提取所有涉及时间步的 LOB 数组，消除逐行 Polars row 查找
     slippages = np.zeros((B, h), dtype=np.float64)
     if env.states_dataframe is not None:
-        # 只对持仓变化的步骤计算 slippage
         change_mask = delta_positions != 0
-        for bi in range(B):
-            for ti in range(h):
-                if change_mask[bi, ti]:
+
+        # 收集所有需要计算 slippage 的全局时间步索引（去重）
+        # price_indices shape (B, h)，flatten 后取唯一值，避免重复提取
+        all_global_t = price_indices[change_mask]  # 只取有持仓变化的位置
+        if all_global_t.size > 0:
+            unique_ts = np.unique(all_global_t)
+
+            # 一次性从 DataFrame 提取所有需要的行的 LOB 列为 NumPy 数组
+            # 用 polars 的列式 select + to_numpy，比逐行 .row() 快一个数量级
+            lob_df = env.states_dataframe[unique_ts.tolist()]
+            ap = lob_df.select(TradingEnv.LOB_ASK_PRICE_COLS).to_numpy()  # (U, 5)
+            as_ = lob_df.select(TradingEnv.LOB_ASK_SIZE_COLS).to_numpy()  # (U, 5)
+            bp = lob_df.select(TradingEnv.LOB_BID_PRICE_COLS).to_numpy()  # (U, 5)
+            bs = lob_df.select(TradingEnv.LOB_BID_SIZE_COLS).to_numpy()   # (U, 5)
+
+            # 建立 global_t → 数组行索引的映射，O(1) 查找
+            t_to_row = {int(t): i for i, t in enumerate(unique_ts)}
+
+            for bi in range(B):
+                for ti in range(h):
+                    if not change_mask[bi, ti]:
+                        continue
                     global_t = int(price_indices[bi, ti])
-                    state_dict = env.states_dataframe.row(global_t, named=True)
-                    slippages[bi, ti] = TradingEnv.compute_lob_slippage(
-                        int(delta_positions[bi, ti]), state_dict, float(prices[bi, ti])
-                    )
+                    row = t_to_row[global_t]
+                    dp = int(delta_positions[bi, ti])
+                    mark = float(prices[bi, ti])
+                    abs_dp = abs(dp)
+
+                    # 5-level LOB walk（纯 NumPy 数组索引，无 dict 查找）
+                    lvl_p = ap[row] if dp > 0 else bp[row]
+                    lvl_s = as_[row] if dp > 0 else bs[row]
+
+                    qty = float(abs_dp)
+                    fill_cash = 0.0
+                    last_p = mark
+                    for lv in range(5):
+                        lp, ls = float(lvl_p[lv]), float(lvl_s[lv])
+                        if lp <= 0 or ls <= 0:
+                            continue
+                        last_p = lp
+                        fill_qty = min(qty, ls)
+                        fill_cash += fill_qty * lp
+                        qty -= fill_qty
+                        if qty <= 0:
+                            break
+                    if qty > 0:
+                        fill_cash += qty * last_p
+
+                    slip = (fill_cash - abs_dp * mark) if dp > 0 else (abs_dp * mark - fill_cash)
+                    slippages[bi, ti] = max(slip, 0.0)
 
     # 总执行损失
     execution_costs = slippages + commissions  # (B, h)
@@ -623,19 +647,16 @@ def vectorized_execute_horizons(
     return horizon_returns, details
 
 
-def get_horizon_start_states(env: TradingEnv, horizon_indices: np.ndarray) -> np.ndarray:
-    """获取一批 horizon 的起始状态。
-
-    功能说明:
-        将一组 horizon index 映射到对应的首 bar 状态，用于构建 selector 的
-        batch 输入。
-
-    论文相关:
-        Section 4.2 明确规定高层状态 s_sel 定义为当前 horizon 第一根 bar 的
-        状态向量，因此这里严格按 horizon 起点取状态，而不是取整段序列。
-    """
+def get_horizon_start_states(
+    env: TradingEnv, horizon_indices: np.ndarray,
+    normalizer: StateNormalizer | None = None,
+) -> np.ndarray:
+    """获取一批 horizon 的起始状态（归一化后）。"""
     start_indices = horizon_indices * env.horizon
-    return env.states[start_indices]
+    states = env.states[start_indices]
+    if normalizer is not None:
+        states = normalizer.normalize_states(states)
+    return states
 
 
 def get_ground_truth_labels(
@@ -812,6 +833,7 @@ def collect_rollout_batch(
                 "gt_label_histogram": _format_histogram_from_counts(
                     _histogram_counts(gt_np, agent.num_archetypes)
                 ),
+                # gt_agree: selector 与 VQ encoder label 的一致性（诊断用）
                 "sampled_gt_agreement": float(np.mean(actions_np == gt_np)) if gt_np.size > 0 else 0.0,
                 "greedy_gt_agreement": float(np.mean(greedy_np == gt_np)) if gt_np.size > 0 else 0.0,
             }
@@ -918,9 +940,14 @@ def ppo_update(
             value_pred = values.squeeze(-1)
             value_loss = F.mse_loss(value_pred, mb_returns)
 
-            # Eq.(5): KL(â_sel || π_sel)
-            # one-hot(gt) 对 policy 的 KL，可等价实现为 NLL / cross-entropy。
-            imitation_loss = F.nll_loss(torch.log(action_probs + 1e-8), mb_gt_labels)
+            # Eq.(5): KL(â_sel || π_sel)，advantage-weighted 版本：
+            # 只对 advantage > 0 的样本施加 imitation 正则，
+            # 避免把 policy 拉向 DP 建议但 env 收益为负的 archetype。
+            pos_mask = (mb_advantages > 0).float()  # (mb,)
+            per_sample_nll = F.nll_loss(
+                torch.log(action_probs + 1e-8), mb_gt_labels, reduction="none"
+            )  # (mb,)
+            imitation_loss = (pos_mask * per_sample_nll).sum() / (pos_mask.sum() + 1e-8)
 
             # Actor 损失：PPO policy + entropy + imitation prior。
             # Critic 损失单独优化，避免 value loss 梯度劫持 shared backbone。
@@ -1069,6 +1096,28 @@ def evaluate_on_validation(
     return metrics
 
 
+def _phase2_health_status(metrics: dict[str, Any]) -> tuple[str, str]:
+    """给出 Phase II 验证结果的健康度标签与说明。"""
+    avg_return = float(metrics.get("avg_return", 0.0))
+    avg_cost = float(metrics.get("avg_execution_cost", 0.0))
+
+    if avg_return < 0.0:
+        return (
+            "bad_negative_return",
+            "验证集平均 return 为负，说明第二阶段策略当前方向存在明显问题；直接进入第三阶段通常难以彻底修复。",
+        )
+
+    # “微弱收益”判定: 收益仅与执行成本同量级，边际非常薄
+    weak_threshold = max(1e-8, abs(avg_cost))
+    if avg_return <= weak_threshold:
+        return (
+            "weak_edge",
+            "验证集收益仅与执行成本同量级，属于微弱优势；建议先继续打磨第二阶段再进入第三阶段。",
+        )
+
+    return ("healthy", "验证集收益明显高于执行成本，第二阶段模型整体健康。")
+
+
 def evaluate_training_subset_diagnostics(
     agent: SelectionAgent,
     encoder: VQEncoder,
@@ -1089,10 +1138,19 @@ def evaluate_training_subset_diagnostics(
         - gt oracle 是否明显高于 learned；
         - best fixed archetype 是否已经为负。
 
+    性能优化:
+        原实现对 learned / random / oracle / K 个 fixed 分别调用 _run_policy_on_horizons，
+        共 K+3 次 batch_decode_actions + vectorized_execute_horizons。
+        改为把所有策略的 actions 堆叠成 ((K+3)×subset_size,) 的大批量，
+        一次 batch_decode_actions + 一次 vectorized_execute_horizons 完成，
+        decoder 前向和 LOB slippage 预提取各只做一次。
+
     论文相关:
         这一步并不改变论文算法本身，而是对 Section 4.2 的 archetype selector
         做工程诊断，帮助判断瓶颈在 selector 还是在 frozen archetype 基座。
     """
+    K = codebook.embeddings.weight.size(0)  # archetype 数量
+
     subset_size = min(int(diagnostic_horizons), train_env.num_horizons)
     if subset_size <= 0:
         return {
@@ -1109,6 +1167,7 @@ def evaluate_training_subset_diagnostics(
     horizon_indices = np.random.choice(train_env.num_horizons, size=subset_size, replace=False)
     horizon_indices = np.asarray(horizon_indices, dtype=np.int64)
 
+    # --- 计算各策略的 archetype 选择 ---
     states_np = get_horizon_start_states(train_env, horizon_indices)
     states_t = torch.tensor(states_np, dtype=torch.float32, device=device)
     with torch.no_grad():
@@ -1116,58 +1175,67 @@ def evaluate_training_subset_diagnostics(
         learned_actions = torch.argmax(action_probs, dim=-1).detach().cpu().numpy()
 
     gt_labels = get_ground_truth_labels(
-        encoder=encoder,
-        codebook=codebook,
-        demo_states=demo_states,
-        demo_actions=demo_actions,
-        demo_rewards=demo_rewards,
-        horizon_indices=horizon_indices,
-        device=device,
+        encoder=encoder, codebook=codebook,
+        demo_states=demo_states, demo_actions=demo_actions, demo_rewards=demo_rewards,
+        horizon_indices=horizon_indices, device=device,
     ).detach().cpu().numpy()
 
-    learned_metrics = _run_policy_on_horizons(
-        codebook=codebook,
-        decoder=decoder,
-        env=train_env,
-        horizon_indices=horizon_indices,
-        device=device,
-        selected_archetypes=learned_actions,
-    )
-
     rng = np.random.default_rng(12345)
-    random_actions = rng.integers(0, codebook.embeddings.weight.size(0), size=subset_size, dtype=np.int64)
-    random_metrics = _run_policy_on_horizons(
-        codebook=codebook,
-        decoder=decoder,
-        env=train_env,
-        horizon_indices=horizon_indices,
-        device=device,
-        selected_archetypes=random_actions,
-    )
+    random_actions = rng.integers(0, K, size=subset_size, dtype=np.int64)
 
-    oracle_metrics = _run_policy_on_horizons(
-        codebook=codebook,
-        decoder=decoder,
-        env=train_env,
-        horizon_indices=horizon_indices,
+    # fixed_actions[k] = 全部选第 k 个 archetype，shape (K, subset_size)
+    fixed_actions_all = np.stack(
+        [np.full(subset_size, k, dtype=np.int64) for k in range(K)], axis=0
+    )  # (K, subset_size)
+
+    # --- 把所有策略的 actions 拼成一个大批量，一次 decode + execute ---
+    # 顺序: [learned, random, oracle, fixed_0, fixed_1, ..., fixed_{K-1}]
+    # 每段长度均为 subset_size，总长度 = (K+3) × subset_size
+    all_archetypes = np.concatenate(
+        [learned_actions, random_actions, gt_labels] + list(fixed_actions_all),
+        axis=0,
+    )  # ((K+3) × subset_size,)
+
+    tiled_horizon_indices = np.tile(horizon_indices, K + 3)  # ((K+3) × subset_size,)
+
+    archetype_t = torch.tensor(all_archetypes, dtype=torch.long, device=device)
+
+    # 一次 batch_decode_actions：decoder 前向只跑一次
+    all_actions_np = batch_decode_actions(
+        decoder=decoder, codebook=codebook, env=train_env,
+        horizon_indices=tiled_horizon_indices,
+        archetype_indices=archetype_t,
         device=device,
-        selected_archetypes=gt_labels,
-    )
+    )  # ((K+3)×subset_size, h)
+
+    # 一次 vectorized_execute_horizons：LOB 预提取只做一次
+    horizon_returns_np, horizon_details = vectorized_execute_horizons(
+        env=train_env,
+        horizon_indices=tiled_horizon_indices,
+        all_actions=all_actions_np,
+        need_diagnostics=True,
+    )  # ((K+3)×subset_size,)
+
+    # --- 按段切分结果 ---
+    def _slice_metrics(start: int) -> dict[str, Any]:
+        """取第 start 段（长度 subset_size）的诊断指标。"""
+        seg = slice(start * subset_size, (start + 1) * subset_size)
+        return _aggregate_execution_diagnostics(horizon_details[seg])
+
+    learned_metrics = _slice_metrics(0)
+    random_metrics  = _slice_metrics(1)
+    oracle_metrics  = _slice_metrics(2)
 
     fixed_returns: list[float] = []
-    for archetype_idx in range(codebook.embeddings.weight.size(0)):
-        fixed_actions = np.full(subset_size, archetype_idx, dtype=np.int64)
-        fixed_metrics = _run_policy_on_horizons(
-            codebook=codebook,
-            decoder=decoder,
-            env=train_env,
-            horizon_indices=horizon_indices,
-            device=device,
-            selected_archetypes=fixed_actions,
-        )
-        fixed_returns.append(float(fixed_metrics["avg_return"]))
+    for k in range(K):
+        fixed_returns.append(float(_slice_metrics(3 + k)["avg_return"]))
 
     best_fixed_idx = int(np.argmax(fixed_returns)) if fixed_returns else -1
+
+    # selected_histogram 需要单独计算（_aggregate_execution_diagnostics 不含）
+    learned_metrics["selected_histogram"] = _format_histogram_from_counts(
+        _histogram_counts(learned_actions, K)
+    )
 
     return {
         "num_horizons": subset_size,
@@ -1179,7 +1247,7 @@ def evaluate_training_subset_diagnostics(
         "learned_gt_agreement": float(np.mean(learned_actions == gt_labels)) if gt_labels.size > 0 else 0.0,
         "learned_selected_histogram": learned_metrics["selected_histogram"],
         "oracle_label_histogram": _format_histogram_from_counts(
-            _histogram_counts(gt_labels, codebook.embeddings.weight.size(0))
+            _histogram_counts(gt_labels, K)
         ),
         "fixed_returns": "[" + ", ".join(f"{idx}:{ret:.4f}" for idx, ret in enumerate(fixed_returns)) + "]",
         "learned_avg_gross_pnl": float(learned_metrics["avg_gross_pnl"]),
@@ -1384,6 +1452,12 @@ def run_training_loop(
             device=device,
             need_diagnostics=need_diag,
         )
+        log_and_guard_gpu_memory(
+            logger,
+            stage=f"Phase II rollout_batch(step={step_count}, batch={current_batch_size})",
+            device=device,
+            force_log=need_diag,
+        )
         if need_diag:
             last_batch_diag = batch["diagnostics"]
 
@@ -1421,6 +1495,12 @@ def run_training_loop(
             minibatch_size=minibatch_size,
             max_grad_norm=max_grad_norm,
             device=device,
+        )
+        log_and_guard_gpu_memory(
+            logger,
+            stage=f"Phase II ppo_update(step={step_count}, batch={current_batch_size})",
+            device=device,
+            force_log=need_diag,
         )
 
         batch_returns = batch["returns"].detach().cpu().tolist()
@@ -1619,17 +1699,23 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("使用设备: %s", device)
+    logger.info("结果目录批次: %s", config.train_batch_id)
+    reset_gpu_peak_memory_stats(device)
+    log_and_guard_gpu_memory(logger, stage="Phase II startup", device=device, force_log=True)
 
     # ----------------------------------------------------------------
     # Step 1: 加载 Phase I 模型（编码器 + 码本 + 冻结 Decoder）
     # ----------------------------------------------------------------
-    encoder, codebook, decoder = load_phase1_model(config, pair, device)
+    encoder, codebook, decoder, normalizer = load_phase1_model(config, pair, device)
+    log_and_guard_gpu_memory(logger, stage="Phase II after Phase I model load", device=device, force_log=True)
 
     # ----------------------------------------------------------------
     # Step 2: 加载特征数据，初始化 TradingEnv
     # ----------------------------------------------------------------
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
-    pipeline = FeaturePipeline(config.data_dir, pair)
+    pipeline = FeaturePipeline(
+        config.data_dir, pair, cycle_features=config.cycle_features,
+    )
     train_df, val_df, _ = pipeline.get_state_vector()
     train_prices_df, val_prices_df, _ = pipeline.get_prices()
 
@@ -1637,6 +1723,11 @@ def main() -> None:
     val_states = val_df.to_numpy()
     train_prices = train_prices_df["close"].to_numpy()
     val_prices = val_prices_df["close"].to_numpy()
+
+    # 归一化 states（与 Phase 1 训练一致）
+    if normalizer is not None:
+        train_states = normalizer.normalize_states(train_states)
+        val_states = normalizer.normalize_states(val_states)
 
     logger.info(
         "训练集: states shape=%s, 验证集: states shape=%s",
@@ -1651,7 +1742,7 @@ def main() -> None:
         horizon=config.horizon,
         states_dataframe=train_df,
         max_positions=config.max_positions,
-        commission_rate=config.commission_rate,
+        commission_rate=config.train_commission_rate,
     )
     val_env = TradingEnv(
         states=val_states,
@@ -1660,13 +1751,14 @@ def main() -> None:
         horizon=config.horizon,
         states_dataframe=val_df,
         max_positions=config.max_positions,
-        commission_rate=config.commission_rate,
+        commission_rate=config.train_commission_rate,
     )
     logger.info(
         "TradingEnv 初始化完成: train_horizons=%d, val_horizons=%d",
         train_env.num_horizons,
         val_env.num_horizons,
     )
+    log_and_guard_gpu_memory(logger, stage="Phase II after env init", device=device, force_log=False)
 
     if train_env.num_horizons == 0:
         logger.error("训练集 horizon 数量为 0，无法训练")
@@ -1678,7 +1770,7 @@ def main() -> None:
     # 前 num_horizons 条与训练环境 horizon 索引 1:1 对齐。
     # ----------------------------------------------------------------
     traj_path = os.path.join(
-        config.result_dir, pair, "dp_trajectories", f"trajectories.npz"
+        config.get_stage_result_dir(pair, "dp_trajectories"), "trajectories.npz",
     )
     if not os.path.exists(traj_path):
         raise FileNotFoundError(
@@ -1690,12 +1782,19 @@ def main() -> None:
     demo_states = demo_data["states"]    # (N, h, state_dim)
     demo_actions = demo_data["actions"]  # (N, h)
     demo_rewards = demo_data["rewards"]  # (N, h)
+
+    # 归一化 demo 数据（与 Phase 1 训练时一致）
+    if normalizer is not None:
+        demo_states = normalizer.normalize_states(demo_states)
+        demo_rewards = normalizer.normalize_rewards(demo_rewards)
+
     logger.info(
         "DP 示范轨迹加载完成: %d 条, horizon=%d (训练 env horizons=%d)",
         demo_states.shape[0],
         demo_states.shape[1],
         train_env.num_horizons,
     )
+    log_and_guard_gpu_memory(logger, stage="Phase II after demo load", device=device, force_log=False)
 
     if demo_states.shape[0] < train_env.num_horizons:
         raise ValueError(
@@ -1715,6 +1814,7 @@ def main() -> None:
         "SelectionAgent 初始化完成: params=%d",
         sum(p.numel() for p in agent.parameters()),
     )
+    log_and_guard_gpu_memory(logger, stage="Phase II after agent init", device=device, force_log=True)
 
     optimizer = torch.optim.Adam(
         list(agent.shared.parameters()) + list(agent.policy_head.parameters()),
@@ -1736,10 +1836,10 @@ def main() -> None:
     # ----------------------------------------------------------------
     alpha = config.selection_alpha  # KL / imitation 惩罚系数
     total_steps = int(config.phase2_total_steps)
-    val_interval = max(train_env.num_horizons, train_env.num_horizons*10)  # 每遍历一次训练集或步评估一次
+    val_interval = max(train_env.num_horizons, train_env.num_horizons*200)  # 每遍历一次训练集或步评估一次
     log_interval = int(ppo_hparams["log_interval"])
 
-    save_dir = os.path.join(config.result_dir, pair, "phase2_archetype_selection")
+    save_dir = config.get_stage_result_dir(pair, "phase2_archetype_selection")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f"{pair}_selection_agent.pt")
 
@@ -1779,6 +1879,96 @@ def main() -> None:
     )
     logger.info("最终模型已保存到 %s", final_save_path)
 
+    # ----------------------------------------------------------------
+    # Step 5: 训练结束后立即做一次验证集评估（best/final 对照）
+    # 目标: 在进入 Phase III 前确认 Phase II 模型是否健康
+    # ----------------------------------------------------------------
+    eval_max_horizons = ppo_hparams["eval_max_horizons"]
+
+    final_val_metrics = evaluate_on_validation(
+        agent=agent,
+        codebook=codebook,
+        decoder=decoder,
+        val_env=val_env,
+        device=device,
+        max_horizons=eval_max_horizons,
+    )
+    final_val_return = float(final_val_metrics["avg_return"])
+
+    best_val_metrics: dict[str, Any]
+    if os.path.exists(save_path):
+        best_ckpt = torch.load(save_path, map_location=device, weights_only=False)
+        best_agent = SelectionAgent(
+            state_dim=config.state_dim,
+            num_archetypes=config.num_archetypes,
+        ).to(device)
+        best_agent.load_state_dict(best_ckpt["agent"])
+        best_agent.eval()
+        best_val_metrics = evaluate_on_validation(
+            agent=best_agent,
+            codebook=codebook,
+            decoder=decoder,
+            val_env=val_env,
+            device=device,
+            max_horizons=eval_max_horizons,
+        )
+    else:
+        logger.warning("未找到最优 checkpoint: %s，将使用最终模型验证结果替代", save_path)
+        best_val_metrics = dict(final_val_metrics)
+
+    best_status, best_status_msg = _phase2_health_status(best_val_metrics)
+    final_status, final_status_msg = _phase2_health_status(final_val_metrics)
+
+    logger.info(
+        "Phase II 结束验证（BEST）: avg_return=%.4f, gross=%.4f, cost=%.4f, turnover=%.4f, flips=%.4f, selected=%s",
+        float(best_val_metrics.get("avg_return", 0.0)),
+        float(best_val_metrics.get("avg_gross_pnl", 0.0)),
+        float(best_val_metrics.get("avg_execution_cost", 0.0)),
+        float(best_val_metrics.get("avg_turnover", 0.0)),
+        float(best_val_metrics.get("avg_direct_flips", 0.0)),
+        best_val_metrics.get("selected_histogram", "[]"),
+    )
+    logger.info("Phase II 结束验证（BEST）健康度: %s — %s", best_status, best_status_msg)
+
+    logger.info(
+        "Phase II 结束验证（FINAL）: avg_return=%.4f, gross=%.4f, cost=%.4f, turnover=%.4f, flips=%.4f, selected=%s",
+        float(final_val_metrics.get("avg_return", 0.0)),
+        float(final_val_metrics.get("avg_gross_pnl", 0.0)),
+        float(final_val_metrics.get("avg_execution_cost", 0.0)),
+        float(final_val_metrics.get("avg_turnover", 0.0)),
+        float(final_val_metrics.get("avg_direct_flips", 0.0)),
+        final_val_metrics.get("selected_histogram", "[]"),
+    )
+    logger.info("Phase II 结束验证（FINAL）健康度: %s — %s", final_status, final_status_msg)
+
+    if best_status != "healthy":
+        logger.warning(
+            "Phase II 最优模型健康度=%s。建议先修正第二阶段，再投入第三阶段训练。",
+            best_status,
+        )
+
+    phase2_report = {
+        "pair": pair,
+        "step_count": int(step_count),
+        "eval_max_horizons": eval_max_horizons,
+        "best_checkpoint_path": save_path,
+        "final_checkpoint_path": final_save_path,
+        "best_checkpoint_validation": {
+            **best_val_metrics,
+            "health_status": best_status,
+            "health_message": best_status_msg,
+        },
+        "final_checkpoint_validation": {
+            **final_val_metrics,
+            "health_status": final_status,
+            "health_message": final_status_msg,
+        },
+    }
+    phase2_report_path = os.path.join(save_dir, f"{pair}_phase2_validation_report.json")
+    with open(phase2_report_path, "w", encoding="utf-8") as f:
+        json.dump(phase2_report, f, ensure_ascii=False, indent=2)
+    logger.info("Phase II 结束验证报告已保存到 %s", phase2_report_path)
+
     logger.info("=" * 50)
     logger.info("Phase II 训练完成: pair=%s", pair)
     logger.info("总训练步数: %d", step_count)
@@ -1786,10 +1976,18 @@ def main() -> None:
         "最终平均奖励 (最近 1000 步): %.4f",
         np.mean(reward_history[-1000:]) if reward_history else float("nan"),
     )
-    logger.info("最优验证集 return: %.4f", best_val_return)
+    logger.info("训练期间最优验证集 return: %.4f", best_val_return)
+    logger.info("结束时 FINAL 模型验证集 return: %.4f", final_val_return)
     logger.info("最优模型路径: %s", save_path)
     logger.info("最终模型路径: %s", final_save_path)
     logger.info("=" * 50)
+
+    if bool(getattr(config, "phase2_stop_on_unhealthy", False)) and best_status != "healthy":
+        logger.error(
+            "已启用 --phase2-stop-on-unhealthy，且 Phase II 最优模型健康度=%s，训练流程在 Phase II 后终止。",
+            best_status,
+        )
+        sys.exit(2)
 
 
 if __name__ == "__main__":

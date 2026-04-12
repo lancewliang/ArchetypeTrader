@@ -45,11 +45,10 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 PAPER_PHASE1_REFERENCE_TRAIN_ROWS = 1_400_000
-PAPER_PHASE1_SPEC = {
-    "state_dim": 45,
+PAPER_PHASE1_SPEC = { 
     "action_dim": 3,
     "horizon": 72,
-    "commission_rate": 0.0002,
+    "commission_rate": 0.0003,
     "lstm_hidden_dim": 128,
     "latent_dim": 16,
     "num_archetypes": 10,
@@ -58,7 +57,7 @@ PAPER_PHASE1_SPEC = {
     "phase1_epochs": 300,
     "pretrain_epochs": 10,
     "discount_factor": 0.99,
-    "max_positions": {"BTC": 8, "ETH": 100, "DOT": 2500, "BNB": 200},
+    "max_positions": { "ETH": 100, "AL": 10},
 }
 
 
@@ -222,7 +221,6 @@ def assert_paper_phase1_settings(config: Any, pair: str) -> None:
         if not np.isclose(actual, expected, atol=atol, rtol=0.0):
             mismatches.append(f"{name}: actual={actual}, expected={expected}")
 
-    _check_exact("state_dim", config.state_dim, PAPER_PHASE1_SPEC["state_dim"])
     _check_exact("action_dim", config.action_dim, PAPER_PHASE1_SPEC["action_dim"])
     _check_exact("horizon", config.horizon, PAPER_PHASE1_SPEC["horizon"])
     _check_float("commission_rate", config.commission_rate, PAPER_PHASE1_SPEC["commission_rate"])
@@ -289,7 +287,7 @@ def inspect_trajectory_cache(
         "num_available_starts": int(expected_starts),
         "training_rows": int(train_rows),
         "state_dim": int(config.state_dim),
-        "commission_rate": float(config.commission_rate),
+        "commission_rate": float(config.dp_commission_rate),
         "max_position": int(config.max_positions[pair]),
         "algorithm_variant": "paper_single_change",
     }
@@ -361,7 +359,9 @@ def load_data_and_env(config: Any, pair: str) -> Tuple[TradingEnv, int]:
         (env, train_rows)
     """
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
-    pipeline = FeaturePipeline(config.data_dir, pair)
+    pipeline = FeaturePipeline(
+        config.data_dir, pair, cycle_features=config.cycle_features,
+    )
     train_df, _, _ = pipeline.get_state_vector()
     train_prices_df, _, _ = pipeline.get_prices()
 
@@ -386,28 +386,46 @@ def load_data_and_env(config: Any, pair: str) -> Tuple[TradingEnv, int]:
         horizon=config.horizon,
         states_dataframe=train_df,
         max_positions=config.max_positions,
-        commission_rate=config.commission_rate,
+        commission_rate=config.train_commission_rate,
+    )
+
+    # DP planner 用更高的费率筛选高利润轨迹
+    dp_env = TradingEnv(
+        states=train_states,
+        prices=prices,
+        pair=pair,
+        horizon=config.horizon,
+        states_dataframe=train_df,
+        max_positions=config.max_positions,
+        commission_rate=config.dp_commission_rate,
     )
 
     logger.info(
         "TradingEnv 初始化完成: num_horizons=%d, horizon=%d, max_position=%d, "
-        "commission_rate=%.6f, available_starts=%d",
-        env.num_horizons, config.horizon, env.m, env.commission_rate, available_starts,
+        "train_commission_rate=%.6f, dp_commission_rate=%.6f, available_starts=%d",
+        env.num_horizons, config.horizon, env.m,
+        env.commission_rate, dp_env.commission_rate, available_starts,
     )
-    return env, train_rows
+    return env, dp_env, train_rows
 
 
 def prepare_trajectory_dataset(
-    config: Any, pair: str, env: TradingEnv, train_rows: int,
+    config: Any, pair: str, dp_env: TradingEnv, train_rows: int,
 ) -> Tuple[TrajectoryDataset, str]:
-    """检查缓存 / 生成 DP 示范轨迹，返回 (dataset, traj_path)。"""
+    """检查缓存 / 生成 DP 示范轨迹，返回 (dataset, traj_path)。
+
+    使用 dp_env（高费率环境）生成轨迹，筛选出高利润交易模式。
+    """
     planner = DPPlanner(
-        env=env,
+        env=dp_env,
         gamma=config.discount_factor,
         result_dir=config.result_dir,
+        train_batch_id=config.train_batch_id,
         sampling_seed=config.phase1_sampling_seed,
     )
-    traj_path = DPPlanner.build_trajectory_cache_path(config.result_dir, pair)
+    traj_path = DPPlanner.build_trajectory_cache_path(
+        config.result_dir, pair, config.train_batch_id,
+    )
 
     if os.path.exists(traj_path):
         cache_ok, cache_reasons = inspect_trajectory_cache(
@@ -415,7 +433,7 @@ def prepare_trajectory_dataset(
         )
         if cache_ok:
             logger.info("发现与当前严格论文设置兼容的轨迹缓存，直接加载: %s", traj_path)
-            return TrajectoryDataset.from_npz(traj_path), traj_path
+            return TrajectoryDataset.from_npz(traj_path, normalize=True), traj_path
         backup_incompatible_cache(traj_path, cache_reasons)
 
     logger.info("开始生成 DP 示范轨迹: num_trajectories=%d", config.num_trajectories)
@@ -425,6 +443,7 @@ def prepare_trajectory_dataset(
         states=trajectories["states"],
         actions=trajectories["actions"],
         rewards=trajectories["rewards"],
+        normalize=True,
     )
     return dataset, traj_path
 
@@ -712,41 +731,48 @@ def save_checkpoint(
     decoder: VQDecoder,
     history: TrainingHistory,
     train_rows: int,
+    norm_stats: dict | None = None,
 ) -> str:
     """保存模型 checkpoint 到 result/phase1_archetype_discovery/，返回保存路径。"""
-    save_dir = os.path.join(config.result_dir, pair, "phase1_archetype_discovery")
+    save_dir = config.get_stage_result_dir(pair, "phase1_archetype_discovery")
     os.makedirs(save_dir, exist_ok=True)
 
     save_path = os.path.join(save_dir, f"{pair}_vq_model.pt")
-    torch.save(
-        {
-            "encoder": encoder.state_dict(),
-            "codebook": codebook.state_dict(),
-            "decoder": decoder.state_dict(),
-            "loss_history": history.loss,
-            "training_monitor": history.to_dict(),
-            "config": {
-                "state_dim": config.state_dim,
-                "action_dim": config.action_dim,
-                "latent_dim": config.latent_dim,
-                "num_archetypes": config.num_archetypes,
-                "lstm_hidden_dim": config.lstm_hidden_dim,
-                "phase1_epochs": config.phase1_epochs,
-                "pretrain_epochs": config.pretrain_epochs,
-                "learning_rate": config.learning_rate,
-                "batch_size": config.batch_size,
-                "vq_beta0": config.vq_beta0,
-                "num_trajectories": config.num_trajectories,
-                "phase1_sampling_seed": config.phase1_sampling_seed,
-                "discount_factor": config.discount_factor,
-                "commission_rate": config.commission_rate,
-                "max_positions": config.max_positions,
-                "paper_phase1_reference_train_rows": PAPER_PHASE1_REFERENCE_TRAIN_ROWS,
-                "current_train_rows": train_rows,
-            },
+    checkpoint_data = {
+        "encoder": encoder.state_dict(),
+        "codebook": codebook.state_dict(),
+        "decoder": decoder.state_dict(),
+        "loss_history": history.loss,
+        "training_monitor": history.to_dict(),
+        "config": {
+            "state_dim": config.state_dim,
+            "action_dim": config.action_dim,
+            "latent_dim": config.latent_dim,
+            "num_archetypes": config.num_archetypes,
+            "lstm_hidden_dim": config.lstm_hidden_dim,
+            "phase1_epochs": config.phase1_epochs,
+            "pretrain_epochs": config.pretrain_epochs,
+            "learning_rate": config.learning_rate,
+            "batch_size": config.batch_size,
+            "vq_beta0": config.vq_beta0,
+            "num_trajectories": config.num_trajectories,
+            "phase1_sampling_seed": config.phase1_sampling_seed,
+            "discount_factor": config.discount_factor,
+            "commission_rate": config.commission_rate,
+                "dp_commission_rate": config.dp_commission_rate,
+                "train_commission_rate": config.train_commission_rate,
+            "max_positions": config.max_positions,
+            "train_batch_id": config.train_batch_id,
+            "paper_phase1_reference_train_rows": PAPER_PHASE1_REFERENCE_TRAIN_ROWS,
+            "current_train_rows": train_rows,
         },
-        save_path,
-    )
+    }
+    if norm_stats is not None:
+        checkpoint_data["norm_stats"] = {
+            k: v.tolist() if hasattr(v, 'tolist') else float(v)
+            for k, v in norm_stats.items()
+        }
+    torch.save(checkpoint_data, save_path)
     logger.info("模型已保存到 %s", save_path)
     return save_path
 
@@ -791,6 +817,7 @@ def main() -> None:
     set_reproducibility_seed(config.phase1_sampling_seed)
 
     logger.info("Phase I 训练开始: pair=%s", pair)
+    logger.info("结果目录批次: %s", config.train_batch_id)
     logger.info(
         "严格论文主线配置已通过守卫检查: epochs=%d, batch_size=%d, lr=%.1e, latent_dim=%d, "
         "num_archetypes=%d, num_trajectories=%d, vq_beta0=%.2f, sampling_seed=%d",
@@ -802,10 +829,10 @@ def main() -> None:
     logger.info("使用设备: %s", device)
 
     # Step 1: 加载数据 & 环境
-    env, train_rows = load_data_and_env(config, pair)
+    env, dp_env, train_rows = load_data_and_env(config, pair)
 
-    # Step 2: 准备轨迹数据集
-    dataset, traj_path = prepare_trajectory_dataset(config, pair, env, train_rows)
+    # Step 2: 准备轨迹数据集（用 dp_env 的高费率筛选高利润轨迹）
+    dataset, traj_path = prepare_trajectory_dataset(config, pair, dp_env, train_rows)
     logger.info("Dataset 大小: %d 条轨迹", len(dataset))
 
     dataloader = DataLoader(
@@ -830,10 +857,11 @@ def main() -> None:
         config=config, pair=pair,
         encoder=encoder, codebook=codebook, decoder=decoder,
         history=history, train_rows=train_rows,
+        norm_stats=dataset.norm_stats,
     )
 
     # Step 6: 验证
-    save_dir = os.path.join(config.result_dir, pair, "phase1_archetype_discovery")
+    save_dir = config.get_stage_result_dir(pair, "phase1_archetype_discovery")
     report_path = os.path.join(save_dir, "phase1_validation_report.json")
     validation_report = validate_phase1_artifacts(
         config=config, pair=pair,
@@ -845,11 +873,18 @@ def main() -> None:
     # Step 7: 环境级验证 — 评估 archetype 在真实交易环境中的可用性
     logger.info("开始 Phase I 环境级验证...")
     # 加载验证集环境
-    val_pipeline = FeaturePipeline(config.data_dir, pair)
+    val_pipeline = FeaturePipeline(
+        config.data_dir, pair, cycle_features=config.cycle_features,
+    )
     _, val_state_df, _ = val_pipeline.get_state_vector()
     _, val_prices_df, _ = val_pipeline.get_prices()
     val_env = None
     if val_state_df is not None and len(val_state_df) >= config.horizon:
+        if val_state_df.width != config.state_dim:
+            raise ValueError(
+                "验证集 state_dim 与当前配置不一致: "
+                f"actual={val_state_df.width}, expected={config.state_dim}"
+            )
         val_env = TradingEnv(
             states=val_state_df.to_numpy(),
             prices=val_prices_df["close"].to_numpy(),
@@ -857,7 +892,7 @@ def main() -> None:
             horizon=config.horizon,
             states_dataframe=val_state_df,
             max_positions=config.max_positions,
-            commission_rate=config.commission_rate,
+            commission_rate=config.train_commission_rate,
         )
 
     env_report = run_phase1_env_validation(
