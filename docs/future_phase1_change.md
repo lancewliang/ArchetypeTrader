@@ -30,7 +30,7 @@ decoder 在 change point 处倾向于预测 flat 而不是正确的方向。这�
 
 还有几个方向，我按"改动成本 vs 预期收益"排：
 
-4. 特征增强 — 加入 price change 和 order imbalance
+4. 特征增强 — 加入 price change 和 order imbalance（已完成）
 
 当前 45 维特征是原始 LOB 价格/数量 + WAP + trend_60。但 decoder 需要判断"这一步该不该开仓"，最直接的信号是短期价格变化率和买卖力量对比。可以在 feature_pipeline.py 里加 3-5 个衍生特征：
 
@@ -60,7 +60,28 @@ DP 轨迹的 single-trade 结构是 [flat...flat, action, action...action]。可
 
 当前 pretrain_epochs=10，Phase A 只跑 10 个 epoch 就切到 Phase B 开始 VQ 量化。如果 encoder-decoder 在 Phase A 还没充分收敛，Phase B 的 codebook 初始化质量就差。可以增加到 20-30 个 epoch，让连续 latent space 先充分成型。
 
-如果要我从这些里再挑最值得试的，我选 4（特征增强） 和 5（decoder 加 reward 输入）。理由：
+## 改动分类与实现状态总表
+
+| 编号 | 改动 | 是否超出论文架构 | 当前代码状态 | 备注 |
+|---|---|---|---|---|
+| 1 | 增加 DP 轨迹数量 | 否 | 已实现（可直接改配置） | `num_trajectories` 已接入 `Config` 和 `train_phase1.py` |
+| 1b | 改 DP 采样策略提升多样性 | 不改模型架构，但超出论文默认数据协议 | 未实现 | 当前只有滑窗合法起点 + 随机采样， |
+| 2 | 增大 codebook size K（10 → 16 / 20） | 否 | 已实现（可直接改配置） | `num_archetypes` 已接入训练和存档 效果不好  |
+| 3 | 增大 latent_dim（16 → 32） | 否 | 已实现（可直接改配置） | `latent_dim` 已接入 encoder / decoder / codebook。|
+| 4 | 特征增强（price change / imbalance / spread） | 否 | 已实现 | 属于输入特征增强，不改 Phase I 核心结构 |
+| 5 | Decoder 输入加入 reward 信号 | 是 | 未实现 | 会把 decoder 从 `p(a_hat | s, z_q)` 改成更强输入版本 |
+| 6 | 训练时数据增强（时间翻转） | 不改网络结构，但超出论文原始训练流程 | 未实现 | 属于训练技巧扩展 |
+| 7 | 多尺度 horizon 训练 | 是 | 未实现 | 会改固定长度 `h=72` 的数据组织和训练协议 |
+| 8 | Encoder 用 BiLSTM 替代单向 LSTM | 是 | 未实现 | 当前 encoder 仍是单向 LSTM + temporal attention |
+| 9 | 增加 VQ 训练的 pretrain epochs | 否 | 已实现（可直接改配置） | `pretrain_epochs` 已接入两阶段训练流程 |
+
+补充说明：
+
+- 当前论文定义的 Phase I 是 `encoder: q(z_e | s, a, r)`，`decoder: p(a_hat | s, z_q)`。
+- 当前代码里 decoder 已经是 BiLSTM，但 encoder 还不是 BiLSTM。
+- 因此第 8 项不是“继续沿用现状”，而是一次新的结构修改。
+
+如果要我从这些里再挑最值得试的，我会把 4 标记为已完成；在剩余未完成项里，优先考虑 5（decoder 加 reward 输入）。理由：
 
 特征增强是零风险改动，直接给 decoder 更好的输入信号来判断 change point 方向
 Decoder 加 reward 修复了 encoder-decoder 之间的信息不对称，让 decoder 不用从 z_q 里"猜" reward 信息
