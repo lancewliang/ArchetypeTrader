@@ -29,7 +29,7 @@ class Config:
     # MDP 配置
     action_dim: int = 3  # {0: short, 1: flat, 2: long}
     horizon: int = 72  # h = 72 步
-    commission_rate: float = 0.0003  # δ = 0.03%（真实佣金率，用于 evaluation）
+    commission_rate: float = 0.0002  # δ = 0.03%（真实佣金率，用于 evaluation）
     dp_commission_rate: float = 0.0008  # DP planner 用 0.1%（高门槛筛选高利润轨迹）
     train_commission_rate: float = 0.0008  # Phase 1/2/3 训练用 0.06%（2× 真实费率，留安全边际）
     max_positions: Dict[str, int] = field(
@@ -47,6 +47,8 @@ class Config:
     pretrain_epochs: int = 10  # 连续潜在预训练轮数（无 VQ 量化）
 
     # Phase II 配置
+    phase2_hidden_dim: int = 128       # SelectionAgent 共享层宽度
+    phase2_bottleneck_dim: int = 64    # SelectionAgent 瓶颈层宽度
     phase2_total_steps: int = 3_000_000
     selection_alpha: float = 1.0  # KL 惩罚系数
     phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出

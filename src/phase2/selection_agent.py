@@ -20,33 +20,41 @@ class SelectionAgent(nn.Module):
     # 输出: 原型选择概率分布 π(a_sel | s_sel) 和状态价值 V(s_sel)
     #
     # 网络结构:
-    #   共享层: Linear(state_dim, 128) → ReLU → Linear(128, 64) → ReLU
-    #   策略头: Linear(64, K) → Softmax → action_probs
-    #   价值头: Linear(64, 1) → value
+    #   共享层: Linear(state_dim, hidden_dim) → ReLU → Linear(hidden_dim, bottleneck_dim) → ReLU
+    #   策略头: Linear(bottleneck_dim, K) → Softmax → action_probs
+    #   价值头: Linear(bottleneck_dim, 1) → value
 
     Args:
         state_dim: 状态向量维度 (默认 45)
         num_archetypes: 原型数量 K (默认 10)
+        hidden_dim: 共享层第一层宽度 (默认 256)
+        bottleneck_dim: 共享层第二层宽度 (默认 128)
     """
 
-    def __init__(self, state_dim: int, num_archetypes: int = 10) -> None:
+    def __init__(
+        self,
+        state_dim: int,
+        num_archetypes: int = 10,
+        hidden_dim: int = 256,
+        bottleneck_dim: int = 128,
+    ) -> None:
         super().__init__()
         self.state_dim = state_dim
         self.num_archetypes = num_archetypes
 
         # Section 4.2: 共享特征提取层
         self.shared = nn.Sequential(
-            nn.Linear(state_dim, 128),
+            nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(128, 64),
+            nn.Linear(hidden_dim, bottleneck_dim),
             nn.ReLU(),
         )
 
         # Section 4.2: 策略头 — 输出 K 个原型的选择概率
-        self.policy_head = nn.Linear(64, num_archetypes)
+        self.policy_head = nn.Linear(bottleneck_dim, num_archetypes)
 
         # Section 4.2: 价值头 — 输出状态价值估计
-        self.value_head = nn.Linear(64, 1)
+        self.value_head = nn.Linear(bottleneck_dim, 1)
 
     def forward(self, state: Tensor) -> Tuple[Tensor, Tensor]:
         """根据当前状态输出原型选择的策略分布和状态价值。

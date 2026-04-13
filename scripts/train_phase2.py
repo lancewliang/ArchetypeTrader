@@ -1808,6 +1808,8 @@ def main() -> None:
     agent = SelectionAgent(
         state_dim=config.state_dim,
         num_archetypes=config.num_archetypes,
+        hidden_dim=config.phase2_hidden_dim,
+        bottleneck_dim=config.phase2_bottleneck_dim,
     ).to(device)
 
     logger.info(
@@ -1901,6 +1903,8 @@ def main() -> None:
         best_agent = SelectionAgent(
             state_dim=config.state_dim,
             num_archetypes=config.num_archetypes,
+            hidden_dim=config.phase2_hidden_dim,
+            bottleneck_dim=config.phase2_bottleneck_dim,
         ).to(device)
         best_agent.load_state_dict(best_ckpt["agent"])
         best_agent.eval()

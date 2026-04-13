@@ -102,6 +102,8 @@ def load_phase2_model(
 
     agent = SelectionAgent(
         state_dim=config.state_dim, num_archetypes=config.num_archetypes,
+        hidden_dim=config.phase2_hidden_dim,
+        bottleneck_dim=config.phase2_bottleneck_dim,
     ).to(device)
     agent.load_state_dict(checkpoint["agent"])
 

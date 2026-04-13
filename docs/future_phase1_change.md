@@ -94,3 +94,8 @@ dp优化
 放宽 single-trade 约束，允许 2 次或更多 change
 给窗口末端加 continuation value，而不是把窗口外价值当 0
 降低下游 imitation 权重，让 RL 学会偏离 DP 先验
+
+
+因子组测试完了
+short/long 只有20%收益
+middle 有80%收益
