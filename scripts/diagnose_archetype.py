@@ -39,12 +39,17 @@ def parse_args():
     p.add_argument("--split", default="val", choices=["val", "test"])
     p.add_argument("--focus-k", type=int, default=8, dest="focus_k",
                    help="重点分析的 archetype index（默认 8）")
+    p.add_argument("--cycle-feature-sets", default=None, dest="cycle_feature_sets",
+                   help="特征集，逗号分隔，如 short / middle / long（默认跟随 config）")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    config = parse_config(["--train-batch-id", args.batch_id])
+    config_argv = ["--train-batch-id", args.batch_id]
+    if args.cycle_feature_sets:
+        config_argv += ["--cycle-feature-sets", args.cycle_feature_sets]
+    config = parse_config(config_argv)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pair = args.pair
     split = args.split
