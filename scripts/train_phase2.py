@@ -1415,6 +1415,8 @@ def run_training_loop(
     next_log_step = log_interval
     next_val_step = val_interval
 
+    warmup_steps = int(config.phase2_warmup_steps)
+
     # 保留原有日志。
     logger.info("开始训练: %d 步", total_steps)
     # 新增 PPO 训练器细节日志，便于和单步 Actor-Critic 区分。
@@ -1425,6 +1427,11 @@ def run_training_loop(
         ppo_epochs,
         minibatch_size,
         clip_eps,
+    )
+    logger.info(
+        "热身期设置: warmup_steps=%d (%.1f%%), 只有超过此步数的模型才能成为最优模型",
+        warmup_steps,
+        100.0 * warmup_steps / total_steps if total_steps > 0 else 0.0,
     )
 
     pbar = tqdm(total=total_steps, desc="Phase II 训练", unit="step", dynamic_ncols=True)
@@ -1626,7 +1633,18 @@ def run_training_loop(
                 train_diag["fixed_returns"],
             )
 
-            if val_return > best_val_return:
+            # 只有超过热身期的模型才有资格成为最优模型
+            warmup_steps = int(config.phase2_warmup_steps)
+            if step_count < warmup_steps:
+                if val_return > best_val_return:
+                    logger.info(
+                        "验证集性能提升 (%.4f -> %.4f)，但仍在热身期 (step %d < %d)，暂不保存为最优模型",
+                        best_val_return,
+                        val_return,
+                        step_count,
+                        warmup_steps,
+                    )
+            elif val_return > best_val_return:
                 best_val_return = val_return
                 save_checkpoint(
                     save_path=save_path,
@@ -1639,7 +1657,7 @@ def run_training_loop(
                     config=config,
                     ppo_hparams=ppo_hparams,
                 )
-                logger.info("最优模型已保存到 %s (val_return=%.4f)", save_path, val_return)
+                logger.info("最优模型已保存到 %s (val_return=%.4f, step=%d)", save_path, val_return, step_count)
 
             pbar.set_description("Phase II 训练")
             pbar.set_postfix({
@@ -1867,6 +1885,12 @@ def main() -> None:
         device=device,
     )
 
+    # ----------------------------------------------------------------
+    # Step 5: 训练结束后重新加载最优模型，确保后续使用的是验证集上表现最好的版本
+    # ----------------------------------------------------------------
+    eval_max_horizons = ppo_hparams["eval_max_horizons"]
+
+    # 先保存最终模型（用于对比分析）
     final_save_path = os.path.join(save_dir, f"{pair}_selection_agent_final.pt")
     save_checkpoint(
         save_path=final_save_path,
@@ -1881,12 +1905,7 @@ def main() -> None:
     )
     logger.info("最终模型已保存到 %s", final_save_path)
 
-    # ----------------------------------------------------------------
-    # Step 5: 训练结束后立即做一次验证集评估（best/final 对照）
-    # 目标: 在进入 Phase III 前确认 Phase II 模型是否健康
-    # ----------------------------------------------------------------
-    eval_max_horizons = ppo_hparams["eval_max_horizons"]
-
+    # 评估最终模型性能
     final_val_metrics = evaluate_on_validation(
         agent=agent,
         codebook=codebook,
@@ -1897,27 +1916,28 @@ def main() -> None:
     )
     final_val_return = float(final_val_metrics["avg_return"])
 
+    # 重新加载最优模型（确保后续阶段使用的是最优版本）
     best_val_metrics: dict[str, Any]
     if os.path.exists(save_path):
+        logger.info("重新加载最优模型: %s", save_path)
         best_ckpt = torch.load(save_path, map_location=device, weights_only=False)
-        best_agent = SelectionAgent(
-            state_dim=config.state_dim,
-            num_archetypes=config.num_archetypes,
-            hidden_dim=config.phase2_hidden_dim,
-            bottleneck_dim=config.phase2_bottleneck_dim,
-        ).to(device)
-        best_agent.load_state_dict(best_ckpt["agent"])
-        best_agent.eval()
+        agent.load_state_dict(best_ckpt["agent"])  # 将最优权重加载回agent
+        agent.eval()
         best_val_metrics = evaluate_on_validation(
-            agent=best_agent,
+            agent=agent,
             codebook=codebook,
             decoder=decoder,
             val_env=val_env,
             device=device,
             max_horizons=eval_max_horizons,
         )
+        logger.info("已将最优模型权重加载到内存，后续阶段将使用此版本")
     else:
-        logger.warning("未找到最优 checkpoint: %s，将使用最终模型验证结果替代", save_path)
+        logger.warning(
+            "未找到最优 checkpoint: %s (可能训练未超过热身期 %d 步)，将继续使用最终模型",
+            save_path,
+            config.phase2_warmup_steps,
+        )
         best_val_metrics = dict(final_val_metrics)
 
     best_status, best_status_msg = _phase2_health_status(best_val_metrics)

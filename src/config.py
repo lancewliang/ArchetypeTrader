@@ -52,6 +52,7 @@ class Config:
     phase2_total_steps: int = 3_000_000
     selection_alpha: float = 1.0  # KL 惩罚系数
     phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
+    phase2_warmup_steps: int = 1_500_000  # 热身期步数，只有超过此步数的模型才能成为最优模型
     phase2_rollout_batch_size: int = 2048
     phase2_ppo_epochs: int = 16
     phase2_minibatch_size: int = 512
@@ -208,6 +209,12 @@ def parse_args(argv: list | None = None) -> Config:
         "--selection-alpha", type=float, default=None, help="KL 惩罚系数"
     )
     parser.add_argument(
+        "--phase2-warmup-steps",
+        type=int,
+        default=None,
+        help="Phase II 热身期步数，只有超过此步数的模型才能成为最优模型（默认1500000）",
+    )
+    parser.add_argument(
         "--phase2-rollout-batch-size",
         type=int,
         default=None,
@@ -354,6 +361,7 @@ def parse_args(argv: list | None = None) -> Config:
         "pretrain_epochs": getattr(args, "pretrain_epochs", None),
         "phase2_total_steps": getattr(args, "phase2_total_steps", None),
         "selection_alpha": getattr(args, "selection_alpha", None),
+        "phase2_warmup_steps": getattr(args, "phase2_warmup_steps", None),
         "phase2_rollout_batch_size": getattr(args, "phase2_rollout_batch_size", None),
         "phase2_ppo_epochs": getattr(args, "phase2_ppo_epochs", None),
         "phase2_minibatch_size": getattr(args, "phase2_minibatch_size", None),
