@@ -737,6 +737,16 @@ def validate_phase1_model(
     used_code_count = int(np.sum(code_counts > 0))
     dead_code_count = int(np.sum(code_counts == 0))
     dominant_code_ratio = float(np.max(code_counts) / np.sum(code_counts)) if np.sum(code_counts) > 0 else 0.0
+    
+    # 计算低使用率码本（使用率 < 10%）
+    total_usage = np.sum(code_counts)
+    low_usage_threshold = 0.10  # 10%
+    low_usage_codes = []
+    for i, count in enumerate(code_counts):
+        usage_ratio = float(count / total_usage) if total_usage > 0 else 0.0
+        if 0 < usage_ratio < low_usage_threshold:
+            low_usage_codes.append((i, usage_ratio))
+    
     report["codebook_usage"] = {
         "code_usage_histogram": {str(i): int(v) for i, v in enumerate(code_counts.tolist())},
         "used_code_count": used_code_count,
@@ -744,6 +754,8 @@ def validate_phase1_model(
         "dominant_code_ratio": dominant_code_ratio,
         "codebook_entropy": codebook_entropy,
         "codebook_perplexity": codebook_perplexity,
+        "low_usage_codes": [(int(i), float(ratio)) for i, ratio in low_usage_codes],
+        "low_usage_code_count": len(low_usage_codes),
     }
     if used_code_count == 0:
         report["hard_failures"].append("codebook 未被任何样本使用")
@@ -760,6 +772,25 @@ def validate_phase1_model(
 
     if dead_code_count > code_counts.shape[0] // 2:
         report["soft_warnings"].append("超过一半的 code 未被使用，codebook 利用率偏低")
+    
+    # 新增警告 1: 低使用率码本（死码）检测
+    if len(low_usage_codes) > 0:
+        dead_code_details = ", ".join([f"k={i}({ratio*100:.2f}%)" for i, ratio in low_usage_codes[:5]])
+        if len(low_usage_codes) > 5:
+            dead_code_details += f" 等 {len(low_usage_codes)} 个"
+        report["soft_warnings"].append(
+            f"⚠️ 码本坍缩: {len(low_usage_codes)} 个原型使用率低于10%（死码）: {dead_code_details}"
+        )
+    
+    # 新增警告 3: 困惑度检测（分布极度不均匀）
+    num_codes = code_counts.shape[0]
+    perplexity_threshold_ratio = 1.0 / 3.0  # 困惑度应 > K/3
+    expected_min_perplexity = num_codes * perplexity_threshold_ratio
+    if codebook_perplexity < expected_min_perplexity:
+        report["soft_warnings"].append(
+            f"⚠️ 码本分布极度不均匀: 困惑度={codebook_perplexity:.2f} 远小于 K/3={expected_min_perplexity:.2f}，"
+            f"说明原型选择过度集中"
+        )
 
     codebook_weight = codebook.embeddings.weight.detach().cpu()
     normalized_weight = torch.nn.functional.normalize(codebook_weight, dim=1)
@@ -768,6 +799,16 @@ def validate_phase1_model(
     off_diag_mask = ~torch.eye(codebook_weight.shape[0], dtype=torch.bool)
     off_diag_cos = cosine_matrix[off_diag_mask].numpy()
     off_diag_l2 = l2_matrix[off_diag_mask].numpy()
+    
+    # 找出高相似度的码本对
+    high_similarity_threshold = 0.8
+    high_similarity_pairs = []
+    for i in range(codebook_weight.shape[0]):
+        for j in range(i + 1, codebook_weight.shape[0]):
+            cos_sim = float(cosine_matrix[i, j].item())
+            if cos_sim > high_similarity_threshold:
+                high_similarity_pairs.append((i, j, cos_sim))
+    
     report["latent_geometry"] = {
         "z_e_norm_mean": _safe_mean(z_e_norm_array),
         "z_e_norm_std": _safe_std(z_e_norm_array),
@@ -782,9 +823,21 @@ def validate_phase1_model(
         "pairwise_codebook_l2_min": _safe_min(off_diag_l2),
         "pairwise_codebook_l2_max": _safe_max(off_diag_l2),
         "logit_abs_max": logit_abs_max,
+        "high_similarity_pairs": [(int(i), int(j), float(sim)) for i, j, sim in high_similarity_pairs],
+        "high_similarity_pair_count": len(high_similarity_pairs),
     }
     if report["latent_geometry"]["pairwise_codebook_cosine_min"] > 0.95:
         report["soft_warnings"].append("pairwise_codebook_cosine_min 过高，多个 codebook 向量可能过于相似")
+    
+    # 新增警告 2: 余弦相似度过高检测（特征多样性丧失）
+    if len(high_similarity_pairs) > 0:
+        pair_details = ", ".join([f"(k={i},k={j}:{sim:.3f})" for i, j, sim in high_similarity_pairs[:3]])
+        if len(high_similarity_pairs) > 3:
+            pair_details += f" 等 {len(high_similarity_pairs)} 对"
+        report["soft_warnings"].append(
+            f"⚠️ 特征多样性丧失: {len(high_similarity_pairs)} 对原型余弦相似度 > 0.8，"
+            f"说明原型向量过于相似: {pair_details}"
+        )
 
     training_monitor = checkpoint.get("training_monitor", {})
     report["training_monitor_summary"] = training_monitor

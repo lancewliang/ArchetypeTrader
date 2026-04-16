@@ -1,23 +1,32 @@
-"""诊断脚本: 分析 Phase II archetype 选择质量
+"""诊断脚本: 自动分析 Phase II archetype 选择质量并输出详细报告
 
-排查 phase2_eval vs DP 的 gap 来源:
-1. 每个 archetype 在 val 上的平均 horizon return
-2. selector 的 archetype 选择分布（是否坍缩）
-3. selector 的概率分布熵（是否过于自信/随机）
-4. 每个 archetype 对应的 decoder 输出动作分布（long/flat/short 比例）
-5. 亏损 horizon 的 archetype 分布 vs 盈利 horizon 的分布
-6. k=8 被选时的市场特征 vs 其他 archetype（判断是否真的是震荡行情）
+功能:
+1. 自动识别有问题的 archetype（表现最差、选择频率异常等）
+2. 深入诊断问题原型的参数和行为模式
+3. 输出详细的诊断报告（JSON + Markdown）供 AI 分析
+
+排查内容:
+- 每个 archetype 在 val 上的平均 horizon return
+- selector 的 archetype 选择分布（是否坍缩）
+- selector 的概率分布熵（是否过于自信/随机）
+- 每个 archetype 对应的 decoder 输出动作分布（long/flat/short 比例）
+- 亏损 horizon 的 archetype 分布 vs 盈利 horizon 的分布
+- 问题 archetype 被选时的市场特征分析
 
 用法:
     python scripts/diagnose_archetype.py --pair AL --batch-id batch_001 --split val
-    python scripts/diagnose_archetype.py --pair AL --batch-id batch_001 --split val --focus-k 8
+    python scripts/diagnose_archetype.py --pair AL --batch-id batch_001 --split val --output-dir reports
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import sys
 from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -37,10 +46,12 @@ def parse_args():
     p.add_argument("--pair", default="AL")
     p.add_argument("--batch-id", default="batch_001", dest="batch_id")
     p.add_argument("--split", default="val", choices=["val", "test"])
-    p.add_argument("--focus-k", type=int, default=8, dest="focus_k",
-                   help="重点分析的 archetype index（默认 8）")
+    p.add_argument("--output-dir", default="reports", dest="output_dir",
+                   help="诊断报告输出目录（默认 reports）")
     p.add_argument("--cycle-feature-sets", default=None, dest="cycle_feature_sets",
                    help="特征集，逗号分隔，如 short / middle / long（默认跟随 config）")
+    p.add_argument("--top-n-problems", type=int, default=3, dest="top_n_problems",
+                   help="诊断表现最差的前 N 个 archetype（默认 3）")
     return p.parse_args()
 
 
@@ -53,22 +64,90 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pair = args.pair
     split = args.split
-    focus_k = args.focus_k
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*60}")
-    print(f"Archetype 诊断: {pair} [{split}]  batch={args.batch_id}")
+    print(f"Archetype 自动诊断: {pair} [{split}]  batch={args.batch_id}")
     print(f"{'='*60}\n")
 
     # 加载模型
-    codebook, decoder, normalizer = load_phase1_model(config, pair, device)
-    selection_agent = load_phase2_model(config, pair, device)
+    try:
+        codebook, decoder, normalizer = load_phase1_model(config, pair, device)
+    except RuntimeError as e:
+        error_msg = str(e)
+        if "size mismatch" in error_msg and "state_dict" in error_msg:
+            print(f"\n❌ 模型维度不匹配错误:")
+            print(f"{error_msg}\n")
+            
+            # 尝试从 checkpoint 中提取实际的 state_dim
+            import re
+            match = re.search(r'torch\.Size\(\[(\d+), (\d+)\]\)', error_msg)
+            if match:
+                checkpoint_dim = int(match.group(2))
+                current_dim = config.state_dim
+                print(f"问题分析:")
+                print(f"  - Checkpoint 中的模型期望 state_dim = {checkpoint_dim}")
+                print(f"  - 当前配置使用 state_dim = {current_dim}")
+                print(f"  - 差异: {current_dim - checkpoint_dim} 个特征\n")
+                
+                print(f"解决方案:")
+                print(f"  训练模型时使用的特征集与当前不一致。请使用正确的特征集参数:\n")
+                
+                # 推测可能的特征集
+                if checkpoint_dim == 70:
+                    print(f"  python scripts/diagnose_archetype.py --pair {pair} --batch-id {args.batch_id} --split {split} --cycle-feature-sets short")
+                elif checkpoint_dim == 73:
+                    print(f"  python scripts/diagnose_archetype.py --pair {pair} --batch-id {args.batch_id} --split {split} --cycle-feature-sets middle")
+                else:
+                    print(f"  python scripts/diagnose_archetype.py --pair {pair} --batch-id {args.batch_id} --split {split} --cycle-feature-sets <正确的特征集>")
+                
+                print(f"\n  或者检查训练日志确认使用的特征集配置")
+            else:
+                print(f"错误详情: {error_msg}")
+        else:
+            print(f"\n❌ 加载 Phase I 模型失败: {e}")
+            print(f"\n请检查:")
+            print(f"  1. 模型文件是否存在: result/{pair}/{args.batch_id}/phase1_archetype_discovery/{pair}_vq_model.pt")
+            print(f"  2. 模型文件是否完整（未损坏）")
+            print(f"  3. 是否使用正确的 batch-id")
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ 加载 Phase I 模型失败: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    
+    try:
+        selection_agent = load_phase2_model(config, pair, device)
+    except Exception as e:
+        print(f"\n❌ 加载 Phase II 模型失败: {e}")
+        print(f"\n请检查:")
+        print(f"  1. 模型文件是否存在: result/{pair}/{args.batch_id}/phase2_archetype_selection/{pair}_selection_agent.pt")
+        print(f"  2. Phase II 训练是否已完成")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
     K = config.num_archetypes
 
     # 加载数据
-    pipeline = FeaturePipeline(config.data_dir, pair, cycle_features=config.cycle_features)
-    train_df, val_df, test_df = pipeline.get_state_vector()
-    _, val_prices_df, test_prices_df = pipeline.get_prices()
+    print(f"加载数据: {pair}, 特征集: {config.cycle_features}")
+    try:
+        pipeline = FeaturePipeline(config.data_dir, pair, cycle_features=config.cycle_features)
+        train_df, val_df, test_df = pipeline.get_state_vector()
+        _, val_prices_df, test_prices_df = pipeline.get_prices()
+    except Exception as e:
+        print(f"\n❌ 加载数据失败: {e}")
+        print(f"\n请检查:")
+        print(f"  1. 数据目录是否存在: {config.data_dir}")
+        print(f"  2. 交易对数据是否存在: {pair}")
+        print(f"  3. 特征集配置是否正确: {config.cycle_features}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
     df = val_df if split == "val" else test_df
     prices_df = val_prices_df if split == "val" else test_prices_df
@@ -181,6 +260,73 @@ def main():
     archetype_chosen = np.array(archetype_chosen)
     archetype_probs_entropy = np.array(archetype_probs_entropy)
 
+    # ---- 自动识别问题 archetype ----
+    problem_archetypes = []
+    
+    # 计算每个 archetype 的统计信息
+    archetype_stats = {}
+    for k in range(K):
+        rets = np.array(archetype_returns[k])
+        if len(rets) == 0:
+            continue
+        
+        count = int(np.sum(archetype_chosen == k))
+        freq = count / env.num_horizons * 100
+        avg_ret = rets.mean()
+        win_rate = np.mean(rets > 0) * 100
+        
+        # 计算问题评分（越高越有问题）
+        problem_score = 0
+        issues = []
+        
+        # 1. 负收益
+        if avg_ret < 0:
+            problem_score += abs(avg_ret) * count  # 加权损失
+            issues.append(f"负收益: {avg_ret:.2f}")
+        
+        # 2. 低胜率
+        if win_rate < 40:
+            problem_score += (40 - win_rate) * count / 100
+            issues.append(f"低胜率: {win_rate:.1f}%")
+        
+        # 3. 高频率但表现差
+        if freq > 10 and avg_ret < 0:
+            problem_score += freq * abs(avg_ret)
+            issues.append(f"高频负收益: freq={freq:.1f}%")
+        
+        archetype_stats[k] = {
+            "k": k,
+            "count": count,
+            "freq": freq,
+            "avg_return": float(avg_ret),
+            "std_return": float(rets.std()),
+            "min_return": float(rets.min()),
+            "max_return": float(rets.max()),
+            "win_rate": win_rate,
+            "problem_score": problem_score,
+            "issues": issues,
+        }
+        
+        if problem_score > 0:
+            problem_archetypes.append((k, problem_score, issues))
+    
+    # 按问题评分排序
+    problem_archetypes.sort(key=lambda x: x[1], reverse=True)
+    top_problems = problem_archetypes[:args.top_n_problems]
+    
+    print(f"\n{'='*60}")
+    print(f"🔍 自动识别的问题 archetype (Top {args.top_n_problems}):")
+    print(f"{'='*60}")
+    for idx, (k, score, issues) in enumerate(top_problems, 1):
+        stats = archetype_stats[k]
+        print(f"\n{idx}. Archetype k={k} (问题评分: {score:.2f})")
+        print(f"   选择频率: {stats['freq']:.1f}% ({stats['count']} 次)")
+        print(f"   平均收益: {stats['avg_return']:.2f}")
+        print(f"   胜率: {stats['win_rate']:.1f}%")
+        print(f"   问题:")
+        for issue in issues:
+            print(f"     - {issue}")
+
     # ---- 打印结果 ----
 
     # 1. Archetype 选择频率
@@ -274,86 +420,320 @@ def main():
     if dominant_freq > 50:
         print(f"  ⚠️  selector 严重坍缩到 k={dominant_k}，多样性不足")
 
-    # ---- 【6】focus_k 市场特征对比分析 ----
+    # ---- 【6】对每个问题 archetype 进行详细诊断 ----
     feat_keys = ["price_range_pct", "price_direction", "volatility", "trend_strength",
                  "avg_volume", "lob_imbalance"]
     feat_labels = {
-        "price_range_pct":  "价格振幅%    (高=波动大)",
-        "price_direction":  "价格方向     (正=上涨,负=下跌)",
-        "volatility":       "逐步波动率   (高=震荡)",
-        "trend_strength":   "趋势强度     (高=趋势,低=震荡)",
+        "price_range_pct":  "价格振幅%",
+        "price_direction":  "价格方向",
+        "volatility":       "逐步波动率",
+        "trend_strength":   "趋势强度",
         "avg_volume":       "平均成交量",
-        "lob_imbalance":    "LOB不平衡    (正=买压,负=卖压)",
+        "lob_imbalance":    "LOB不平衡",
     }
-
-    focus_rows = [r for r in horizon_raw_features if r["k"] == focus_k]
-    other_rows  = [r for r in horizon_raw_features if r["k"] != focus_k]
-
-    print(f"\n{'='*60}")
-    print(f"【6】k={focus_k} 市场特征对比 (k={focus_k} vs 其他所有 archetype)")
-    print(f"{'='*60}")
-    print(f"  k={focus_k} 样本数: {len(focus_rows)}   其他: {len(other_rows)}\n")
-
-    print(f"  {'特征':<30}  {'k='+str(focus_k)+' 均值':>12}  {'其他均值':>10}  {'差异':>10}  结论")
-    print(f"  {'-'*80}")
-    for fk in feat_keys:
-        fv_focus = np.array([r[fk] for r in focus_rows])
-        fv_other = np.array([r[fk] for r in other_rows])
-        m_focus = fv_focus.mean()
-        m_other = fv_other.mean()
-        diff_pct = (m_focus - m_other) / (abs(m_other) + 1e-10) * 100
-        if fk == "trend_strength":
-            verdict = "✓ 确实震荡" if m_focus < m_other * 0.8 else ("✗ 趋势行情" if m_focus > m_other * 1.2 else "≈ 相近")
-        elif fk == "volatility":
-            verdict = "✓ 低波动" if m_focus < m_other * 0.8 else ("✗ 高波动" if m_focus > m_other * 1.2 else "≈ 相近")
-        elif fk == "price_range_pct":
-            verdict = "✓ 窄幅震荡" if m_focus < m_other * 0.8 else ("✗ 宽幅波动" if m_focus > m_other * 1.2 else "≈ 相近")
-        else:
-            verdict = ""
-        label = feat_labels[fk]
-        print(f"  {label:<30}  {m_focus:>12.6f}  {m_other:>10.6f}  {diff_pct:>+9.1f}%  {verdict}")
-
-    # k=focus_k 内部：盈利 vs 亏损 horizon 的特征差异
-    focus_win  = [r for r in focus_rows if r["h_return"] >= 0]
-    focus_loss = [r for r in focus_rows if r["h_return"] < 0]
-    print(f"\n  k={focus_k} 内部: 盈利 {len(focus_win)} 次 vs 亏损 {len(focus_loss)} 次")
-    if focus_win and focus_loss:
-        print(f"\n  {'特征':<30}  {'盈利均值':>10}  {'亏损均值':>10}  差异")
-        print(f"  {'-'*65}")
+    
+    detailed_diagnosis = {
+        "metadata": {
+            "pair": pair,
+            "split": split,
+            "batch_id": args.batch_id,
+            "timestamp": datetime.now().isoformat(),
+            "num_archetypes": K,
+            "num_horizons": int(env.num_horizons),
+            "horizon_length": config.horizon,
+        },
+        "summary": {
+            "total_return": float(total_return_sum),
+            "win_rate": float(win_mask.mean() * 100),
+            "avg_entropy": float(archetype_probs_entropy.mean()),
+            "max_entropy": float(np.log(K)),
+            "dominant_archetype": int(dominant_k),
+            "dominant_freq": float(dominant_freq),
+            "selector_collapsed": bool(dominant_freq > 50),
+        },
+        "all_archetypes": {},
+        "problem_archetypes": {},
+    }
+    
+    # 保存所有 archetype 的统计信息
+    for k, stats in archetype_stats.items():
+        ad = archetype_action_dist[k]
+        total_steps = ad.sum()
+        action_dist = {
+            "short_pct": float(ad[0] / total_steps * 100) if total_steps > 0 else 0.0,
+            "flat_pct": float(ad[1] / total_steps * 100) if total_steps > 0 else 0.0,
+            "long_pct": float(ad[2] / total_steps * 100) if total_steps > 0 else 0.0,
+        }
+        stats["action_distribution"] = action_dist
+        detailed_diagnosis["all_archetypes"][str(k)] = stats
+    
+    # 对每个问题 archetype 进行详细诊断
+    for idx, (focus_k, score, issues) in enumerate(top_problems, 1):
+        print(f"\n{'='*80}")
+        print(f"【详细诊断 {idx}】Archetype k={focus_k} 市场特征分析")
+        print(f"{'='*80}")
+        
+        focus_rows = [r for r in horizon_raw_features if r["k"] == focus_k]
+        other_rows = [r for r in horizon_raw_features if r["k"] != focus_k]
+        
+        print(f"  k={focus_k} 样本数: {len(focus_rows)}   其他: {len(other_rows)}\n")
+        
+        # 市场特征对比
+        print(f"  {'特征':<20}  {'k='+str(focus_k):>12}  {'其他':>12}  {'差异%':>10}  结论")
+        print(f"  {'-'*70}")
+        
+        feature_comparison = {}
         for fk in feat_keys:
-            mw = np.mean([r[fk] for r in focus_win])
-            ml = np.mean([r[fk] for r in focus_loss])
-            diff_pct = (mw - ml) / (abs(ml) + 1e-10) * 100
-            print(f"  {feat_labels[fk]:<30}  {mw:>10.6f}  {ml:>10.6f}  {diff_pct:>+8.1f}%")
+            fv_focus = np.array([r[fk] for r in focus_rows]) if focus_rows else np.array([])
+            fv_other = np.array([r[fk] for r in other_rows]) if other_rows else np.array([])
+            
+            m_focus = fv_focus.mean() if len(fv_focus) > 0 else 0.0
+            m_other = fv_other.mean() if len(fv_other) > 0 else 0.0
+            diff_pct = (m_focus - m_other) / (abs(m_other) + 1e-10) * 100
+            
+            # 自动判断
+            verdict = ""
+            if fk == "trend_strength":
+                if m_focus < m_other * 0.8:
+                    verdict = "✓ 震荡行情"
+                elif m_focus > m_other * 1.2:
+                    verdict = "✗ 趋势行情"
+                else:
+                    verdict = "≈ 相近"
+            elif fk == "volatility":
+                if m_focus < m_other * 0.8:
+                    verdict = "✓ 低波动"
+                elif m_focus > m_other * 1.2:
+                    verdict = "✗ 高波动"
+                else:
+                    verdict = "≈ 相近"
+            elif fk == "price_range_pct":
+                if m_focus < m_other * 0.8:
+                    verdict = "✓ 窄幅"
+                elif m_focus > m_other * 1.2:
+                    verdict = "✗ 宽幅"
+                else:
+                    verdict = "≈ 相近"
+            
+            label = feat_labels[fk]
+            print(f"  {label:<20}  {m_focus:>12.6f}  {m_other:>12.6f}  {diff_pct:>+9.1f}%  {verdict}")
+            
+            feature_comparison[fk] = {
+                "focus_mean": float(m_focus),
+                "other_mean": float(m_other),
+                "diff_pct": float(diff_pct),
+                "verdict": verdict,
+            }
+        
+        # 盈利 vs 亏损分析
+        focus_win = [r for r in focus_rows if r["h_return"] >= 0]
+        focus_loss = [r for r in focus_rows if r["h_return"] < 0]
+        
+        print(f"\n  k={focus_k} 内部: 盈利 {len(focus_win)} 次 vs 亏损 {len(focus_loss)} 次")
+        
+        win_loss_comparison = {}
+        if focus_win and focus_loss:
+            print(f"\n  {'特征':<20}  {'盈利均值':>12}  {'亏损均值':>12}  {'差异%':>10}")
+            print(f"  {'-'*60}")
+            for fk in feat_keys:
+                mw = np.mean([r[fk] for r in focus_win])
+                ml = np.mean([r[fk] for r in focus_loss])
+                diff_pct = (mw - ml) / (abs(ml) + 1e-10) * 100
+                print(f"  {feat_labels[fk]:<20}  {mw:>12.6f}  {ml:>12.6f}  {diff_pct:>+9.1f}%")
+                
+                win_loss_comparison[fk] = {
+                    "win_mean": float(mw),
+                    "loss_mean": float(ml),
+                    "diff_pct": float(diff_pct),
+                }
+        
+        # 价格方向分析
+        focus_dirs = np.array([r["price_direction"] for r in focus_rows]) if focus_rows else np.array([])
+        
+        direction_analysis = {}
+        if len(focus_dirs) > 0:
+            print(f"\n  k={focus_k} 价格方向分布:")
+            up_count = np.sum(focus_dirs > 0.001)
+            down_count = np.sum(focus_dirs < -0.001)
+            flat_count = np.sum(np.abs(focus_dirs) <= 0.001)
+            
+            print(f"    上涨: {up_count} 次 ({up_count/len(focus_dirs)*100:.1f}%)")
+            print(f"    下跌: {down_count} 次 ({down_count/len(focus_dirs)*100:.1f}%)")
+            print(f"    横盘: {flat_count} 次 ({flat_count/len(focus_dirs)*100:.1f}%)")
+            
+            direction_analysis = {
+                "up_count": int(up_count),
+                "up_pct": float(up_count/len(focus_dirs)*100),
+                "down_count": int(down_count),
+                "down_pct": float(down_count/len(focus_dirs)*100),
+                "flat_count": int(flat_count),
+                "flat_pct": float(flat_count/len(focus_dirs)*100),
+            }
+            
+            # 误判分析
+            mismatched = [r for r in focus_rows if abs(r["price_direction"]) > 0.002]
+            if mismatched:
+                mm_returns = np.array([r["h_return"] for r in mismatched])
+                print(f"\n  ⚠️  k={focus_k} 被选但有明显趋势(|dir|>0.2%): {len(mismatched)} 次 "
+                      f"({len(mismatched)/len(focus_rows)*100:.1f}%)")
+                print(f"     这些 horizon 的平均 return: {mm_returns.mean():.2f}")
+                print(f"     亏损比例: {np.mean(mm_returns < 0)*100:.1f}%")
+                
+                direction_analysis["mismatched"] = {
+                    "count": len(mismatched),
+                    "pct": float(len(mismatched)/len(focus_rows)*100),
+                    "avg_return": float(mm_returns.mean()),
+                    "loss_rate": float(np.mean(mm_returns < 0)*100),
+                }
+        
+        # 保存详细诊断结果
+        detailed_diagnosis["problem_archetypes"][str(focus_k)] = {
+            "rank": idx,
+            "problem_score": float(score),
+            "issues": issues,
+            "stats": archetype_stats[focus_k],
+            "feature_comparison": feature_comparison,
+            "win_loss_comparison": win_loss_comparison,
+            "direction_analysis": direction_analysis,
+        }
+    
+    # ---- 生成报告文件 ----
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # JSON 报告
+    json_path = output_dir / f"diagnosis_{pair}_{split}_{timestamp}.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(detailed_diagnosis, f, indent=2, ensure_ascii=False)
+    print(f"\n{'='*80}")
+    print(f"✅ JSON 报告已保存: {json_path}")
+    
+    # Markdown 报告
+    md_path = output_dir / f"diagnosis_{pair}_{split}_{timestamp}.md"
+    generate_markdown_report(md_path, detailed_diagnosis, archetype_stats, top_problems)
+    print(f"✅ Markdown 报告已保存: {md_path}")
+    print(f"{'='*80}\n")
 
-    # 价格方向分布对比
-    print(f"\n  k={focus_k} 被选时的价格方向分布:")
-    focus_dirs = np.array([r["price_direction"] for r in focus_rows])
-    print(f"    上涨 horizon (dir>0.001): {np.sum(focus_dirs > 0.001)} 次 "
-          f"({np.mean(focus_dirs > 0.001)*100:.1f}%)")
-    print(f"    下跌 horizon (dir<-0.001): {np.sum(focus_dirs < -0.001)} 次 "
-          f"({np.mean(focus_dirs < -0.001)*100:.1f}%)")
-    print(f"    横盘 horizon: {np.sum(np.abs(focus_dirs) <= 0.001)} 次 "
-          f"({np.mean(np.abs(focus_dirs) <= 0.001)*100:.1f}%)")
 
-    other_dirs = np.array([r["price_direction"] for r in other_rows])
-    print(f"\n  其他 archetype 被选时的价格方向分布:")
-    print(f"    上涨 horizon (dir>0.001): {np.sum(other_dirs > 0.001)} 次 "
-          f"({np.mean(other_dirs > 0.001)*100:.1f}%)")
-    print(f"    下跌 horizon (dir<-0.001): {np.sum(other_dirs < -0.001)} 次 "
-          f"({np.mean(other_dirs < -0.001)*100:.1f}%)")
-    print(f"    横盘 horizon: {np.sum(np.abs(other_dirs) <= 0.001)} 次 "
-          f"({np.mean(np.abs(other_dirs) <= 0.001)*100:.1f}%)")
+def generate_markdown_report(path, diagnosis, archetype_stats, top_problems):
+    """生成 Markdown 格式的诊断报告"""
+    with open(path, "w", encoding="utf-8") as f:
+        meta = diagnosis["metadata"]
+        summary = diagnosis["summary"]
+        
+        f.write(f"# Archetype 诊断报告\n\n")
+        f.write(f"## 基本信息\n\n")
+        f.write(f"- **交易对**: {meta['pair']}\n")
+        f.write(f"- **数据集**: {meta['split']}\n")
+        f.write(f"- **Batch ID**: {meta['batch_id']}\n")
+        f.write(f"- **诊断时间**: {meta['timestamp']}\n")
+        f.write(f"- **Archetype 数量**: {meta['num_archetypes']}\n")
+        f.write(f"- **Horizon 数量**: {meta['num_horizons']}\n")
+        f.write(f"- **Horizon 长度**: {meta['horizon_length']}\n\n")
+        
+        f.write(f"## 整体表现\n\n")
+        f.write(f"- **总收益**: {summary['total_return']:.2f}\n")
+        f.write(f"- **胜率**: {summary['win_rate']:.1f}%\n")
+        f.write(f"- **Selector 平均熵**: {summary['avg_entropy']:.4f} / {summary['max_entropy']:.4f}\n")
+        f.write(f"- **主导 Archetype**: k={summary['dominant_archetype']} (频率: {summary['dominant_freq']:.1f}%)\n")
+        if summary['selector_collapsed']:
+            f.write(f"- **⚠️ 警告**: Selector 严重坍缩，多样性不足\n")
+        f.write(f"\n")
+        
+        f.write(f"## 所有 Archetype 统计\n\n")
+        f.write(f"| k | 频率% | 次数 | 平均收益 | 胜率% | 动作分布(S/F/L) |\n")
+        f.write(f"|---|-------|------|----------|-------|----------------|\n")
+        
+        sorted_archetypes = sorted(archetype_stats.items(), key=lambda x: x[1]['avg_return'])
+        for k, stats in sorted_archetypes:
+            ad = stats['action_distribution']
+            f.write(f"| {k} | {stats['freq']:.1f} | {stats['count']} | "
+                   f"{stats['avg_return']:.2f} | {stats['win_rate']:.1f} | "
+                   f"{ad['short_pct']:.0f}/{ad['flat_pct']:.0f}/{ad['long_pct']:.0f} |\n")
+        f.write(f"\n")
+        
+        f.write(f"## 问题 Archetype 详细诊断\n\n")
+        for idx, (k, score, issues) in enumerate(top_problems, 1):
+            prob_data = diagnosis["problem_archetypes"][str(k)]
+            stats = prob_data["stats"]
+            
+            f.write(f"### {idx}. Archetype k={k}\n\n")
+            f.write(f"**问题评分**: {score:.2f}\n\n")
+            f.write(f"**基本统计**:\n")
+            f.write(f"- 选择频率: {stats['freq']:.1f}% ({stats['count']} 次)\n")
+            f.write(f"- 平均收益: {stats['avg_return']:.2f}\n")
+            f.write(f"- 收益标准差: {stats['std_return']:.2f}\n")
+            f.write(f"- 收益范围: [{stats['min_return']:.2f}, {stats['max_return']:.2f}]\n")
+            f.write(f"- 胜率: {stats['win_rate']:.1f}%\n\n")
+            
+            f.write(f"**识别的问题**:\n")
+            for issue in issues:
+                f.write(f"- {issue}\n")
+            f.write(f"\n")
+            
+            # 市场特征对比
+            if "feature_comparison" in prob_data:
+                f.write(f"**市场特征对比** (k={k} vs 其他):\n\n")
+                f.write(f"| 特征 | k={k} | 其他 | 差异% | 结论 |\n")
+                f.write(f"|------|-------|------|-------|------|\n")
+                for feat, comp in prob_data["feature_comparison"].items():
+                    f.write(f"| {feat} | {comp['focus_mean']:.6f} | {comp['other_mean']:.6f} | "
+                           f"{comp['diff_pct']:+.1f} | {comp['verdict']} |\n")
+                f.write(f"\n")
+            
+            # 盈亏对比
+            if "win_loss_comparison" in prob_data and prob_data["win_loss_comparison"]:
+                f.write(f"**盈利 vs 亏损特征对比**:\n\n")
+                f.write(f"| 特征 | 盈利均值 | 亏损均值 | 差异% |\n")
+                f.write(f"|------|----------|----------|-------|\n")
+                for feat, comp in prob_data["win_loss_comparison"].items():
+                    f.write(f"| {feat} | {comp['win_mean']:.6f} | {comp['loss_mean']:.6f} | "
+                           f"{comp['diff_pct']:+.1f} |\n")
+                f.write(f"\n")
+            
+            # 方向分析
+            if "direction_analysis" in prob_data and prob_data["direction_analysis"]:
+                da = prob_data["direction_analysis"]
+                f.write(f"**价格方向分布**:\n")
+                f.write(f"- 上涨: {da['up_count']} 次 ({da['up_pct']:.1f}%)\n")
+                f.write(f"- 下跌: {da['down_count']} 次 ({da['down_pct']:.1f}%)\n")
+                f.write(f"- 横盘: {da['flat_count']} 次 ({da['flat_pct']:.1f}%)\n")
+                
+                if "mismatched" in da:
+                    mm = da["mismatched"]
+                    f.write(f"\n**⚠️ Selector 误判分析**:\n")
+                    f.write(f"- 被选但有明显趋势: {mm['count']} 次 ({mm['pct']:.1f}%)\n")
+                    f.write(f"- 这些 horizon 的平均收益: {mm['avg_return']:.2f}\n")
+                    f.write(f"- 亏损比例: {mm['loss_rate']:.1f}%\n")
+                f.write(f"\n")
+        
+        f.write(f"## 建议\n\n")
+        f.write(f"根据诊断结果，建议关注以下方面:\n\n")
+        
+        if summary['selector_collapsed']:
+            f.write(f"1. **Selector 坍缩**: 考虑增加探索性训练或调整 selector 的损失函数\n")
+        
+        for idx, (k, score, issues) in enumerate(top_problems[:3], 1):
+            prob_data = diagnosis["problem_archetypes"][str(k)]
+            f.write(f"{idx+1}. **Archetype k={k}**: ")
+            
+            # 根据特征分析给出建议
+            if "direction_analysis" in prob_data and "mismatched" in prob_data["direction_analysis"]:
+                mm_pct = prob_data["direction_analysis"]["mismatched"]["pct"]
+                if mm_pct > 30:
+                    f.write(f"Selector 误判率高 ({mm_pct:.1f}%)，需要改进特征或 selector 训练\n")
+            
+            if prob_data["stats"]["avg_return"] < -10:
+                f.write(f"严重负收益，考虑重新训练该 archetype 或调整 decoder\n")
+            elif prob_data["stats"]["win_rate"] < 30:
+                f.write(f"胜率过低，检查动作生成策略\n")
+            else:
+                f.write(f"需要进一步分析市场特征匹配度\n")
+        
+        f.write(f"\n---\n")
+        f.write(f"*报告生成时间: {meta['timestamp']}*\n")
 
-    # 关键：k=focus_k 被选时有多少 horizon 其实有明显趋势
-    mismatched = [r for r in focus_rows if abs(r["price_direction"]) > 0.002]
-    print(f"\n  ⚠️  k={focus_k} 被选但价格方向明显(|dir|>0.2%): {len(mismatched)} 次 "
-          f"({len(mismatched)/max(len(focus_rows),1)*100:.1f}%)")
-    if mismatched:
-        mm_returns = np.array([r["h_return"] for r in mismatched])
-        print(f"     这些 horizon 的平均 return: {mm_returns.mean():.2f}  "
-              f"(亏损比例: {np.mean(mm_returns < 0)*100:.1f}%)")
-        print(f"     → 这部分是 selector 误判，把趋势行情当成震荡行情处理")
+
+# ---- 【6】focus_k 市场特征对比分析 ----（旧代码，已被上面的自动诊断替代）
 
 
 if __name__ == "__main__":
