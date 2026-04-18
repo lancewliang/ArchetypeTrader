@@ -34,13 +34,13 @@ EXTRA_ARGS=("${@:3}")
 # --- Phase I: Archetype Discovery ---
 echo ""
 echo ">>> [Phase I] 开始训练 — $(date '+%H:%M:%S')"
-python scripts/train_phase1.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" "${EXTRA_ARGS[@]}"
+#python scripts/train_phase1.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" "${EXTRA_ARGS[@]}"
 echo ">>> [Phase I] 完成 — $(date '+%H:%M:%S')"
 
 # --- Phase II: Archetype Selection ---
 echo ""
 echo ">>> [Phase II] 开始训练 — $(date '+%H:%M:%S')"
-python scripts/train_phase2.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" --phase2-total-steps 3000000 --selection-alpha 1.0 --phase2-ent-coef 0.02 "${EXTRA_ARGS[@]}"
+python scripts/train_phase2.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" "${EXTRA_ARGS[@]}"
 echo ">>> [Phase II] 完成 — $(date '+%H:%M:%S')"
 
 python scripts/diagnose_archetype.py --pair "${PAIR}" --split val --batch-id "${BATCH_ID}" "${EXTRA_ARGS[@]}"

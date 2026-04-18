@@ -29,7 +29,7 @@ class Config:
     # MDP 配置
     action_dim: int = 3  # {0: short, 1: flat, 2: long}
     horizon: int = 72  # h = 72 步
-    commission_rate: float = 0.0002  # δ = 0.03%（真实佣金率，用于 evaluation）
+    commission_rate: float = 0.00025  # δ = 0.03%（真实佣金率，用于 evaluation）
     dp_commission_rate: float = 0.0008  # DP planner 用 0.1%（高门槛筛选高利润轨迹）
     train_commission_rate: float = 0.0008  # Phase 1/2/3 训练用 0.06%（2× 真实费率，留安全边际）
     max_positions: Dict[str, int] = field(
@@ -49,8 +49,8 @@ class Config:
     # Phase II 配置
     phase2_hidden_dim: int = 128       # SelectionAgent 共享层宽度
     phase2_bottleneck_dim: int = 64    # SelectionAgent 瓶颈层宽度
-    phase2_total_steps: int = 3_000_000
-    selection_alpha: float = 2.0  # Phase II 中 imitation/KL 正则的权重；对应 Eq.(5) 的 α，用于平衡“按环境收益优化”与“贴近 DP/VQ 给出的 archetype 标签 â_sel”。值越大，selector 越倾向模仿示范原型选择；值越小，越依赖 PPO 按实际收益自由探索
+    phase2_total_steps: int = 4_000_000
+    selection_alpha: float = 1.0  # Phase II 中 imitation/KL 正则的权重；对应 Eq.(5) 的 α，用于平衡“按环境收益优化”与“贴近 DP/VQ 给出的 archetype 标签 â_sel”。值越大，selector 越倾向模仿示范原型选择；值越小，越依赖 PPO 按实际收益自由探索
     phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
     phase2_warmup_steps: int = 800_000  # 热身期步数，只有超过此步数的模型才能成为最优模型
     phase2_rollout_batch_size: int =1024*6  # 每轮 rollout 收集的 horizon 数；越大统计更稳，但单轮更新更慢、更占显存
@@ -58,7 +58,7 @@ class Config:
     phase2_minibatch_size: int = 1024*3 # 每个 PPO epoch 内的小批量大小；需小于 rollout_batch_size，过大时会退化为近似 full-batch 更新
     phase2_clip_eps: float = 0.2  # PPO ratio 裁剪阈值；限制新旧策略偏移幅度，防止 selector 一次更新跳太远
     phase2_vf_coef: float = 0.001  # Critic 的 value loss 权重；越大越强调 return 拟合，越小越避免 value 分支主导训练
-    phase2_ent_coef: float = 0.5  # 策略熵正则权重；鼓励探索更多 archetype，过大可能让选择分布过于发散
+    phase2_ent_coef: float = 0.02  # 策略熵正则权重；鼓励探索更多 archetype，过大可能让选择分布过于发散
     phase2_max_grad_norm: float = 1.0  # 梯度裁剪上限；用于抑制 PPO 更新中的梯度爆炸，稳定 actor/critic 训练
     phase2_log_interval: int = 1000000  # 训练日志输出间隔（按 horizon step 计）；调小更易观测训练过程，但日志会更频繁
     phase2_eval_max_horizons: int | None = None  # 验证时最多评估多少个 horizon；None 表示跑完整验证集，便于最准确对比

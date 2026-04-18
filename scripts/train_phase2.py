@@ -1858,7 +1858,7 @@ def main() -> None:
     # ----------------------------------------------------------------
     alpha = config.selection_alpha  # KL / imitation 惩罚系数
     total_steps = int(config.phase2_total_steps)
-    val_interval = max(train_env.num_horizons, train_env.num_horizons*200)  # 每遍历一次训练集或步评估一次
+    val_interval = max(train_env.num_horizons, train_env.num_horizons*100)  # 每遍历一次训练集或步评估一次
     log_interval = int(ppo_hparams["log_interval"])
 
     save_dir = config.get_stage_result_dir(pair, "phase2_archetype_selection")
