@@ -49,19 +49,19 @@ class Config:
     # Phase II 配置
     phase2_hidden_dim: int = 128       # SelectionAgent 共享层宽度
     phase2_bottleneck_dim: int = 64    # SelectionAgent 瓶颈层宽度
-    phase2_total_steps: int = 3_000_000
+    phase2_total_steps: int = 5_000_000
     selection_alpha: float = 1.0  # KL 惩罚系数
     phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
-    phase2_rollout_batch_size: int = 2048
+    phase2_rollout_batch_size: int = 1024*6
     phase2_ppo_epochs: int = 16
-    phase2_minibatch_size: int = 512
+    phase2_minibatch_size: int = 1024*2
     phase2_clip_eps: float = 0.2
     phase2_vf_coef: float = 0.001
     phase2_ent_coef: float = 0.1
     phase2_max_grad_norm: float = 1.0
     phase2_log_interval: int = 1000000
     phase2_eval_max_horizons: int | None = None
-    phase2_diagnostic_horizons: int = 128
+    phase2_diagnostic_horizons: int = 512
 
     # Phase III 配置
     phase3_total_steps: int = 1_000_000

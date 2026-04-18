@@ -7,7 +7,7 @@ import logging
 import torch
 
 
-GPU_MEMORY_LIMIT_BYTES = 6 * 1024 ** 3
+GPU_MEMORY_LIMIT_BYTES = 14.5 * 1024 ** 3
 
 
 def _bytes_to_gib(num_bytes: int) -> float:
@@ -43,19 +43,6 @@ def log_and_guard_gpu_memory(
     max_allocated = int(torch.cuda.max_memory_allocated(device))
     max_reserved = int(torch.cuda.max_memory_reserved(device))
     observed = max(allocated, reserved)
-
-    if force_log or observed > limit_bytes:
-        logger.info(
-            "[GPU] %s | allocated=%.2f GiB, reserved=%.2f GiB, "
-            "max_allocated=%.2f GiB, max_reserved=%.2f GiB, limit=%.2f GiB",
-            stage,
-            _bytes_to_gib(allocated),
-            _bytes_to_gib(reserved),
-            _bytes_to_gib(max_allocated),
-            _bytes_to_gib(max_reserved),
-            _bytes_to_gib(limit_bytes),
-        )
-
     if observed > limit_bytes:
         logger.error(
             "GPU 显存超过阈值，终止程序: stage=%s, allocated=%.2f GiB, reserved=%.2f GiB, limit=%.2f GiB",
