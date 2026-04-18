@@ -50,19 +50,19 @@ class Config:
     phase2_hidden_dim: int = 128       # SelectionAgent 共享层宽度
     phase2_bottleneck_dim: int = 64    # SelectionAgent 瓶颈层宽度
     phase2_total_steps: int = 3_000_000
-    selection_alpha: float = 1.0  # KL 惩罚系数
+    selection_alpha: float = 2.0  # Phase II 中 imitation/KL 正则的权重；对应 Eq.(5) 的 α，用于平衡“按环境收益优化”与“贴近 DP/VQ 给出的 archetype 标签 â_sel”。值越大，selector 越倾向模仿示范原型选择；值越小，越依赖 PPO 按实际收益自由探索
     phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
-    phase2_warmup_steps: int = 1_500_000  # 热身期步数，只有超过此步数的模型才能成为最优模型
-    phase2_rollout_batch_size: int = 2048
-    phase2_ppo_epochs: int = 16
-    phase2_minibatch_size: int = 512
-    phase2_clip_eps: float = 0.2
-    phase2_vf_coef: float = 0.001
-    phase2_ent_coef: float = 0.1
-    phase2_max_grad_norm: float = 1.0
-    phase2_log_interval: int = 1000000
-    phase2_eval_max_horizons: int | None = None
-    phase2_diagnostic_horizons: int = 128
+    phase2_warmup_steps: int = 800_000  # 热身期步数，只有超过此步数的模型才能成为最优模型
+    phase2_rollout_batch_size: int =1024*6  # 每轮 rollout 收集的 horizon 数；越大统计更稳，但单轮更新更慢、更占显存
+    phase2_ppo_epochs: int = 16  # 同一批 rollout 数据重复做 PPO 更新的轮数；增大可提高样本利用率，但也更容易过拟合旧策略
+    phase2_minibatch_size: int = 1024*3 # 每个 PPO epoch 内的小批量大小；需小于 rollout_batch_size，过大时会退化为近似 full-batch 更新
+    phase2_clip_eps: float = 0.2  # PPO ratio 裁剪阈值；限制新旧策略偏移幅度，防止 selector 一次更新跳太远
+    phase2_vf_coef: float = 0.001  # Critic 的 value loss 权重；越大越强调 return 拟合，越小越避免 value 分支主导训练
+    phase2_ent_coef: float = 0.5  # 策略熵正则权重；鼓励探索更多 archetype，过大可能让选择分布过于发散
+    phase2_max_grad_norm: float = 1.0  # 梯度裁剪上限；用于抑制 PPO 更新中的梯度爆炸，稳定 actor/critic 训练
+    phase2_log_interval: int = 1000000  # 训练日志输出间隔（按 horizon step 计）；调小更易观测训练过程，但日志会更频繁
+    phase2_eval_max_horizons: int | None = None  # 验证时最多评估多少个 horizon；None 表示跑完整验证集，便于最准确对比
+    phase2_diagnostic_horizons: int = 256  # 训练诊断阶段抽样的 horizon 数；用于 learned/random/oracle 对比，越大诊断越稳但更耗时
 
     # Phase III 配置
     phase3_total_steps: int = 1_000_000
@@ -206,7 +206,10 @@ def parse_args(argv: list | None = None) -> Config:
         "--phase2-total-steps", type=int, default=None, help="Phase II 总训练步数"
     )
     parser.add_argument(
-        "--selection-alpha", type=float, default=None, help="KL 惩罚系数"
+        "--selection-alpha",
+        type=float,
+        default=None,
+        help="Phase II 中 imitation/KL 正则权重；越大越贴近 DP/VQ 的 archetype 标签，越小越偏向按环境收益自由学习",
     )
     parser.add_argument(
         "--phase2-warmup-steps",
@@ -218,43 +221,43 @@ def parse_args(argv: list | None = None) -> Config:
         "--phase2-rollout-batch-size",
         type=int,
         default=None,
-        help="每次 PPO rollout 采样的 horizon 数量",
+        help="每轮 PPO rollout 收集的 horizon 数量；越大统计更稳，但更耗时、更占显存",
     )
     parser.add_argument(
         "--phase2-ppo-epochs",
         type=int,
         default=None,
-        help="每个 rollout 的 PPO 更新轮数",
+        help="对同一批 rollout 数据重复执行 PPO 更新的轮数",
     )
     parser.add_argument(
         "--phase2-minibatch-size",
         type=int,
         default=None,
-        help="PPO 更新时的 minibatch 大小",
+        help="每个 PPO epoch 内的小批量大小，通常应小于 rollout_batch_size",
     )
     parser.add_argument(
         "--phase2-clip-eps",
         type=float,
         default=None,
-        help="PPO 裁剪阈值 epsilon",
+        help="PPO 裁剪阈值 epsilon，用于限制新旧策略概率比的偏移",
     )
     parser.add_argument(
         "--phase2-vf-coef",
         type=float,
         default=None,
-        help="PPO value loss 系数",
+        help="PPO 中 critic value loss 的权重系数",
     )
     parser.add_argument(
         "--phase2-ent-coef",
         type=float,
         default=None,
-        help="PPO 熵正则系数",
+        help="PPO 熵正则系数，用于鼓励 archetype 选择探索",
     )
     parser.add_argument(
         "--phase2-max-grad-norm",
         type=float,
         default=None,
-        help="PPO 梯度裁剪阈值",
+        help="PPO 梯度裁剪阈值，用于稳定 actor/critic 更新",
     )
     parser.add_argument(
         "--phase2-log-interval",
@@ -266,13 +269,13 @@ def parse_args(argv: list | None = None) -> Config:
         "--phase2-eval-max-horizons",
         type=int,
         default=None,
-        help="Phase II 验证时最多评估的 horizon 数",
+        help="Phase II 验证时最多评估的 horizon 数；不设则评估完整验证集",
     )
     parser.add_argument(
         "--phase2-diagnostic-horizons",
         type=int,
         default=None,
-        help="Phase II 训练诊断采样的 horizon 数",
+        help="Phase II 训练诊断时抽样的 horizon 数，用于 learned/random/oracle 对比",
     )
     parser.add_argument(
         "--phase2-stop-on-unhealthy",

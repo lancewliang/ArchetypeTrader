@@ -7,7 +7,7 @@ import logging
 import torch
 
 
-GPU_MEMORY_LIMIT_BYTES = 6 * 1024 ** 3
+GPU_MEMORY_LIMIT_BYTES = 12 * 1024 ** 3
 
 
 def _bytes_to_gib(num_bytes: int) -> float:

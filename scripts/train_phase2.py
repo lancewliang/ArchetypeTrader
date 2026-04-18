@@ -1421,12 +1421,14 @@ def run_training_loop(
     logger.info("开始训练: %d 步", total_steps)
     # 新增 PPO 训练器细节日志，便于和单步 Actor-Critic 区分。
     logger.info(
-        "开始训练: total_steps=%d, rollout_batch=%d, ppo_epochs=%d, minibatch=%d, clip_eps=%.3f",
+        "开始训练: total_steps=%d, rollout_batch=%d, ppo_epochs=%d, minibatch=%d, clip_eps=%.3f val_interval=%d log_interval=%d",
         total_steps,
         rollout_batch_size,
         ppo_epochs,
         minibatch_size,
         clip_eps,
+        val_interval,
+        log_interval,
     )
     logger.info(
         "热身期设置: warmup_steps=%d (%.1f%%), 只有超过此步数的模型才能成为最优模型",

@@ -585,6 +585,10 @@ def validate_phase1_model(
     codebook_loss_weight_sum = 0.0
     encoder_commit_weight_sum = 0.0
     code_counts = np.zeros(int(model_config["num_archetypes"]), dtype=np.int64)
+    
+    # 新增：原型收益统计
+    archetype_returns: Dict[int, List[float]] = {i: [] for i in range(int(model_config["num_archetypes"]))}
+    
     confusion = np.zeros((int(model_config["action_dim"]), int(model_config["action_dim"])), dtype=np.int64)
     z_e_norm_values: List[np.ndarray] = []
     z_q_norm_values: List[np.ndarray] = []
@@ -625,6 +629,15 @@ def validate_phase1_model(
             codebook_loss_weight_sum += float(commitment_loss.item()) * batch_size
             encoder_commit_weight_sum += float(encoder_commitment.item()) * batch_size
             code_counts += np.bincount(indices.detach().cpu().numpy(), minlength=code_counts.shape[0])
+            
+            # 新增：记录每个原型对应的轨迹收益
+            indices_np = indices.detach().cpu().numpy()
+            r_demo_np = r_demo.detach().cpu().numpy()
+            for i in range(batch_size):
+                archetype_idx = int(indices_np[i])
+                trajectory_return = float(r_demo_np[i].sum())  # 轨迹总收益
+                archetype_returns[archetype_idx].append(trajectory_return)
+            
             confusion += _compute_confusion_matrix(
                 a_demo.detach().cpu().numpy(),
                 preds.detach().cpu().numpy(),
@@ -740,12 +753,59 @@ def validate_phase1_model(
     
     # 计算低使用率码本（使用率 < 10%）
     total_usage = np.sum(code_counts)
-    low_usage_threshold = 0.10  # 10%
+    low_usage_threshold = 0.05  # 5%
     low_usage_codes = []
     for i, count in enumerate(code_counts):
         usage_ratio = float(count / total_usage) if total_usage > 0 else 0.0
         if 0 < usage_ratio < low_usage_threshold:
             low_usage_codes.append((i, usage_ratio))
+    
+    # 新增：计算每个原型的收益统计
+    archetype_quality_analysis = []
+    for k in range(int(model_config["num_archetypes"])):
+        returns = archetype_returns[k]
+        usage_count = int(code_counts[k])
+        usage_ratio = float(usage_count / total_usage) if total_usage > 0 else 0.0
+        
+        if len(returns) > 0:
+            mean_return = float(np.mean(returns))
+            std_return = float(np.std(returns))
+            min_return = float(np.min(returns))
+            max_return = float(np.max(returns))
+        else:
+            mean_return = 0.0
+            std_return = 0.0
+            min_return = 0.0
+            max_return = 0.0
+        
+        archetype_quality_analysis.append({
+            "archetype_id": k,
+            "usage_count": usage_count,
+            "usage_ratio": usage_ratio,
+            "mean_return": mean_return,
+            "std_return": std_return,
+            "min_return": min_return,
+            "max_return": max_return,
+            "sample_count": len(returns),
+        })
+    
+    # 按平均收益排序
+    archetype_quality_analysis_sorted = sorted(
+        archetype_quality_analysis, 
+        key=lambda x: x["mean_return"], 
+        reverse=True
+    )
+    
+    # 计算收益-使用率相关性
+    valid_archetypes = [a for a in archetype_quality_analysis if a["usage_count"] > 0]
+    if len(valid_archetypes) >= 2:
+        usage_ratios = np.array([a["usage_ratio"] for a in valid_archetypes])
+        mean_returns = np.array([a["mean_return"] for a in valid_archetypes])
+        
+        # Pearson 相关系数
+        correlation = float(np.corrcoef(usage_ratios, mean_returns)[0, 1]) if len(valid_archetypes) > 1 else 0.0
+    else:
+        correlation = 0.0
     
     report["codebook_usage"] = {
         "code_usage_histogram": {str(i): int(v) for i, v in enumerate(code_counts.tolist())},
@@ -756,6 +816,8 @@ def validate_phase1_model(
         "codebook_perplexity": codebook_perplexity,
         "low_usage_codes": [(int(i), float(ratio)) for i, ratio in low_usage_codes],
         "low_usage_code_count": len(low_usage_codes),
+        "archetype_quality_analysis": archetype_quality_analysis_sorted,
+        "return_usage_correlation": correlation,
     }
     if used_code_count == 0:
         report["hard_failures"].append("codebook 未被任何样本使用")
@@ -779,7 +841,32 @@ def validate_phase1_model(
         if len(low_usage_codes) > 5:
             dead_code_details += f" 等 {len(low_usage_codes)} 个"
         report["soft_warnings"].append(
-            f"⚠️ 码本坍缩: {len(low_usage_codes)} 个原型使用率低于10%（死码）: {dead_code_details}"
+            f"⚠️ 码本坍缩: {len(low_usage_codes)} 个原型使用率低于5%（死码）: {dead_code_details}"
+        )
+    
+    # 新增警告 4: 收益-使用率反相关检测
+    if correlation < -0.3:
+        report["soft_warnings"].append(
+            f"⚠️ 收益-使用率负相关: 相关系数={correlation:.3f}，"
+            f"说明低收益原型被过度使用，高收益原型被忽略"
+        )
+    
+    # 新增警告 5: 死码高收益检测（最严重的问题）
+    high_return_dead_codes = []
+    for arch in archetype_quality_analysis:
+        if arch["usage_ratio"] < 0.05 and arch["usage_count"] > 0:  # 死码
+            # 与活跃码本的平均收益比较
+            active_archetypes = [a for a in archetype_quality_analysis if a["usage_ratio"] >= 0.10]
+            if active_archetypes:
+                avg_active_return = np.mean([a["mean_return"] for a in active_archetypes])
+                if arch["mean_return"] > avg_active_return * 1.2:  # 死码收益比活跃码本高20%
+                    high_return_dead_codes.append((arch["archetype_id"], arch["mean_return"], arch["usage_ratio"]))
+    
+    if high_return_dead_codes:
+        dead_code_details = ", ".join([f"k={k}(收益={r:.1f}, 使用率={u*100:.2f}%)" for k, r, u in high_return_dead_codes[:3]])
+        report["soft_warnings"].append(
+            f"⚠️ 高收益死码: {len(high_return_dead_codes)} 个死码的平均收益高于活跃码本，"
+            f"说明模型忽略了高质量策略: {dead_code_details}"
         )
     
     # 新增警告 3: 困惑度检测（分布极度不均匀）
@@ -788,7 +875,7 @@ def validate_phase1_model(
     expected_min_perplexity = num_codes * perplexity_threshold_ratio
     if codebook_perplexity < expected_min_perplexity:
         report["soft_warnings"].append(
-            f"⚠️ 码本分布极度不均匀: 困惑度={codebook_perplexity:.2f} 远小于 K/3={expected_min_perplexity:.2f}，"
+            f"码本分布极度不均匀: 困惑度={codebook_perplexity:.2f} 远小于 K/3={expected_min_perplexity:.2f}，"
             f"说明原型选择过度集中"
         )
 
@@ -801,7 +888,7 @@ def validate_phase1_model(
     off_diag_l2 = l2_matrix[off_diag_mask].numpy()
     
     # 找出高相似度的码本对
-    high_similarity_threshold = 0.8
+    high_similarity_threshold = 0.9
     high_similarity_pairs = []
     for i in range(codebook_weight.shape[0]):
         for j in range(i + 1, codebook_weight.shape[0]):
