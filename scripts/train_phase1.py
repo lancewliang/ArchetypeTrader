@@ -22,7 +22,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -60,6 +60,9 @@ PAPER_PHASE1_SPEC = {
     "discount_factor": 0.99,
     "max_positions": { "ETH": 100, "AL": 10},
 }
+
+# Phase I checkpoint 评估间隔：每训练 30 个 epoch 评估一次
+PHASE1_CHECKPOINT_EVAL_INTERVAL = 30
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +655,8 @@ def run_training_loop(
     decoder: VQDecoder,
     config: Any,
     device: torch.device,
+    checkpoint_interval: int = 0,
+    on_checkpoint: Callable[[int, Dict[str, float], TrainingHistory], None] | None = None,
 ) -> TrainingHistory:
     """执行完整的 Phase I 训练循环（Phase A 预训练 + Phase B VQ 训练）。"""
     all_params = (
@@ -717,6 +722,13 @@ def run_training_loop(
                 )
             )
 
+        if (
+            on_checkpoint is not None
+            and checkpoint_interval > 0
+            and epoch % checkpoint_interval == 0
+        ):
+            on_checkpoint(epoch, summary, history)
+
         if np.isnan(summary["avg_loss"]):
             logger.error("训练 loss 发散 (NaN)，在 epoch %d 终止训练", epoch)
             break
@@ -738,12 +750,15 @@ def save_checkpoint(
     history: TrainingHistory,
     train_rows: int,
     norm_stats: dict | None = None,
+    save_path: str | None = None,
+    checkpoint_meta: Dict[str, Any] | None = None,
 ) -> str:
     """保存模型 checkpoint 到 result/phase1_archetype_discovery/，返回保存路径。"""
     save_dir = config.get_stage_result_dir(pair, "phase1_archetype_discovery")
     os.makedirs(save_dir, exist_ok=True)
 
-    save_path = os.path.join(save_dir, f"{pair}_vq_model.pt")
+    if save_path is None:
+        save_path = os.path.join(save_dir, f"{pair}_vq_model.pt")
     checkpoint_data = {
         "encoder": encoder.state_dict(),
         "codebook": codebook.state_dict(),
@@ -778,9 +793,385 @@ def save_checkpoint(
             k: v.tolist() if hasattr(v, 'tolist') else float(v)
             for k, v in norm_stats.items()
         }
+    if checkpoint_meta is not None:
+        checkpoint_data["checkpoint_meta"] = checkpoint_meta
     torch.save(checkpoint_data, save_path)
     logger.info("模型已保存到 %s", save_path)
     return save_path
+
+
+def build_val_env(config: Any, pair: str) -> TradingEnv | None:
+    """构建验证集环境（若验证集不足一个 horizon，则返回 None）。"""
+    val_pipeline = FeaturePipeline(
+        config.data_dir, pair, cycle_features=config.cycle_features,
+    )
+    _, val_state_df, _ = val_pipeline.get_state_vector()
+    _, val_prices_df, _ = val_pipeline.get_prices()
+    if val_state_df is None or len(val_state_df) < config.horizon:
+        return None
+    if val_state_df.width != config.state_dim:
+        raise ValueError(
+            "验证集 state_dim 与当前配置不一致: "
+            f"actual={val_state_df.width}, expected={config.state_dim}"
+        )
+    return TradingEnv(
+        states=val_state_df.to_numpy(),
+        prices=val_prices_df["close"].to_numpy(),
+        pair=pair,
+        horizon=config.horizon,
+        states_dataframe=val_state_df,
+        max_positions=config.max_positions,
+        commission_rate=config.train_commission_rate,
+    )
+
+
+def load_models_from_phase1_checkpoint(
+    *,
+    config: Any,
+    checkpoint_path: str,
+    device: torch.device,
+) -> Tuple[VQEncoder, VQCodebook, VQDecoder]:
+    """从指定 checkpoint 还原 encoder/codebook/decoder。"""
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    encoder = VQEncoder(
+        state_dim=config.state_dim,
+        action_dim=config.action_dim,
+        hidden_dim=config.lstm_hidden_dim,
+        latent_dim=config.latent_dim,
+    ).to(device)
+    codebook = VQCodebook(
+        num_codes=config.num_archetypes,
+        code_dim=config.latent_dim,
+    ).to(device)
+    decoder = VQDecoder(
+        state_dim=config.state_dim,
+        code_dim=config.latent_dim,
+        hidden_dim=config.lstm_hidden_dim,
+        action_dim=config.action_dim,
+    ).to(device)
+    encoder.load_state_dict(checkpoint["encoder"], strict=True)
+    codebook.load_state_dict(checkpoint["codebook"], strict=True)
+    decoder.load_state_dict(checkpoint["decoder"], strict=True)
+    encoder.eval()
+    codebook.eval()
+    decoder.eval()
+    return encoder, codebook, decoder
+
+
+def extract_checkpoint_selection_metrics(
+    validation_report: Dict[str, Any],
+    env_report: Dict[str, Any],
+) -> Dict[str, Any]:
+    """从 Phase I 两类验证报告中抽取 checkpoint 选择指标。"""
+
+    def _safe_float_metric(value: Any, default: float = 0.0) -> float:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        if not np.isfinite(val):
+            return float(default)
+        return val
+
+    status = validation_report.get("status", {})
+    dp_validation = validation_report.get("dp_validation", {})
+    model_validation = validation_report.get("model_validation", {})
+    loss_decomposition = model_validation.get("loss_decomposition", {})
+    reconstruction = model_validation.get("reconstruction", {})
+    codebook_usage = model_validation.get("codebook_usage", {})
+    latent_geometry = model_validation.get("latent_geometry", {})
+    archetype_env = env_report.get("archetype_env_returns", {})
+    val_env = env_report.get("val_env_returns", {})
+    decoder_action_shift = env_report.get("decoder_action_shift", {})
+
+    oracle_return_mean = _safe_float_metric(val_env.get("oracle_return_mean", 0.0))
+    oracle_return_std = _safe_float_metric(val_env.get("oracle_return_std", 0.0))
+    oracle_positive_ratio = _safe_float_metric(val_env.get("oracle_positive_ratio", 0.0))
+    decoded_return_mean = _safe_float_metric(archetype_env.get("decoded_return_mean", 0.0))
+    decoded_to_oracle_return_ratio = decoded_return_mean / oracle_return_mean if oracle_return_mean > 0 else 0.0
+    token_accuracy = _safe_float_metric(reconstruction.get("token_accuracy", 0.0))
+    flat_baseline_accuracy = _safe_float_metric(reconstruction.get("flat_baseline_accuracy", 0.0))
+
+    return {
+        "overall_passed": bool(status.get("overall_passed", False)),
+        "dp_passed": bool(status.get("dp_passed", False)),
+        "model_passed": bool(status.get("model_passed", False)),
+        "hard_failures_count": len(status.get("hard_failures", [])),
+        "soft_warnings_count": len(status.get("soft_warnings", [])),
+        "dp_hard_failures_count": len(dp_validation.get("hard_failures", [])),
+        "dp_soft_warnings_count": len(dp_validation.get("soft_warnings", [])),
+        "model_hard_failures_count": len(model_validation.get("hard_failures", [])),
+        "model_soft_warnings_count": len(model_validation.get("soft_warnings", [])),
+        "token_accuracy": token_accuracy,
+        "trajectory_exact_match_rate": _safe_float_metric(reconstruction.get("trajectory_exact_match_rate", 0.0)),
+        "change_detect_accuracy": _safe_float_metric(reconstruction.get("change_detect_accuracy", 0.0)),
+        "change_step_mae": _safe_float_metric(reconstruction.get("change_step_mae", 1e6)),
+        "flat_baseline_accuracy": flat_baseline_accuracy,
+        "flat_baseline_margin": token_accuracy - flat_baseline_accuracy,
+        "loss_decomposition_residual": _safe_float_metric(loss_decomposition.get("loss_decomposition_residual", 0.0)),
+        "used_code_count": int(codebook_usage.get("used_code_count", 0)),
+        "dead_code_count": int(codebook_usage.get("dead_code_count", 0)),
+        "dominant_code_ratio": _safe_float_metric(codebook_usage.get("dominant_code_ratio", 0.0)),
+        "codebook_perplexity": _safe_float_metric(codebook_usage.get("codebook_perplexity", 0.0)),
+        "low_usage_code_count": int(codebook_usage.get("low_usage_code_count", 0)),
+        "quantization_mse": _safe_float_metric(latent_geometry.get("quantization_mse", 0.0)),
+        "high_similarity_pair_count": int(latent_geometry.get("high_similarity_pair_count", 0)),
+        "positive_archetype_count": int(archetype_env.get("positive_archetype_count", 0)),
+        "decoded_return_mean": decoded_return_mean,
+        "oracle_return_mean": oracle_return_mean,
+        "oracle_return_std": oracle_return_std,
+        "oracle_positive_ratio": oracle_positive_ratio,
+        "decoded_to_oracle_return_ratio": _safe_float_metric(decoded_to_oracle_return_ratio, default=0.0),
+        "return_usage_correlation": _safe_float_metric(codebook_usage.get("return_usage_correlation", 0.0)),
+        "change_point_accuracy": _safe_float_metric(decoder_action_shift.get("change_point_accuracy", 0.0)),
+        "non_change_accuracy": _safe_float_metric(decoder_action_shift.get("non_change_accuracy", 0.0)),
+        "env_warning_count": len(env_report.get("all_warnings", [])),
+    }
+
+
+def build_checkpoint_rank_tuple(
+    metrics: Dict[str, Any],
+    epoch: int,
+    num_archetypes: int,
+) -> Tuple[float, ...]:
+    """构造用于 checkpoint 排序的 rank tuple（越大越好）。"""
+    _ = max(int(num_archetypes), 1)
+    # 选优核心：先比较验证集 oracle 最大可达收益，再比较泛化稳定性。
+    model_passed = 1.0 if bool(metrics.get("model_passed", False)) else 0.0
+    dp_passed = 1.0 if bool(metrics.get("dp_passed", False)) else 0.0
+    model_hard_failures = float(metrics.get("model_hard_failures_count", 0))
+    dp_hard_failures = float(metrics.get("dp_hard_failures_count", 0))
+    model_soft_warnings = float(metrics.get("model_soft_warnings_count", 0))
+
+    oracle_mean = float(metrics.get("oracle_return_mean", 0.0))
+    oracle_pos_ratio = float(np.clip(metrics.get("oracle_positive_ratio", 0.0), 0.0, 1.0))
+    oracle_std = float(metrics.get("oracle_return_std", 0.0))
+    oracle_cv = oracle_std / max(abs(oracle_mean), 1e-6)
+    decoded_ratio = float(np.clip(metrics.get("decoded_to_oracle_return_ratio", 0.0), 0.0, 1.5))
+    corr = float(np.clip(metrics.get("return_usage_correlation", 0.0), -1.0, 1.0))
+    change_acc = float(np.clip(metrics.get("change_point_accuracy", 0.0), 0.0, 1.0))
+    non_change_acc = float(np.clip(metrics.get("non_change_accuracy", 0.0), 0.0, 1.0))
+    change_detect_acc = float(np.clip(metrics.get("change_detect_accuracy", 0.0), 0.0, 1.0))
+    change_step_mae = float(max(metrics.get("change_step_mae", 1e6), 0.0))
+    change_step_score = 1.0 / (1.0 + change_step_mae)
+    flat_baseline_margin = float(np.clip(metrics.get("flat_baseline_margin", 0.0), -1.0, 1.0))
+    quantization_mse = float(max(metrics.get("quantization_mse", 0.0), 0.0))
+    quantization_penalty = float(np.clip(quantization_mse, 0.0, 10.0))
+    dominant_ratio = float(np.clip(metrics.get("dominant_code_ratio", 0.0), 0.0, 1.0))
+
+    soft_warnings = float(metrics.get("soft_warnings_count", 0))
+    env_warnings = float(metrics.get("env_warning_count", 0))
+    high_sim = float(metrics.get("high_similarity_pair_count", 0))
+    low_usage = float(metrics.get("low_usage_code_count", 0))
+    token_acc = float(metrics.get("token_accuracy", 0.0))
+    exact_match = float(metrics.get("trajectory_exact_match_rate", 0.0))
+
+    # 仅用于报告可读性的辅助分，不作为唯一排序依据。
+    generalization_score = (
+        0.50 * oracle_pos_ratio
+        - 0.30 * oracle_cv
+        + 0.20 * decoded_ratio
+        + 0.15 * change_acc
+        + 0.10 * non_change_acc
+        + 0.10 * change_detect_acc
+        + 0.08 * change_step_score
+        + 0.10 * corr
+        + 0.05 * flat_baseline_margin
+        - 0.10 * model_soft_warnings
+        - 0.08 * env_warnings
+        - 0.05 * high_sim
+        - 0.03 * low_usage
+        - 0.04 * dominant_ratio
+        - 0.02 * quantization_penalty
+    )
+
+    return (
+        float(1 if metrics["overall_passed"] else 0),
+        float(model_passed),
+        float(dp_passed),
+        float(-model_hard_failures),
+        float(-dp_hard_failures),
+        float(oracle_mean),
+        float(oracle_pos_ratio),
+        float(-oracle_std),
+        float(generalization_score),
+        float(decoded_ratio),
+        float(corr),
+        float(change_acc),
+        float(non_change_acc),
+        float(change_detect_acc),
+        float(change_step_score),
+        float(exact_match),
+        float(token_acc),
+        float(-model_soft_warnings),
+        float(-soft_warnings),
+        float(-env_warnings),
+        float(-high_sim),
+        float(-low_usage),
+        float(metrics.get("decoded_return_mean", 0.0)),
+        float(-epoch),
+    )
+
+
+def select_and_materialize_best_phase1_checkpoint(
+    *,
+    config: Any,
+    pair: str,
+    checkpoint_candidates: List[Dict[str, Any]],
+    trajectory_path: str,
+    train_env: TradingEnv,
+    val_env: TradingEnv | None,
+    trajectory_dataset: TrajectoryDataset,
+    device: torch.device,
+) -> Tuple[str, str, str, Dict[str, Any]]:
+    """评估候选 checkpoint，选择最佳并回写到标准 Phase I 产物路径。"""
+    if not checkpoint_candidates:
+        raise ValueError("Phase I checkpoint 候选列表为空，无法进行最佳 checkpoint 选择")
+
+    save_dir = config.get_stage_result_dir(pair, "phase1_archetype_discovery")
+    eval_dir = os.path.join(save_dir, "checkpoint_evaluations")
+    os.makedirs(eval_dir, exist_ok=True)
+    selection_rows: List[Dict[str, Any]] = []
+
+    logger.info(
+        "开始 Phase I checkpoint 评估与选择: 候选数量=%d, 间隔=%d",
+        len(checkpoint_candidates),
+        PHASE1_CHECKPOINT_EVAL_INTERVAL,
+    )
+
+    for candidate in checkpoint_candidates:
+        epoch = int(candidate.get("epoch", 0))
+        checkpoint_path = str(candidate["path"])
+        tag = str(candidate.get("tag", f"epoch_{epoch:04d}"))
+        safe_tag = tag.replace("/", "_")
+        val_report_path = os.path.join(eval_dir, f"{pair}_{safe_tag}_phase1_validation_report.json")
+        env_report_path = os.path.join(eval_dir, f"{pair}_{safe_tag}_phase1_env_validation_report.json")
+
+        row: Dict[str, Any] = {
+            "epoch": epoch,
+            "tag": tag,
+            "checkpoint_path": checkpoint_path,
+            "training_summary": candidate.get("training_summary", {}),
+            "validation_report_path": val_report_path,
+            "env_report_path": env_report_path,
+            "evaluation_succeeded": False,
+            "error": None,
+            "selection_metrics": {},
+            "selection_score": float("-inf"),
+            "rank_tuple": [],
+        }
+
+        try:
+            set_reproducibility_seed(config.phase1_sampling_seed)
+            validation_report = validate_phase1_artifacts(
+                config=config,
+                pair=pair,
+                trajectory_path=trajectory_path,
+                model_path=checkpoint_path,
+                report_path=val_report_path,
+                env=train_env,
+                device=device,
+                dp_check_limit=256,
+            )
+
+            encoder_ckpt, codebook_ckpt, decoder_ckpt = load_models_from_phase1_checkpoint(
+                config=config,
+                checkpoint_path=checkpoint_path,
+                device=device,
+            )
+            set_reproducibility_seed(config.phase1_sampling_seed)
+            env_report = run_phase1_env_validation(
+                config=config,
+                pair=pair,
+                encoder=encoder_ckpt,
+                codebook=codebook_ckpt,
+                decoder=decoder_ckpt,
+                train_env=train_env,
+                trajectory_dataset=trajectory_dataset,
+                device=device,
+                val_env=val_env,
+            )
+            with open(env_report_path, "w", encoding="utf-8") as fp:
+                json.dump(env_report, fp, ensure_ascii=False, indent=2, default=str)
+
+            metrics = extract_checkpoint_selection_metrics(validation_report, env_report)
+            rank_tuple = build_checkpoint_rank_tuple(metrics, epoch, int(config.num_archetypes))
+
+            row["selection_metrics"] = metrics
+            row["selection_score"] = float(rank_tuple[2])
+            row["selection_primary_oracle_return_mean"] = float(rank_tuple[2])
+            row["selection_generalization_score"] = float(rank_tuple[5])
+            row["rank_tuple"] = [float(x) for x in rank_tuple]
+            row["evaluation_succeeded"] = True
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("checkpoint 评估失败: epoch=%d, path=%s", epoch, checkpoint_path)
+            row["error"] = str(exc)
+
+        selection_rows.append(row)
+
+    successful_rows = [r for r in selection_rows if r["evaluation_succeeded"]]
+    if not successful_rows:
+        raise RuntimeError("所有候选 checkpoint 评估均失败，无法选出最佳 checkpoint")
+
+    best_row = max(successful_rows, key=lambda r: tuple(r["rank_tuple"]))
+    best_source_path = str(best_row["checkpoint_path"])
+    best_model_path = os.path.join(save_dir, f"{pair}_vq_model_best.pt")
+    standard_model_path = os.path.join(save_dir, f"{pair}_vq_model.pt")
+
+    if os.path.abspath(best_source_path) != os.path.abspath(best_model_path):
+        shutil.copy2(best_source_path, best_model_path)
+    if os.path.abspath(best_source_path) != os.path.abspath(standard_model_path):
+        shutil.copy2(best_source_path, standard_model_path)
+
+    standard_val_report_path = os.path.join(save_dir, "phase1_validation_report.json")
+    standard_env_report_path = os.path.join(save_dir, "phase1_env_validation_report.json")
+    if os.path.abspath(best_row["validation_report_path"]) != os.path.abspath(standard_val_report_path):
+        shutil.copy2(best_row["validation_report_path"], standard_val_report_path)
+    if os.path.abspath(best_row["env_report_path"]) != os.path.abspath(standard_env_report_path):
+        shutil.copy2(best_row["env_report_path"], standard_env_report_path)
+
+    with open(standard_val_report_path, "r", encoding="utf-8") as fp:
+        best_validation_report = json.load(fp)
+
+    selection_report_path = os.path.join(save_dir, "phase1_checkpoint_selection_report.json")
+    selection_report = {
+        "pair": pair,
+        "train_batch_id": config.train_batch_id,
+        "selection_strategy": "phase1_v5_oracle_plus_validation_health",
+        "phase1_epochs": int(config.phase1_epochs),
+        "phase1_checkpoint_interval": int(PHASE1_CHECKPOINT_EVAL_INTERVAL),
+        "candidate_count": len(checkpoint_candidates),
+        "successful_candidate_count": len(successful_rows),
+        "selected_checkpoint": {
+            "epoch": int(best_row["epoch"]),
+            "tag": best_row["tag"],
+            "source_path": best_source_path,
+            "best_model_path": best_model_path,
+            "standard_model_path": standard_model_path,
+            "standard_validation_report_path": standard_val_report_path,
+            "standard_env_validation_report_path": standard_env_report_path,
+            "selection_metrics": best_row["selection_metrics"],
+            "selection_score": float(best_row.get("selection_score", 0.0)),
+            "selection_primary_oracle_return_mean": float(best_row.get("selection_primary_oracle_return_mean", 0.0)),
+            "selection_generalization_score": float(best_row.get("selection_generalization_score", 0.0)),
+            "rank_tuple": best_row["rank_tuple"],
+        },
+        "candidates": selection_rows,
+    }
+    with open(selection_report_path, "w", encoding="utf-8") as fp:
+        json.dump(selection_report, fp, ensure_ascii=False, indent=2)
+
+    logger.info("Phase I checkpoint 选择报告已保存到 %s", selection_report_path)
+    logger.info(
+        "Phase I 最佳 checkpoint 已确定: epoch=%d, oracle_mean=%.6f, gen_score=%.6f, source=%s",
+        int(best_row["epoch"]),
+        float(best_row.get("selection_primary_oracle_return_mean", 0.0)),
+        float(best_row.get("selection_generalization_score", 0.0)),
+        best_source_path,
+    )
+    logger.info("标准 Phase I 模型路径已更新为最佳 checkpoint: %s", standard_model_path)
+
+    return standard_model_path, standard_val_report_path, standard_env_report_path, best_validation_report
 
 
 def log_training_summary(
@@ -848,7 +1239,44 @@ def main() -> None:
     # Step 3: 初始化模型
     encoder, codebook, decoder = build_models(config, device)
 
-    # Step 4: 训练
+    # Step 4: 训练（每 30 epoch 保存一个 checkpoint 候选）
+    save_dir = config.get_stage_result_dir(pair, "phase1_archetype_discovery")
+    checkpoint_dir = os.path.join(save_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_interval = PHASE1_CHECKPOINT_EVAL_INTERVAL
+    checkpoint_candidates: List[Dict[str, Any]] = []
+    logger.info("已启用 Phase I checkpoint 评估: 每 %d 个 epoch 评估一次", checkpoint_interval)
+
+    def on_epoch_checkpoint(epoch: int, summary: Dict[str, float], cur_history: TrainingHistory) -> None:
+        checkpoint_path = os.path.join(checkpoint_dir, f"{pair}_vq_model_epoch_{epoch:04d}.pt")
+        save_checkpoint(
+            config=config,
+            pair=pair,
+            encoder=encoder,
+            codebook=codebook,
+            decoder=decoder,
+            history=cur_history,
+            train_rows=train_rows,
+            norm_stats=dataset.norm_stats,
+            save_path=checkpoint_path,
+            checkpoint_meta={
+                "epoch": int(epoch),
+                "kind": "periodic",
+                "phase1_checkpoint_interval": int(checkpoint_interval),
+            },
+        )
+        checkpoint_candidates.append(
+            {
+                "epoch": int(epoch),
+                "tag": f"epoch_{epoch:04d}",
+                "path": checkpoint_path,
+                "training_summary": {
+                    k: float(v) if isinstance(v, (np.floating, float)) else int(v) if isinstance(v, (np.integer, int)) else v
+                    for k, v in summary.items()
+                },
+            }
+        )
+
     history = run_training_loop(
         dataloader=dataloader,
         encoder=encoder,
@@ -856,71 +1284,40 @@ def main() -> None:
         decoder=decoder,
         config=config,
         device=device,
+        checkpoint_interval=checkpoint_interval,
+        on_checkpoint=on_epoch_checkpoint,
     )
 
-    # Step 5: 保存模型
-    save_path = save_checkpoint(
-        config=config, pair=pair,
-        encoder=encoder, codebook=codebook, decoder=decoder,
-        history=history, train_rows=train_rows,
-        norm_stats=dataset.norm_stats,
-    )
-
-    # Step 6: 验证
-    save_dir = config.get_stage_result_dir(pair, "phase1_archetype_discovery")
-    report_path = os.path.join(save_dir, "phase1_validation_report.json")
-    validation_report = validate_phase1_artifacts(
-        config=config, pair=pair,
-        trajectory_path=traj_path, model_path=save_path,
-        report_path=report_path, env=env, device=device,
-        dp_check_limit=256,
-    )
-
-    # Step 7: 环境级验证 — 评估 archetype 在真实交易环境中的可用性
-    logger.info("开始 Phase I 环境级验证...")
-    # 加载验证集环境
-    val_pipeline = FeaturePipeline(
-        config.data_dir, pair, cycle_features=config.cycle_features,
-    )
-    _, val_state_df, _ = val_pipeline.get_state_vector()
-    _, val_prices_df, _ = val_pipeline.get_prices()
-    val_env = None
-    if val_state_df is not None and len(val_state_df) >= config.horizon:
-        if val_state_df.width != config.state_dim:
-            raise ValueError(
-                "验证集 state_dim 与当前配置不一致: "
-                f"actual={val_state_df.width}, expected={config.state_dim}"
-            )
-        val_env = TradingEnv(
-            states=val_state_df.to_numpy(),
-            prices=val_prices_df["close"].to_numpy(),
-            pair=pair,
-            horizon=config.horizon,
-            states_dataframe=val_state_df,
-            max_positions=config.max_positions,
-            commission_rate=config.train_commission_rate,
+    # Step 5: 不再保存 final 模型；仅使用周期 checkpoint 作为候选
+    if not checkpoint_candidates:
+        raise ValueError(
+            "未生成任何 Phase I checkpoint 候选。"
+            f"请确保 phase1_epochs >= {PHASE1_CHECKPOINT_EVAL_INTERVAL}，"
+            "或调整 checkpoint 评估间隔。"
         )
+    logger.info("Phase I 周期 checkpoint 候选数量: %d", len(checkpoint_candidates))
 
-    env_report = run_phase1_env_validation(
+    # Step 6: 构建验证集环境（供 checkpoint 评估阶段复用）
+    logger.info("构建验证集环境（用于 checkpoint 选择）...")
+    val_env = build_val_env(config, pair)
+    if val_env is None:
+        logger.warning("验证集不足一个 horizon，checkpoint 选择将仅依赖训练集环境诊断")
+
+    # Step 7: 候选 checkpoint 评估 + 选择最佳，并回写标准路径
+    save_path, report_path, env_report_path, validation_report = select_and_materialize_best_phase1_checkpoint(
         config=config,
         pair=pair,
-        encoder=encoder,
-        codebook=codebook,
-        decoder=decoder,
+        checkpoint_candidates=checkpoint_candidates,
+        trajectory_path=traj_path,
         train_env=env,
+        val_env=val_env,
         trajectory_dataset=dataset,
         device=device,
-        val_env=val_env,
     )
-
-    # 保存环境级验证报告
-    env_report_path = os.path.join(save_dir, "phase1_env_validation_report.json")
-    with open(env_report_path, "w", encoding="utf-8") as fp:
-        json.dump(env_report, fp, ensure_ascii=False, indent=2, default=str)
-    logger.info("环境级验证报告已保存到 %s", env_report_path)
 
     # Step 8: 日志摘要
     log_training_summary(pair, history.loss, traj_path, save_path, report_path, validation_report)
+    logger.info("最佳 checkpoint 环境级验证报告路径: %s", env_report_path)
 
 
 if __name__ == "__main__":
