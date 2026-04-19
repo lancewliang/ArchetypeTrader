@@ -43,7 +43,7 @@ class Config:
     vq_beta0: float = 0.25  # 承诺损失系数
     num_trajectories: int = 30000  # 论文 Phase I 默认采样 30k DP trajectories
     phase1_epochs: int = 500
-    phase1_sampling_seed: int = 2147483648  # Phase I 轨迹采样随机种子，用于结果复现
+    phase1_sampling_seed: int = 42  # Phase I 轨迹采样随机种子，用于结果复现
     pretrain_epochs: int = 10  # 连续潜在预训练轮数（无 VQ 量化）
 
     # Phase II 配置
