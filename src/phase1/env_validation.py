@@ -80,6 +80,54 @@ def _run_actions_in_env(
     }
 
 
+def _run_actions_from_start_index(
+    env: TradingEnv,
+    start_index: int,
+    actions: np.ndarray,
+) -> Dict[str, Any]:
+    """在任意时间起点执行动作序列，返回 return 与执行细节。
+
+    说明:
+    - `_run_actions_in_env` 仅支持 `horizon_idx * horizon` 的非重叠起点。
+    - Phase I 的轨迹采样是滑窗 start（sampled_start_indices），因此评估时必须
+      按真实 start_index 回放，否则会把动作应用到错误的市场窗口。
+    """
+    total_return = 0.0
+    total_cost = 0.0
+    gross_pnl = 0.0
+    position_changes = 0
+    current_position = 0
+
+    for local_t, action in enumerate(actions):
+        global_t = int(start_index) + int(local_t)
+        if global_t >= len(env.prices):
+            break
+
+        p_t = float(np.float64(env.prices[global_t]))
+        p_next = float(np.float64(env.prices[global_t + 1])) if (global_t + 1) < len(env.prices) else p_t
+        state_row = env.states_dataframe.row(global_t, named=True) if env.states_dataframe is not None else None
+
+        execution_cost = float(
+            np.float64(env.compute_execution_cost(int(action), current_position, p_t, state_row))
+        )
+        next_position = int(TradingEnv.POSITION_MAP[int(action)] * env.m)
+        reward = float(next_position * (p_next - p_t) - execution_cost)
+
+        total_return += reward
+        total_cost += execution_cost
+        gross_pnl += reward + execution_cost
+        if next_position != current_position:
+            position_changes += 1
+        current_position = next_position
+
+    return {
+        "total_return": float(total_return),
+        "gross_pnl": float(gross_pnl),
+        "total_cost": float(total_cost),
+        "position_changes": int(position_changes),
+    }
+
+
 def _decode_horizon(
     decoder: VQDecoder,
     z_q: torch.Tensor,
@@ -162,35 +210,35 @@ def validate_archetype_env_returns(
             _, gt_idx, _ = codebook.quantize(z_e)
             k = int(gt_idx.item())
 
-        # 确定该样本在原始时间序列中的真实起点
-        # 若 dataset 携带 sampled_start_indices（滑窗采样），用真实 start 换算
-        # horizon_idx，避免 idx * h 与滑窗坐标系不一致的 bug。
+        # 确定该样本在原始时间序列中的真实起点（滑窗坐标）。
         if has_start_indices:
             true_start = int(trajectory_dataset.sampled_start_indices[idx])
-            horizon_idx = true_start // h  # 映射到最近的非重叠 horizon
         else:
             true_start = idx * h
-            horizon_idx = idx
 
-        # 用 DP 原始动作在 env 中执行
-        if horizon_idx < env.num_horizons:
-            dp_result = _run_actions_in_env(env, horizon_idx, a_demo.numpy() if hasattr(a_demo, 'numpy') else a_demo)
-            dp_returns.append(dp_result["total_return"])
+        # 超界保护：至少需要一个 next price 才能计算 reward。
+        if true_start >= len(env.prices) - 1:
+            continue
 
-            # 用 decoder 重建动作在 env 中执行（状态从真实 start 取）
-            end = min(true_start + h, len(env.states))
-            horizon_states = env.states[true_start:end]
-            z_q = codebook.embeddings.weight[k].unsqueeze(0)
-            decoded_actions = _decode_horizon(
-                decoder, z_q, horizon_states, device,
-                normalizer=trajectory_dataset,
-            )
-            dec_result = _run_actions_in_env(env, horizon_idx, decoded_actions)
+        # 用 DP 原始动作在真实起点执行。
+        dp_actions = a_demo.numpy() if hasattr(a_demo, "numpy") else a_demo
+        dp_result = _run_actions_from_start_index(env, true_start, dp_actions)
+        dp_returns.append(dp_result["total_return"])
 
-            archetype_returns[k].append(dec_result["total_return"])
-            archetype_costs[k].append(dec_result["total_cost"])
-            decoded_returns.append(dec_result["total_return"])
-            return_gaps.append(dp_result["total_return"] - dec_result["total_return"])
+        # 用 decoder 重建动作在同一真实起点执行。
+        end = min(true_start + h, len(env.states))
+        horizon_states = env.states[true_start:end]
+        z_q = codebook.embeddings.weight[k].unsqueeze(0)
+        decoded_actions = _decode_horizon(
+            decoder, z_q, horizon_states, device,
+            normalizer=trajectory_dataset,
+        )
+        dec_result = _run_actions_from_start_index(env, true_start, decoded_actions)
+
+        archetype_returns[k].append(dec_result["total_return"])
+        archetype_costs[k].append(dec_result["total_cost"])
+        decoded_returns.append(dec_result["total_return"])
+        return_gaps.append(dp_result["total_return"] - dec_result["total_return"])
 
     # 汇总
     dp_arr = np.array(dp_returns, dtype=np.float64)
