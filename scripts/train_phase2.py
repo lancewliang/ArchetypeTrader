@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sys
 from typing import Any
 
@@ -58,6 +59,30 @@ from src.utils.progress import should_disable_tqdm
 
 logger = get_logger(__name__)
 
+
+def set_reproducibility_seed(seed: int) -> None:
+    """设置 Phase II 复现实验所需的随机种子（与 Phase I 保持一致）。"""
+    logger.info(
+        "随机状态(设种子前): PYTHONHASHSEED=%s, torch.initial_seed=%d, numpy_state_head=%d, python_state_head=%d",
+        os.getenv("PYTHONHASHSEED"),
+        int(torch.initial_seed()),
+        int(np.random.get_state()[1][0]),
+        int(random.getstate()[1][0]),
+    )
+
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    logger.info(
+        "随机状态(设种子后): seed=%d, torch.initial_seed=%d, numpy_state_head=%d, python_state_head=%d",
+        int(seed),
+        int(torch.initial_seed()),
+        int(np.random.get_state()[1][0]),
+        int(random.getstate()[1][0]),
+    )
 
 def _parameter_grad_norm(parameters) -> float:
     """计算一组参数当前梯度的 L2 norm。
@@ -1682,9 +1707,11 @@ def main() -> None:
     # ----------------------------------------------------------------
     config = parse_args()
     pair = config.pairs[0]  # 单交易对训练
+    set_reproducibility_seed(config.phase1_sampling_seed)
     ppo_hparams = get_phase2_hparams(config)
 
     logger.info("Phase II 训练开始: pair=%s", pair)
+    logger.info("随机种子: phase1_sampling_seed=%d（Phase I/II 对齐）", config.phase1_sampling_seed)
     logger.info(
         "超参数: total_steps=%d, lr=%.1e, selection_alpha=%.2f, num_archetypes=%d, discount_factor=%.2f",
         config.phase2_total_steps,
