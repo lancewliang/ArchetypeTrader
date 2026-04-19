@@ -27,6 +27,7 @@ from src.phase1.vq_decoder import VQDecoder
 from src.phase3.policy_adapter import PolicyAdapter
 from src.phase3.refinement_agent import RefinementAgent
 from src.utils.logger import get_logger
+from src.utils.progress import should_disable_tqdm
 
 logger = get_logger(__name__)
 
@@ -322,7 +323,12 @@ def evaluate_pair(
 
     all_step_returns: List[float] = []
 
-    for h_idx in tqdm(range(test_env.num_horizons), desc=f"评估 {pair}", unit="horizon"):
+    for h_idx in tqdm(
+        range(test_env.num_horizons),
+        desc=f"评估 {pair}",
+        unit="horizon",
+        disable=should_disable_tqdm(),
+    ):
         h = test_env.horizon
         start = h_idx * h
         end = min(start + h, len(test_env.states))
@@ -524,7 +530,12 @@ def evaluate_pair_dp(
 
     all_step_returns: List[float] = []
 
-    for h_idx in tqdm(range(env.num_horizons), desc=f"DP {split} {pair}", unit="horizon"):
+    for h_idx in tqdm(
+        range(env.num_horizons),
+        desc=f"DP {split} {pair}",
+        unit="horizon",
+        disable=should_disable_tqdm(),
+    ):
         h = env.horizon
         start = h_idx * h
         end = min(start + h, len(states))

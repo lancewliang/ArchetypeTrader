@@ -54,6 +54,7 @@ from src.phase2.selection_agent import SelectionAgent
 from src.utils.gpu_guard import log_and_guard_gpu_memory, reset_gpu_peak_memory_stats
 from src.utils.logger import get_logger
 from src.utils.normalizer import StateNormalizer
+from src.utils.progress import should_disable_tqdm
 
 logger = get_logger(__name__)
 
@@ -1427,7 +1428,14 @@ def run_training_loop(
         clip_eps,
     )
 
-    pbar = tqdm(total=total_steps, desc="Phase II 训练", unit="step", dynamic_ncols=True)
+    disable_tqdm = should_disable_tqdm()
+    pbar = tqdm(
+        total=total_steps,
+        desc="Phase II 训练",
+        unit="step",
+        dynamic_ncols=True,
+        disable=disable_tqdm,
+    )
     while step_count < total_steps:
         current_batch_size = min(rollout_batch_size, total_steps - step_count)
 

@@ -41,6 +41,7 @@ from src.phase1.validation import validate_phase1_artifacts
 from src.phase1.vq_decoder import VQDecoder
 from src.phase1.vq_encoder import VQEncoder
 from src.utils.logger import get_logger
+from src.utils.progress import should_disable_tqdm
 
 logger = get_logger(__name__)
 
@@ -665,7 +666,12 @@ def run_training_loop(
     logger.info("开始训练: %d epochs", config.phase1_epochs)
     logger.info("Phase A (连续潜在预训练): epochs 1-%d, loss=L_rec only", config.pretrain_epochs)
 
-    for epoch in tqdm(range(1, config.phase1_epochs + 1), desc="Training Epochs"):
+    disable_tqdm = should_disable_tqdm()
+    for epoch in tqdm(
+        range(1, config.phase1_epochs + 1),
+        desc="Training Epochs",
+        disable=disable_tqdm,
+    ):
         is_phase_a = epoch <= config.pretrain_epochs
         # 在 Phase A 最后一个 epoch 收集 z_e 用于 k-means 初始化
         collect_z_e = (epoch == config.pretrain_epochs)

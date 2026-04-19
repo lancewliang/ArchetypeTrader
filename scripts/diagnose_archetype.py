@@ -39,6 +39,7 @@ from src.data.feature_pipeline import FeaturePipeline
 from src.env.trading_env import TradingEnv
 from src.evaluation.model_loader import load_phase1_model, load_phase2_model
 from src.evaluation.inference_runner import generate_base_actions, compute_base_return
+from src.utils.progress import should_disable_tqdm
 
 
 def parse_args():
@@ -181,7 +182,12 @@ def main():
     # 加载原始（未归一化）数据用于特征分析
     raw_states = df.to_numpy()  # 原始未归一化
 
-    for h_idx in tqdm(range(env.num_horizons), desc="诊断中", unit="horizon"):
+    for h_idx in tqdm(
+        range(env.num_horizons),
+        desc="诊断中",
+        unit="horizon",
+        disable=should_disable_tqdm(),
+    ):
         h = config.horizon
         start = h_idx * h
         end = min(start + h, len(states_norm))

@@ -152,9 +152,9 @@ def validate_archetype_env_returns(
     for idx in indices_to_check:
         idx = int(idx)
         s_demo, a_demo, r_demo = trajectory_dataset[idx]
-        s_demo_t = torch.tensor(s_demo, dtype=torch.float32, device=device).unsqueeze(0)
-        a_demo_t = torch.tensor(a_demo, dtype=torch.long, device=device).unsqueeze(0)
-        r_demo_t = torch.tensor(r_demo, dtype=torch.float32, device=device).unsqueeze(0)
+        s_demo_t = torch.as_tensor(s_demo, dtype=torch.float32, device=device).unsqueeze(0)
+        a_demo_t = torch.as_tensor(a_demo, dtype=torch.long, device=device).unsqueeze(0)
+        r_demo_t = torch.as_tensor(r_demo, dtype=torch.float32, device=device).unsqueeze(0)
 
         # 获取 ground-truth archetype label
         with torch.no_grad():

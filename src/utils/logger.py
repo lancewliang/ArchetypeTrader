@@ -3,6 +3,8 @@
 提供统一的日志接口，支持 INFO/WARNING/ERROR 级别。
 训练过程中输出损失值、奖励等关键指标。
 
+默认日志格式仅保留正文，不输出日期时间和模块名。
+
 需求: 7.6, 9.2
 """
 
@@ -31,8 +33,7 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
         handler = logging.StreamHandler(sys.stderr)
         handler.setLevel(level)
         formatter = logging.Formatter(
-            fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
+            fmt="%(message)s",
         )
         handler.setFormatter(formatter)
         logger.addHandler(handler)

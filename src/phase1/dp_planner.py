@@ -22,6 +22,7 @@ from tqdm import tqdm
 
 from src.env.trading_env import TradingEnv
 from src.utils.logger import get_logger
+from src.utils.progress import should_disable_tqdm
 
 logger = get_logger(__name__)
 
@@ -322,8 +323,14 @@ class DPPlanner:
         all_actions = []
         all_rewards = []
 
-        # 使用 tqdm 显示进度条
-        for i, start in enumerate(tqdm(sampled_start_indices, desc="生成DP轨迹")):
+        # 在非交互终端中自动关闭进度条，避免写入日志文件。
+        for i, start in enumerate(
+            tqdm(
+                sampled_start_indices,
+                desc="生成DP轨迹",
+                disable=should_disable_tqdm(),
+            )
+        ):
             start = int(start)
             end = start + self.horizon
             h_states = self.env.states_dataframe.slice(start, self.horizon)

@@ -50,16 +50,16 @@ python scripts/evaluate.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" --spl
 echo ">>> [Evaluate after Phase II] 完成 — $(date '+%H:%M:%S')"
 
 # --- Phase III: Archetype Refinement ---
-echo ""
-echo ">>> [Phase III] 开始训练 — $(date '+%H:%M:%S')"
-python scripts/train_phase3.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" "${EXTRA_ARGS[@]}"
-echo ">>> [Phase III] 完成 — $(date '+%H:%M:%S')"
+# echo ""
+# echo ">>> [Phase III] 开始训练 — $(date '+%H:%M:%S')"
+# python scripts/train_phase3.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" "${EXTRA_ARGS[@]}"
+# echo ">>> [Phase III] 完成 — $(date '+%H:%M:%S')"
 
 # --- Evaluate ---
-echo ""
-echo ">>> [Evaluate after Phase III] val + test — $(date '+%H:%M:%S')"
-python scripts/evaluate.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" --split val test --stage-label phase3_eval "${EXTRA_ARGS[@]}"
-echo ">>> [Evaluate] 完成 — $(date '+%H:%M:%S')"
+# echo ""
+# echo ">>> [Evaluate after Phase III] val + test — $(date '+%H:%M:%S')"
+# python scripts/evaluate.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" --split val test --stage-label phase3_eval "${EXTRA_ARGS[@]}"
+# echo ">>> [Evaluate] 完成 — $(date '+%H:%M:%S')"
 
 echo ""
 echo "========================================================"

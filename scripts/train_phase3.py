@@ -47,6 +47,7 @@ from src.phase3.regret_reward import compute_regret_reward, compute_top5_hindsig
 from src.utils.gpu_guard import log_and_guard_gpu_memory, reset_gpu_peak_memory_stats
 from src.utils.logger import get_logger
 from src.utils.normalizer import StateNormalizer
+from src.utils.progress import should_disable_tqdm
 
 logger = get_logger(__name__)
 
@@ -661,9 +662,14 @@ def main() -> None:
     last_loss = 0.0
 
     logger.info("开始训练: %d 步", total_steps)
-    pbar = tqdm(total=total_steps, desc="Phase III", unit="step", dynamic_ncols=True)
-
-    pbar = tqdm(total=total_steps, desc="Phase III", unit="step", dynamic_ncols=True)
+    disable_tqdm = should_disable_tqdm()
+    pbar = tqdm(
+        total=total_steps,
+        desc="Phase III",
+        unit="step",
+        dynamic_ncols=True,
+        disable=disable_tqdm,
+    )
 
     while step_count < total_steps:
         # ===================================================================
