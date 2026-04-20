@@ -114,7 +114,10 @@ class VQCodebook(nn.Module):
         self,
         z_e_samples: Tensor,
         actions: Tensor,
+        trajectory_returns: Tensor | None = None,
         n_iter: int = 10,
+        profit_top_ratio: float = 0.0,
+        profit_code_ratio: float = 0.0,
     ) -> None:
         """方向感知的码本初始化：先按交易方向分组，再在组内 k-means。
 
@@ -130,7 +133,10 @@ class VQCodebook(nn.Module):
         Args:
             z_e_samples: encoder 输出的 z_e 样本 (N, code_dim)
             actions: 对应的 DP 动作序列 (N, h)，值域 {0, 1, 2}
+            trajectory_returns: 轨迹总收益，用于优先在高收益子集中初始化部分 code
             n_iter: k-means 迭代次数
+            profit_top_ratio: 每个方向内优先考虑的高收益样本 top 比例
+            profit_code_ratio: 每个方向分配给高收益子集的 code 比例
         """
         N = z_e_samples.shape[0]
         K = self.num_codes
@@ -145,6 +151,7 @@ class VQCodebook(nn.Module):
 
         z = z_e_samples.to(device).float()
         a = actions.to(device).long()  # (N, h)
+        returns = trajectory_returns.to(device).float().reshape(-1) if trajectory_returns is not None else None
 
         # 判断每条轨迹的主要方向
         # 统计每条轨迹中 short(0) / flat(1) / long(2) 的占比
@@ -206,23 +213,87 @@ class VQCodebook(nn.Module):
             z_sub = z[mask]
             if z_sub.shape[0] == 0:
                 continue
-            # 如果子集样本少于分配数，用全部样本 + 噪声填充
-            if z_sub.shape[0] < k_alloc:
-                for j in range(k_alloc):
-                    src = z_sub[j % z_sub.shape[0]]
-                    centroids[idx] = src + torch.randn_like(src) * 1e-3
-                    idx += 1
+            returns_sub = returns[mask] if returns is not None else None
+
+            k_profit = 0
+            if (
+                returns_sub is not None
+                and profit_top_ratio > 0
+                and profit_code_ratio > 0
+                and z_sub.shape[0] > 1
+            ):
+                k_profit = min(k_alloc, max(1, int(round(k_alloc * profit_code_ratio))))
+
+            if k_profit > 0:
+                z_profit = self._select_high_return_subset(
+                    z_sub,
+                    returns_sub,
+                    top_ratio=profit_top_ratio,
+                    min_size=k_profit,
+                )
+                idx = self._write_centroids_from_subset(centroids, idx, z_profit, k_profit, n_iter)
+                k_remaining = k_alloc - k_profit
+                if k_remaining > 0:
+                    idx = self._write_centroids_from_subset(centroids, idx, z_sub, k_remaining, n_iter)
+                logger.info(
+                    "方向=%s 使用收益感知初始化: total_codes=%d, profit_codes=%d, top_ratio=%.2f",
+                    label, k_alloc, k_profit, profit_top_ratio,
+                )
                 continue
-            # 组内 k-means
-            sub_centroids = self._kmeans(z_sub, k_alloc, n_iter)
-            centroids[idx:idx + k_alloc] = sub_centroids
-            idx += k_alloc
+
+            idx = self._write_centroids_from_subset(centroids, idx, z_sub, k_alloc, n_iter)
 
         self.embeddings.weight.copy_(centroids)
         logger.info(
             "码本已通过方向感知 k-means 初始化: %d long + %d short + %d flat = %d codes",
             k_long, k_short, k_flat, K,
         )
+
+    @staticmethod
+    def _write_centroids_from_subset(
+        centroids: Tensor,
+        start_idx: int,
+        z_sub: Tensor,
+        k_alloc: int,
+        n_iter: int,
+    ) -> int:
+        """将给定子集的 k 个中心写入目标 centroids，返回新的写入指针。"""
+        if k_alloc <= 0 or z_sub.shape[0] == 0:
+            return start_idx
+
+        if z_sub.shape[0] < k_alloc:
+            for j in range(k_alloc):
+                src = z_sub[j % z_sub.shape[0]]
+                centroids[start_idx + j] = src + torch.randn_like(src) * 1e-3
+            return start_idx + k_alloc
+
+        sub_centroids = VQCodebook._kmeans(z_sub, k_alloc, n_iter)
+        centroids[start_idx:start_idx + k_alloc] = sub_centroids
+        return start_idx + k_alloc
+
+    @staticmethod
+    def _select_high_return_subset(
+        z_sub: Tensor,
+        returns_sub: Tensor | None,
+        *,
+        top_ratio: float,
+        min_size: int,
+    ) -> Tensor:
+        """从子集中提取高收益样本 top 子集；若收益不可用则返回原集合。"""
+        if returns_sub is None or z_sub.shape[0] <= 1:
+            return z_sub
+
+        ratio = float(np.clip(top_ratio, 0.0, 1.0))
+        if ratio <= 0.0 or ratio >= 1.0:
+            return z_sub
+
+        top_n = max(min_size, int(np.ceil(z_sub.shape[0] * ratio)))
+        top_n = min(top_n, z_sub.shape[0])
+        if top_n <= 0:
+            return z_sub
+
+        top_idx = torch.topk(returns_sub, k=top_n, largest=True).indices
+        return z_sub[top_idx]
 
     @staticmethod
     def _kmeans(z: Tensor, k: int, n_iter: int) -> Tensor:
@@ -258,7 +329,13 @@ class VQCodebook(nn.Module):
         return centroids
 
     @torch.no_grad()
-    def reset_dead_codes(self, z_e_batch: Tensor, code_counts: np.ndarray) -> int:
+    def reset_dead_codes(
+        self,
+        z_e_batch: Tensor,
+        code_counts: np.ndarray,
+        trajectory_returns: Tensor | None = None,
+        top_ratio: float = 0.0,
+    ) -> int:
         """将死码重置为当前 z_e 分布中的采样点（加少量噪声）。
 
         在每个 Phase B epoch 结束后调用。死码定义为 code_counts == 0 的条目。
@@ -266,6 +343,8 @@ class VQCodebook(nn.Module):
         Args:
             z_e_batch: 当前 epoch 最后一个 batch 的 z_e (batch, code_dim)
             code_counts: 当前 epoch 各码本条目的使用计数 (num_codes,)
+            trajectory_returns: 当前 batch 的轨迹总收益，用于偏向高收益样本
+            top_ratio: 若 >0，则优先从高收益样本 top 比例中重置死码
 
         Returns:
             重置的死码数量
@@ -278,10 +357,18 @@ class VQCodebook(nn.Module):
         device = self.embeddings.weight.device
         z = z_e_batch.to(device).float()
         N = z.shape[0]
+        pool = z
+        if trajectory_returns is not None and N > 1:
+            ratio = float(np.clip(top_ratio, 0.0, 1.0))
+            if 0.0 < ratio < 1.0:
+                returns = trajectory_returns.to(device).float().reshape(-1)
+                top_n = max(1, int(np.ceil(N * ratio)))
+                top_n = min(top_n, N)
+                top_idx = torch.topk(returns, k=top_n, largest=True).indices
+                pool = z[top_idx]
 
-        for idx in dead_indices:
-            # 从 z_e 中随机采样一个点，加少量噪声
-            sampled = z[torch.randint(N, (1,), device=device)].squeeze(0)
+        for i, idx in enumerate(dead_indices):
+            sampled = pool[i % pool.shape[0]]
             noise = torch.randn_like(sampled) * 1e-3
             self.embeddings.weight.data[idx] = sampled + noise
 

@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -76,6 +77,11 @@ class EpochMetrics:
     loss: float = 0.0
     rec_loss: float = 0.0
     vq_loss: float = 0.0
+    alignment_reg: float = 0.0
+    return_aux_reg: float = 0.0
+    return_bucket_acc: float = 0.0
+    separation_reg: float = 0.0
+    usage_profit_corr: float = 0.0
     token_correct: int = 0
     token_total: int = 0
     exact_match: int = 0
@@ -99,6 +105,11 @@ class EpochMetrics:
             "avg_loss": self.loss / nb,
             "avg_rec": self.rec_loss / nb,
             "avg_vq": self.vq_loss / nb,
+            "avg_alignment_reg": self.alignment_reg / nb,
+            "avg_return_aux_reg": self.return_aux_reg / nb,
+            "avg_return_bucket_acc": self.return_bucket_acc / nb,
+            "avg_separation_reg": self.separation_reg / nb,
+            "avg_usage_profit_corr": self.usage_profit_corr / nb,
             "token_accuracy": float(self.token_correct / nt),
             "exact_match_rate": float(self.exact_match / ns),
             "avg_encoder_grad": float(self.encoder_grad / nb),
@@ -118,6 +129,11 @@ class TrainingHistory:
     loss: List[float] = field(default_factory=list)
     rec_loss: List[float] = field(default_factory=list)
     vq_loss: List[float] = field(default_factory=list)
+    alignment_reg: List[float] = field(default_factory=list)
+    return_aux_reg: List[float] = field(default_factory=list)
+    return_bucket_acc: List[float] = field(default_factory=list)
+    separation_reg: List[float] = field(default_factory=list)
+    usage_profit_corr: List[float] = field(default_factory=list)
     token_accuracy: List[float] = field(default_factory=list)
     exact_match: List[float] = field(default_factory=list)
     codebook_perplexity: List[float] = field(default_factory=list)
@@ -134,6 +150,11 @@ class TrainingHistory:
         self.loss.append(s["avg_loss"])
         self.rec_loss.append(s["avg_rec"])
         self.vq_loss.append(s["avg_vq"])
+        self.alignment_reg.append(s["avg_alignment_reg"])
+        self.return_aux_reg.append(s["avg_return_aux_reg"])
+        self.return_bucket_acc.append(s["avg_return_bucket_acc"])
+        self.separation_reg.append(s["avg_separation_reg"])
+        self.usage_profit_corr.append(s["avg_usage_profit_corr"])
         self.token_accuracy.append(s["token_accuracy"])
         self.exact_match.append(s["exact_match_rate"])
         self.codebook_perplexity.append(s["codebook_perplexity"])
@@ -151,6 +172,11 @@ class TrainingHistory:
             "loss_history": self.loss,
             "rec_loss_history": self.rec_loss,
             "vq_loss_history": self.vq_loss,
+            "alignment_reg_history": self.alignment_reg,
+            "return_aux_reg_history": self.return_aux_reg,
+            "return_bucket_acc_history": self.return_bucket_acc,
+            "separation_reg_history": self.separation_reg,
+            "usage_profit_corr_history": self.usage_profit_corr,
             "token_accuracy_history": self.token_accuracy,
             "exact_match_history": self.exact_match,
             "codebook_perplexity_history": self.codebook_perplexity,
@@ -186,6 +212,106 @@ def compute_grad_norm(parameters) -> float:
         norm = param.grad.detach().data.norm(2).item()
         total += norm * norm
     return float(total ** 0.5)
+
+
+def compute_soft_code_assignments(
+    z_e: torch.Tensor,
+    codebook: VQCodebook,
+    temperature: float,
+) -> torch.Tensor:
+    """基于 encoder latent 与 codebook 距离计算 soft assignment。"""
+    code_vectors = codebook.embeddings.weight
+    temp = max(float(temperature), 1e-6)
+    distances = (
+        torch.sum(z_e ** 2, dim=1, keepdim=True)
+        - 2 * z_e @ code_vectors.t()
+        + torch.sum(code_vectors ** 2, dim=1, keepdim=False)
+    )
+    return torch.softmax(-distances / temp, dim=1)
+
+
+def compute_usage_profit_alignment_loss(
+    soft_assignments: torch.Tensor,
+    trajectory_returns: torch.Tensor,
+    target_corr: float,
+    eps: float = 1e-6,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """鼓励高收益 archetype 具有更高使用率，避免收益-使用率负相关。"""
+    if soft_assignments.ndim != 2 or soft_assignments.shape[0] < 2 or soft_assignments.shape[1] < 2:
+        zero = soft_assignments.new_zeros(())
+        return zero, zero
+
+    returns = trajectory_returns.reshape(-1, 1)
+    code_mass = soft_assignments.sum(dim=0).clamp_min(eps)
+    usage = code_mass / max(int(soft_assignments.shape[0]), 1)
+    code_returns = (soft_assignments * returns).sum(dim=0) / code_mass
+
+    usage_centered = usage - usage.mean()
+    return_centered = code_returns - code_returns.mean()
+    covariance = torch.mean(usage_centered * return_centered)
+    denom = torch.sqrt(
+        torch.mean(usage_centered ** 2) * torch.mean(return_centered ** 2) + eps,
+    )
+    corr = covariance / denom
+    target = soft_assignments.new_tensor(float(np.clip(target_corr, -1.0, 1.0)))
+    loss = torch.relu(target - corr)
+    return loss, corr
+
+
+def compute_codebook_separation_loss(
+    embeddings: torch.Tensor,
+    margin: float,
+) -> torch.Tensor:
+    """惩罚过高的 codebook cosine 相似度，降低 archetype 同质化。"""
+    if embeddings.ndim != 2 or embeddings.shape[0] < 2:
+        return embeddings.new_zeros(())
+
+    normalized = F.normalize(embeddings, dim=1)
+    cosine = normalized @ normalized.t()
+    off_diag_mask = ~torch.eye(cosine.shape[0], dtype=torch.bool, device=cosine.device)
+    penalties = torch.relu(cosine[off_diag_mask] - float(np.clip(margin, -1.0, 1.0)))
+    if penalties.numel() == 0:
+        return embeddings.new_zeros(())
+    return torch.mean(penalties ** 2)
+
+
+def build_return_bucket_head(config: Any, device: torch.device) -> nn.Module:
+    """构建基于 archetype latent 的收益分桶头。"""
+    hidden_dim = max(int(getattr(config, "phase1_return_aux_hidden_dim", 32)), 1)
+    num_buckets = max(int(getattr(config, "phase1_return_num_buckets", 5)), 2)
+    return nn.Sequential(
+        nn.LayerNorm(config.latent_dim),
+        nn.Linear(config.latent_dim, hidden_dim),
+        nn.GELU(),
+        nn.Linear(hidden_dim, num_buckets),
+    ).to(device)
+
+
+def build_return_bucket_edges(
+    trajectory_returns: torch.Tensor | np.ndarray,
+    num_buckets: int,
+) -> np.ndarray:
+    """根据全局轨迹收益分位数构建收益分桶边界。"""
+    values = np.asarray(trajectory_returns, dtype=np.float32).reshape(-1)
+    if values.size == 0 or num_buckets <= 1:
+        return np.zeros(0, dtype=np.float32)
+
+    quantiles = np.linspace(0.0, 1.0, num_buckets + 1, dtype=np.float32)[1:-1]
+    if quantiles.size == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    edges = np.quantile(values, quantiles).astype(np.float32)
+    return np.unique(edges)
+
+
+def bucketize_trajectory_returns(
+    trajectory_returns: torch.Tensor,
+    bucket_edges: torch.Tensor,
+) -> torch.Tensor:
+    """将轨迹总收益映射到离散 bucket id。"""
+    if bucket_edges.numel() == 0:
+        return torch.zeros_like(trajectory_returns, dtype=torch.long)
+    return torch.bucketize(trajectory_returns, bucket_edges)
 
 
 def summarize_code_usage(code_counts: np.ndarray) -> dict:
@@ -282,12 +408,34 @@ def inspect_trajectory_cache(
 
     reasons: List[str] = []
     expected_starts = expected_num_available_starts(train_rows, config.horizon)
+    ratio_sum = float(config.phase1_stratified_ratio) + float(config.phase1_importance_ratio)
+    if ratio_sum <= 0:
+        expected_stratified_ratio = 1.0
+        expected_importance_ratio = 0.0
+    else:
+        expected_stratified_ratio = float(config.phase1_stratified_ratio) / ratio_sum
+        expected_importance_ratio = float(config.phase1_importance_ratio) / ratio_sum
+
+    weight_sum = float(config.phase1_importance_vol_weight) + float(config.phase1_importance_net_weight)
+    if weight_sum <= 0:
+        expected_importance_vol_weight = 0.5
+        expected_importance_net_weight = 0.5
+    else:
+        expected_importance_vol_weight = float(config.phase1_importance_vol_weight) / weight_sum
+        expected_importance_net_weight = float(config.phase1_importance_net_weight) / weight_sum
+
     expected_values = {
         "pair": pair,
         "horizon": int(config.horizon),
         "gamma": float(config.discount_factor),
         "num_sampled_trajectories": int(config.num_trajectories),
         "sampling_seed": int(config.phase1_sampling_seed),
+        "sampling_mode": str(config.phase1_start_sampling_mode),
+        "sampling_stratified_ratio": float(expected_stratified_ratio),
+        "sampling_importance_ratio": float(expected_importance_ratio),
+        "sampling_num_strata": int(config.phase1_sampling_strata),
+        "sampling_importance_vol_weight": float(expected_importance_vol_weight),
+        "sampling_importance_net_weight": float(expected_importance_net_weight),
         "num_available_starts": int(expected_starts),
         "training_rows": int(train_rows),
         "state_dim": int(config.state_dim),
@@ -426,6 +574,12 @@ def prepare_trajectory_dataset(
         result_dir=config.result_dir,
         train_batch_id=config.train_batch_id,
         sampling_seed=config.phase1_sampling_seed,
+        sampling_mode=config.phase1_start_sampling_mode,
+        stratified_ratio=config.phase1_stratified_ratio,
+        importance_ratio=config.phase1_importance_ratio,
+        sampling_num_strata=config.phase1_sampling_strata,
+        importance_vol_weight=config.phase1_importance_vol_weight,
+        importance_net_weight=config.phase1_importance_net_weight,
     )
     traj_path = DPPlanner.build_trajectory_cache_path(
         config.result_dir, pair, config.train_batch_id,
@@ -494,6 +648,11 @@ def _accumulate_batch_metrics(
     total_loss: torch.Tensor,
     rec_loss: torch.Tensor,
     vq_loss_val: float,
+    alignment_reg_val: float,
+    return_aux_reg_val: float,
+    return_bucket_acc_val: float,
+    separation_reg_val: float,
+    usage_profit_corr_val: float,
     pred_actions: torch.Tensor,
     a_demo: torch.Tensor,
     action_logits: torch.Tensor,
@@ -510,6 +669,11 @@ def _accumulate_batch_metrics(
     metrics.loss += total_loss.item()
     metrics.rec_loss += rec_loss.item()
     metrics.vq_loss += vq_loss_val
+    metrics.alignment_reg += alignment_reg_val
+    metrics.return_aux_reg += return_aux_reg_val
+    metrics.return_bucket_acc += return_bucket_acc_val
+    metrics.separation_reg += separation_reg_val
+    metrics.usage_profit_corr += usage_profit_corr_val
     metrics.token_correct += int((pred_actions == a_demo).sum().item())
     metrics.token_total += int(a_demo.numel())
     metrics.exact_match += int(torch.all(pred_actions == a_demo, dim=1).sum().item())
@@ -534,13 +698,15 @@ def train_one_epoch(
     encoder: VQEncoder,
     codebook: VQCodebook,
     decoder: VQDecoder,
+    return_bucket_head: nn.Module,
     optimizer: torch.optim.Optimizer,
     ce_loss_fn: nn.CrossEntropyLoss,
     config: Any,
     device: torch.device,
+    return_bucket_edges: torch.Tensor,
     is_phase_a: bool,
     collect_z_e: bool = False,
-) -> Tuple[EpochMetrics, torch.Tensor | None]:
+) -> Tuple[EpochMetrics, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     """执行单个 epoch 的训练，返回累积指标。
 
     Phase A (预训练): 跳过 VQ 量化，仅优化 L_rec。
@@ -557,18 +723,23 @@ def train_one_epoch(
     encoder.train()
     codebook.train()
     decoder.train()
+    return_bucket_head.train()
 
     metrics = EpochMetrics(
         code_counts=np.zeros(config.num_archetypes, dtype=np.int64),
     )
     z_e_list: List[torch.Tensor] = [] if collect_z_e else []
     a_demo_list: List[torch.Tensor] = [] if collect_z_e else []
+    traj_return_list: List[torch.Tensor] = [] if collect_z_e else []
     last_z_e: torch.Tensor | None = None
+    last_traj_returns: torch.Tensor | None = None
 
     for s_demo, a_demo, r_demo in dataloader:
         s_demo = s_demo.to(device)
         a_demo = a_demo.to(device)
         r_demo = r_demo.to(device)
+        traj_returns = r_demo.sum(dim=1)
+        return_bucket_targets = bucketize_trajectory_returns(traj_returns, return_bucket_edges)
 
         # Encode
         z_e = encoder(s_demo, a_demo, r_demo)
@@ -576,9 +747,11 @@ def train_one_epoch(
         if collect_z_e:
             z_e_list.append(z_e.detach())
             a_demo_list.append(a_demo.detach())
+            traj_return_list.append(traj_returns.detach())
 
         if not is_phase_a:
             last_z_e = z_e.detach()
+            last_traj_returns = traj_returns.detach()
 
         if is_phase_a:
             # Phase A: bypass VQ, pass z_e directly to decoder
@@ -586,6 +759,11 @@ def train_one_epoch(
             indices_np = None
             vq_loss_val = 0.0
             quantization_mse_val = 0.0
+            alignment_reg_val = 0.0
+            return_aux_reg_val = 0.0
+            return_bucket_acc_val = 0.0
+            separation_reg_val = 0.0
+            usage_profit_corr_val = 0.0
         else:
             # Phase B: full VQ quantization
             z_q_st, indices, commitment_loss = codebook.quantize(z_e)
@@ -607,9 +785,43 @@ def train_one_epoch(
             # β₀ × ||z_e - sg[z_q]||²
             z_q_detached = z_q_st.detach()
             encoder_commitment = config.vq_beta0 * torch.mean((z_e - z_q_detached) ** 2)
-            total_loss = rec_loss + commitment_loss + encoder_commitment
+            soft_assignments = compute_soft_code_assignments(
+                z_e, codebook, config.phase1_usage_profit_alignment_temperature,
+            )
+            code_bucket_logits = return_bucket_head(codebook.embeddings.weight)
+            soft_bucket_logits = soft_assignments @ code_bucket_logits
+            hard_bucket_logits = code_bucket_logits[indices]
+            soft_bucket_loss = F.cross_entropy(soft_bucket_logits, return_bucket_targets)
+            hard_bucket_loss = F.cross_entropy(hard_bucket_logits, return_bucket_targets)
+            soft_bucket_weight = float(np.clip(config.phase1_return_soft_assignment_weight, 0.0, 1.0))
+            return_aux_loss = (
+                soft_bucket_weight * soft_bucket_loss
+                + (1.0 - soft_bucket_weight) * hard_bucket_loss
+            )
+            alignment_loss, usage_profit_corr = compute_usage_profit_alignment_loss(
+                soft_assignments,
+                traj_returns,
+                config.phase1_usage_profit_alignment_target_corr,
+            )
+            separation_loss = compute_codebook_separation_loss(
+                codebook.embeddings.weight,
+                config.phase1_codebook_separation_margin,
+            )
+            alignment_reg = config.phase1_usage_profit_alignment_weight * alignment_loss
+            return_aux_reg = config.phase1_return_aux_weight * return_aux_loss
+            separation_reg = config.phase1_codebook_separation_weight * separation_loss
+            total_loss = (
+                rec_loss + commitment_loss + encoder_commitment + alignment_reg + return_aux_reg + separation_reg
+            )
             vq_loss_val = commitment_loss.item() + encoder_commitment.item()
             quantization_mse_val = float(torch.mean((z_e - z_q_detached) ** 2).item())
+            alignment_reg_val = float(alignment_reg.item())
+            return_aux_reg_val = float(return_aux_reg.item())
+            return_bucket_acc_val = float(
+                (torch.argmax(hard_bucket_logits, dim=1) == return_bucket_targets).float().mean().item()
+            )
+            separation_reg_val = float(separation_reg.item())
+            usage_profit_corr_val = float(usage_profit_corr.item())
 
         optimizer.zero_grad()
         total_loss.backward()
@@ -620,6 +832,11 @@ def train_one_epoch(
             total_loss=total_loss,
             rec_loss=rec_loss,
             vq_loss_val=vq_loss_val,
+            alignment_reg_val=alignment_reg_val,
+            return_aux_reg_val=return_aux_reg_val,
+            return_bucket_acc_val=return_bucket_acc_val,
+            separation_reg_val=separation_reg_val,
+            usage_profit_corr_val=usage_profit_corr_val,
             pred_actions=pred_actions,
             a_demo=a_demo,
             action_logits=action_logits,
@@ -635,12 +852,18 @@ def train_one_epoch(
 
     z_e_all = torch.cat(z_e_list, dim=0) if collect_z_e and z_e_list else None
     a_demo_all = torch.cat(a_demo_list, dim=0) if collect_z_e and a_demo_list else None
+    traj_return_all = torch.cat(traj_return_list, dim=0) if collect_z_e and traj_return_list else None
 
     # Phase B: 死码重置
     if not is_phase_a and last_z_e is not None:
-        codebook.reset_dead_codes(last_z_e, metrics.code_counts)
+        codebook.reset_dead_codes(
+            last_z_e,
+            metrics.code_counts,
+            trajectory_returns=last_traj_returns,
+            top_ratio=config.phase1_profit_reset_top_ratio,
+        )
 
-    return metrics, z_e_all, a_demo_all
+    return metrics, z_e_all, a_demo_all, traj_return_all
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +876,7 @@ def run_training_loop(
     encoder: VQEncoder,
     codebook: VQCodebook,
     decoder: VQDecoder,
+    return_bucket_head: nn.Module,
     config: Any,
     device: torch.device,
     checkpoint_interval: int = 0,
@@ -663,13 +887,26 @@ def run_training_loop(
         list(encoder.parameters())
         + list(codebook.parameters())
         + list(decoder.parameters())
+        + list(return_bucket_head.parameters())
     )
     optimizer = torch.optim.Adam(all_params, lr=config.learning_rate)
     ce_loss_fn = nn.CrossEntropyLoss()
     history = TrainingHistory()
+    dataset_returns = dataloader.dataset.rewards.sum(dim=1)
+    return_bucket_edges_np = build_return_bucket_edges(
+        dataset_returns.detach().cpu().numpy(),
+        config.phase1_return_num_buckets,
+    )
+    return_bucket_edges = torch.as_tensor(return_bucket_edges_np, dtype=torch.float32, device=device)
 
     logger.info("开始训练: %d epochs", config.phase1_epochs)
     logger.info("Phase A (连续潜在预训练): epochs 1-%d, loss=L_rec only", config.pretrain_epochs)
+    logger.info(
+        "收益分桶目标已启用: num_buckets=%d, soft_assignment_weight=%.2f, edges=%s",
+        int(config.phase1_return_num_buckets),
+        float(config.phase1_return_soft_assignment_weight),
+        np.round(return_bucket_edges_np, 4).tolist(),
+    )
 
     disable_tqdm = should_disable_tqdm()
     for epoch in tqdm(
@@ -687,15 +924,17 @@ def run_training_loop(
                 config.pretrain_epochs + 1, config.phase1_epochs,
             )
 
-        metrics, z_e_all, a_demo_all = train_one_epoch(
+        metrics, z_e_all, a_demo_all, traj_return_all = train_one_epoch(
             dataloader=dataloader,
             encoder=encoder,
             codebook=codebook,
             decoder=decoder,
+            return_bucket_head=return_bucket_head,
             optimizer=optimizer,
             ce_loss_fn=ce_loss_fn,
             config=config,
             device=device,
+            return_bucket_edges=return_bucket_edges,
             is_phase_a=is_phase_a,
             collect_z_e=collect_z_e,
         )
@@ -703,7 +942,13 @@ def run_training_loop(
         # Phase A → Phase B 过渡: 用方向感知 k-means 初始化码本
         if collect_z_e and z_e_all is not None:
             if a_demo_all is not None:
-                codebook.init_from_data_direction_aware(z_e_all, a_demo_all)
+                codebook.init_from_data_direction_aware(
+                    z_e_all,
+                    a_demo_all,
+                    trajectory_returns=traj_return_all,
+                    profit_top_ratio=config.phase1_profit_init_top_ratio,
+                    profit_code_ratio=config.phase1_profit_init_code_ratio,
+                )
             else:
                 codebook.init_from_data(z_e_all)
 
@@ -713,10 +958,14 @@ def run_training_loop(
         if epoch == 1 or epoch % 10 == 0 or epoch == config.phase1_epochs:
             tqdm.write(
                 "Epoch %3d/%d — total_loss=%.4f, rec_loss=%.4f, vq_loss=%.4f, "
+                "align_reg=%.4f, return_reg=%.4f, bucket_acc=%.4f, sep_reg=%.4f, usage_corr=%.4f, "
                 "token_acc=%.4f, exact_match=%.4f, perplexity=%.4f, used_codes=%d"
                 % (
                     epoch, config.phase1_epochs,
                     summary["avg_loss"], summary["avg_rec"], summary["avg_vq"],
+                    summary["avg_alignment_reg"], summary["avg_return_aux_reg"], summary["avg_return_bucket_acc"],
+                    summary["avg_separation_reg"],
+                    summary["avg_usage_profit_corr"],
                     summary["token_accuracy"], summary["exact_match_rate"],
                     summary["codebook_perplexity"], summary["used_code_count"],
                 )
@@ -778,6 +1027,24 @@ def save_checkpoint(
             "vq_beta0": config.vq_beta0,
             "num_trajectories": config.num_trajectories,
             "phase1_sampling_seed": config.phase1_sampling_seed,
+            "phase1_start_sampling_mode": config.phase1_start_sampling_mode,
+            "phase1_stratified_ratio": config.phase1_stratified_ratio,
+            "phase1_importance_ratio": config.phase1_importance_ratio,
+            "phase1_sampling_strata": config.phase1_sampling_strata,
+            "phase1_importance_vol_weight": config.phase1_importance_vol_weight,
+            "phase1_importance_net_weight": config.phase1_importance_net_weight,
+            "phase1_usage_profit_alignment_weight": config.phase1_usage_profit_alignment_weight,
+            "phase1_usage_profit_alignment_target_corr": config.phase1_usage_profit_alignment_target_corr,
+            "phase1_usage_profit_alignment_temperature": config.phase1_usage_profit_alignment_temperature,
+            "phase1_return_aux_weight": config.phase1_return_aux_weight,
+            "phase1_return_aux_hidden_dim": config.phase1_return_aux_hidden_dim,
+            "phase1_return_num_buckets": config.phase1_return_num_buckets,
+            "phase1_return_soft_assignment_weight": config.phase1_return_soft_assignment_weight,
+            "phase1_codebook_separation_weight": config.phase1_codebook_separation_weight,
+            "phase1_codebook_separation_margin": config.phase1_codebook_separation_margin,
+            "phase1_profit_init_top_ratio": config.phase1_profit_init_top_ratio,
+            "phase1_profit_init_code_ratio": config.phase1_profit_init_code_ratio,
+            "phase1_profit_reset_top_ratio": config.phase1_profit_reset_top_ratio,
             "discount_factor": config.discount_factor,
             "commission_rate": config.commission_rate,
                 "dp_commission_rate": config.dp_commission_rate,
@@ -1102,6 +1369,77 @@ def build_checkpoint_rank_tuple(
     )
 
 
+def evaluate_checkpoint_profit_gate(
+    *,
+    metrics: Dict[str, Any],
+    config: Any,
+) -> Dict[str, Any]:
+    """根据更贴近 Phase II 目标的收益指标，对 Phase I checkpoint 做准入过滤。"""
+    oracle_mean = float(max(metrics.get("oracle_return_mean", 0.0), 0.0))
+    realizable_proxy_return = float(metrics.get("phase2_realizable_proxy_return_mean", 0.0))
+    best_fixed_return = float(metrics.get("best_fixed_archetype_return_mean", 0.0))
+    return_usage_corr = float(np.clip(metrics.get("return_usage_correlation", 0.0), -1.0, 1.0))
+
+    realizable_abs_threshold = float(
+        max(getattr(config, "phase1_selection_min_realizable_proxy_return_mean", 0.0), 0.0),
+    )
+    realizable_ratio_threshold = float(
+        max(getattr(config, "phase1_selection_min_realizable_proxy_to_oracle_ratio", 0.0), 0.0),
+    )
+    best_fixed_abs_threshold = float(
+        max(getattr(config, "phase1_selection_min_best_fixed_archetype_return_mean", 0.0), 0.0),
+    )
+    best_fixed_ratio_threshold = float(
+        max(getattr(config, "phase1_selection_min_best_fixed_to_oracle_ratio", 0.0), 0.0),
+    )
+    corr_threshold = float(
+        np.clip(getattr(config, "phase1_selection_min_return_usage_correlation", 0.0), -1.0, 1.0),
+    )
+
+    realizable_ratio = realizable_proxy_return / oracle_mean if oracle_mean > 0 else 0.0
+    best_fixed_ratio = best_fixed_return / oracle_mean if oracle_mean > 0 else 0.0
+    min_realizable_required = max(realizable_abs_threshold, realizable_ratio_threshold * oracle_mean)
+    min_best_fixed_required = max(best_fixed_abs_threshold, best_fixed_ratio_threshold * oracle_mean)
+
+    failed_reasons: List[str] = []
+    if realizable_proxy_return < min_realizable_required:
+        failed_reasons.append(
+            "realizable_proxy_return_mean="
+            f"{realizable_proxy_return:.4f} < required={min_realizable_required:.4f}",
+        )
+    if best_fixed_return < min_best_fixed_required:
+        failed_reasons.append(
+            "best_fixed_archetype_return_mean="
+            f"{best_fixed_return:.4f} < required={min_best_fixed_required:.4f}",
+        )
+    if return_usage_corr < corr_threshold:
+        failed_reasons.append(
+            "return_usage_correlation="
+            f"{return_usage_corr:.4f} < required={corr_threshold:.4f}",
+        )
+
+    thresholds = {
+        "min_realizable_proxy_return_mean": float(min_realizable_required),
+        "min_realizable_proxy_to_oracle_ratio": float(realizable_ratio_threshold),
+        "min_best_fixed_archetype_return_mean": float(min_best_fixed_required),
+        "min_best_fixed_to_oracle_ratio": float(best_fixed_ratio_threshold),
+        "min_return_usage_correlation": float(corr_threshold),
+    }
+    observed = {
+        "realizable_proxy_return_mean": float(realizable_proxy_return),
+        "realizable_proxy_to_oracle_ratio": float(realizable_ratio),
+        "best_fixed_archetype_return_mean": float(best_fixed_return),
+        "best_fixed_to_oracle_ratio": float(best_fixed_ratio),
+        "return_usage_correlation": float(return_usage_corr),
+    }
+    return {
+        "passed": not failed_reasons,
+        "failed_reasons": failed_reasons,
+        "thresholds": thresholds,
+        "observed": observed,
+    }
+
+
 def select_and_materialize_best_phase1_checkpoint(
     *,
     config: Any,
@@ -1186,6 +1524,7 @@ def select_and_materialize_best_phase1_checkpoint(
             metrics = extract_checkpoint_selection_metrics(validation_report, env_report)
             rank_tuple = build_checkpoint_rank_tuple(metrics, epoch, int(config.num_archetypes))
             generalization_score = compute_generalization_score(metrics)
+            profit_gate = evaluate_checkpoint_profit_gate(metrics=metrics, config=config)
 
             row["selection_metrics"] = metrics
             row["selection_score"] = float(metrics.get("phase2_realizable_proxy_return_mean", 0.0))
@@ -1201,6 +1540,11 @@ def select_and_materialize_best_phase1_checkpoint(
             row["selection_best_fixed_archetype_return_mean"] = float(
                 metrics.get("best_fixed_archetype_return_mean", 0.0),
             )
+            row["selection_return_usage_correlation"] = float(metrics.get("return_usage_correlation", 0.0))
+            row["selection_profit_gate_passed"] = bool(profit_gate["passed"])
+            row["selection_profit_gate_failed_reasons"] = list(profit_gate["failed_reasons"])
+            row["selection_profit_gate_thresholds"] = dict(profit_gate["thresholds"])
+            row["selection_profit_gate_observed"] = dict(profit_gate["observed"])
             row["rank_tuple"] = [float(x) for x in rank_tuple]
             row["evaluation_succeeded"] = True
         except Exception as exc:  # noqa: BLE001
@@ -1213,7 +1557,31 @@ def select_and_materialize_best_phase1_checkpoint(
     if not successful_rows:
         raise RuntimeError("所有候选 checkpoint 评估均失败，无法选出最佳 checkpoint")
 
-    best_row = max(successful_rows, key=lambda r: tuple(r["rank_tuple"]))
+    profit_gated_rows = [r for r in successful_rows if r.get("selection_profit_gate_passed", False)]
+    selection_pool_name = "profit_gated_candidates"
+    if profit_gated_rows:
+        candidate_pool = profit_gated_rows
+        logger.info(
+            "Phase I checkpoint profit gate 命中: %d / %d 个候选满足收益准入门槛",
+            len(profit_gated_rows),
+            len(successful_rows),
+        )
+    else:
+        if bool(getattr(config, "phase1_selection_require_gated_candidate", False)):
+            best_fallback_row = max(successful_rows, key=lambda r: tuple(r["rank_tuple"]))
+            raise RuntimeError(
+                "没有任何 Phase I checkpoint 满足 profit gate。"
+                f" 最优候选(epoch={int(best_fallback_row['epoch'])}) 的失败原因: "
+                + "; ".join(best_fallback_row.get("selection_profit_gate_failed_reasons", ["unknown"]))
+            )
+        candidate_pool = successful_rows
+        selection_pool_name = "fallback_all_successful_candidates"
+        logger.warning(
+            "Phase I checkpoint profit gate 未命中任何候选，回退到原排序。"
+            " 这通常意味着本轮 Phase I 尚未学出足够可交易的 archetype。",
+        )
+
+    best_row = max(candidate_pool, key=lambda r: tuple(r["rank_tuple"]))
     best_source_path = str(best_row["checkpoint_path"])
     best_model_path = os.path.join(save_dir, f"{pair}_vq_model_best.pt")
     standard_model_path = os.path.join(save_dir, f"{pair}_vq_model.pt")
@@ -1237,11 +1605,33 @@ def select_and_materialize_best_phase1_checkpoint(
     selection_report = {
         "pair": pair,
         "train_batch_id": config.train_batch_id,
-        "selection_strategy": "phase1_v7_realizable_proxy_plus_validation_health",
+        "selection_strategy": "phase1_v8_profit_gated_realizable_proxy_plus_validation_health",
         "phase1_epochs": int(config.phase1_epochs),
         "phase1_checkpoint_interval": int(PHASE1_CHECKPOINT_EVAL_INTERVAL),
         "candidate_count": len(checkpoint_candidates),
         "successful_candidate_count": len(successful_rows),
+        "profit_gate_candidate_count": len(profit_gated_rows),
+        "selection_pool": selection_pool_name,
+        "profit_gate_config": {
+            "min_realizable_proxy_return_mean": float(
+                getattr(config, "phase1_selection_min_realizable_proxy_return_mean", 0.0),
+            ),
+            "min_realizable_proxy_to_oracle_ratio": float(
+                getattr(config, "phase1_selection_min_realizable_proxy_to_oracle_ratio", 0.0),
+            ),
+            "min_best_fixed_archetype_return_mean": float(
+                getattr(config, "phase1_selection_min_best_fixed_archetype_return_mean", 0.0),
+            ),
+            "min_best_fixed_to_oracle_ratio": float(
+                getattr(config, "phase1_selection_min_best_fixed_to_oracle_ratio", 0.0),
+            ),
+            "min_return_usage_correlation": float(
+                getattr(config, "phase1_selection_min_return_usage_correlation", 0.0),
+            ),
+            "require_gated_candidate": bool(
+                getattr(config, "phase1_selection_require_gated_candidate", False),
+            ),
+        },
         "selected_checkpoint": {
             "epoch": int(best_row["epoch"]),
             "tag": best_row["tag"],
@@ -1262,6 +1652,12 @@ def select_and_materialize_best_phase1_checkpoint(
             "selection_best_fixed_archetype_return_mean": float(
                 best_row.get("selection_best_fixed_archetype_return_mean", 0.0),
             ),
+            "selection_return_usage_correlation": float(best_row.get("selection_return_usage_correlation", 0.0)),
+            "selection_profit_gate_passed": bool(best_row.get("selection_profit_gate_passed", False)),
+            "selection_profit_gate_failed_reasons": list(
+                best_row.get("selection_profit_gate_failed_reasons", []),
+            ),
+            "selection_profit_gate_thresholds": dict(best_row.get("selection_profit_gate_thresholds", {})),
             "selection_primary_oracle_return_mean": float(best_row.get("selection_primary_oracle_return_mean", 0.0)),
             "selection_generalization_score": float(best_row.get("selection_generalization_score", 0.0)),
             "rank_tuple": best_row["rank_tuple"],
@@ -1283,6 +1679,11 @@ def select_and_materialize_best_phase1_checkpoint(
         float(best_row.get("selection_generalization_score", 0.0)),
         best_source_path,
     )
+    if not bool(best_row.get("selection_profit_gate_passed", False)):
+        logger.warning(
+            "当前选中的 Phase I checkpoint 未满足 profit gate，原因: %s",
+            "; ".join(best_row.get("selection_profit_gate_failed_reasons", [])) or "unknown",
+        )
     logger.info("标准 Phase I 模型路径已更新为最佳 checkpoint: %s", standard_model_path)
 
     return standard_model_path, standard_val_report_path, standard_env_report_path, best_validation_report
@@ -1331,9 +1732,24 @@ def main() -> None:
     logger.info("结果目录批次: %s", config.train_batch_id)
     logger.info(
         "严格论文主线配置已通过守卫检查: epochs=%d, batch_size=%d, lr=%.1e, latent_dim=%d, "
-        "num_archetypes=%d, num_trajectories=%d, vq_beta0=%.2f, sampling_seed=%d",
+        "num_archetypes=%d, num_trajectories=%d, vq_beta0=%.2f, sampling_seed=%d, "
+        "sampling_mode=%s(%.2f/%.2f), align_w=%.3f, align_target=%.2f, return_w=%.3f, "
+        "return_hidden=%d, return_bins=%d, return_soft=%.2f, sep_w=%.3f, sep_margin=%.2f, "
+        "init_top=%.2f, init_code=%.2f, reset_top=%.2f",
         config.phase1_epochs, config.batch_size, config.learning_rate, config.latent_dim,
         config.num_archetypes, config.num_trajectories, config.vq_beta0, config.phase1_sampling_seed,
+        config.phase1_start_sampling_mode, config.phase1_stratified_ratio, config.phase1_importance_ratio,
+        config.phase1_usage_profit_alignment_weight,
+        config.phase1_usage_profit_alignment_target_corr,
+        config.phase1_return_aux_weight,
+        config.phase1_return_aux_hidden_dim,
+        config.phase1_return_num_buckets,
+        config.phase1_return_soft_assignment_weight,
+        config.phase1_codebook_separation_weight,
+        config.phase1_codebook_separation_margin,
+        config.phase1_profit_init_top_ratio,
+        config.phase1_profit_init_code_ratio,
+        config.phase1_profit_reset_top_ratio,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1352,6 +1768,7 @@ def main() -> None:
 
     # Step 3: 初始化模型
     encoder, codebook, decoder = build_models(config, device)
+    return_bucket_head = build_return_bucket_head(config, device)
 
     # Step 4: 训练（每 30 epoch 保存一个 checkpoint 候选）
     save_dir = config.get_stage_result_dir(pair, "phase1_archetype_discovery")
@@ -1396,6 +1813,7 @@ def main() -> None:
         encoder=encoder,
         codebook=codebook,
         decoder=decoder,
+        return_bucket_head=return_bucket_head,
         config=config,
         device=device,
         checkpoint_interval=checkpoint_interval,

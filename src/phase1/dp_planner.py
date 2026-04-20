@@ -50,6 +50,12 @@ class DPPlanner:
         result_dir: str = "result",
         train_batch_id: str = "default",
         sampling_seed: int = 42,
+        sampling_mode: str = "stratified",
+        stratified_ratio: float = 1.0,
+        importance_ratio: float = 0.0,
+        sampling_num_strata: int = 4,
+        importance_vol_weight: float = 1.0,
+        importance_net_weight: float = 0.0,
     ):
         """
         Args:
@@ -58,7 +64,43 @@ class DPPlanner:
             result_dir: 轨迹缓存输出目录根路径。
             train_batch_id: 训练批次号，用于隔离并行任务结果目录。
             sampling_seed: Phase I 轨迹采样随机种子，用于结果复现。
+            sampling_mode: 起点采样模式，支持 "uniform"、"stratified"
+                           与 "hybrid_stratified_importance"。
+            stratified_ratio: 混合采样中分层随机占比。
+            importance_ratio: 混合采样中重要性采样占比。
+            sampling_num_strata: 分层采样分位桶数（波动率 x 趋势）。
+            importance_vol_weight: 重要性打分中波动率权重。
+            importance_net_weight: 重要性打分中净收益代理权重。
         """
+        if sampling_mode not in {"uniform", "stratified", "hybrid_stratified_importance"}:
+            raise ValueError(
+                f"不支持的 sampling_mode: {sampling_mode!r}，可选: "
+                f"['uniform', 'stratified', 'hybrid_stratified_importance']"
+            )
+        if stratified_ratio < 0 or importance_ratio < 0:
+            raise ValueError(
+                f"stratified_ratio / importance_ratio 必须非负，收到 "
+                f"{stratified_ratio}, {importance_ratio}"
+            )
+        if sampling_num_strata < 2:
+            raise ValueError(f"sampling_num_strata 必须 >= 2，收到 {sampling_num_strata}")
+        if importance_vol_weight < 0 or importance_net_weight < 0:
+            raise ValueError(
+                f"importance_vol_weight / importance_net_weight 必须非负，收到 "
+                f"{importance_vol_weight}, {importance_net_weight}"
+            )
+
+        ratio_sum = stratified_ratio + importance_ratio
+        if ratio_sum <= 0:
+            # 默认回退为纯分层随机，避免零除。
+            stratified_ratio, importance_ratio = 1.0, 0.0
+            ratio_sum = 1.0
+
+        weight_sum = importance_vol_weight + importance_net_weight
+        if weight_sum <= 0:
+            importance_vol_weight, importance_net_weight = 0.5, 0.5
+            weight_sum = 1.0
+
         self.env = env
         self.pair = env.pair
         self.horizon = env.horizon
@@ -67,6 +109,12 @@ class DPPlanner:
         self.result_dir = result_dir
         self.train_batch_id = train_batch_id
         self.sampling_seed = sampling_seed
+        self.sampling_mode = sampling_mode
+        self.stratified_ratio = float(stratified_ratio / ratio_sum)
+        self.importance_ratio = float(importance_ratio / ratio_sum)
+        self.sampling_num_strata = int(sampling_num_strata)
+        self.importance_vol_weight = float(importance_vol_weight / weight_sum)
+        self.importance_net_weight = float(importance_net_weight / weight_sum)
 
     # ------------------------------------------------------------------
     # 核心接口
@@ -298,25 +346,40 @@ class DPPlanner:
                     "commission_rate": np.float64(self.env.commission_rate),
                     "max_position": np.int64(self.m),
                     "algorithm_variant": np.array("paper_single_change"),
+                    "sampling_mode": np.array(self.sampling_mode),
+                    "sampling_stratified_ratio": np.float64(self.stratified_ratio),
+                    "sampling_importance_ratio": np.float64(self.importance_ratio),
+                    "sampling_num_strata": np.int64(self.sampling_num_strata),
+                    "sampling_importance_vol_weight": np.float64(self.importance_vol_weight),
+                    "sampling_importance_net_weight": np.float64(self.importance_net_weight),
+                    "sampling_stratified_count": np.int64(0),
+                    "sampling_importance_count": np.int64(0),
                 }
             )
             self._save_trajectories(result)
             return result
 
         replace = num_available_starts < num_trajectories
-        sampled_start_indices = self._sample_start_indices(
+        sampled_start_indices, sampling_meta = self._sample_start_indices(
             valid_start_indices=valid_start_indices,
             num_trajectories=num_trajectories,
             replace=replace,
         )
 
         logger.info(
-            "开始生成 DP 示范轨迹: pair=%s, num_available_starts=%d, target=%d, replace=%s, seed=%d",
+            "开始生成 DP 示范轨迹: pair=%s, num_available_starts=%d, target=%d, "
+            "replace=%s, seed=%d, sampling_mode=%s, stratified_ratio=%.3f, importance_ratio=%.3f, "
+            "stratified_count=%d, importance_count=%d",
             self.pair,
             num_available_starts,
             num_trajectories,
             replace,
             self.sampling_seed,
+            self.sampling_mode,
+            self.stratified_ratio,
+            self.importance_ratio,
+            int(sampling_meta.get("sampling_stratified_count", 0)),
+            int(sampling_meta.get("sampling_importance_count", 0)),
         )
 
         all_states = []
@@ -372,6 +435,14 @@ class DPPlanner:
             "commission_rate": np.float64(self.env.commission_rate),
             "max_position": np.int64(self.m),
             "algorithm_variant": np.array("paper_single_change"),
+            "sampling_mode": np.array(self.sampling_mode),
+            "sampling_stratified_ratio": np.float64(self.stratified_ratio),
+            "sampling_importance_ratio": np.float64(self.importance_ratio),
+            "sampling_num_strata": np.int64(self.sampling_num_strata),
+            "sampling_importance_vol_weight": np.float64(self.importance_vol_weight),
+            "sampling_importance_net_weight": np.float64(self.importance_net_weight),
+            "sampling_stratified_count": np.int64(sampling_meta.get("sampling_stratified_count", 0)),
+            "sampling_importance_count": np.int64(sampling_meta.get("sampling_importance_count", 0)),
         }
 
         logger.info(
@@ -411,7 +482,7 @@ class DPPlanner:
         valid_start_indices: np.ndarray,
         num_trajectories: int,
         replace: bool,
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, Dict[str, int]]:
         """从合法起点集合中采样固定数量的 trajectory 起点。
 
         Args:
@@ -420,15 +491,430 @@ class DPPlanner:
             replace: 是否有放回采样
 
         Returns:
-            采样后的起点索引数组
+            (采样后的起点索引数组, 采样统计元数据)
         """
+        if num_trajectories <= 0:
+            return np.empty(0, dtype=np.int64), {
+                "sampling_stratified_count": 0,
+                "sampling_importance_count": 0,
+            }
+
         rng = np.random.default_rng(self.sampling_seed)
+
+        if self.sampling_mode == "uniform" or valid_start_indices.size <= 1 or self.horizon <= 1:
+            sampled = self._sample_uniform_start_indices(
+                valid_start_indices=valid_start_indices,
+                num_trajectories=num_trajectories,
+                replace=replace,
+                rng=rng,
+            )
+            return sampled, {
+                "sampling_stratified_count": 0,
+                "sampling_importance_count": 0,
+            }
+
+        if self.sampling_mode == "stratified":
+            sampled = self._sample_stratified_start_indices(
+                valid_start_indices=valid_start_indices,
+                num_samples=num_trajectories,
+                replace=replace,
+                rng=rng,
+            )
+            return sampled, {
+                "sampling_stratified_count": int(sampled.size),
+                "sampling_importance_count": 0,
+            }
+
+        sampled, meta = self._sample_hybrid_start_indices(
+            valid_start_indices=valid_start_indices,
+            num_trajectories=num_trajectories,
+            replace=replace,
+            rng=rng,
+        )
+        return sampled, meta
+
+    def _sample_uniform_start_indices(
+        self,
+        valid_start_indices: np.ndarray,
+        num_trajectories: int,
+        replace: bool,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
         sampled = rng.choice(
             valid_start_indices,
             size=num_trajectories,
             replace=replace,
         )
         return np.asarray(sampled, dtype=np.int64)
+
+    def _sample_hybrid_start_indices(
+        self,
+        valid_start_indices: np.ndarray,
+        num_trajectories: int,
+        replace: bool,
+        rng: np.random.Generator,
+    ) -> Tuple[np.ndarray, Dict[str, int]]:
+        """混合采样: 分层随机 + 高波动/高净收益重要性采样。"""
+        importance_count = int(round(num_trajectories * self.importance_ratio))
+        if self.importance_ratio > 0 and num_trajectories > 0:
+            importance_count = max(importance_count, 1)
+        importance_count = min(max(importance_count, 0), num_trajectories)
+        stratified_count = num_trajectories - importance_count
+
+        if replace:
+            importance_indices = self._sample_importance_start_indices(
+                valid_start_indices=valid_start_indices,
+                num_samples=importance_count,
+                replace=True,
+                rng=rng,
+            )
+            stratified_indices = self._sample_stratified_start_indices(
+                valid_start_indices=valid_start_indices,
+                num_samples=stratified_count,
+                replace=True,
+                rng=rng,
+            )
+        else:
+            importance_indices = self._sample_importance_start_indices(
+                valid_start_indices=valid_start_indices,
+                num_samples=importance_count,
+                replace=False,
+                rng=rng,
+            )
+            remaining = np.setdiff1d(
+                valid_start_indices,
+                importance_indices,
+                assume_unique=False,
+            )
+            stratified_replace = remaining.size < stratified_count
+            if stratified_replace:
+                logger.warning(
+                    "剩余候选起点不足以完成分层无放回采样，回退为分层有放回补齐。"
+                )
+            source = remaining if remaining.size > 0 else valid_start_indices
+            stratified_indices = self._sample_stratified_start_indices(
+                valid_start_indices=source,
+                num_samples=stratified_count,
+                replace=stratified_replace,
+                rng=rng,
+            )
+
+        sampled = np.concatenate([stratified_indices, importance_indices], axis=0)
+        if sampled.size > 0:
+            sampled = sampled[rng.permutation(sampled.size)]
+
+        # 安全兜底：极端边界情况下按 uniform 填补/截断，确保数量严格一致。
+        if sampled.size < num_trajectories:
+            shortfall = num_trajectories - sampled.size
+            if replace:
+                fill = self._sample_uniform_start_indices(
+                    valid_start_indices=valid_start_indices,
+                    num_trajectories=shortfall,
+                    replace=True,
+                    rng=rng,
+                )
+            else:
+                remain = np.setdiff1d(valid_start_indices, sampled, assume_unique=False)
+                if remain.size >= shortfall:
+                    fill = self._sample_uniform_start_indices(
+                        valid_start_indices=remain,
+                        num_trajectories=shortfall,
+                        replace=False,
+                        rng=rng,
+                    )
+                else:
+                    logger.warning(
+                        "无放回兜底样本不足，最后 %d 条起点改为有放回填充。", shortfall
+                    )
+                    fill = self._sample_uniform_start_indices(
+                        valid_start_indices=valid_start_indices,
+                        num_trajectories=shortfall,
+                        replace=True,
+                        rng=rng,
+                    )
+            sampled = np.concatenate([sampled, fill], axis=0)
+        elif sampled.size > num_trajectories:
+            sampled = self._sample_uniform_start_indices(
+                valid_start_indices=sampled,
+                num_trajectories=num_trajectories,
+                replace=False,
+                rng=rng,
+            )
+
+        return np.asarray(sampled, dtype=np.int64), {
+            "sampling_stratified_count": int(stratified_indices.size),
+            "sampling_importance_count": int(importance_indices.size),
+        }
+
+    def _sample_stratified_start_indices(
+        self,
+        valid_start_indices: np.ndarray,
+        num_samples: int,
+        replace: bool,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        if num_samples <= 0 or valid_start_indices.size == 0:
+            return np.empty(0, dtype=np.int64)
+
+        volatility, trend, _ = self._compute_window_metrics(valid_start_indices)
+        labels = self._build_strata_labels(volatility, trend)
+        unique_labels = np.unique(labels)
+        if unique_labels.size <= 1:
+            return self._sample_uniform_start_indices(
+                valid_start_indices=valid_start_indices,
+                num_trajectories=num_samples,
+                replace=replace,
+                rng=rng,
+            )
+
+        groups = [
+            valid_start_indices[labels == label]
+            for label in unique_labels
+        ]
+        capacities = np.array([g.size for g in groups], dtype=np.int64)
+        alloc = self._allocate_stratified_counts(
+            capacities=capacities,
+            total=num_samples,
+            replace=replace,
+            rng=rng,
+        )
+
+        sampled_parts = []
+        for i, group in enumerate(groups):
+            k = int(alloc[i])
+            if k <= 0:
+                continue
+            sampled_parts.append(
+                self._sample_uniform_start_indices(
+                    valid_start_indices=group,
+                    num_trajectories=k,
+                    replace=replace or (k > group.size),
+                    rng=rng,
+                )
+            )
+
+        if not sampled_parts:
+            return np.empty(0, dtype=np.int64)
+        sampled = np.concatenate(sampled_parts, axis=0)
+        if sampled.size > 0:
+            sampled = sampled[rng.permutation(sampled.size)]
+        if sampled.size != num_samples:
+            sampled = self._sample_uniform_start_indices(
+                valid_start_indices=valid_start_indices,
+                num_trajectories=num_samples,
+                replace=replace or (valid_start_indices.size < num_samples),
+                rng=rng,
+            )
+        return np.asarray(sampled, dtype=np.int64)
+
+    def _sample_importance_start_indices(
+        self,
+        valid_start_indices: np.ndarray,
+        num_samples: int,
+        replace: bool,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        if num_samples <= 0 or valid_start_indices.size == 0:
+            return np.empty(0, dtype=np.int64)
+
+        volatility, _, net_proxy = self._compute_window_metrics(valid_start_indices)
+        scores = self._compute_importance_scores(volatility, net_proxy)
+
+        if not np.isfinite(scores).all():
+            scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
+
+        if replace:
+            top_pool = max(num_samples, int(round(0.2 * valid_start_indices.size)))
+            top_pool = min(top_pool, valid_start_indices.size)
+            order = np.argsort(scores)
+            candidates = valid_start_indices[order[-top_pool:]]
+            sampled = self._sample_uniform_start_indices(
+                valid_start_indices=candidates,
+                num_trajectories=num_samples,
+                replace=True,
+                rng=rng,
+            )
+            return np.asarray(sampled, dtype=np.int64)
+
+        order = np.argsort(scores)
+        picked = valid_start_indices[order[-num_samples:]]
+        if picked.size > 0:
+            picked = picked[rng.permutation(picked.size)]
+        return np.asarray(picked, dtype=np.int64)
+
+    def _compute_window_metrics(
+        self,
+        valid_start_indices: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """计算每个起点窗口的波动率、趋势与净收益代理。"""
+        starts = np.asarray(valid_start_indices, dtype=np.int64)
+        if starts.size == 0:
+            empty = np.empty(0, dtype=np.float64)
+            return empty, empty, empty
+
+        prices = np.asarray(self.env.prices, dtype=np.float64)
+        prices = np.clip(prices, 1e-12, None)
+        last_idx = len(prices) - 1
+
+        start_idx = np.clip(starts, 0, last_idx)
+        end_idx = np.clip(starts + self.horizon - 1, 0, last_idx)
+
+        p0 = prices[start_idx]
+        p1 = prices[end_idx]
+        trend = (p1 - p0) / p0
+        net_proxy = np.maximum(np.abs(trend) - 2.0 * float(self.env.commission_rate), 0.0)
+
+        if self.horizon <= 1 or prices.size <= 1:
+            volatility = np.zeros_like(trend, dtype=np.float64)
+            return volatility, trend.astype(np.float64), net_proxy.astype(np.float64)
+
+        log_returns = np.diff(np.log(prices))
+        if log_returns.size == 0:
+            volatility = np.zeros_like(trend, dtype=np.float64)
+            return volatility, trend.astype(np.float64), net_proxy.astype(np.float64)
+
+        win = max(self.horizon - 1, 1)
+        c1 = np.concatenate(([0.0], np.cumsum(log_returns)))
+        c2 = np.concatenate(([0.0], np.cumsum(log_returns * log_returns)))
+
+        s = np.clip(starts, 0, log_returns.size)
+        e = np.clip(starts + win, 0, log_returns.size)
+        lengths = np.maximum(e - s, 1)
+
+        sum1 = c1[e] - c1[s]
+        sum2 = c2[e] - c2[s]
+        mean = sum1 / lengths
+        var = np.maximum(sum2 / lengths - mean * mean, 0.0)
+        volatility = np.sqrt(var)
+
+        return (
+            volatility.astype(np.float64),
+            trend.astype(np.float64),
+            net_proxy.astype(np.float64),
+        )
+
+    def _build_strata_labels(
+        self,
+        volatility: np.ndarray,
+        trend: np.ndarray,
+    ) -> np.ndarray:
+        vol_bins = self._quantile_labels(volatility, self.sampling_num_strata)
+        trend_bins = self._quantile_labels(trend, self.sampling_num_strata)
+        labels = vol_bins * self.sampling_num_strata + trend_bins
+        return labels.astype(np.int64)
+
+    @staticmethod
+    def _quantile_labels(values: np.ndarray, num_bins: int) -> np.ndarray:
+        if values.size == 0:
+            return np.empty(0, dtype=np.int64)
+        if num_bins <= 1:
+            return np.zeros(values.size, dtype=np.int64)
+
+        quantiles = np.linspace(0.0, 1.0, num_bins + 1)
+        edges = np.quantile(values, quantiles)
+        if not np.isfinite(edges).all() or np.allclose(edges[0], edges[-1]):
+            return np.zeros(values.size, dtype=np.int64)
+
+        internal_edges = edges[1:-1]
+        labels = np.searchsorted(internal_edges, values, side="right")
+        return labels.astype(np.int64)
+
+    def _compute_importance_scores(
+        self,
+        volatility: np.ndarray,
+        net_proxy: np.ndarray,
+    ) -> np.ndarray:
+        vol_z = self._zscore(volatility)
+        net_z = self._zscore(net_proxy)
+        return self.importance_vol_weight * vol_z + self.importance_net_weight * net_z
+
+    @staticmethod
+    def _zscore(values: np.ndarray) -> np.ndarray:
+        if values.size == 0:
+            return np.empty(0, dtype=np.float64)
+        mu = float(np.mean(values))
+        sigma = float(np.std(values))
+        if sigma <= 1e-12:
+            return np.zeros(values.size, dtype=np.float64)
+        return (values - mu) / sigma
+
+    @staticmethod
+    def _allocate_stratified_counts(
+        capacities: np.ndarray,
+        total: int,
+        replace: bool,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        k = int(capacities.size)
+        alloc = np.zeros(k, dtype=np.int64)
+        if k == 0 or total <= 0:
+            return alloc
+
+        if replace:
+            probs = capacities.astype(np.float64)
+            denom = probs.sum()
+            if denom <= 0:
+                alloc[0] = total
+                return alloc
+            probs /= denom
+            chosen = rng.choice(np.arange(k), size=total, replace=True, p=probs)
+            for idx in chosen:
+                alloc[int(idx)] += 1
+            return alloc
+
+        # 非放回：先给每个分层至少 1 个样本（若预算允许），再按剩余容量比例分配。
+        non_empty = np.where(capacities > 0)[0]
+        if non_empty.size == 0:
+            return alloc
+
+        base = min(total, non_empty.size)
+        if base > 0:
+            seed_bins = rng.choice(non_empty, size=base, replace=False)
+            alloc[seed_bins] += 1
+        remaining = total - int(alloc.sum())
+        if remaining <= 0:
+            return alloc
+
+        caps_left = capacities - alloc
+        caps_left = np.maximum(caps_left, 0)
+        if caps_left.sum() <= 0:
+            return alloc
+
+        raw = remaining * (caps_left / caps_left.sum())
+        step = np.floor(raw).astype(np.int64)
+        step = np.minimum(step, caps_left)
+        alloc += step
+        remaining = total - int(alloc.sum())
+        if remaining <= 0:
+            return alloc
+
+        caps_left = capacities - alloc
+        frac = raw - np.floor(raw)
+        eligible = np.where(caps_left > 0)[0]
+        if eligible.size == 0:
+            return alloc
+        # 用小幅随机扰动打破同分 ties，避免固定偏置。
+        tie_break = rng.random(k) * 1e-9
+        rank = np.argsort(-(frac + tie_break))
+        for idx in rank:
+            if remaining <= 0:
+                break
+            if caps_left[idx] <= 0:
+                continue
+            alloc[idx] += 1
+            caps_left[idx] -= 1
+            remaining -= 1
+
+        if remaining > 0:
+            fill_bins = np.where(caps_left > 0)[0]
+            while remaining > 0 and fill_bins.size > 0:
+                idx = int(rng.choice(fill_bins))
+                alloc[idx] += 1
+                caps_left[idx] -= 1
+                remaining -= 1
+                fill_bins = np.where(caps_left > 0)[0]
+
+        return alloc
 
     def _compute_next_constraint(
         self, c: int, a_prev: int, a_next: int

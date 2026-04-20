@@ -44,6 +44,30 @@ class Config:
     num_trajectories: int = 30000  # 论文 Phase I 默认采样 30k DP trajectories
     phase1_epochs: int = 500
     phase1_sampling_seed: int = 42  # Phase I 轨迹采样随机种子，用于结果复现
+    phase1_start_sampling_mode: str = "hybrid_stratified_importance"  # 起点采样: uniform / stratified / hybrid_stratified_importance
+    phase1_stratified_ratio: float = 0.95  # 混合采样中分层随机占比；纯 stratified 模式下作为元数据保留
+    phase1_importance_ratio: float = 0.05  # 混合采样中重要性采样占比；纯 stratified 模式下默认关闭
+    phase1_sampling_strata: int = 4  # 分层采样分位桶数（波动率 x 趋势）
+    phase1_importance_vol_weight: float = 0.8  # 重要性打分中波动率权重
+    phase1_importance_net_weight: float = 0.2  # 重要性打分中净收益代理权重
+    phase1_usage_profit_alignment_weight: float = 0.01  # 轻量收益-使用率对齐，修正 assignment 而不主导训练
+    phase1_usage_profit_alignment_target_corr: float = 0.02  # 仅要求弱正相关，避免再次把收益谱系压平
+    phase1_usage_profit_alignment_temperature: float = 0.35  # soft assignment 温度
+    phase1_return_aux_weight: float = 0.10  # 收益分桶辅助目标权重
+    phase1_return_aux_hidden_dim: int = 32  # 收益分桶头隐藏层宽度
+    phase1_return_num_buckets: int = 5  # 收益分桶数量（按轨迹总收益分位数切分）
+    phase1_return_soft_assignment_weight: float = 0.50  # 收益分桶 loss 中 soft-assignment 路径占比
+    phase1_codebook_separation_weight: float = 0.02  # codebook 分离正则权重
+    phase1_codebook_separation_margin: float = 0.35  # cosine 相似度超过该阈值后开始惩罚
+    phase1_profit_init_top_ratio: float = 0.25  # 初始化时优先使用高收益样本的 top 比例
+    phase1_profit_init_code_ratio: float = 0.50  # 初始化时每个方向分配给高收益子集的 code 比例
+    phase1_profit_reset_top_ratio: float = 0.25  # 死码重置时优先抽取高收益样本的 top 比例
+    phase1_selection_min_realizable_proxy_return_mean: float = 0.0  # Phase I checkpoint 选择的 realizable proxy 绝对门槛
+    phase1_selection_min_realizable_proxy_to_oracle_ratio: float = 0.40  # realizable proxy / oracle 的最低占比
+    phase1_selection_min_best_fixed_archetype_return_mean: float = 0.0  # 最佳固定原型收益绝对门槛
+    phase1_selection_min_best_fixed_to_oracle_ratio: float = 0.50  # 最佳固定原型收益 / oracle 的最低占比
+    phase1_selection_min_return_usage_correlation: float = 0.0  # 高收益原型应至少不被负向压制
+    phase1_selection_require_gated_candidate: bool = True  # 若所有候选都不满足 profit gate，则直接报错而不是回退
     pretrain_epochs: int = 10  # 连续潜在预训练轮数（无 VQ 量化）
 
     # Phase II 配置
@@ -194,6 +218,151 @@ def parse_args(argv: list | None = None) -> Config:
         help="Phase I 轨迹采样随机种子",
     )
     parser.add_argument(
+        "--phase1-start-sampling-mode",
+        type=str,
+        default=None,
+        choices=["uniform", "stratified", "hybrid_stratified_importance"],
+        help="Phase I 轨迹起点采样模式",
+    )
+    parser.add_argument(
+        "--phase1-stratified-ratio",
+        type=float,
+        default=None,
+        help="混合采样中分层随机占比",
+    )
+    parser.add_argument(
+        "--phase1-importance-ratio",
+        type=float,
+        default=None,
+        help="混合采样中重要性采样占比",
+    )
+    parser.add_argument(
+        "--phase1-sampling-strata",
+        type=int,
+        default=None,
+        help="分层采样分位桶数（>=2）",
+    )
+    parser.add_argument(
+        "--phase1-importance-vol-weight",
+        type=float,
+        default=None,
+        help="重要性打分中波动率权重（非负）",
+    )
+    parser.add_argument(
+        "--phase1-importance-net-weight",
+        type=float,
+        default=None,
+        help="重要性打分中净收益代理权重（非负）",
+    )
+    parser.add_argument(
+        "--phase1-usage-profit-alignment-weight",
+        type=float,
+        default=None,
+        help="收益-使用率对齐正则权重",
+    )
+    parser.add_argument(
+        "--phase1-usage-profit-alignment-target-corr",
+        type=float,
+        default=None,
+        help="收益-使用率对齐正则的目标相关系数",
+    )
+    parser.add_argument(
+        "--phase1-usage-profit-alignment-temperature",
+        type=float,
+        default=None,
+        help="收益-使用率对齐所用 soft assignment 温度",
+    )
+    parser.add_argument(
+        "--phase1-return-aux-weight",
+        type=float,
+        default=None,
+        help="Phase I 轨迹收益辅助头权重",
+    )
+    parser.add_argument(
+        "--phase1-return-aux-hidden-dim",
+        type=int,
+        default=None,
+        help="Phase I 收益分桶头隐藏层宽度",
+    )
+    parser.add_argument(
+        "--phase1-return-num-buckets",
+        type=int,
+        default=None,
+        help="Phase I 收益分桶数量（>=2）",
+    )
+    parser.add_argument(
+        "--phase1-return-soft-assignment-weight",
+        type=float,
+        default=None,
+        help="Phase I 收益分桶 loss 中 soft-assignment 路径占比",
+    )
+    parser.add_argument(
+        "--phase1-codebook-separation-weight",
+        type=float,
+        default=None,
+        help="codebook 分离正则权重",
+    )
+    parser.add_argument(
+        "--phase1-codebook-separation-margin",
+        type=float,
+        default=None,
+        help="codebook cosine 相似度分离边界",
+    )
+    parser.add_argument(
+        "--phase1-profit-init-top-ratio",
+        type=float,
+        default=None,
+        help="Phase I 初始化时优先采用高收益样本的 top 比例",
+    )
+    parser.add_argument(
+        "--phase1-profit-init-code-ratio",
+        type=float,
+        default=None,
+        help="Phase I 初始化时分配给高收益子集的 code 比例",
+    )
+    parser.add_argument(
+        "--phase1-profit-reset-top-ratio",
+        type=float,
+        default=None,
+        help="Phase I 死码重置时优先采用高收益样本的 top 比例",
+    )
+    parser.add_argument(
+        "--phase1-selection-min-realizable-proxy-return-mean",
+        type=float,
+        default=None,
+        help="Phase I checkpoint 选择时 realizable proxy return mean 的绝对下限",
+    )
+    parser.add_argument(
+        "--phase1-selection-min-realizable-proxy-to-oracle-ratio",
+        type=float,
+        default=None,
+        help="Phase I checkpoint 选择时 realizable proxy / oracle 的最低占比",
+    )
+    parser.add_argument(
+        "--phase1-selection-min-best-fixed-archetype-return-mean",
+        type=float,
+        default=None,
+        help="Phase I checkpoint 选择时最佳固定 archetype 收益的绝对下限",
+    )
+    parser.add_argument(
+        "--phase1-selection-min-best-fixed-to-oracle-ratio",
+        type=float,
+        default=None,
+        help="Phase I checkpoint 选择时最佳固定 archetype / oracle 的最低占比",
+    )
+    parser.add_argument(
+        "--phase1-selection-min-return-usage-correlation",
+        type=float,
+        default=None,
+        help="Phase I checkpoint 选择时收益-使用率相关系数的最低阈值",
+    )
+    parser.add_argument(
+        "--phase1-selection-require-gated-candidate",
+        action="store_true",
+        default=None,
+        help="若没有候选满足 Phase I profit gate，则直接报错而不是回退到原排序",
+    )
+    parser.add_argument(
         "--pretrain-epochs",
         type=int,
         default=None,
@@ -336,6 +505,70 @@ def parse_args(argv: list | None = None) -> Config:
         if any(sep in args.train_batch_id for sep in invalid_separators):
             parser.error("--train-batch-id 不能包含路径分隔符")
 
+    if args.phase1_stratified_ratio is not None and args.phase1_stratified_ratio < 0:
+        parser.error("--phase1-stratified-ratio 必须 >= 0")
+    if args.phase1_importance_ratio is not None and args.phase1_importance_ratio < 0:
+        parser.error("--phase1-importance-ratio 必须 >= 0")
+    if args.phase1_sampling_strata is not None and args.phase1_sampling_strata < 2:
+        parser.error("--phase1-sampling-strata 必须 >= 2")
+    if args.phase1_importance_vol_weight is not None and args.phase1_importance_vol_weight < 0:
+        parser.error("--phase1-importance-vol-weight 必须 >= 0")
+    if args.phase1_importance_net_weight is not None and args.phase1_importance_net_weight < 0:
+        parser.error("--phase1-importance-net-weight 必须 >= 0")
+    if args.phase1_usage_profit_alignment_weight is not None and args.phase1_usage_profit_alignment_weight < 0:
+        parser.error("--phase1-usage-profit-alignment-weight 必须 >= 0")
+    if (
+        args.phase1_usage_profit_alignment_target_corr is not None
+        and not -1.0 <= args.phase1_usage_profit_alignment_target_corr <= 1.0
+    ):
+        parser.error("--phase1-usage-profit-alignment-target-corr 必须在 [-1, 1] 范围内")
+    if (
+        args.phase1_usage_profit_alignment_temperature is not None
+        and args.phase1_usage_profit_alignment_temperature <= 0
+    ):
+        parser.error("--phase1-usage-profit-alignment-temperature 必须 > 0")
+    if args.phase1_return_aux_weight is not None and args.phase1_return_aux_weight < 0:
+        parser.error("--phase1-return-aux-weight 必须 >= 0")
+    if args.phase1_return_aux_hidden_dim is not None and args.phase1_return_aux_hidden_dim < 1:
+        parser.error("--phase1-return-aux-hidden-dim 必须 >= 1")
+    if args.phase1_return_num_buckets is not None and args.phase1_return_num_buckets < 2:
+        parser.error("--phase1-return-num-buckets 必须 >= 2")
+    if (
+        args.phase1_return_soft_assignment_weight is not None
+        and not 0.0 <= args.phase1_return_soft_assignment_weight <= 1.0
+    ):
+        parser.error("--phase1-return-soft-assignment-weight 必须在 [0, 1] 范围内")
+    if args.phase1_codebook_separation_weight is not None and args.phase1_codebook_separation_weight < 0:
+        parser.error("--phase1-codebook-separation-weight 必须 >= 0")
+    if (
+        args.phase1_codebook_separation_margin is not None
+        and not -1.0 <= args.phase1_codebook_separation_margin <= 1.0
+    ):
+        parser.error("--phase1-codebook-separation-margin 必须在 [-1, 1] 范围内")
+    for name in [
+        "phase1_profit_init_top_ratio",
+        "phase1_profit_init_code_ratio",
+        "phase1_profit_reset_top_ratio",
+    ]:
+        value = getattr(args, name, None)
+        if value is not None and not 0.0 <= value <= 1.0:
+            parser.error(f"--{name.replace('_', '-')} 必须在 [0, 1] 范围内")
+    if (
+        args.phase1_selection_min_realizable_proxy_to_oracle_ratio is not None
+        and args.phase1_selection_min_realizable_proxy_to_oracle_ratio < 0
+    ):
+        parser.error("--phase1-selection-min-realizable-proxy-to-oracle-ratio 必须 >= 0")
+    if (
+        args.phase1_selection_min_best_fixed_to_oracle_ratio is not None
+        and args.phase1_selection_min_best_fixed_to_oracle_ratio < 0
+    ):
+        parser.error("--phase1-selection-min-best-fixed-to-oracle-ratio 必须 >= 0")
+    if (
+        args.phase1_selection_min_return_usage_correlation is not None
+        and not -1.0 <= args.phase1_selection_min_return_usage_correlation <= 1.0
+    ):
+        parser.error("--phase1-selection-min-return-usage-correlation 必须在 [-1, 1] 范围内")
+
     # 清理 argparse 添加的 pair 属性（非 Config 字段）
     delattr(args, "pair")
 
@@ -351,6 +584,48 @@ def parse_args(argv: list | None = None) -> Config:
         "latent_dim": getattr(args, "latent_dim", None),
         "vq_beta0": getattr(args, "vq_beta0", None),
         "phase1_sampling_seed": getattr(args, "phase1_sampling_seed", None),
+        "phase1_start_sampling_mode": getattr(args, "phase1_start_sampling_mode", None),
+        "phase1_stratified_ratio": getattr(args, "phase1_stratified_ratio", None),
+        "phase1_importance_ratio": getattr(args, "phase1_importance_ratio", None),
+        "phase1_sampling_strata": getattr(args, "phase1_sampling_strata", None),
+        "phase1_importance_vol_weight": getattr(args, "phase1_importance_vol_weight", None),
+        "phase1_importance_net_weight": getattr(args, "phase1_importance_net_weight", None),
+        "phase1_usage_profit_alignment_weight": getattr(args, "phase1_usage_profit_alignment_weight", None),
+        "phase1_usage_profit_alignment_target_corr": getattr(
+            args, "phase1_usage_profit_alignment_target_corr", None,
+        ),
+        "phase1_usage_profit_alignment_temperature": getattr(
+            args, "phase1_usage_profit_alignment_temperature", None,
+        ),
+        "phase1_return_aux_weight": getattr(args, "phase1_return_aux_weight", None),
+        "phase1_return_aux_hidden_dim": getattr(args, "phase1_return_aux_hidden_dim", None),
+        "phase1_return_num_buckets": getattr(args, "phase1_return_num_buckets", None),
+        "phase1_return_soft_assignment_weight": getattr(
+            args, "phase1_return_soft_assignment_weight", None,
+        ),
+        "phase1_codebook_separation_weight": getattr(args, "phase1_codebook_separation_weight", None),
+        "phase1_codebook_separation_margin": getattr(args, "phase1_codebook_separation_margin", None),
+        "phase1_profit_init_top_ratio": getattr(args, "phase1_profit_init_top_ratio", None),
+        "phase1_profit_init_code_ratio": getattr(args, "phase1_profit_init_code_ratio", None),
+        "phase1_profit_reset_top_ratio": getattr(args, "phase1_profit_reset_top_ratio", None),
+        "phase1_selection_min_realizable_proxy_return_mean": getattr(
+            args, "phase1_selection_min_realizable_proxy_return_mean", None,
+        ),
+        "phase1_selection_min_realizable_proxy_to_oracle_ratio": getattr(
+            args, "phase1_selection_min_realizable_proxy_to_oracle_ratio", None,
+        ),
+        "phase1_selection_min_best_fixed_archetype_return_mean": getattr(
+            args, "phase1_selection_min_best_fixed_archetype_return_mean", None,
+        ),
+        "phase1_selection_min_best_fixed_to_oracle_ratio": getattr(
+            args, "phase1_selection_min_best_fixed_to_oracle_ratio", None,
+        ),
+        "phase1_selection_min_return_usage_correlation": getattr(
+            args, "phase1_selection_min_return_usage_correlation", None,
+        ),
+        "phase1_selection_require_gated_candidate": getattr(
+            args, "phase1_selection_require_gated_candidate", None,
+        ),
         "pretrain_epochs": getattr(args, "pretrain_epochs", None),
         "phase2_total_steps": getattr(args, "phase2_total_steps", None),
         "selection_alpha": getattr(args, "selection_alpha", None),
