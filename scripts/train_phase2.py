@@ -158,50 +158,7 @@ def _aggregate_execution_diagnostics(horizon_details: list[dict[str, Any]]) -> d
         "decoder_action_histogram": _format_histogram_from_counts(decoder_hist),
     }
 
-
-def _run_policy_on_horizons(
-    codebook: VQCodebook,
-    decoder: VQDecoder,
-    env: TradingEnv,
-    horizon_indices: np.ndarray,
-    device: torch.device,
-    selected_archetypes: np.ndarray,
-) -> dict[str, Any]:
-    """在给定 horizons 上执行指定 archetype 选择结果，并汇总诊断指标。
-
-    性能优化: 使用 batch_decode_actions + vectorized_execute_horizons
-    替代逐 horizon 的 Python 循环。
-    """
-    if len(horizon_indices) != len(selected_archetypes):
-        raise ValueError(
-            f"horizon_indices 和 selected_archetypes 长度不一致: {len(horizon_indices)} vs {len(selected_archetypes)}"
-        )
-
-    archetype_t = torch.tensor(selected_archetypes, dtype=torch.long, device=device)
-
-    all_actions_np = batch_decode_actions(
-        decoder=decoder,
-        codebook=codebook,
-        env=env,
-        horizon_indices=horizon_indices,
-        archetype_indices=archetype_t,
-        device=device,
-    )
-
-    _, horizon_details = vectorized_execute_horizons(
-        env=env,
-        horizon_indices=horizon_indices,
-        all_actions=all_actions_np,
-        need_diagnostics=True,
-    )
-
-    metrics = _aggregate_execution_diagnostics(horizon_details)
-    metrics["selected_histogram"] = _format_histogram_from_counts(
-        _histogram_counts(selected_archetypes, codebook.embeddings.weight.size(0))
-    )
-    metrics["num_horizons"] = int(len(horizon_indices))
-    return metrics
-
+ 
 
 def _cfg(config: Any, name: str, default: Any) -> Any:
     """安全读取配置项；若不存在则回退到默认值。
