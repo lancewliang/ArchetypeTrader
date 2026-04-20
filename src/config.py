@@ -73,15 +73,19 @@ class Config:
     # Phase II 配置
     phase2_hidden_dim: int = 128       # SelectionAgent 共享层宽度
     phase2_bottleneck_dim: int = 64    # SelectionAgent 瓶颈层宽度
-    phase2_total_steps: int = 5_000_000
-    selection_alpha: float = 1.0  # KL 惩罚系数
+    phase2_total_steps: int = 1_000_000
+    selection_alpha: float = 0.5  # KL / imitation 初始惩罚系数
+    phase2_alpha_schedule: str = "linear"  # selection_alpha 调度: constant / linear
+    phase2_alpha_final_ratio: float = 0.0  # 线性调度结束时 alpha = initial_alpha × ratio
+    phase2_imitation_min_raw_return: float = 0.0  # 仅对 raw horizon return 超过该阈值的样本施加 imitation
+    phase2_val_interval_multiplier: int = 10  # 每遍历多少轮 train horizons 做一次验证
     phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
     phase2_rollout_batch_size: int = 1024*6
-    phase2_ppo_epochs: int = 16
+    phase2_ppo_epochs: int = 8
     phase2_minibatch_size: int = 1024*2
     phase2_clip_eps: float = 0.2
     phase2_vf_coef: float = 0.001
-    phase2_ent_coef: float = 0.1
+    phase2_ent_coef: float = 0.02
     phase2_max_grad_norm: float = 1.0
     phase2_log_interval: int = 1000000
     phase2_eval_max_horizons: int | None = None
@@ -377,6 +381,31 @@ def parse_args(argv: list | None = None) -> Config:
         "--selection-alpha", type=float, default=None, help="KL 惩罚系数"
     )
     parser.add_argument(
+        "--phase2-alpha-schedule",
+        type=str,
+        default=None,
+        choices=["constant", "linear"],
+        help="Phase II selection_alpha 调度方式",
+    )
+    parser.add_argument(
+        "--phase2-alpha-final-ratio",
+        type=float,
+        default=None,
+        help="线性 alpha 调度结束时相对初始值的比例",
+    )
+    parser.add_argument(
+        "--phase2-imitation-min-raw-return",
+        type=float,
+        default=None,
+        help="仅对 raw horizon return 超过该阈值的样本施加 imitation",
+    )
+    parser.add_argument(
+        "--phase2-val-interval-multiplier",
+        type=int,
+        default=None,
+        help="Phase II 每遍历多少轮 train horizons 做一次验证",
+    )
+    parser.add_argument(
         "--phase2-rollout-batch-size",
         type=int,
         default=None,
@@ -568,6 +597,18 @@ def parse_args(argv: list | None = None) -> Config:
         and not -1.0 <= args.phase1_selection_min_return_usage_correlation <= 1.0
     ):
         parser.error("--phase1-selection-min-return-usage-correlation 必须在 [-1, 1] 范围内")
+    if args.selection_alpha is not None and args.selection_alpha < 0:
+        parser.error("--selection-alpha 必须 >= 0")
+    if (
+        args.phase2_alpha_final_ratio is not None
+        and args.phase2_alpha_final_ratio < 0
+    ):
+        parser.error("--phase2-alpha-final-ratio 必须 >= 0")
+    if (
+        args.phase2_val_interval_multiplier is not None
+        and args.phase2_val_interval_multiplier < 1
+    ):
+        parser.error("--phase2-val-interval-multiplier 必须 >= 1")
 
     # 清理 argparse 添加的 pair 属性（非 Config 字段）
     delattr(args, "pair")
@@ -629,6 +670,10 @@ def parse_args(argv: list | None = None) -> Config:
         "pretrain_epochs": getattr(args, "pretrain_epochs", None),
         "phase2_total_steps": getattr(args, "phase2_total_steps", None),
         "selection_alpha": getattr(args, "selection_alpha", None),
+        "phase2_alpha_schedule": getattr(args, "phase2_alpha_schedule", None),
+        "phase2_alpha_final_ratio": getattr(args, "phase2_alpha_final_ratio", None),
+        "phase2_imitation_min_raw_return": getattr(args, "phase2_imitation_min_raw_return", None),
+        "phase2_val_interval_multiplier": getattr(args, "phase2_val_interval_multiplier", None),
         "phase2_rollout_batch_size": getattr(args, "phase2_rollout_batch_size", None),
         "phase2_ppo_epochs": getattr(args, "phase2_ppo_epochs", None),
         "phase2_minibatch_size": getattr(args, "phase2_minibatch_size", None),

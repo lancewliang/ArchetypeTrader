@@ -7,10 +7,10 @@
 # 1. 加载 Phase I 模型（码本 + 冻结 Decoder），检查文件存在性
 # 2. 加载特征数据，初始化 TradingEnv（训练集 + 验证集）
 # 3. 初始化 SelectionAgent（Actor-Critic backbone）
-# 4. 训练 3M 步（horizon 级别 RL / PPO 风格）
+# 4. 训练若干步（horizon 级别 RL / PPO 风格）
 #    - 每个 horizon: agent 选择原型 → 冻结 decoder 生成 micro actions → env 执行 → 计算 horizon return
 #    - PPO 更新: clipped surrogate objective + value loss + entropy bonus
-#    - imitation / KL 惩罚: α × KL(â_sel || π_sel)
+#    - imitation / KL 惩罚: α(step) × KL(â_sel || π_sel)
 #    - 其中 â_sel 来自冻结的 VQ encoder + codebook，对应论文 Eq.(5) 的 ground-truth archetype label
 # 5. 定期在验证集上评估，保存最优检查点
 # 6. 保存模型到 result/phase2_archetype_selection/
@@ -244,7 +244,7 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
         dict[str, Any]: 统一整理后的 PPO 超参数字典。
     """
     rollout_batch_size = int(_cfg(config, "phase2_rollout_batch_size", 1024))
-    ppo_epochs = int(_cfg(config, "phase2_ppo_epochs", 4))
+    ppo_epochs = int(_cfg(config, "phase2_ppo_epochs", 8))
     minibatch_size = int(_cfg(config, "phase2_minibatch_size", 256))
     clip_eps = float(_cfg(config, "phase2_clip_eps", 0.2))
     vf_coef = float(_cfg(config, "phase2_vf_coef", 0.001))
@@ -253,12 +253,25 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
     log_interval = int(_cfg(config, "phase2_log_interval", 1000000))
     eval_max_horizons = _cfg(config, "phase2_eval_max_horizons", None)
     diagnostic_horizons = int(_cfg(config, "phase2_diagnostic_horizons", 128))
+    alpha_schedule = str(_cfg(config, "phase2_alpha_schedule", "linear"))
+    alpha_final_ratio = float(_cfg(config, "phase2_alpha_final_ratio", 0.0))
+    imitation_min_raw_return = float(_cfg(config, "phase2_imitation_min_raw_return", 0.0))
+    val_interval_multiplier = int(_cfg(config, "phase2_val_interval_multiplier", 10))
 
     rollout_batch_size = max(1, rollout_batch_size)
     ppo_epochs = max(1, ppo_epochs)
     minibatch_size = max(1, minibatch_size)
     log_interval = max(1, log_interval)
     diagnostic_horizons = max(1, diagnostic_horizons)
+    val_interval_multiplier = max(1, val_interval_multiplier)
+    alpha_final_ratio = max(0.0, alpha_final_ratio)
+
+    if alpha_schedule not in {"constant", "linear"}:
+        logger.warning(
+            "未知的 phase2_alpha_schedule=%s，回退为 constant。",
+            alpha_schedule,
+        )
+        alpha_schedule = "constant"
 
     # PPO 关键保护：minibatch 必须小于 rollout_batch，否则第一轮 full-batch
     # 更新在 advantage 零均值归一化后很容易导致 policy loss 接近 0。
@@ -283,7 +296,29 @@ def get_phase2_hparams(config: Any) -> dict[str, Any]:
         "log_interval": log_interval,
         "eval_max_horizons": eval_max_horizons,
         "diagnostic_horizons": diagnostic_horizons,
+        "alpha_schedule": alpha_schedule,
+        "alpha_final_ratio": alpha_final_ratio,
+        "imitation_min_raw_return": imitation_min_raw_return,
+        "val_interval_multiplier": val_interval_multiplier,
     }
+
+
+def get_current_selection_alpha(
+    initial_alpha: float,
+    schedule: str,
+    final_ratio: float,
+    step_count: int,
+    total_steps: int,
+) -> float:
+    """按训练进度计算当前 selection_alpha。"""
+    initial_alpha = max(0.0, float(initial_alpha))
+    final_ratio = max(0.0, float(final_ratio))
+    if schedule != "linear" or total_steps <= 0:
+        return initial_alpha
+
+    progress = min(max(float(step_count) / float(total_steps), 0.0), 1.0)
+    end_alpha = initial_alpha * final_ratio
+    return initial_alpha + (end_alpha - initial_alpha) * progress
 
 
 def load_phase1_model(config: Any, pair: str, device: torch.device):
@@ -818,7 +853,8 @@ def collect_rollout_batch(
         need_diagnostics=need_diagnostics,
     )
 
-    returns_t = torch.tensor(horizon_returns_np, dtype=torch.float32, device=device)
+    raw_returns_t = torch.tensor(horizon_returns_np, dtype=torch.float32, device=device)
+    returns_t = raw_returns_t.clone()
 
     # Return 归一化：将 horizon return 标准化到零均值单位方差，
     # 避免 value loss 因 return 绝对值过大（ETH 持仓 100 × 72 步）而爆炸，
@@ -873,6 +909,7 @@ def collect_rollout_batch(
         "states": states_t,
         "actions": actions.detach(),
         "old_log_probs": old_log_probs.detach(),
+        "raw_returns": raw_returns_t.detach(),
         "returns": returns_t.detach(),
         "advantages": advantages_t.detach(),
         "gt_labels": gt_labels.detach(),
@@ -886,6 +923,7 @@ def ppo_update(
     critic_optimizer: torch.optim.Optimizer,
     batch: dict[str, Any],
     alpha: float,
+    imitation_min_raw_return: float,
     clip_eps: float,
     vf_coef: float,
     ent_coef: float,
@@ -919,6 +957,7 @@ def ppo_update(
     states = batch["states"]
     actions = batch["actions"]
     old_log_probs = batch["old_log_probs"]
+    raw_returns = batch["raw_returns"]
     returns = batch["returns"]
     advantages = batch["advantages"]
     gt_labels = batch["gt_labels"]
@@ -933,6 +972,7 @@ def ppo_update(
     total_losses: list[float] = []
     clip_fractions: list[float] = []
     approx_kls: list[float] = []
+    imitation_mask_fractions: list[float] = []
     policy_grad_norms: list[float] = []
     value_grad_norms: list[float] = []
     shared_grad_norms: list[float] = []
@@ -946,6 +986,7 @@ def ppo_update(
             mb_states = states[idx]
             mb_actions = actions[idx]
             mb_old_log_probs = old_log_probs[idx]
+            mb_raw_returns = raw_returns[idx]
             mb_returns = returns[idx]
             mb_advantages = advantages[idx]
             mb_gt_labels = gt_labels[idx]
@@ -966,10 +1007,10 @@ def ppo_update(
             value_pred = values.squeeze(-1)
             value_loss = F.mse_loss(value_pred, mb_returns)
 
-            # Eq.(5): KL(â_sel || π_sel)，advantage-weighted 版本：
-            # 只对 advantage > 0 的样本施加 imitation 正则，
-            # 避免把 policy 拉向 DP 建议但 env 收益为负的 archetype。
-            pos_mask = (mb_advantages > 0).float()  # (mb,)
+            # Eq.(5): KL(â_sel || π_sel)。
+            # 只对 raw horizon return 超过阈值的样本施加 imitation，
+            # 避免把 policy 拉向“只是标准化后优势为正、但绝对收益很薄”的 archetype。
+            pos_mask = (mb_raw_returns > imitation_min_raw_return).float()  # (mb,)
             per_sample_nll = F.nll_loss(
                 torch.log(action_probs + 1e-8), mb_gt_labels, reduction="none"
             )  # (mb,)
@@ -1017,6 +1058,7 @@ def ppo_update(
             total_losses.append(float(total_loss.detach().item()))
             clip_fractions.append(float(clip_fraction.detach().item()))
             approx_kls.append(float(approx_kl.detach().item()))
+            imitation_mask_fractions.append(float(pos_mask.mean().detach().item()))
             policy_grad_norms.append(float(policy_grad_norm))
             value_grad_norms.append(float(value_grad_norm))
             shared_grad_norms.append(float(shared_grad_norm))
@@ -1029,6 +1071,7 @@ def ppo_update(
         "total_loss": float(np.mean(total_losses)) if total_losses else 0.0,
         "clip_fraction": float(np.mean(clip_fractions)) if clip_fractions else 0.0,
         "approx_kl": float(np.mean(approx_kls)) if approx_kls else 0.0,
+        "imitation_mask_fraction": float(np.mean(imitation_mask_fractions)) if imitation_mask_fractions else 0.0,
         "policy_grad_norm": float(np.mean(policy_grad_norms)) if policy_grad_norms else 0.0,
         "value_grad_norm": float(np.mean(value_grad_norms)) if value_grad_norms else 0.0,
         "shared_grad_norm": float(np.mean(shared_grad_norms)) if shared_grad_norms else 0.0,
@@ -1317,9 +1360,13 @@ def save_checkpoint(
                 "state_dim": config.state_dim,
                 "num_archetypes": config.num_archetypes,
                 "selection_alpha": config.selection_alpha,
+                "phase2_alpha_schedule": ppo_hparams["alpha_schedule"],
+                "phase2_alpha_final_ratio": ppo_hparams["alpha_final_ratio"],
+                "phase2_imitation_min_raw_return": ppo_hparams["imitation_min_raw_return"],
                 "phase2_total_steps": config.phase2_total_steps,
                 "learning_rate": config.learning_rate,
                 "discount_factor": config.discount_factor,
+                "phase2_val_interval_multiplier": ppo_hparams["val_interval_multiplier"],
                 "phase2_rollout_batch_size": ppo_hparams["rollout_batch_size"],
                 "phase2_ppo_epochs": ppo_hparams["ppo_epochs"],
                 "phase2_minibatch_size": ppo_hparams["minibatch_size"],
@@ -1405,6 +1452,7 @@ def run_training_loop(
         "policy_loss": 0.0,
         "value_loss": 0.0,
         "imitation_loss": 0.0,
+        "imitation_mask_fraction": 0.0,
         "entropy": 0.0,
         "total_loss": 0.0,
         "clip_fraction": 0.0,
@@ -1437,6 +1485,9 @@ def run_training_loop(
     max_grad_norm = float(ppo_hparams["max_grad_norm"])
     eval_max_horizons = ppo_hparams["eval_max_horizons"]
     diagnostic_horizons = int(ppo_hparams["diagnostic_horizons"])
+    alpha_schedule = str(ppo_hparams["alpha_schedule"])
+    alpha_final_ratio = float(ppo_hparams["alpha_final_ratio"])
+    imitation_min_raw_return = float(ppo_hparams["imitation_min_raw_return"])
 
     next_log_step = log_interval
     next_val_step = val_interval
@@ -1495,6 +1546,13 @@ def run_training_loop(
             last_batch_diag = batch["diagnostics"]
 
         if step_count == 0:
+            current_alpha = get_current_selection_alpha(
+                initial_alpha=alpha,
+                schedule=alpha_schedule,
+                final_ratio=alpha_final_ratio,
+                step_count=step_count,
+                total_steps=total_steps,
+            )
             logger.info(
                 "首批 rollout 形状: states=%s, actions=%s, returns=%s, advantages=%s, gt_labels=%s",
                 tuple(batch["states"].shape),
@@ -1502,6 +1560,13 @@ def run_training_loop(
                 tuple(batch["returns"].shape),
                 tuple(batch["advantages"].shape),
                 tuple(batch["gt_labels"].shape),
+            )
+            logger.info(
+                "首批 PPO / imitation 配置: alpha=%.4f, alpha_schedule=%s, alpha_final_ratio=%.4f, imitation_min_raw_return=%.4f",
+                current_alpha,
+                alpha_schedule,
+                alpha_final_ratio,
+                imitation_min_raw_return,
             )
             logger.info(
                 "首批 rollout 诊断: gross=%.4f, cost=%.4f, turnover=%.4f, flips=%.4f, sampled_hist=%s, gt_hist=%s, sampled_agree=%.4f, greedy_agree=%.4f",
@@ -1515,12 +1580,20 @@ def run_training_loop(
                 last_batch_diag["greedy_gt_agreement"],
             )
 
+        current_alpha = get_current_selection_alpha(
+            initial_alpha=alpha,
+            schedule=alpha_schedule,
+            final_ratio=alpha_final_ratio,
+            step_count=step_count,
+            total_steps=total_steps,
+        )
         last_stats = ppo_update(
             agent=agent,
             optimizer=optimizer,
             critic_optimizer=critic_optimizer,
             batch=batch,
-            alpha=alpha,
+            alpha=current_alpha,
+            imitation_min_raw_return=imitation_min_raw_return,
             clip_eps=clip_eps,
             vf_coef=vf_coef,
             ent_coef=ent_coef,
@@ -1549,6 +1622,7 @@ def run_training_loop(
             "loss": f"{last_stats['total_loss']:.4f}",
             "policy": f"{last_stats['policy_loss']:.4f}",
             "kl": f"{last_stats['approx_kl']:.4f}",
+            "alpha": f"{current_alpha:.3f}",
             "val": f"{best_val_return:.4f}",
         })
 
@@ -1556,15 +1630,17 @@ def run_training_loop(
         if step_count >= next_log_step or step_count == total_steps:
             batch_avg_reward = float(np.mean(batch_returns)) if batch_returns else 0.0
             logger.info(
-                "Step %7d/%d — avg_reward=%.4f, batch_reward=%.4f, total=%.4f, policy=%.4f, value=%.4f, imitation=%.4f, entropy=%.4f, clipfrac=%.4f, kl=%.4f, p_gn=%.4f, v_gn=%.4f, shared_gn=%.4f",
+                "Step %7d/%d — avg_reward=%.4f, batch_reward=%.4f, alpha=%.4f, total=%.4f, policy=%.4f, value=%.4f, imitation=%.4f, imitation_mask=%.4f, entropy=%.4f, clipfrac=%.4f, kl=%.4f, p_gn=%.4f, v_gn=%.4f, shared_gn=%.4f",
                 step_count,
                 total_steps,
                 avg_reward,
                 batch_avg_reward,
+                current_alpha,
                 last_stats["total_loss"],
                 last_stats["policy_loss"],
                 last_stats["value_loss"],
                 last_stats["imitation_loss"],
+                last_stats["imitation_mask_fraction"],
                 last_stats["entropy"],
                 last_stats["clip_fraction"],
                 last_stats["approx_kl"],
@@ -1680,6 +1756,7 @@ def run_training_loop(
                 "loss": f"{last_stats['total_loss']:.4f}",
                 "policy": f"{last_stats['policy_loss']:.4f}",
                 "kl": f"{last_stats['approx_kl']:.4f}",
+                "alpha": f"{current_alpha:.3f}",
                 "val": f"{best_val_return:.4f}",
             })
             next_val_step = ((step_count // val_interval) + 1) * val_interval
@@ -1713,15 +1790,17 @@ def main() -> None:
     logger.info("Phase II 训练开始: pair=%s", pair)
     logger.info("随机种子: phase1_sampling_seed=%d（Phase I/II 对齐）", config.phase1_sampling_seed)
     logger.info(
-        "超参数: total_steps=%d, lr=%.1e, selection_alpha=%.2f, num_archetypes=%d, discount_factor=%.2f",
+        "超参数: total_steps=%d, lr=%.1e, selection_alpha=%.2f, alpha_schedule=%s, alpha_final_ratio=%.2f, num_archetypes=%d, discount_factor=%.2f",
         config.phase2_total_steps,
         config.learning_rate,
         config.selection_alpha,
+        ppo_hparams["alpha_schedule"],
+        ppo_hparams["alpha_final_ratio"],
         config.num_archetypes,
         config.discount_factor,
     )
     logger.info(
-        "PPO 超参数: rollout_batch=%d, ppo_epochs=%d, minibatch=%d, clip_eps=%.3f, vf_coef=%.3f, ent_coef=%.4f, max_grad_norm=%.2f, diagnostic_horizons=%d",
+        "PPO 超参数: rollout_batch=%d, ppo_epochs=%d, minibatch=%d, clip_eps=%.3f, vf_coef=%.3f, ent_coef=%.4f, max_grad_norm=%.2f, val_interval_multiplier=%d, imitation_min_raw_return=%.4f, diagnostic_horizons=%d",
         ppo_hparams["rollout_batch_size"],
         ppo_hparams["ppo_epochs"],
         ppo_hparams["minibatch_size"],
@@ -1729,6 +1808,8 @@ def main() -> None:
         ppo_hparams["vf_coef"],
         ppo_hparams["ent_coef"],
         ppo_hparams["max_grad_norm"],
+        ppo_hparams["val_interval_multiplier"],
+        ppo_hparams["imitation_min_raw_return"],
         ppo_hparams["diagnostic_horizons"],
     )
 
@@ -1873,7 +1954,10 @@ def main() -> None:
     # ----------------------------------------------------------------
     alpha = config.selection_alpha  # KL / imitation 惩罚系数
     total_steps = int(config.phase2_total_steps)
-    val_interval = max(train_env.num_horizons, train_env.num_horizons*50)  # 每遍历一次训练集或步评估一次
+    val_interval = max(
+        train_env.num_horizons,
+        train_env.num_horizons * int(ppo_hparams["val_interval_multiplier"]),
+    )
     log_interval = int(ppo_hparams["log_interval"])
 
     save_dir = config.get_stage_result_dir(pair, "phase2_archetype_selection")
