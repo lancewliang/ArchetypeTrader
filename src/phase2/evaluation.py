@@ -19,6 +19,18 @@ from src.env.trading_env import TradingEnv
 from src.phase1.codebook import VQCodebook
 from src.phase1.vq_decoder import VQDecoder
 from src.phase1.vq_encoder import VQEncoder
+from src.phase2.diagnostics import (
+    aggregate_execution_diagnostics,
+    format_histogram_from_counts,
+    histogram_counts,
+)
+from src.phase2.rollout import (
+    batch_decode_actions,
+    get_ground_truth_labels,
+    get_horizon_start_states,
+    vectorized_execute_horizons,
+)
+from src.phase1.vq_encoder import VQEncoder
 from src.phase2.selection_agent import SelectionAgent
 
 
@@ -51,13 +63,6 @@ def evaluate_on_validation(
     val_env: TradingEnv,
     device: torch.device,
     max_horizons: int | None = None,
-    # 需要从 train_phase2.py 导入的辅助函数
-    get_horizon_start_states_fn=None,
-    batch_decode_actions_fn=None,
-    vectorized_execute_horizons_fn=None,
-    aggregate_execution_diagnostics_fn=None,
-    format_histogram_from_counts_fn=None,
-    histogram_counts_fn=None,
 ) -> dict[str, Any]:
     """在验证集上评估 SelectionAgent，返回平均 horizon return 和诊断指标。
 
@@ -86,12 +91,6 @@ def evaluate_on_validation(
         val_env: 验证集环境
         device: 计算设备
         max_horizons: 若指定，则只评估前若干个 horizon，用于加速验证
-        get_horizon_start_states_fn: 辅助函数
-        batch_decode_actions_fn: 辅助函数
-        vectorized_execute_horizons_fn: 辅助函数
-        aggregate_execution_diagnostics_fn: 辅助函数
-        format_histogram_from_counts_fn: 辅助函数
-        histogram_counts_fn: 辅助函数
 
     Returns:
         dict[str, Any]: 平均 return 及执行诊断
@@ -109,7 +108,7 @@ def evaluate_on_validation(
     horizon_indices = np.arange(num_horizons, dtype=np.int64)
 
     # 批量获取所有 horizon 起始状态
-    states_np = get_horizon_start_states_fn(val_env, horizon_indices)
+    states_np = get_horizon_start_states(val_env, horizon_indices)
     states_t = torch.tensor(states_np, dtype=torch.float32, device=device)
 
     with torch.no_grad():
@@ -118,7 +117,7 @@ def evaluate_on_validation(
 
     # 批量 decoder + 向量化执行
     archetype_t = torch.tensor(selected_archetypes, dtype=torch.long, device=device)
-    all_actions_np = batch_decode_actions_fn(
+    all_actions_np = batch_decode_actions(
         decoder=decoder,
         codebook=codebook,
         env=val_env,
@@ -127,16 +126,16 @@ def evaluate_on_validation(
         device=device,
     )
 
-    _, horizon_details = vectorized_execute_horizons_fn(
+    _, horizon_details = vectorized_execute_horizons(
         env=val_env,
         horizon_indices=horizon_indices,
         all_actions=all_actions_np,
         need_diagnostics=True,
     )
 
-    metrics = aggregate_execution_diagnostics_fn(horizon_details)
-    metrics["selected_histogram"] = format_histogram_from_counts_fn(
-        histogram_counts_fn(selected_archetypes, codebook.embeddings.weight.size(0))
+    metrics = aggregate_execution_diagnostics(horizon_details)
+    metrics["selected_histogram"] = format_histogram_from_counts(
+        histogram_counts(selected_archetypes, codebook.embeddings.weight.size(0))
     )
     metrics["avg_return"] = metrics.pop("avg_return")
 
@@ -155,14 +154,6 @@ def evaluate_training_subset_diagnostics(
     demo_rewards: np.ndarray,
     diagnostic_horizons: int,
     device: torch.device,
-    # 需要从 train_phase2.py 导入的辅助函数
-    get_horizon_start_states_fn=None,
-    get_ground_truth_labels_fn=None,
-    batch_decode_actions_fn=None,
-    vectorized_execute_horizons_fn=None,
-    aggregate_execution_diagnostics_fn=None,
-    format_histogram_from_counts_fn=None,
-    histogram_counts_fn=None,
 ) -> dict[str, Any]:
     """在训练子集上做 learned / random / oracle / fixed baseline 对照。
 
@@ -202,13 +193,13 @@ def evaluate_training_subset_diagnostics(
     horizon_indices = np.asarray(horizon_indices, dtype=np.int64)
 
     # --- 计算各策略的 archetype 选择 ---
-    states_np = get_horizon_start_states_fn(train_env, horizon_indices)
+    states_np = get_horizon_start_states(train_env, horizon_indices)
     states_t = torch.tensor(states_np, dtype=torch.float32, device=device)
     with torch.no_grad():
         action_probs, _ = agent(states_t)
         learned_actions = torch.argmax(action_probs, dim=-1).detach().cpu().numpy()
 
-    gt_labels = get_ground_truth_labels_fn(
+    gt_labels = get_ground_truth_labels(
         encoder=encoder, codebook=codebook,
         demo_states=demo_states, demo_actions=demo_actions, demo_rewards=demo_rewards,
         horizon_indices=horizon_indices, device=device,
@@ -235,7 +226,7 @@ def evaluate_training_subset_diagnostics(
     archetype_t = torch.tensor(all_archetypes, dtype=torch.long, device=device)
 
     # 一次 batch_decode_actions：decoder 前向只跑一次
-    all_actions_np = batch_decode_actions_fn(
+    all_actions_np = batch_decode_actions(
         decoder=decoder, codebook=codebook, env=train_env,
         horizon_indices=tiled_horizon_indices,
         archetype_indices=archetype_t,
@@ -243,7 +234,7 @@ def evaluate_training_subset_diagnostics(
     )  # ((K+3)×subset_size, h)
 
     # 一次 vectorized_execute_horizons：LOB 预提取只做一次
-    horizon_returns_np, horizon_details = vectorized_execute_horizons_fn(
+    horizon_returns_np, horizon_details = vectorized_execute_horizons(
         env=train_env,
         horizon_indices=tiled_horizon_indices,
         all_actions=all_actions_np,
@@ -254,7 +245,7 @@ def evaluate_training_subset_diagnostics(
     def _slice_metrics(start: int) -> dict[str, Any]:
         """取第 start 段（长度 subset_size）的诊断指标。"""
         seg = slice(start * subset_size, (start + 1) * subset_size)
-        return aggregate_execution_diagnostics_fn(horizon_details[seg])
+        return aggregate_execution_diagnostics(horizon_details[seg])
 
     learned_metrics = _slice_metrics(0)
     random_metrics  = _slice_metrics(1)
@@ -267,8 +258,8 @@ def evaluate_training_subset_diagnostics(
     best_fixed_idx = int(np.argmax(fixed_returns)) if fixed_returns else -1
 
     # selected_histogram 需要单独计算（aggregate_execution_diagnostics 不含）
-    learned_metrics["selected_histogram"] = format_histogram_from_counts_fn(
-        histogram_counts_fn(learned_actions, K)
+    learned_metrics["selected_histogram"] = format_histogram_from_counts(
+        histogram_counts(learned_actions, K)
     )
 
     return {
@@ -280,8 +271,8 @@ def evaluate_training_subset_diagnostics(
         "best_fixed_idx": best_fixed_idx,
         "learned_gt_agreement": float(np.mean(learned_actions == gt_labels)) if gt_labels.size > 0 else 0.0,
         "learned_selected_histogram": learned_metrics["selected_histogram"],
-        "oracle_label_histogram": format_histogram_from_counts_fn(
-            histogram_counts_fn(gt_labels, K)
+        "oracle_label_histogram": format_histogram_from_counts(
+            histogram_counts(gt_labels, K)
         ),
         "fixed_returns": "[" + ", ".join(f"{idx}:{ret:.4f}" for idx, ret in enumerate(fixed_returns)) + "]",
         "learned_avg_gross_pnl": float(learned_metrics["avg_gross_pnl"]),
