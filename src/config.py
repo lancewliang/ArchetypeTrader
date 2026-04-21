@@ -37,11 +37,11 @@ class Config:
     )
 
     # Phase I 配置
-    lstm_hidden_dim: int = 128
-    latent_dim: int = 16  # z_e 维度
+    lstm_hidden_dim: int = 256
+    latent_dim: int = 32  # z_e 维度
     num_archetypes: int = 10  # K = 10
     vq_beta0: float = 0.25  # 承诺损失系数
-    num_trajectories: int = 30000  # 论文 Phase I 默认采样 30k DP trajectories
+    num_trajectories: int = 60000  # 默认 90k（论文 Phase I 为 30k DP trajectories）
     phase1_epochs: int = 500
     phase1_sampling_seed: int = 42  # Phase I 轨迹采样随机种子，用于结果复现
     phase1_start_sampling_mode: str = "hybrid_stratified_importance"  # 起点采样: uniform / stratified / hybrid_stratified_importance
@@ -54,7 +54,7 @@ class Config:
     phase1_usage_profit_alignment_target_corr: float = 0.02  # 仅要求弱正相关，避免再次把收益谱系压平
     phase1_usage_profit_alignment_temperature: float = 0.35  # soft assignment 温度
     phase1_return_aux_weight: float = 0.10  # 收益分桶辅助目标权重
-    phase1_return_aux_hidden_dim: int = 32  # 收益分桶头隐藏层宽度
+    phase1_return_aux_hidden_dim: int = 64  # 收益分桶头隐藏层宽度
     phase1_return_num_buckets: int = 5  # 收益分桶数量（按轨迹总收益分位数切分）
     phase1_return_soft_assignment_weight: float = 0.50  # 收益分桶 loss 中 soft-assignment 路径占比
     phase1_codebook_separation_weight: float = 0.02  # codebook 分离正则权重
@@ -71,8 +71,8 @@ class Config:
     pretrain_epochs: int = 10  # 连续潜在预训练轮数（无 VQ 量化）
 
     # Phase II 配置
-    phase2_hidden_dim: int = 128       # SelectionAgent 共享层宽度
-    phase2_bottleneck_dim: int = 64    # SelectionAgent 瓶颈层宽度
+    phase2_hidden_dim: int = 256       # SelectionAgent 共享层宽度
+    phase2_bottleneck_dim: int = 128    # SelectionAgent 瓶颈层宽度
     phase2_total_steps: int = 1_000_000
     selection_alpha: float = 0.5  # KL / imitation 初始惩罚系数
     phase2_alpha_schedule: str = "linear"  # selection_alpha 调度: constant / linear
@@ -80,9 +80,9 @@ class Config:
     phase2_imitation_min_raw_return: float = 0.0  # 仅对 raw horizon return 超过该阈值的样本施加 imitation
     phase2_val_interval_multiplier: int = 10  # 每遍历多少轮 train horizons 做一次验证
     phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
-    phase2_rollout_batch_size: int = 1024*6
+    phase2_rollout_batch_size: int = 1024*2
     phase2_ppo_epochs: int = 8
-    phase2_minibatch_size: int = 1024*2
+    phase2_minibatch_size: int = 1024*1
     phase2_clip_eps: float = 0.2
     phase2_vf_coef: float = 0.001
     phase2_ent_coef: float = 0.02
@@ -211,6 +211,12 @@ def parse_args(argv: list | None = None) -> Config:
     )
     parser.add_argument(
         "--latent-dim", type=int, default=None, help="潜在嵌入维度"
+    )
+    parser.add_argument(
+        "--lstm-hidden-dim",
+        type=int,
+        default=None,
+        help="Phase I encoder/decoder LSTM 隐藏层维度",
     )
     parser.add_argument(
         "--vq-beta0", type=float, default=None, help="VQ 承诺损失系数"
@@ -378,6 +384,18 @@ def parse_args(argv: list | None = None) -> Config:
         "--phase2-total-steps", type=int, default=None, help="Phase II 总训练步数"
     )
     parser.add_argument(
+        "--phase2-hidden-dim",
+        type=int,
+        default=None,
+        help="Phase II SelectionAgent 共享层宽度",
+    )
+    parser.add_argument(
+        "--phase2-bottleneck-dim",
+        type=int,
+        default=None,
+        help="Phase II SelectionAgent 瓶颈层宽度",
+    )
+    parser.add_argument(
         "--selection-alpha", type=float, default=None, help="KL 惩罚系数"
     )
     parser.add_argument(
@@ -540,6 +558,10 @@ def parse_args(argv: list | None = None) -> Config:
         parser.error("--phase1-importance-ratio 必须 >= 0")
     if args.phase1_sampling_strata is not None and args.phase1_sampling_strata < 2:
         parser.error("--phase1-sampling-strata 必须 >= 2")
+    for name in ["latent_dim", "lstm_hidden_dim", "phase2_hidden_dim", "phase2_bottleneck_dim"]:
+        value = getattr(args, name, None)
+        if value is not None and value < 1:
+            parser.error(f"--{name.replace('_', '-')} 必须 >= 1")
     if args.phase1_importance_vol_weight is not None and args.phase1_importance_vol_weight < 0:
         parser.error("--phase1-importance-vol-weight 必须 >= 0")
     if args.phase1_importance_net_weight is not None and args.phase1_importance_net_weight < 0:

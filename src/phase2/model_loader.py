@@ -39,26 +39,45 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
 
     logger.info("加载 Phase I 模型: %s", model_path)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    ckpt_config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+
+    ckpt_state_dim = int(ckpt_config.get("state_dim", config.state_dim))
+    ckpt_action_dim = int(ckpt_config.get("action_dim", config.action_dim))
+    ckpt_latent_dim = int(ckpt_config.get("latent_dim", config.latent_dim))
+    ckpt_num_archetypes = int(ckpt_config.get("num_archetypes", config.num_archetypes))
+    ckpt_lstm_hidden_dim = int(ckpt_config.get("lstm_hidden_dim", config.lstm_hidden_dim))
+
+    if ckpt_state_dim != config.state_dim:
+        logger.warning(
+            "Phase I checkpoint state_dim=%d 与当前 config.state_dim=%d 不一致；"
+            "请确认 --cycle-feature-sets 与训练时一致。",
+            ckpt_state_dim, config.state_dim,
+        )
+    if ckpt_action_dim != config.action_dim:
+        logger.warning(
+            "Phase I checkpoint action_dim=%d 与当前 config.action_dim=%d 不一致。",
+            ckpt_action_dim, config.action_dim,
+        )
 
     encoder = VQEncoder(
-        state_dim=config.state_dim,
-        action_dim=config.action_dim,
-        hidden_dim=config.lstm_hidden_dim,
-        latent_dim=config.latent_dim,
+        state_dim=ckpt_state_dim,
+        action_dim=ckpt_action_dim,
+        hidden_dim=ckpt_lstm_hidden_dim,
+        latent_dim=ckpt_latent_dim,
     ).to(device)
     encoder.load_state_dict(checkpoint["encoder"])
 
     codebook = VQCodebook(
-        num_codes=config.num_archetypes,
-        code_dim=config.latent_dim,
+        num_codes=ckpt_num_archetypes,
+        code_dim=ckpt_latent_dim,
     ).to(device)
     codebook.load_state_dict(checkpoint["codebook"])
 
     decoder = VQDecoder(
-        state_dim=config.state_dim,
-        code_dim=config.latent_dim,
-        hidden_dim=config.lstm_hidden_dim,
-        action_dim=config.action_dim,
+        state_dim=ckpt_state_dim,
+        code_dim=ckpt_latent_dim,
+        hidden_dim=ckpt_lstm_hidden_dim,
+        action_dim=ckpt_action_dim,
     ).to(device)
     decoder.load_state_dict(checkpoint["decoder"])
 

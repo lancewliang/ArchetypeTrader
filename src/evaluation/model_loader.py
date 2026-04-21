@@ -48,17 +48,36 @@ def load_phase1_model(
 
     logger.info("加载 Phase I 模型: %s", model_path)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    ckpt_config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+
+    ckpt_state_dim = int(ckpt_config.get("state_dim", config.state_dim))
+    ckpt_action_dim = int(ckpt_config.get("action_dim", config.action_dim))
+    ckpt_latent_dim = int(ckpt_config.get("latent_dim", config.latent_dim))
+    ckpt_num_archetypes = int(ckpt_config.get("num_archetypes", config.num_archetypes))
+    ckpt_lstm_hidden_dim = int(ckpt_config.get("lstm_hidden_dim", config.lstm_hidden_dim))
+
+    if ckpt_state_dim != config.state_dim:
+        raise ValueError(
+            "Phase I checkpoint 的 state_dim 与当前配置不一致，无法加载并用于推理。\n"
+            f"  checkpoint_state_dim={ckpt_state_dim}, config_state_dim={config.state_dim}\n"
+            "  提示: 请用与训练一致的 --cycle-feature-sets 运行 evaluate/train_phase2/train_phase3。",
+        )
+    if ckpt_action_dim != config.action_dim:
+        raise ValueError(
+            "Phase I checkpoint 的 action_dim 与当前配置不一致，无法加载并用于推理。\n"
+            f"  checkpoint_action_dim={ckpt_action_dim}, config_action_dim={config.action_dim}",
+        )
 
     codebook = VQCodebook(
-        num_codes=config.num_archetypes, code_dim=config.latent_dim,
+        num_codes=ckpt_num_archetypes, code_dim=ckpt_latent_dim,
     ).to(device)
     codebook.load_state_dict(checkpoint["codebook"])
 
     decoder = VQDecoder(
-        state_dim=config.state_dim,
-        code_dim=config.latent_dim,
-        hidden_dim=config.lstm_hidden_dim,
-        action_dim=config.action_dim,
+        state_dim=ckpt_state_dim,
+        code_dim=ckpt_latent_dim,
+        hidden_dim=ckpt_lstm_hidden_dim,
+        action_dim=ckpt_action_dim,
     ).to(device)
     decoder.load_state_dict(checkpoint["decoder"])
 
@@ -100,12 +119,36 @@ def load_phase2_model(
     logger.info("加载 Phase II 模型: %s", model_path)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
+    agent_state = checkpoint.get("agent", None)
+    if not isinstance(agent_state, dict):
+        raise ValueError(f"Phase II checkpoint 缺少 agent state_dict: {model_path}")
+
+    try:
+        shared0_w = agent_state["shared.0.weight"]
+        shared2_w = agent_state["shared.2.weight"]
+        policy_w = agent_state["policy_head.weight"]
+    except KeyError as e:
+        raise ValueError(f"Phase II agent state_dict 缺少关键参数 {e!s}: {model_path}") from e
+
+    inferred_state_dim = int(shared0_w.shape[1])
+    inferred_hidden_dim = int(shared0_w.shape[0])
+    inferred_bottleneck_dim = int(shared2_w.shape[0])
+    inferred_num_archetypes = int(policy_w.shape[0])
+
+    if inferred_state_dim != config.state_dim:
+        raise ValueError(
+            "Phase II checkpoint 的 state_dim 与当前配置不一致，无法加载并用于推理。\n"
+            f"  checkpoint_state_dim={inferred_state_dim}, config_state_dim={config.state_dim}\n"
+            "  提示: 请用与训练一致的 --cycle-feature-sets 运行 evaluate。",
+        )
+
     agent = SelectionAgent(
-        state_dim=config.state_dim, num_archetypes=config.num_archetypes,
-        hidden_dim=config.phase2_hidden_dim,
-        bottleneck_dim=config.phase2_bottleneck_dim,
+        state_dim=inferred_state_dim,
+        num_archetypes=inferred_num_archetypes,
+        hidden_dim=inferred_hidden_dim,
+        bottleneck_dim=inferred_bottleneck_dim,
     ).to(device)
-    agent.load_state_dict(checkpoint["agent"])
+    agent.load_state_dict(agent_state)
 
     for p in agent.parameters():
         p.requires_grad = False
@@ -138,10 +181,22 @@ def load_phase3_model(
     logger.info("加载 Phase III 模型: %s", model_path)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
-    context_dim = config.latent_dim + 3
+    ckpt_config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+    ckpt_state_dim = int(ckpt_config.get("state_dim", config.state_dim))
+    ckpt_latent_dim = int(ckpt_config.get("latent_dim", config.latent_dim))
+    ckpt_hidden_dim = int(ckpt_config.get("refinement_hidden_dim", config.refinement_hidden_dim))
+
+    if ckpt_state_dim != config.state_dim:
+        raise ValueError(
+            "Phase III checkpoint 的 state_dim 与当前配置不一致，无法加载并用于推理。\n"
+            f"  checkpoint_state_dim={ckpt_state_dim}, config_state_dim={config.state_dim}\n"
+            "  提示: 请用与训练一致的 --cycle-feature-sets 运行 evaluate。",
+        )
+
+    context_dim = ckpt_latent_dim + 3
     agent = RefinementAgent(
-        market_dim=config.state_dim, context_dim=context_dim,
-        hidden_dim=config.refinement_hidden_dim,
+        market_dim=ckpt_state_dim, context_dim=context_dim,
+        hidden_dim=ckpt_hidden_dim,
     ).to(device)
     agent.load_state_dict(checkpoint["agent"])
 

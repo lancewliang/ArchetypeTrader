@@ -209,7 +209,7 @@ def load_data_and_env(config: Any, pair: str) -> Tuple[TradingEnv, TradingEnv, i
     available_starts = expected_num_available_starts(train_rows, config.horizon)
     if available_starts < config.num_trajectories:
         raise ValueError(
-            "当前训练集不足以在严格论文滑窗协议下无放回采样 30k trajectories。"
+            "当前训练集不足以在严格论文滑窗协议下无放回采样指定数量的 trajectories。"
             f" available_starts={available_starts}, required={config.num_trajectories}"
         )
 

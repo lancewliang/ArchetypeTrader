@@ -5,7 +5,7 @@
 #
 # 流程:
 # 1. 加载特征数据，初始化 TradingEnv
-# 2. 调用 DPPlanner 生成 30k 示范轨迹并保存
+# 2. 调用 DPPlanner 生成示范轨迹并保存（默认 num_trajectories=90k，可用 CLI 覆盖）
 # 3. 初始化 VQ Encoder、Codebook、Decoder
 # 4. 训练 100 epochs
 #    损失函数 L = L_rec + ||sg[z_e] - z_q||² + 0.25 × ||z_e - sg[z_q]||²
@@ -501,7 +501,7 @@ def load_data_and_env(config: Any, pair: str) -> Tuple[TradingEnv, int]:
     available_starts = expected_num_available_starts(train_rows, config.horizon)
     if available_starts < config.num_trajectories:
         raise ValueError(
-            "当前训练集不足以在严格论文滑窗协议下无放回采样 30k trajectories。"
+            "当前训练集不足以在严格论文滑窗协议下无放回采样指定数量的 trajectories。"
             f" available_starts={available_starts}, required={config.num_trajectories}"
         )
 
