@@ -411,6 +411,11 @@ def run_training_loop(
     encoder: VQEncoder,
     codebook: VQCodebook,
     decoder: VQDecoder,
+    eval_agent: SelectionAgent,
+    eval_encoder: VQEncoder,
+    eval_codebook: VQCodebook,
+    eval_decoder: VQDecoder,
+    eval_device: torch.device,
     train_env: TradingEnv,
     val_env: TradingEnv,
     demo_states: np.ndarray,
@@ -702,12 +707,14 @@ def run_training_loop(
         # 需求 5.7: 定期在验证集上评估，保存最优检查点
         if step_count >= next_val_step or step_count == total_steps:
             pbar.set_description("验证集评估中")
+            # 验证与诊断使用 CPU，避免占用 GPU 显存（16G 显卡也能稳定跑训练）。
+            eval_agent.load_state_dict(agent.state_dict(), strict=True)
             val_metrics = evaluate_on_validation(
-                agent=agent,
-                codebook=codebook,
-                decoder=decoder,
+                agent=eval_agent,
+                codebook=eval_codebook,
+                decoder=eval_decoder,
                 val_env=val_env,
-                device=device,
+                device=eval_device,
                 max_horizons=eval_max_horizons,
             )
             val_return = float(val_metrics["avg_return"])
@@ -724,16 +731,16 @@ def run_training_loop(
             )
 
             train_diag = evaluate_training_subset_diagnostics(
-                agent=agent,
-                encoder=encoder,
-                codebook=codebook,
-                decoder=decoder,
+                agent=eval_agent,
+                encoder=eval_encoder,
+                codebook=eval_codebook,
+                decoder=eval_decoder,
                 train_env=train_env,
                 demo_states=demo_states,
                 demo_actions=demo_actions,
                 demo_rewards=demo_rewards,
                 diagnostic_horizons=diagnostic_horizons,
-                device=device,
+                device=eval_device,
             )
             logger.info(
                 "训练子集诊断 (n=%d): learned=%.4f, random=%.4f, oracle=%.4f, best_fixed=%.4f(k=%d), gt_agree=%.4f",
@@ -887,6 +894,44 @@ def main() -> None:
         bottleneck_dim=config.phase2_bottleneck_dim,
     ).to(device)
 
+    # Phase II 验证/诊断统一走 CPU，显著降低验证阶段显存峰值（适配 16G 显卡）。
+    eval_device = torch.device("cpu")
+    eval_agent = SelectionAgent(
+        state_dim=config.state_dim,
+        num_archetypes=config.num_archetypes,
+        hidden_dim=config.phase2_hidden_dim,
+        bottleneck_dim=config.phase2_bottleneck_dim,
+    ).to(eval_device)
+    eval_encoder = VQEncoder(
+        state_dim=encoder.state_dim,
+        action_dim=encoder.action_dim,
+        hidden_dim=encoder.hidden_dim,
+        latent_dim=encoder.latent_dim,
+    ).to(eval_device)
+    eval_encoder.load_state_dict(encoder.state_dict(), strict=True)
+    eval_codebook = VQCodebook(
+        num_codes=codebook.num_codes,
+        code_dim=codebook.code_dim,
+    ).to(eval_device)
+    eval_codebook.load_state_dict(codebook.state_dict(), strict=True)
+    eval_decoder = VQDecoder(
+        state_dim=decoder.state_dim,
+        code_dim=decoder.code_dim,
+        hidden_dim=decoder.hidden_dim,
+        action_dim=decoder.action_dim,
+    ).to(eval_device)
+    eval_decoder.load_state_dict(decoder.state_dict(), strict=True)
+    for param in eval_encoder.parameters():
+        param.requires_grad = False
+    for param in eval_codebook.parameters():
+        param.requires_grad = False
+    for param in eval_decoder.parameters():
+        param.requires_grad = False
+    eval_encoder.eval()
+    eval_codebook.eval()
+    eval_decoder.eval()
+    logger.info("Phase II 验证设备: %s（训练设备: %s）", eval_device, device)
+
     logger.info(
         "SelectionAgent 初始化完成: params=%d",
         sum(p.numel() for p in agent.parameters()),
@@ -926,6 +971,11 @@ def main() -> None:
         encoder=encoder,
         codebook=codebook,
         decoder=decoder,
+        eval_agent=eval_agent,
+        eval_encoder=eval_encoder,
+        eval_codebook=eval_codebook,
+        eval_decoder=eval_decoder,
+        eval_device=eval_device,
         train_env=train_env,
         val_env=val_env,
         demo_states=demo_states,
@@ -963,33 +1013,34 @@ def main() -> None:
     # ----------------------------------------------------------------
     eval_max_horizons = ppo_hparams["eval_max_horizons"]
 
+    eval_agent.load_state_dict(agent.state_dict(), strict=True)
     final_val_metrics = evaluate_on_validation(
-        agent=agent,
-        codebook=codebook,
-        decoder=decoder,
+        agent=eval_agent,
+        codebook=eval_codebook,
+        decoder=eval_decoder,
         val_env=val_env,
-        device=device,
+        device=eval_device,
         max_horizons=eval_max_horizons,
     )
     final_val_return = float(final_val_metrics["avg_return"])
 
     best_val_metrics: dict[str, Any]
     if os.path.exists(save_path):
-        best_ckpt = torch.load(save_path, map_location=device, weights_only=False)
+        best_ckpt = torch.load(save_path, map_location=eval_device, weights_only=False)
         best_agent = SelectionAgent(
             state_dim=config.state_dim,
             num_archetypes=config.num_archetypes,
             hidden_dim=config.phase2_hidden_dim,
             bottleneck_dim=config.phase2_bottleneck_dim,
-        ).to(device)
+        ).to(eval_device)
         best_agent.load_state_dict(best_ckpt["agent"])
         best_agent.eval()
         best_val_metrics = evaluate_on_validation(
             agent=best_agent,
-            codebook=codebook,
-            decoder=decoder,
+            codebook=eval_codebook,
+            decoder=eval_decoder,
             val_env=val_env,
-            device=device,
+            device=eval_device,
             max_horizons=eval_max_horizons,
         )
     else:

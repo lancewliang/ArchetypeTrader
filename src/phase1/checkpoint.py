@@ -620,6 +620,91 @@ def select_and_materialize_best_phase1_checkpoint(
     else:
         if bool(getattr(config, "phase1_selection_require_gated_candidate", False)):
             best_fallback_row = max(successful_rows, key=lambda r: tuple(r["rank_tuple"]))
+            selection_report_path = os.path.join(save_dir, "phase1_checkpoint_selection_report.json")
+            selection_report = {
+                "pair": pair,
+                "train_batch_id": config.train_batch_id,
+                "selection_strategy": "phase1_v8_profit_gated_realizable_proxy_plus_validation_health",
+                "phase1_epochs": int(config.phase1_epochs),
+                "phase1_checkpoint_interval": int(PHASE1_CHECKPOINT_EVAL_INTERVAL),
+                "candidate_count": len(checkpoint_candidates),
+                "successful_candidate_count": len(successful_rows),
+                "profit_gate_candidate_count": len(profit_gated_rows),
+                "selection_pool": "profit_gate_failed_no_candidate_passed",
+                "profit_gate_config": {
+                    "min_realizable_proxy_return_mean": float(
+                        getattr(config, "phase1_selection_min_realizable_proxy_return_mean", 0.0),
+                    ),
+                    "min_realizable_proxy_to_oracle_ratio": float(
+                        getattr(config, "phase1_selection_min_realizable_proxy_to_oracle_ratio", 0.0),
+                    ),
+                    "min_best_fixed_archetype_return_mean": float(
+                        getattr(config, "phase1_selection_min_best_fixed_archetype_return_mean", 0.0),
+                    ),
+                    "min_best_fixed_to_oracle_ratio": float(
+                        getattr(config, "phase1_selection_min_best_fixed_to_oracle_ratio", 0.0),
+                    ),
+                    "min_return_usage_correlation": float(
+                        getattr(config, "phase1_selection_min_return_usage_correlation", 0.0),
+                    ),
+                    "require_gated_candidate": True,
+                },
+                "selection_error": {
+                    "type": "profit_gate_no_candidate_passed",
+                    "best_fallback_epoch": int(best_fallback_row.get("epoch", 0)),
+                    "best_fallback_failed_reasons": list(
+                        best_fallback_row.get("selection_profit_gate_failed_reasons", []),
+                    ),
+                },
+                "selected_checkpoint": {
+                    "epoch": int(best_fallback_row.get("epoch", 0)),
+                    "tag": str(best_fallback_row.get("tag", "")),
+                    "source_path": str(best_fallback_row.get("checkpoint_path", "")),
+                    "validation_report_path": str(best_fallback_row.get("validation_report_path", "")),
+                    "env_report_path": str(best_fallback_row.get("env_report_path", "")),
+                    "selection_metrics": best_fallback_row.get("selection_metrics", {}),
+                    "selection_score": float(best_fallback_row.get("selection_score", 0.0)),
+                    "selection_phase2_realizable_proxy_return_mean": float(
+                        best_fallback_row.get("selection_phase2_realizable_proxy_return_mean", 0.0),
+                    ),
+                    "selection_phase2_realizability_score": float(
+                        best_fallback_row.get("selection_phase2_realizability_score", 0.0),
+                    ),
+                    "selection_phase2_proxy_return_mean": float(
+                        best_fallback_row.get("selection_phase2_proxy_return_mean", 0.0),
+                    ),
+                    "selection_best_fixed_archetype_return_mean": float(
+                        best_fallback_row.get("selection_best_fixed_archetype_return_mean", 0.0),
+                    ),
+                    "selection_return_usage_correlation": float(
+                        best_fallback_row.get("selection_return_usage_correlation", 0.0),
+                    ),
+                    "selection_profit_gate_passed": bool(
+                        best_fallback_row.get("selection_profit_gate_passed", False),
+                    ),
+                    "selection_profit_gate_failed_reasons": list(
+                        best_fallback_row.get("selection_profit_gate_failed_reasons", []),
+                    ),
+                    "selection_profit_gate_thresholds": dict(
+                        best_fallback_row.get("selection_profit_gate_thresholds", {}),
+                    ),
+                    "selection_primary_oracle_return_mean": float(
+                        best_fallback_row.get("selection_primary_oracle_return_mean", 0.0),
+                    ),
+                    "selection_generalization_score": float(
+                        best_fallback_row.get("selection_generalization_score", 0.0),
+                    ),
+                    "rank_tuple": best_fallback_row.get("rank_tuple", []),
+                    "materialized": False,
+                },
+                "candidates": selection_rows,
+            }
+            with open(selection_report_path, "w", encoding="utf-8") as fp:
+                json.dump(selection_report, fp, ensure_ascii=False, indent=2)
+            logger.error(
+                "Phase I checkpoint profit gate 未命中任何候选，已写入选择报告: %s",
+                selection_report_path,
+            )
             raise RuntimeError(
                 "没有任何 Phase I checkpoint 满足 profit gate。"
                 f" 最优候选(epoch={int(best_fallback_row['epoch'])}) 的失败原因: "

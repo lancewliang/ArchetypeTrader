@@ -41,8 +41,8 @@ class Config:
     latent_dim: int = 32  # z_e 维度
     num_archetypes: int = 10  # K = 10
     vq_beta0: float = 0.25  # 承诺损失系数
-    num_trajectories: int = 60000  # 默认 90k（论文 Phase I 为 30k DP trajectories）
-    phase1_epochs: int = 500
+    num_trajectories: int = 50000  # 默认 90k（论文 Phase I 为 30k DP trajectories）
+    phase1_epochs: int = 400
     phase1_sampling_seed: int = 42  # Phase I 轨迹采样随机种子，用于结果复现
     phase1_start_sampling_mode: str = "hybrid_stratified_importance"  # 起点采样: uniform / stratified / hybrid_stratified_importance
     phase1_stratified_ratio: float = 0.95  # 混合采样中分层随机占比；纯 stratified 模式下作为元数据保留
@@ -80,7 +80,7 @@ class Config:
     phase2_imitation_min_raw_return: float = 0.0  # 仅对 raw horizon return 超过该阈值的样本施加 imitation
     phase2_val_interval_multiplier: int = 10  # 每遍历多少轮 train horizons 做一次验证
     phase2_stop_on_unhealthy: bool = False  # 若 Phase II 结束验证不健康则直接退出
-    phase2_rollout_batch_size: int = 1024*2
+    phase2_rollout_batch_size: int = 1024*3
     phase2_ppo_epochs: int = 8
     phase2_minibatch_size: int = 1024*1
     phase2_clip_eps: float = 0.2
@@ -368,7 +368,7 @@ def parse_args(argv: list | None = None) -> Config:
     )
     parser.add_argument(
         "--phase1-selection-require-gated-candidate",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=None,
         help="若没有候选满足 Phase I profit gate，则直接报错而不是回退到原排序",
     )
