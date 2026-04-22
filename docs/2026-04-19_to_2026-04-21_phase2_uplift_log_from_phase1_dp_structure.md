@@ -3,7 +3,7 @@
 日期范围: 2026-04-19 至 2026-04-21  
 交易对: AL  
 关注点: 第二阶段（Phase II）收益为什么跌、怎么通过 Phase I 的 DP 结构与 profit-aware 训练把收益拉回来，并记录关键改动与测试结果。  
-相关过程文档: `docs/phase1_dp_structure_optimization_log.md`（更偏 Phase I 训练细节与完整时间线）
+相关过程文档: `docs/2026-04-19_phase1_dp_structure_optimization_log.md`（更偏 Phase I 训练细节与完整时间线）
 
 ---
 

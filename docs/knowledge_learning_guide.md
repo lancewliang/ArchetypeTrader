@@ -136,7 +136,7 @@
 
 ### 3.4 损失函数设计
 
-**涉及代码**: `scripts/train_phase1.py`, `docs/phase1_decoder_optimization_log.md`
+**涉及代码**: `scripts/train_phase1.py`, `docs/2026-04-03_phase1_decoder_optimization_log.md`
 
 - 交叉熵损失（Cross-Entropy Loss）：标准分类损失
 - Focal Loss：$FL(p_t) = -(1-p_t)^\gamma \log(p_t)$，降低 easy sample 权重（实验 4 尝试，gamma=2.0）
@@ -177,7 +177,7 @@
 
 ### 4.3 Teacher Forcing 与 Exposure Bias
 
-**涉及代码**: `docs/phase1_decoder_optimization_log.md`（实验 5）
+**涉及代码**: `docs/2026-04-03_phase1_decoder_optimization_log.md`（实验 5）
 
 - Teacher Forcing：训练时用 ground-truth 作为 decoder 输入
 - Exposure Bias：训练和推理时输入分布不一致导致的误差累积
@@ -486,7 +486,7 @@
   - 搜索最优 single-change-point 分割："action_a × t + action_b × (h-t)"
   - 使用前缀和 + 后缀和，复杂度 $O(h \times \text{action\_dim}^2)$
   - 全部在 GPU tensor 上完成，无 Python 循环
-- 效果：decoded_return 从 -470 翻转到 +1062（见 `docs/phase1_decoder_optimization_log.md`）
+- 效果：decoded_return 从 -470 翻转到 +1062（见 `docs/2026-04-03_phase1_decoder_optimization_log.md`）
 
 ### 10.2 向量化计算
 
