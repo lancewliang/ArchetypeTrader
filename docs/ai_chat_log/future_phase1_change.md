@@ -2,6 +2,35 @@
 
 早期 Phase I 诊断数据告诉我们（以下数值保留当时实验口径；当前代码状态以文末总表为准）：
 
+## 2026-04-22 补充：BiLSTM Encoder 首轮实验结果
+
+实验：`logs/AL/batch_02-short/AL_pipeline_20260422_215103.log`，在 `short` 因子组上将 Phase I encoder 从单向 LSTM 改为 BiLSTM。对照参考为同一天较早的 `logs/AL/batch_01-short/AL_pipeline_20260422_151607.log`。
+
+结论：BiLSTM encoder 已实现，但这次首轮 `short` 对照效果不好，不建议把“单方向 hidden_dim=128 的 BiLSTM encoder”直接当成默认增强主线。更准确的判断是：它提升了 encoder 的表达能力，同时也更容易把完整示范轨迹中的 hindsight 信息压进 code；Phase II selector 只看 horizon 市场状态，未必能稳定预测这种更强、更后验的 code。
+
+关键指标对照：
+
+| 指标 | batch_01-short（单向 encoder） | batch_02-short（BiLSTM encoder） |
+|---|---:|---:|
+| Encoder 参数量 | 332,064 | 664,096 |
+| Phase I profit gate 命中 | 9/13 | 1/13 |
+| 选中 checkpoint | epoch 240 | epoch 120 |
+| realizable proxy mean | 182.91 | 152.18 |
+| realizability score | 0.965 | 0.777 |
+| Phase II best val avg_return | 154.13 | 125.20 |
+| 选中 checkpoint token accuracy | 0.9998 | 0.9706 |
+| 选中 checkpoint exact match | 0.9906 | 0.7373 |
+| quantization MSE | 0.375 | 8.202 |
+
+这次 BiLSTM 版本的问题不在于 Phase II “只训练了一半”：`batch_02-short` 在 Phase II step 61,440 已达到最佳验证收益 125.20，后续到 step 488,448 反而降到 114.15。更核心的问题发生在 Phase I checkpoint 选择：13 个候选只有 1 个通过 profit gate，最后选中的 epoch 120 是收益 proxy 过关但重构/量化健康度较差的早期 checkpoint。
+
+后续建议：
+
+- 不再优先继续堆 Phase I 架构容量；先修 Phase I/Phase II 窗口标签对齐问题。
+- 如果继续保留 BiLSTM encoder，建议先试 `hidden_dim=64`（单方向），让双向拼接后的宽度接近原单向 128，避免参数量直接翻倍。
+- Phase I checkpoint gate 增加健康约束，例如 `exact_match >= 0.95`、`quantization_mse` 上限、`phase2_realizability_score` 下限，避免选中“收益 proxy 好但 latent 很散”的 checkpoint。
+- 用 `middle` 因子组做同配置对照；历史记录里 `middle` 通常明显强于 `short`。
+
 问题 1：change point 处 56.7% 准确率，混淆矩阵显示主要错误是 short→flat (361/881=41%) 和 long→flat (343/892=38%)
 
 decoder 在 change point 处倾向于预测 flat 而不是正确的方向。这不主要是模型容量问题：当时的 BiLSTM 128 维配置已经足够暴露出该现象。问题在于 72 步中只有 1 步是 change point，标准 CE loss 被 71 步的"保持不变"主导，decoder 学到了"有疑问就预测 flat"的保守策略。
@@ -62,9 +91,9 @@ DP 轨迹的 single-trade 结构是 [flat...flat, action, action...action]。可
 
 实际尝试后效果不好，暂不建议作为主线继续推进。代码阅读确认当前主线仍是单一 `config.horizon` 流程，没有保留多尺度 horizon / padding 的训练实现。可能原因是多尺度/padding 改变了论文固定 `h=72` 的训练协议，也会破坏 Phase I decoder、Phase II horizon selector 和评估流程之间的长度一致性，使收益信号和单次交易结构更难对齐。
 
-8. Encoder 用 BiLSTM 替代单向 LSTM
+8. Encoder 用 BiLSTM 替代单向 LSTM（已实现；首轮 short 对照效果不好）
 
-当前 encoder 是单向 LSTM + attention pooling。改成 BiLSTM 能让 encoder 同时看到轨迹的前后文，更准确地编码 change point 的位置和方向信息到 z_e 中。z_e 质量提升 → codebook 分配更准确 → decoder 收到更有区分度的 z_q。
+当前 encoder 已从单向 LSTM + attention pooling 改为 BiLSTM + attention pooling，让 encoder 同时看到轨迹的前后文。但 `batch_02-short` 首轮结果显示，直接使用单方向 `hidden_dim=128` 的 BiLSTM 会让 encoder 参数量翻倍，并可能把完整示范轨迹中的后验信息编码进 z_e，导致 Phase II selector 更难稳定选择。该方向暂不建议继续作为默认增强，除非配合更小单方向 hidden_dim、checkpoint 健康约束，以及窗口标签对齐修复后重新评估。
 
 9. 增加 VQ 训练的 pretrain epochs
 
@@ -82,16 +111,16 @@ DP 轨迹的 single-trade 结构是 [flat...flat, action, action...action]。可
 | 5 | Decoder 输入加入 reward 信号 | 是 | 未实现 | 会把 decoder 从 `p(a_hat | s, z_q)` 改成更强输入版本 |
 | 6 | 训练时数据增强（时间翻转） | 不改网络结构，但超出论文原始训练流程 | 未实现 | 属于训练技巧扩展 |
 | 7 | 多尺度 horizon 训练 | 是 | 当前未保留/未启用；已尝试效果不好 | 会改固定长度 `h=72` 的数据组织和训练协议；暂不建议继续作为主线 |
-| 8 | Encoder 用 BiLSTM 替代单向 LSTM | 是 | 未实现 | 当前 encoder 仍是单向 LSTM + temporal attention |
+| 8 | Encoder 用 BiLSTM 替代单向 LSTM | 是 | 已实现；首轮 `short` 对照效果不好 | 当前 encoder 是 BiLSTM + temporal attention；`hidden_dim` 表示单方向隐藏维度。`batch_02-short` 对照中 Phase II best val 从 154.13 降到 125.20，需先降容量/加 checkpoint 健康约束再重试 |
 | 9 | 增加 VQ 训练的 pretrain epochs | 否 | 已实现（可直接改配置） | `pretrain_epochs` 已接入两阶段训练流程 |
 
 补充说明：
 
 - 当前论文定义的 Phase I 是 `encoder: q(z_e | s, a, r)`，`decoder: p(a_hat | s, z_q)`。
-- 当前代码里 decoder 已经是 BiLSTM，但 encoder 还不是 BiLSTM。
-- 因此第 8 项不是“继续沿用现状”，而是一次新的结构修改。
+- 当前代码里 decoder 和 encoder 都已经是 BiLSTM。
+- 第 8 项已经完成一次结构实验；首轮 `short` 结果提醒我们，encoder 侧双向上下文不一定自动提升下游 selector 可用性。
 
-如果要从这些里再挑最值得试的，4 已经完成；在剩余未完成项里，优先考虑 5（decoder 加 reward 输入）。理由：
+如果要从这些里再挑最值得试的，4 已经完成；第 8 项首轮不佳；在剩余未完成项里，优先考虑 5（decoder 加 reward 输入），但建议等窗口对齐和 checkpoint gate 修正后再判断。理由：
 
 - 特征增强是低风险改动，直接给 decoder 更好的输入信号来判断 change point 方向。
 - Decoder 加 reward 修复了 encoder-decoder 之间的信息不对称，让 decoder 不用从 z_q 里"猜" reward 信息。
