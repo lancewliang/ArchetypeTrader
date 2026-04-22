@@ -48,8 +48,8 @@ class Config:
     phase1_stratified_ratio: float = 0.95  # 混合采样中分层随机占比；纯 stratified 模式下作为元数据保留
     phase1_importance_ratio: float = 0.05  # 混合采样中重要性采样占比；纯 stratified 模式下默认关闭
     phase1_sampling_strata: int = 4  # 分层采样分位桶数（波动率 x 趋势）
-    phase1_importance_vol_weight: float = 0.4  # 重要性打分中波动率权重
-    phase1_importance_net_weight: float = 0.6  # 重要性打分中净收益代理权重
+    phase1_importance_vol_weight: float = 0.8  # 重要性打分中波动率权重
+    phase1_importance_net_weight: float = 0.2 # 重要性打分中净收益代理权重
     phase1_usage_profit_alignment_weight: float = 0.01  # 轻量收益-使用率对齐，修正 assignment 而不主导训练
     phase1_usage_profit_alignment_target_corr: float = 0.02  # 仅要求弱正相关，避免再次把收益谱系压平
     phase1_usage_profit_alignment_temperature: float = 0.35  # soft assignment 温度
