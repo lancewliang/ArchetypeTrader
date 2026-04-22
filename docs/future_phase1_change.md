@@ -1,8 +1,10 @@
-当前 Phase I 的数据告诉我们：
+# Phase I 后续改动校对记录
+
+早期 Phase I 诊断数据告诉我们（以下数值保留当时实验口径；当前代码状态以文末总表为准）：
 
 问题 1：change point 处 56.7% 准确率，混淆矩阵显示主要错误是 short→flat (361/881=41%) 和 long→flat (343/892=38%)
 
-decoder 在 change point 处倾向于预测 flat 而不是正确的方向。这不是模型容量问题——BiLSTM 128 维已经足够。问题在于 72 步中只有 1 步是 change point，标准 CE loss 被 71 步的"保持不变"主导，decoder 学到了"有疑问就预测 flat"的保守策略。
+decoder 在 change point 处倾向于预测 flat 而不是正确的方向。这不主要是模型容量问题：当时的 BiLSTM 128 维配置已经足够暴露出该现象。问题在于 72 步中只有 1 步是 change point，标准 CE loss 被 71 步的"保持不变"主导，decoder 学到了"有疑问就预测 flat"的保守策略。
 
 问题 2：pairwise agreement 0.75，codebook cosine_max 0.9955
 
@@ -16,29 +18,35 @@ decoder 在 change point 处倾向于预测 flat 而不是正确的方向。这�
 
 1. 增加 DP 轨迹数量和多样性（改 DP 采样策略）
 
-当前 30k 轨迹从 525k 个合法起点中无放回采样，覆盖率只有 5.7%。而且 DP 的 single-trade 约束意味着每条轨迹只有 3 种模式（flat→short、flat→long、全 flat）。增加到 60k-100k 轨迹能让 VQ 模型看到更多市场状态下的最优交易模式，直接提升 encoder 的区分能力和 decoder 的泛化能力。这是最安全的改动——不改任何模型架构，只增加数据量。
+早期配置的 30k 轨迹从 525k 个合法起点中无放回采样，覆盖率只有 5.7%。而且 DP 的 single-trade 约束意味着每条轨迹只有 3 种模式（flat→short、flat→long、全 flat）。当前代码默认已把 `num_trajectories` 提高到 50k；如果继续做数据量对照，60k-100k 仍能让 VQ 模型看到更多市场状态下的最优交易模式。这是相对安全的改动：不改模型架构，只增加数据量和训练成本。
+
+1b. DP 起点采样策略提升多样性（已实现）
+
+代码阅读确认这一项已经落地：`Config` 暴露了 `phase1_start_sampling_mode`，`DPPlanner` 支持 `uniform`、`stratified`、`hybrid_stratified_importance` 三种起点采样方式，并会把采样模式、分层/重要性比例、可用起点数量、采样起点索引等元数据写入 trajectory cache。后续实验记录里，单纯改采样不能完全解决 Phase I 的收益语义问题，但它已经成为当前 Phase I 数据结构的一部分。
 
 2. 增大 codebook size K（10 → 16 或 20）
 
-当前 K=10 但 pairwise cosine_max=0.9955，说明 10 个 code 不够表达 30k 条轨迹的多样性。增大 K 能让每个 archetype 更专注于一种特定的市场模式，减少 archetype 之间的重叠。论文的 ablation study 也提到 K 太小会 under-represent diverse trading motifs。
+当前默认 K=10。早期诊断里的 pairwise cosine_max=0.9955 说明 10 个 code 可能不够表达当时轨迹的多样性。增大 K 的动机是让每个 archetype 更专注于一种特定的市场模式，减少 archetype 之间的重叠；但后续尝试收益不佳，因此目前不建议把它作为优先主线。论文的 ablation study 也提到 K 太小会 under-represent diverse trading motifs。
 
 3. 增大 latent_dim（16 → 32）
 
-当前 z_e 只有 16 维，要编码 72 步 × 3 种动作的轨迹信息。信息瓶颈太紧，encoder 被迫丢弃细节（比如 change point 的精确位置），decoder 只能恢复粗略的方向。增大到 32 维能保留更多时序细节。论文说"archetype dimension is set smaller than network dimension to create information bottleneck"，但 16 维可能过于激进。
+早期 z_e 只有 16 维，要编码 72 步 × 3 种动作的轨迹信息。信息瓶颈太紧，encoder 被迫丢弃细节（比如 change point 的精确位置），decoder 只能恢复粗略的方向。后续代码已把默认 `latent_dim` 调整为 32，以保留更多时序细节。论文说"archetype dimension is set smaller than network dimension to create information bottleneck"，但 16 维可能过于激进。
 
-这三个改动互相独立，可以逐个测试。建议先试第 1 个（增加轨迹数量），因为零风险、不改架构、只需要改 config 里的 num_trajectories。你想从哪个开始？
+这几个改动后来已部分落地和验证：1 / 1b / 3 已进入代码，2 已可配置但尝试效果不好。剩余项更适合作为明确实验分支，而不是默认主线。
 
 还有几个方向，我按"改动成本 vs 预期收益"排：
 
-4. 特征增强 — 加入 price change 和 order imbalance（已完成）
+4. 特征增强 — 固定特征 + 周期特征集（已完成）
 
-当前 45 维特征是原始 LOB 价格/数量 + WAP + trend_60。但 decoder 需要判断"这一步该不该开仓"，最直接的信号是短期价格变化率和买卖力量对比。可以在 feature_pipeline.py 里加 3-5 个衍生特征：
+早期设想是在论文式 45 维状态上补充 price change 和 order imbalance，因为 decoder 需要判断"这一步该不该开仓"，最直接的信号是短期价格变化率和买卖力量对比。当时建议加入的衍生特征包括：
 
 price_return_1：单步收益率 (close[t] - close[t-1]) / close[t-1]
 price_return_6：6 步（1 小时）收益率
 order_imbalance：(bid_total - ask_total) / (bid_total + ask_total)
 spread_ratio：(ask1_price - bid1_price) / close
 这些特征直接帮助 decoder 判断 change point 处的方向，不改任何模型架构。
+
+当前代码的实际落地方式不是新增这些同名列，而是把 `feature_pipeline.py` 改成 `24 fixed features + optional cycle feature sets`。CLI 未指定 `--cycle-feature-sets` 时默认启用 `middle`，因此默认状态维度为 `24 + 33 = 57`。`short` / `middle` / `long` 周期特征已经覆盖价格比率、价差、imbalance、成交量、持仓变化和 regime 类信号。
 
 5. Decoder 输入加入 reward 信号
 
@@ -48,9 +56,11 @@ spread_ratio：(ask1_price - bid1_price) / close
 
 DP 轨迹的 single-trade 结构是 [flat...flat, action, action...action]。可以对每条轨迹做时间翻转：[action...action, flat, flat...flat]（对应"先持仓后平仓"的镜像模式）。这能让 decoder 同时学会"开仓"和"平仓"的 change point 模式，等效于把训练数据翻倍。不过需要注意翻转后 reward 序列也要相应调整。
 
-7. 多尺度 horizon 训练
+7. 多尺度 horizon 训练（已尝试，效果不好）
 
 当前固定 h=72。可以在训练时随机截取 h=36、48、72、96 的子序列（padding 到统一长度），让 encoder-decoder 学会在不同时间尺度上识别交易模式。这能提升泛化能力，但改动量较大。
+
+实际尝试后效果不好，暂不建议作为主线继续推进。代码阅读确认当前主线仍是单一 `config.horizon` 流程，没有保留多尺度 horizon / padding 的训练实现。可能原因是多尺度/padding 改变了论文固定 `h=72` 的训练协议，也会破坏 Phase I decoder、Phase II horizon selector 和评估流程之间的长度一致性，使收益信号和单次交易结构更难对齐。
 
 8. Encoder 用 BiLSTM 替代单向 LSTM
 
@@ -58,20 +68,20 @@ DP 轨迹的 single-trade 结构是 [flat...flat, action, action...action]。可
 
 9. 增加 VQ 训练的 pretrain epochs
 
-当前 pretrain_epochs=10，Phase A 只跑 10 个 epoch 就切到 Phase B 开始 VQ 量化。如果 encoder-decoder 在 Phase A 还没充分收敛，Phase B 的 codebook 初始化质量就差。可以增加到 20-30 个 epoch，让连续 latent space 先充分成型。
+当前 `pretrain_epochs=10`，Phase A 只跑 10 个 epoch 就切到 Phase B 开始 VQ 量化。如果 encoder-decoder 在 Phase A 还没充分收敛，Phase B 的 codebook 初始化质量就差。可以增加到 20-30 个 epoch，让连续 latent space 先充分成型。
 
 ## 改动分类与实现状态总表
 
 | 编号 | 改动 | 是否超出论文架构 | 当前代码状态 | 备注 |
 |---|---|---|---|---|
 | 1 | 增加 DP 轨迹数量 | 否 | 已实现（可直接改配置） | `num_trajectories` 已接入 `Config` 和 `train_phase1.py` |
-| 1b | 改 DP 采样策略提升多样性 | 不改模型架构，但超出论文默认数据协议 | 未实现 | 当前只有滑窗合法起点 + 随机采样， |
-| 2 | 增大 codebook size K（10 → 16 / 20） | 否 | 已实现（可直接改配置） | `num_archetypes` 已接入训练和存档 效果不好  |
-| 3 | 增大 latent_dim（16 → 32） | 否 | 已实现（可直接改配置） | `latent_dim` 已接入 encoder / decoder / codebook。|
-| 4 | 特征增强（price change / imbalance / spread） | 否 | 已实现 | 属于输入特征增强，不改 Phase I 核心结构 |
+| 1b | 改 DP 采样策略提升多样性 | 不改模型架构，但超出论文默认数据协议 | 已实现 | `phase1_start_sampling_mode` 支持 `uniform` / `stratified` / `hybrid_stratified_importance`，并写入 cache 元数据 |
+| 2 | 增大 codebook size K（10 → 16 / 20） | 否 | 已实现（可直接改配置；已尝试效果不好） | `num_archetypes` 已接入训练和存档，但实验收益不佳 |
+| 3 | 增大 latent_dim（16 → 32） | 否 | 已实现（当前默认 32） | `latent_dim` 已接入 encoder / decoder / codebook |
+| 4 | 特征增强（固定特征 + 周期特征集） | 不改模型架构，但超出论文固定状态定义 | 已实现 | `feature_pipeline.py` 使用 `24 fixed features + optional cycle feature sets`；CLI 默认 `middle` 时 state_dim=57 |
 | 5 | Decoder 输入加入 reward 信号 | 是 | 未实现 | 会把 decoder 从 `p(a_hat | s, z_q)` 改成更强输入版本 |
 | 6 | 训练时数据增强（时间翻转） | 不改网络结构，但超出论文原始训练流程 | 未实现 | 属于训练技巧扩展 |
-| 7 | 多尺度 horizon 训练 | 是 | 未实现 | 会改固定长度 `h=72` 的数据组织和训练协议 |
+| 7 | 多尺度 horizon 训练 | 是 | 当前未保留/未启用；已尝试效果不好 | 会改固定长度 `h=72` 的数据组织和训练协议；暂不建议继续作为主线 |
 | 8 | Encoder 用 BiLSTM 替代单向 LSTM | 是 | 未实现 | 当前 encoder 仍是单向 LSTM + temporal attention |
 | 9 | 增加 VQ 训练的 pretrain epochs | 否 | 已实现（可直接改配置） | `pretrain_epochs` 已接入两阶段训练流程 |
 
@@ -81,21 +91,20 @@ DP 轨迹的 single-trade 结构是 [flat...flat, action, action...action]。可
 - 当前代码里 decoder 已经是 BiLSTM，但 encoder 还不是 BiLSTM。
 - 因此第 8 项不是“继续沿用现状”，而是一次新的结构修改。
 
-如果要我从这些里再挑最值得试的，我会把 4 标记为已完成；在剩余未完成项里，优先考虑 5（decoder 加 reward 输入）。理由：
+如果要从这些里再挑最值得试的，4 已经完成；在剩余未完成项里，优先考虑 5（decoder 加 reward 输入）。理由：
 
-特征增强是零风险改动，直接给 decoder 更好的输入信号来判断 change point 方向
-Decoder 加 reward 修复了 encoder-decoder 之间的信息不对称，让 decoder 不用从 z_q 里"猜" reward 信息
+- 特征增强是低风险改动，直接给 decoder 更好的输入信号来判断 change point 方向。
+- Decoder 加 reward 修复了 encoder-decoder 之间的信息不对称，让 decoder 不用从 z_q 里"猜" reward 信息。
 
+## 仍可考虑的 DP / 下游优化
 
+- 调整 `gamma`，做接近 1 的对照实验。
+- 放宽 single-trade 约束，允许 2 次或更多 change。
+- 给窗口末端加 continuation value，而不是把窗口外价值当 0。
+- 降低下游 imitation 权重，让 RL 学会偏离 DP 先验。
+- 多尺度 horizon 已尝试效果不好，暂不列为优先方向。
 
-dp优化
-增大或多尺度化 horizon
-把 gamma 往 1 调近一点做对照实验
-放宽 single-trade 约束，允许 2 次或更多 change
-给窗口末端加 continuation value，而不是把窗口外价值当 0
-降低下游 imitation 权重，让 RL 学会偏离 DP 先验
+## 因子组测试记录
 
-
-因子组测试完了
-short/long 只有20%收益
-middle 有80%收益
+- `short` / `long` 因子组收益约 20%。
+- `middle` 因子组收益约 80%。
