@@ -291,6 +291,30 @@ python -m pytest tests/ -v
 | DOT/USDT | 未配置 | 否 | 2500 | 论文资产；不在当前 `max_positions` 默认值中 |
 | BNB/USDT | 未配置 | 否 | 200 | 论文资产；不在当前 `max_positions` 默认值中 |
 
+## 未继续采用的实验
+
+`docs/ai_chat_log/` 和 `docs/future_phase1_change.md` 中记录了一些有价值的负结果。这些实验有些帮助定位了问题，但最终要么直接失败，要么导致交易质量回退，要么收益不足以成为当前主线。下表中的来源文件名默认指向 `docs/ai_chat_log/`；来源为 `future_phase1_change.md` 时则指向 `docs/future_phase1_change.md`。
+
+| 领域 | 尝试 | 观察到的问题 | 当前结论 | 来源 |
+|---|---|---|---|---|
+| Phase I 解码器 | 不带约束推理的逐点 MLP 解码器 | 缺少时序一致性：动作频繁切换、change point 准确率低、执行成本高。 | 原始 decoder argmax 只适合作为诊断指标；单次交易执行需要 constrained decoding。 | `2026-04-03_phase1_decoder_optimization_log.md` |
+| Phase I 解码器 | 朴素 LSTM 解码器 | 学到了 single-trade 形状，但方向语义坍缩到 long，short recall 几乎为零。 | 仅靠时序递归不能解决方向语义问题。 | `2026-04-03_phase1_decoder_optimization_log.md` |
+| Phase I loss | 反频率 class weight | 对 LSTM 坍缩矫枉过正，产生几乎全 short 的解码器，并降低 change point 准确率。 | 静态类别加权不适合修复这种 decoder 坍缩模式。 | `2026-04-03_phase1_decoder_optimization_log.md` |
+| Phase I loss | Focal loss + 温和 class weight | 同样把 decoder 推向 short，未恢复有效的 long/short 语义。 | 只改 loss 权重没有解决根因。 | `2026-04-03_phase1_decoder_optimization_log.md` |
+| Phase I 解码器 | 带 previous-action 输入的 teacher forcing | 推理时出现 exposure bias；不同 archetype 几乎变成同一种行为，`z_q` 基本被忽略。 | 这个场景下应避免 autoregressive teacher-forcing 变体。 | `2026-04-03_phase1_decoder_optimization_log.md` |
+| Phase II selector | 早期强 imitation 压力下的 selector 训练 | selector 坍缩到少数 archetype，与 DP label 的一致率接近随机，表现接近固定选择最佳 archetype。 | 当前 Phase II 使用更低/退火的 imitation 压力，并加强诊断。 | `2026-04-03_phase1_decoder_optimization_log.md`, `2026-04-12_phase2_optimization_log.md` |
+| Phase II 泛化 | AL selector 过度选择 flat-like 的 `k=8` archetype | `k=8` 在 train 上是合理的 no-trade archetype，但 selector 因分布偏移和过度自信，在 val 的可盈利 horizon 上也选择它。 | 这应视为 selector 泛化问题，而不是 `k=8` 本身是坏 archetype。 | `2026-04-12_phase2_optimization_log.md` |
+| Phase III refinement | Phase II 后完整运行 AL Phase III | Phase III 完成训练，但 `phase3_eval` 与 `phase2_eval` 完全相同，operations CSV checksum 也一致。 | 按论文式局部 refinement 职责，Phase III 不应被期待修复高层 archetype 选择错误。 | `2026-04-12_phase3_optimization_log.md` |
+| DP 采样 | `90%` stratified + `10%` importance 起点采样 | 将 Phase I 训练分布推向高收益/高波动窗口，导致 Phase I/II 收益退化。 | 不应把 importance-heavy 采样作为主线默认；pure stratified 更稳定。 | `2026-04-19_phase1_dp_structure_optimization_log.md` |
+| DP 采样 | 只靠 pure stratified 采样修复 | 只恢复了一部分回退，`best_fixed` 和 `realizable_proxy` 仍然偏低。 | 仅靠采样不能解决 Phase I 收益语义问题。 | `2026-04-19_phase1_dp_structure_optimization_log.md`, `future_phase1_change.md` |
+| Phase I checkpointing | 没有更强收益语义时加入 strict profit gate | 正确拦截了弱 checkpoint，但整轮训练仍没有足够好的 checkpoint 可进入 Phase II。 | gate 是护栏，不是模型质量提升手段本身。 | `2026-04-19_phase1_dp_structure_optimization_log.md` |
+| Phase I 语义 | 强 usage-profit alignment + separation | 改善了相关性症状，但压平收益谱系，真正高收益 archetype 消失。 | alignment 必须保持轻量，不应主导 Phase I 目标。 | `2026-04-19_phase1_dp_structure_optimization_log.md` |
+| Phase I 语义 | return regression 辅助头 | 连续收益回归太弱，无法塑造 code-level profit semantics；`best_fixed` 仍然很差。 | return bucket 分类比弱标量回归更有效。 | `2026-04-19_phase1_dp_structure_optimization_log.md` |
+| Phase I 语义 | 不带轻量 alignment 的 return bucket objective | 恢复了可盈利 archetype，但 assignment 的 usage-profit correlation 仍为负，未通过 gate。 | 当前配方中，return bucket 仍需要轻量 usage-profit alignment 配合。 | `2026-04-19_phase1_dp_structure_optimization_log.md` |
+| Codebook 容量 | 将 codebook size `K` 从 10 增大到 16/20 | 虽然动机合理，但后续尝试没有带来有效收益。 | `num_archetypes` 保持可配置，但更大的 `K` 不是优先路线。 | `future_phase1_change.md` |
+| Horizon 协议 | 带 padding 的多尺度 horizon 训练 | 已尝试但效果不好；同时会破坏 Phase I、Phase II 和评估共享的固定 `h=72` 协议。 | 除非建立独立实验分支并重设所有依赖阶段，否则保持当前单一 horizon 流水线。 | `future_phase1_change.md` |
+| 特征集 | 将 `short` / `long` 周期特征组作为默认 | 记录中的收益明显弱于 `middle` 特征组。 | CLI 默认使用 `--cycle-feature-sets middle`。 | `future_phase1_change.md` |
+
 ## 与论文的差异
 
 本节记录论文和当前代码库之间的已知差异，包括工程增强、有意设计变更，以及近期实验中发现的实现注意事项。
