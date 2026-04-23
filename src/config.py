@@ -119,23 +119,44 @@ class Config:
     # 评估
     annualization_factor: int = 52560  # 10分钟级别年化因子
 
+    def _primary_pair(self) -> str:
+        """返回当前配置的主品种（兼容旧接口）。"""
+        if not self.pairs:
+            raise ValueError("pairs 为空，无法推导默认品种")
+        pair = str(self.pairs[0]).strip()
+        if not pair:
+            raise ValueError("pairs[0] 为空字符串，无法推导默认品种")
+        return pair
+
+    def get_cycle_features(self, pair: str | None = None) -> List[str]:
+        """按品种返回配置选择的 cycle 特征。"""
+        target_pair = pair or self._primary_pair()
+        return resolve_cycle_features(self.cycle_feature_sets, pair=target_pair)
+
     @property
     def cycle_features(self) -> List[str]:
-        """根据配置选择 short/middle/long cycle 特征。"""
-        return resolve_cycle_features(self.cycle_feature_sets)
+        """兼容旧接口：返回主品种的 cycle 特征。"""
+        return self.get_cycle_features()
 
     @property
     def fixed_feature_dim(self) -> int:
         return len(FIXED_FEATURES)
 
+    def get_cycle_feature_dim(self, pair: str | None = None) -> int:
+        return len(self.get_cycle_features(pair=pair))
+
     @property
     def cycle_feature_dim(self) -> int:
-        return len(self.cycle_features)
+        return self.get_cycle_feature_dim()
+
+    def get_state_dim(self, pair: str | None = None) -> int:
+        """按品种返回状态维度 = fixed + cycle。"""
+        return self.fixed_feature_dim + self.get_cycle_feature_dim(pair=pair)
 
     @property
     def state_dim(self) -> int:
-        """状态维度 = fixed features + selected cycle features。"""
-        return self.fixed_feature_dim + self.cycle_feature_dim
+        """兼容旧接口：返回主品种状态维度。"""
+        return self.get_state_dim()
 
     def get_batch_result_dir(self) -> str:
         """批次级结果目录: result/批次号。"""

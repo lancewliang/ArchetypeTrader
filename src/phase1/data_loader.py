@@ -98,6 +98,7 @@ def inspect_trajectory_cache(
         expected_importance_vol_weight = float(config.phase1_importance_vol_weight) / weight_sum
         expected_importance_net_weight = float(config.phase1_importance_net_weight) / weight_sum
 
+    expected_state_dim = int(config.get_state_dim(pair))
     expected_values = {
         "pair": pair,
         "horizon": int(config.horizon),
@@ -112,7 +113,7 @@ def inspect_trajectory_cache(
         "sampling_importance_net_weight": float(expected_importance_net_weight),
         "num_available_starts": int(expected_starts),
         "training_rows": int(train_rows),
-        "state_dim": int(config.state_dim),
+        "state_dim": expected_state_dim,
         "commission_rate": float(config.dp_commission_rate),
         "max_position": int(config.max_positions[pair]),
         "algorithm_variant": "paper_single_change",
@@ -128,9 +129,13 @@ def inspect_trajectory_cache(
         states = data["states"]
         actions = data["actions"]
         rewards = data["rewards"]
-        if states.ndim != 3 or states.shape[1] != config.horizon or states.shape[2] != config.state_dim:
+        if (
+            states.ndim != 3
+            or states.shape[1] != config.horizon
+            or states.shape[2] != expected_state_dim
+        ):
             reasons.append(
-                f"states shape 不匹配: actual={states.shape}, expected=(*, {config.horizon}, {config.state_dim})"
+                f"states shape 不匹配: actual={states.shape}, expected=(*, {config.horizon}, {expected_state_dim})"
             )
         if actions.ndim != 2 or actions.shape[0] != states.shape[0] or actions.shape[1] != config.horizon:
             reasons.append(
@@ -194,7 +199,7 @@ def load_data_and_env(config: Any, pair: str) -> Tuple[TradingEnv, TradingEnv, i
     """
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
     pipeline = FeaturePipeline(
-        config.data_dir, pair, cycle_features=config.cycle_features,
+        config.data_dir, pair, cycle_features=config.get_cycle_features(pair),
     )
     train_df, _, _ = pipeline.get_state_vector()
     train_prices_df, _, _ = pipeline.get_prices()
@@ -308,16 +313,17 @@ def build_val_env(config: Any, pair: str) -> TradingEnv | None:
         验证环境或 None
     """
     val_pipeline = FeaturePipeline(
-        config.data_dir, pair, cycle_features=config.cycle_features,
+        config.data_dir, pair, cycle_features=config.get_cycle_features(pair),
     )
     _, val_state_df, _ = val_pipeline.get_state_vector()
     _, val_prices_df, _ = val_pipeline.get_prices()
+    expected_state_dim = config.get_state_dim(pair)
     if val_state_df is None or len(val_state_df) < config.horizon:
         return None
-    if val_state_df.width != config.state_dim:
+    if val_state_df.width != expected_state_dim:
         raise ValueError(
             "验证集 state_dim 与当前配置不一致: "
-            f"actual={val_state_df.width}, expected={config.state_dim}"
+            f"actual={val_state_df.width}, expected={expected_state_dim}"
         )
     return TradingEnv(
         states=val_state_df.to_numpy(),

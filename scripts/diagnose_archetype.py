@@ -86,7 +86,7 @@ def main():
             match = re.search(r'torch\.Size\(\[(\d+), (\d+)\]\)', error_msg)
             if match:
                 checkpoint_dim = int(match.group(2))
-                current_dim = config.state_dim
+                current_dim = config.get_state_dim(pair)
                 print(f"问题分析:")
                 print(f"  - Checkpoint 中的模型期望 state_dim = {checkpoint_dim}")
                 print(f"  - 当前配置使用 state_dim = {current_dim}")
@@ -135,9 +135,10 @@ def main():
     K = config.num_archetypes
 
     # 加载数据
-    print(f"加载数据: {pair}, 特征集: {config.cycle_features}")
+    pair_cycle_features = config.get_cycle_features(pair)
+    print(f"加载数据: {pair}, 特征集: {pair_cycle_features}")
     try:
-        pipeline = FeaturePipeline(config.data_dir, pair, cycle_features=config.cycle_features)
+        pipeline = FeaturePipeline(config.data_dir, pair, cycle_features=pair_cycle_features)
         train_df, val_df, test_df = pipeline.get_state_vector()
         _, val_prices_df, test_prices_df = pipeline.get_prices()
     except Exception as e:
@@ -145,7 +146,7 @@ def main():
         print(f"\n请检查:")
         print(f"  1. 数据目录是否存在: {config.data_dir}")
         print(f"  2. 交易对数据是否存在: {pair}")
-        print(f"  3. 特征集配置是否正确: {config.cycle_features}")
+        print(f"  3. 特征集配置是否正确: {pair_cycle_features}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

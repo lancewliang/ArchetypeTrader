@@ -777,6 +777,7 @@ def run_training_loop(
                     reward_history=reward_history,
                     best_val_return=best_val_return,
                     step_count=step_count,
+                    state_dim=agent.state_dim,
                     config=config,
                     ppo_hparams=ppo_hparams,
                 )
@@ -887,8 +888,9 @@ def main() -> None:
     # ----------------------------------------------------------------
     # Step 3: 初始化 SelectionAgent
     # ----------------------------------------------------------------
+    state_dim = config.get_state_dim(pair)
     agent = SelectionAgent(
-        state_dim=config.state_dim,
+        state_dim=state_dim,
         num_archetypes=config.num_archetypes,
         hidden_dim=config.phase2_hidden_dim,
         bottleneck_dim=config.phase2_bottleneck_dim,
@@ -897,7 +899,7 @@ def main() -> None:
     # Phase II 验证/诊断统一走 CPU，显著降低验证阶段显存峰值（适配 16G 显卡）。
     eval_device = torch.device("cpu")
     eval_agent = SelectionAgent(
-        state_dim=config.state_dim,
+        state_dim=state_dim,
         num_archetypes=config.num_archetypes,
         hidden_dim=config.phase2_hidden_dim,
         bottleneck_dim=config.phase2_bottleneck_dim,
@@ -1002,6 +1004,7 @@ def main() -> None:
         reward_history=reward_history,
         best_val_return=best_val_return,
         step_count=step_count,
+        state_dim=state_dim,
         config=config,
         ppo_hparams=ppo_hparams,
     )
@@ -1028,7 +1031,7 @@ def main() -> None:
     if os.path.exists(save_path):
         best_ckpt = torch.load(save_path, map_location=eval_device, weights_only=False)
         best_agent = SelectionAgent(
-            state_dim=config.state_dim,
+            state_dim=state_dim,
             num_archetypes=config.num_archetypes,
             hidden_dim=config.phase2_hidden_dim,
             bottleneck_dim=config.phase2_bottleneck_dim,

@@ -22,6 +22,7 @@ def save_checkpoint(
     reward_history: list[float],
     best_val_return: float,
     step_count: int,
+    state_dim: int,
     config: Any,
     ppo_hparams: dict[str, Any],
 ) -> None:
@@ -45,7 +46,7 @@ def save_checkpoint(
             "best_validation_return": best_val_return,
             "step": step_count,
             "config": {
-                "state_dim": config.state_dim,
+                "state_dim": state_dim,
                 "num_archetypes": config.num_archetypes,
                 "selection_alpha": config.selection_alpha,
                 "phase2_alpha_schedule": ppo_hparams["alpha_schedule"],

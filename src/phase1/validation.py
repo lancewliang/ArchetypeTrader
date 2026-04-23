@@ -230,6 +230,7 @@ def validate_dp_trajectories(
     dp_check_limit: int = 256,
 ) -> Dict[str, Any]:
     """验证 dp_trajectories 文件的完整性、约束和数学一致性。"""
+    expected_state_dim = int(config.get_state_dim(pair))
     report: Dict[str, Any] = {
         "file_integrity": {},
         "sampling": {},
@@ -271,7 +272,7 @@ def validate_dp_trajectories(
         "rewards_has_inf": bool(np.isinf(rewards).any()),
         "actions_unique_values": sorted(int(x) for x in np.unique(actions)),
         "expected_horizon": int(config.horizon),
-        "expected_state_dim": int(config.state_dim),
+        "expected_state_dim": expected_state_dim,
         "expected_num_trajectories": int(config.num_trajectories),
         "actual_num_trajectories": int(states.shape[0]),
     }
@@ -287,9 +288,9 @@ def validate_dp_trajectories(
         report["hard_failures"].append(
             f"轨迹 horizon 与 config 不一致: actions h={states.shape[1]}, expected={config.horizon}"
         )
-    if states.ndim == 3 and states.shape[2] != config.state_dim:
+    if states.ndim == 3 and states.shape[2] != expected_state_dim:
         report["hard_failures"].append(
-            f"state_dim 与 config 不一致: states dim={states.shape[2]}, expected={config.state_dim}"
+            f"state_dim 与 config 不一致: states dim={states.shape[2]}, expected={expected_state_dim}"
         )
     if states.shape[0] != actions.shape[0] or states.shape[0] != rewards.shape[0]:
         report["hard_failures"].append("states/actions/rewards 样本数不一致")
@@ -525,6 +526,7 @@ def validate_phase1_model(
     device: torch.device,
 ) -> Dict[str, Any]:
     """验证 Phase I VQ 模型的 checkpoint、重建效果与 codebook 健康度。"""
+    expected_state_dim = int(config.get_state_dim(pair))
     report: Dict[str, Any] = {
         "checkpoint_integrity": {},
         "forward_shape": {},
@@ -559,7 +561,7 @@ def validate_phase1_model(
 
     report["checkpoint_integrity"].update(
         {
-            "state_dim_match": int(model_config["state_dim"]) == int(config.state_dim),
+            "state_dim_match": int(model_config["state_dim"]) == expected_state_dim,
             "action_dim_match": int(model_config["action_dim"]) == int(config.action_dim),
             "latent_dim_match": int(model_config["latent_dim"]) == int(config.latent_dim),
             "num_archetypes_match": int(model_config["num_archetypes"]) == int(config.num_archetypes),
@@ -984,6 +986,7 @@ def validate_phase1_artifacts(
     }
 
     try:
+        expected_state_dim = int(config.get_state_dim(pair))
         # 读取缓存元数据里的 commission_rate，作为 DP 验证阶段的权威值。
         # DP trajectory 生成时用的 dp_commission_rate 与训练/评估用的 commission_rate
         # 可能不一致；若 DP 验证使用另一个费率，reward 回放与 DP 重跑会全部失配。
@@ -998,7 +1001,7 @@ def validate_phase1_artifacts(
                 cached_states = _cache_data["states"]
                 if cached_states.ndim == 3:
                     cache_state_dim = int(cached_states.shape[2])
-                    config_state_dim = int(config.state_dim)
+                    config_state_dim = expected_state_dim
                     if cache_state_dim != config_state_dim:
                         msg = (
                             f"state_dim 不匹配: 轨迹缓存={cache_state_dim}, "
@@ -1014,7 +1017,7 @@ def validate_phase1_artifacts(
         if env is None:
             logger.info("Phase I 验证: 重新加载训练特征与 TradingEnv")
             pipeline = FeaturePipeline(
-                config.data_dir, pair, cycle_features=config.cycle_features,
+                config.data_dir, pair, cycle_features=config.get_cycle_features(pair),
             )
             train_df, _, _ = pipeline.get_state_vector()
             train_prices_df, _, _ = pipeline.get_prices()

@@ -124,7 +124,7 @@ def analyze(pair: str, config: Config, out_dir: str = "docs") -> None:
     print(f"{'='*60}")
 
     pipeline = FeaturePipeline(
-        config.data_dir, pair, cycle_features=config.cycle_features
+        config.data_dir, pair, cycle_features=config.get_cycle_features(pair)
     )
 
     pipeline._load_data()
@@ -205,7 +205,7 @@ def analyze(pair: str, config: Config, out_dir: str = "docs") -> None:
     # ── 4. 关键特征 val vs test 均值/标准差对比
     lines.append("\n[4] 关键特征统计对比（val vs test）")
     lines.append("-" * 50)
-    key_features = FIXED_FEATURES + config.cycle_features
+    key_features = FIXED_FEATURES + config.get_cycle_features(pair)
     key_features = [c for c in key_features if c in feature_cols]
     lines.append(
         f"  {'特征':<40} {'val_mean':>12} {'test_mean':>12} "

@@ -26,7 +26,7 @@ class TestGetStateVector:
         with tempfile.TemporaryDirectory() as tmpdir:
             pair_dir = f"{tmpdir}/ETH"
             os.makedirs(pair_dir, exist_ok=True)
-            feature_cols = FIXED_FEATURES + resolve_cycle_features(["short", "middle", "long"])
+            feature_cols = FIXED_FEATURES + resolve_cycle_features(["short", "middle"], pair="FU")
             n_rows = 1000
             data = {col: list(range(n_rows)) for col in feature_cols}
             train_df = pl.DataFrame(data)
@@ -76,7 +76,7 @@ class TestGetStateVector:
 
     def test_cycle_features_are_appended_when_selected(self, tmp_feather_dir):
         tmpdir, _, _, _ = tmp_feather_dir
-        cycle_features = resolve_cycle_features(["short", "middle"])
+        cycle_features = resolve_cycle_features(["short", "middle"], pair="FU")
 
         fp = FeaturePipeline(tmpdir, "ETH", cycle_features=cycle_features)
         train, _, _ = fp.get_state_vector()

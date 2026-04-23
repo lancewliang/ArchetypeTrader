@@ -26,7 +26,7 @@ ckpt = torch.load(
     map_location=device, weights_only=False,
 )
 encoder = VQEncoder(
-    state_dim=config.state_dim, action_dim=config.action_dim,
+    state_dim=config.get_state_dim("AL"), action_dim=config.action_dim,
     latent_dim=config.latent_dim, hidden_dim=config.lstm_hidden_dim,
 ).to(device)
 encoder.load_state_dict(ckpt["encoder"])

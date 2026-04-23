@@ -82,7 +82,7 @@ def save_checkpoint(
         "loss_history": history.loss,
         "training_monitor": history.to_dict(),
         "config": {
-            "state_dim": config.state_dim,
+            "state_dim": encoder.state_dim,
             "action_dim": config.action_dim,
             "latent_dim": config.latent_dim,
             "num_archetypes": config.num_archetypes,
@@ -137,6 +137,7 @@ def save_checkpoint(
 def load_models_from_phase1_checkpoint(
     *,
     config: Any,
+    pair: str,
     checkpoint_path: str,
     device: torch.device,
 ) -> Tuple[VQEncoder, VQCodebook, VQDecoder]:
@@ -151,8 +152,9 @@ def load_models_from_phase1_checkpoint(
         (encoder, codebook, decoder) 模型元组
     """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_dim = config.get_state_dim(pair)
     encoder = VQEncoder(
-        state_dim=config.state_dim,
+        state_dim=state_dim,
         action_dim=config.action_dim,
         hidden_dim=config.lstm_hidden_dim,
         latent_dim=config.latent_dim,
@@ -162,7 +164,7 @@ def load_models_from_phase1_checkpoint(
         code_dim=config.latent_dim,
     ).to(device)
     decoder = VQDecoder(
-        state_dim=config.state_dim,
+        state_dim=state_dim,
         code_dim=config.latent_dim,
         hidden_dim=config.lstm_hidden_dim,
         action_dim=config.action_dim,
@@ -554,6 +556,7 @@ def select_and_materialize_best_phase1_checkpoint(
 
             encoder_ckpt, codebook_ckpt, decoder_ckpt = load_models_from_phase1_checkpoint(
                 config=config,
+                pair=pair,
                 checkpoint_path=checkpoint_path,
                 device=device,
             )

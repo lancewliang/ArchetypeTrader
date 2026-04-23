@@ -105,7 +105,7 @@ def load_phase1_model(config, pair: str, device: torch.device):
     codebook.load_state_dict(ckpt["codebook"])
 
     decoder = VQDecoder(
-        state_dim=config.state_dim, code_dim=config.latent_dim,
+        state_dim=config.get_state_dim(pair), code_dim=config.latent_dim,
         hidden_dim=config.lstm_hidden_dim, action_dim=config.action_dim,
     ).to(device)
     decoder.load_state_dict(ckpt["decoder"])
@@ -141,7 +141,7 @@ def load_phase2_model(config, pair: str, device: torch.device):
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
 
     agent = SelectionAgent(
-        state_dim=config.state_dim, num_archetypes=config.num_archetypes,
+        state_dim=config.get_state_dim(pair), num_archetypes=config.num_archetypes,
         hidden_dim=config.phase2_hidden_dim,
         bottleneck_dim=config.phase2_bottleneck_dim,
     ).to(device)
@@ -531,7 +531,7 @@ def save_checkpoint(path: str, agent: RefinementAgent, config, **extra):
         {
             "agent": agent.state_dict(),
             "config": {
-                "state_dim": config.state_dim,
+                "state_dim": agent.market_dim,
                 "latent_dim": config.latent_dim,
                 "num_archetypes": config.num_archetypes,
                 "phase3_total_steps": config.phase3_total_steps,
@@ -593,7 +593,7 @@ def main() -> None:
     # --- 数据 & 环境 ---
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
     pipeline = FeaturePipeline(
-        config.data_dir, pair, cycle_features=config.cycle_features,
+        config.data_dir, pair, cycle_features=config.get_cycle_features(pair),
     )
     train_df, _, _ = pipeline.get_state_vector()
     train_prices_df, _, _ = pipeline.get_prices()
@@ -615,15 +615,16 @@ def main() -> None:
 
     # --- RefinementAgent ---
     context_dim = config.latent_dim + 3
+    state_dim = config.get_state_dim(pair)
     refinement_agent = RefinementAgent(
-        market_dim=config.state_dim,
+        market_dim=state_dim,
         context_dim=context_dim,
         hidden_dim=config.refinement_hidden_dim,
     ).to(device)
     logger.info(
         "RefinementAgent: params=%d, market_dim=%d, context_dim=%d",
         sum(p.numel() for p in refinement_agent.parameters()),
-        config.state_dim, context_dim,
+        state_dim, context_dim,
     )
     log_and_guard_gpu_memory(logger, stage="Phase III after agent init", device=device, force_log=False)
 

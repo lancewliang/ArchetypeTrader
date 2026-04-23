@@ -49,17 +49,18 @@ def load_phase1_model(
     logger.info("加载 Phase I 模型: %s", model_path)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     ckpt_config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+    expected_state_dim = config.get_state_dim(pair)
 
-    ckpt_state_dim = int(ckpt_config.get("state_dim", config.state_dim))
+    ckpt_state_dim = int(ckpt_config.get("state_dim", expected_state_dim))
     ckpt_action_dim = int(ckpt_config.get("action_dim", config.action_dim))
     ckpt_latent_dim = int(ckpt_config.get("latent_dim", config.latent_dim))
     ckpt_num_archetypes = int(ckpt_config.get("num_archetypes", config.num_archetypes))
     ckpt_lstm_hidden_dim = int(ckpt_config.get("lstm_hidden_dim", config.lstm_hidden_dim))
 
-    if ckpt_state_dim != config.state_dim:
+    if ckpt_state_dim != expected_state_dim:
         raise ValueError(
             "Phase I checkpoint 的 state_dim 与当前配置不一致，无法加载并用于推理。\n"
-            f"  checkpoint_state_dim={ckpt_state_dim}, config_state_dim={config.state_dim}\n"
+            f"  checkpoint_state_dim={ckpt_state_dim}, config_state_dim={expected_state_dim}\n"
             "  提示: 请用与训练一致的 --cycle-feature-sets 运行 evaluate/train_phase2/train_phase3。",
         )
     if ckpt_action_dim != config.action_dim:
@@ -134,11 +135,12 @@ def load_phase2_model(
     inferred_hidden_dim = int(shared0_w.shape[0])
     inferred_bottleneck_dim = int(shared2_w.shape[0])
     inferred_num_archetypes = int(policy_w.shape[0])
+    expected_state_dim = config.get_state_dim(pair)
 
-    if inferred_state_dim != config.state_dim:
+    if inferred_state_dim != expected_state_dim:
         raise ValueError(
             "Phase II checkpoint 的 state_dim 与当前配置不一致，无法加载并用于推理。\n"
-            f"  checkpoint_state_dim={inferred_state_dim}, config_state_dim={config.state_dim}\n"
+            f"  checkpoint_state_dim={inferred_state_dim}, config_state_dim={expected_state_dim}\n"
             "  提示: 请用与训练一致的 --cycle-feature-sets 运行 evaluate。",
         )
 
@@ -182,14 +184,15 @@ def load_phase3_model(
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
     ckpt_config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
-    ckpt_state_dim = int(ckpt_config.get("state_dim", config.state_dim))
+    expected_state_dim = config.get_state_dim(pair)
+    ckpt_state_dim = int(ckpt_config.get("state_dim", expected_state_dim))
     ckpt_latent_dim = int(ckpt_config.get("latent_dim", config.latent_dim))
     ckpt_hidden_dim = int(ckpt_config.get("refinement_hidden_dim", config.refinement_hidden_dim))
 
-    if ckpt_state_dim != config.state_dim:
+    if ckpt_state_dim != expected_state_dim:
         raise ValueError(
             "Phase III checkpoint 的 state_dim 与当前配置不一致，无法加载并用于推理。\n"
-            f"  checkpoint_state_dim={ckpt_state_dim}, config_state_dim={config.state_dim}\n"
+            f"  checkpoint_state_dim={ckpt_state_dim}, config_state_dim={expected_state_dim}\n"
             "  提示: 请用与训练一致的 --cycle-feature-sets 运行 evaluate。",
         )
 

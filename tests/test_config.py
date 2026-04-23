@@ -152,9 +152,9 @@ class TestParseArgs:
         assert cfg.phase1_epochs == 50
 
     def test_cycle_feature_sets_override(self):
-        cfg = parse_args(["--cycle-feature-sets", "short,long"])
-        assert cfg.cycle_feature_sets == ["short", "long"]
-        assert cfg.cycle_features == resolve_cycle_features(["short", "long"])
+        cfg = parse_args(["--pair", "FU", "--cycle-feature-sets", "short,middle"])
+        assert cfg.cycle_feature_sets == ["short", "middle"]
+        assert cfg.cycle_features == resolve_cycle_features(["short", "middle"], pair="FU")
         assert cfg.state_dim == len(FIXED_FEATURES) + len(cfg.cycle_features)
 
 

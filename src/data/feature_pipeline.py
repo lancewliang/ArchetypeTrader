@@ -4,6 +4,7 @@
 `fixed_features + cycle_features` 组装状态向量。
 """
 
+from pathlib import Path
 from typing import Iterable, Tuple
 
 import polars as pl
@@ -20,117 +21,7 @@ FIXED_FEATURES = [
     "total_trade_volume", "turnover", "open_interest" 
 ]
 
-SHORT_CYCLE_FEATURES = [
-    "ask_gap_3_4",
-    "ask_gap_4_5",
-    "avg_trade_price_bias_zscore_30",
-    "bid1_price_zscore_30",
-    "bid_gap_near_far_ratio",
-    "close_price_ratio_120",
-    "close_price_ratio_240",
-    "close_price_ratio_30",
-    "close_price_ratio_60",
-    "close_price_zscore_120",
-    "close_price_zscore_240",
-    "close_price_zscore_30",
-    "close_price_zscore_60",
-    "depth_replenishment_diff",
-    "imbalance_top3",
-    "klow",
-    "klow2",
-    "kmid2",
-    "ksft2",
-    "kup",
-    "kup2",
-    "log_return_wap_2_vol_60",
-    "max_gap_diff",
-    "price_spread",
-    "sell_vwap",
-    "sell_vwap_trend_240",
-    "sell_vwap_trend_30",
-    "sell_vwap_trend_60",
-    "volume_ratio_60",
-    "weighted_imbalance_inv",
-]
-
-MIDDLE_CYCLE_FEATURES = [
-    "ask_gap_2_3",
-    "ask_gap_near_far_ratio",
-    "bid_gap_near_far_ratio",
-    "buy_volume",
-    "close_price_ratio_120",
-    "close_price_ratio_240",
-    "close_price_ratio_30",
-    "close_price_ratio_60",
-    "close_price_zscore_30",
-    "close_price_zscore_60",
-    "klen",
-    "klow",
-    "klow2",
-    "kmid2",
-    "ksft2",
-    "kup",
-    "kup2",
-    "log_return_wap_2_vol_120",
-    "max_bid_gap",
-    "ofi_vol_120_zscore_240",
-    "open_interest_change_vol_120",
-    "price_spread_vol_120",
-    "turnover_delta_vol_120",
-    "turnover_delta_vol_240_ratio_60",
-    "turnover_delta_vol_60",
-    "turnover_regime_ratio_60_360",
-    "vol_regime_ratio_60_360",
-    "volume",
-    "volume_ratio_120",
-    "volume_ratio_60",
-    "volume_trend_120",
-    "volume_trend_60",
-    "wap_1",
-]
-
-LONG_CYCLE_FEATURES = [
-    "ask_gap_count",
-    "close_price_ratio_120",
-    "close_price_ratio_240",
-    "close_price_ratio_30",
-    "close_price_ratio_60",
-    "gap_count_diff",
-    "klen",
-    "klen_ratio_240",
-    "klow",
-    "kmid2",
-    "ksft2",
-    "kup2",
-    "log_return_wap_2_vol_120",
-    "log_return_wap_2_vol_60",
-    "max_ask_gap",
-    "ofi_vol_240",
-    "ofi_vol_30",
-    "open_interest_change_vol_120",
-    "open_interest_change_vol_60",
-    "sell_volume",
-    "sell_vwap_trend_240",
-    "spread_regime_ratio_60_360",
-    "turnover_delta_vol_120",
-    "turnover_delta_vol_60",
-    "turnover_regime_ratio_60_360",
-    "vol_regime_ratio_60_180",
-    "vol_regime_ratio_60_360",
-    "volume",
-    "volume_ratio_60",
-    "wap_2",
-]
-
-CYCLE_FEATURES = {
-    "short": SHORT_CYCLE_FEATURES,
-    "middle": MIDDLE_CYCLE_FEATURES,
-    "long": LONG_CYCLE_FEATURES,
-}
-
-# Backward-compatible alias retained for tests/imports that still reference it.
- 
- 
+FACTORS_ROOT = Path(__file__).resolve().parents[1] / "factors"
 
 
 def _dedupe_preserve_order(columns: Iterable[str]) -> list[str]:
@@ -145,15 +36,89 @@ def _dedupe_preserve_order(columns: Iterable[str]) -> list[str]:
     return ordered
 
 
-def resolve_cycle_features(cycle_feature_sets: Iterable[str]) -> list[str]:
+def _resolve_pair_factor_dir(pair: str, factors_root: Path | None = None) -> Path:
+    """解析并返回某个品种对应的因子目录（大小写不敏感）。"""
+    root = factors_root or FACTORS_ROOT
+    if not root.exists():
+        raise ValueError(f"因子目录不存在: {root}")
+
+    normalized_pair = pair.strip()
+    if not normalized_pair:
+        raise ValueError("pair 不能为空")
+
+    for candidate in (normalized_pair, normalized_pair.upper(), normalized_pair.lower()):
+        candidate_path = root / candidate
+        if candidate_path.is_dir():
+            return candidate_path
+
+    lower_name_to_path = {
+        child.name.lower(): child
+        for child in root.iterdir()
+        if child.is_dir()
+    }
+    matched = lower_name_to_path.get(normalized_pair.lower())
+    if matched is not None:
+        return matched
+
+    available_pairs = sorted(path.name for path in lower_name_to_path.values())
+    raise ValueError(
+        f"未找到品种 {pair!r} 的因子目录，当前可用品种: {available_pairs}"
+    )
+
+
+def list_cycle_feature_sets(pair: str, factors_root: Path | None = None) -> list[str]:
+    """列出某个品种可用的 cycle 集合名（来自 *.txt 文件名）。"""
+    pair_dir = _resolve_pair_factor_dir(pair, factors_root=factors_root)
+    return sorted(
+        path.stem.strip().lower()
+        for path in pair_dir.glob("*.txt")
+        if path.is_file()
+    )
+
+
+def load_cycle_features_from_file(
+    pair: str,
+    cycle_feature_set: str,
+    factors_root: Path | None = None,
+) -> list[str]:
+    """从 src/factors/<pair>/<cycle>.txt 读取特征列表。"""
+    pair_dir = _resolve_pair_factor_dir(pair, factors_root=factors_root)
+    normalized_cycle = cycle_feature_set.strip().lower()
+    if not normalized_cycle:
+        raise ValueError("cycle feature set 名称不能为空")
+
+    feature_path = pair_dir / f"{normalized_cycle}.txt"
+    if not feature_path.exists():
+        available_sets = list_cycle_feature_sets(pair, factors_root=factors_root)
+        raise ValueError(
+            f"未找到 cycle feature set: {normalized_cycle!r} (pair={pair})，"
+            f"可选: {available_sets}"
+        )
+
+    raw_lines = feature_path.read_text(encoding="utf-8").splitlines()
+    features: list[str] = []
+    for raw_line in raw_lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        feature_name = line.split("#", 1)[0].strip()
+        if feature_name:
+            features.append(feature_name)
+
+    if not features:
+        raise ValueError(f"因子文件为空: {feature_path}")
+
+    return _dedupe_preserve_order(features)
+
+
+def resolve_cycle_features(cycle_feature_sets: Iterable[str], pair: str) -> list[str]:
     """把 short/middle/long 组合解析为去重后的 cycle 特征列表。"""
     merged: list[str] = []
     for name in cycle_feature_sets:
-        if name not in CYCLE_FEATURES:
-            raise ValueError(
-                f"未知 cycle feature set: {name}，可选: {sorted(CYCLE_FEATURES.keys())}"
-            )
-        merged.extend(CYCLE_FEATURES[name])
+        normalized_name = name.strip().lower()
+        if not normalized_name:
+            continue
+        merged.extend(load_cycle_features_from_file(pair, normalized_name))
     return _dedupe_preserve_order(merged)
 
 

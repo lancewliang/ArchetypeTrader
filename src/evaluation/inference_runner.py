@@ -281,7 +281,7 @@ def evaluate_pair(
     # 加载特征数据
     logger.info("加载特征数据: data_dir=%s, pair=%s", config.data_dir, pair)
     pipeline = FeaturePipeline(
-        config.data_dir, pair, cycle_features=config.cycle_features,
+        config.data_dir, pair, cycle_features=config.get_cycle_features(pair),
     )
     train_df, val_df, test_df = pipeline.get_state_vector()
     train_prices_df, val_prices_df, test_prices_df = pipeline.get_prices()
@@ -494,7 +494,7 @@ def evaluate_pair_dp(
     logger.info("DP 基准评估: %s [split=%s]", pair, split)
     logger.info("=" * 50)
 
-    pipeline = FeaturePipeline(config.data_dir, pair, cycle_features=config.cycle_features)
+    pipeline = FeaturePipeline(config.data_dir, pair, cycle_features=config.get_cycle_features(pair))
     _, val_df, test_df = pipeline.get_state_vector()
     _, val_prices_df, test_prices_df = pipeline.get_prices()
 
