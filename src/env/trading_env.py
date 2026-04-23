@@ -26,6 +26,7 @@ class TradingEnv:
     MAX_POSITIONS: Dict[str, int] = {
         "ETH": 100,
         "AL": 10,
+        "FU": 10,
     }
 
     # Section 3.1: 佣金率 δ = 0.02%（论文值）

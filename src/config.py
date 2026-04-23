@@ -21,7 +21,7 @@ class Config:
     data_dir: str = "data"
     result_dir: str = "result"
     train_batch_id: str = "default"
-    pairs: List[str] = field(default_factory=lambda: [ "AL","ETH"])
+    pairs: List[str] = field(default_factory=lambda: [ "AL","ETH","FU"])
 
     # 特征维度
     cycle_feature_sets: List[str] = field(default_factory=list)
@@ -33,7 +33,7 @@ class Config:
     dp_commission_rate: float = 0.0008  # DP planner 用 0.1%（高门槛筛选高利润轨迹）
     train_commission_rate: float = 0.0008  # Phase 1/2/3 训练用 0.06%（2× 真实费率，留安全边际）
     max_positions: Dict[str, int] = field(
-        default_factory=lambda: { "ETH": 100, "AL": 10}
+        default_factory=lambda: { "ETH": 100, "AL": 10, "FU": 10}
     )
 
     # Phase I 配置
