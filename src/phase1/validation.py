@@ -753,7 +753,7 @@ def validate_phase1_model(
     dead_code_count = int(np.sum(code_counts == 0))
     dominant_code_ratio = float(np.max(code_counts) / np.sum(code_counts)) if np.sum(code_counts) > 0 else 0.0
     
-    # 计算低使用率码本（使用率 < 10%）
+    # 计算低使用率码本（使用率 < 5%）
     total_usage = np.sum(code_counts)
     low_usage_threshold = 0.05  # 5%
     low_usage_codes = []
@@ -924,7 +924,7 @@ def validate_phase1_model(
         if len(high_similarity_pairs) > 3:
             pair_details += f" 等 {len(high_similarity_pairs)} 对"
         report["soft_warnings"].append(
-            f"⚠️ 特征多样性丧失: {len(high_similarity_pairs)} 对原型余弦相似度 > 0.8，"
+            f"⚠️ 特征多样性丧失: {len(high_similarity_pairs)} 对原型余弦相似度 > {high_similarity_threshold:.1f}，"
             f"说明原型向量过于相似: {pair_details}"
         )
 

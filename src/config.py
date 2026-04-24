@@ -62,6 +62,7 @@ class Config:
     phase1_profit_init_top_ratio: float = 0.25  # 初始化时优先使用高收益样本的 top 比例
     phase1_profit_init_code_ratio: float = 0.50  # 初始化时每个方向分配给高收益子集的 code 比例
     phase1_profit_reset_top_ratio: float = 0.25  # 死码重置时优先抽取高收益样本的 top 比例
+    phase1_low_usage_reset_threshold: float = 0.0  # 低使用率码本重置阈值（0=仅重置 usage==0；如 0.03 表示 <3% 也重置）
     phase1_selection_min_realizable_proxy_return_mean: float = 0.0  # Phase I checkpoint 选择的 realizable proxy 绝对门槛
     phase1_selection_min_realizable_proxy_to_oracle_ratio: float = 0.40  # realizable proxy / oracle 的最低占比
     phase1_selection_min_best_fixed_archetype_return_mean: float = 0.0  # 最佳固定原型收益绝对门槛
@@ -358,6 +359,12 @@ def parse_args(argv: list | None = None) -> Config:
         help="Phase I 死码重置时优先采用高收益样本的 top 比例",
     )
     parser.add_argument(
+        "--phase1-low-usage-reset-threshold",
+        type=float,
+        default=None,
+        help="Phase I 训练中低使用率码本重置阈值（0=仅重置 usage==0）",
+    )
+    parser.add_argument(
         "--phase1-selection-min-realizable-proxy-return-mean",
         type=float,
         default=None,
@@ -626,6 +633,11 @@ def parse_args(argv: list | None = None) -> Config:
         if value is not None and not 0.0 <= value <= 1.0:
             parser.error(f"--{name.replace('_', '-')} 必须在 [0, 1] 范围内")
     if (
+        args.phase1_low_usage_reset_threshold is not None
+        and not 0.0 <= args.phase1_low_usage_reset_threshold < 1.0
+    ):
+        parser.error("--phase1-low-usage-reset-threshold 必须在 [0, 1) 范围内")
+    if (
         args.phase1_selection_min_realizable_proxy_to_oracle_ratio is not None
         and args.phase1_selection_min_realizable_proxy_to_oracle_ratio < 0
     ):
@@ -692,6 +704,7 @@ def parse_args(argv: list | None = None) -> Config:
         "phase1_profit_init_top_ratio": getattr(args, "phase1_profit_init_top_ratio", None),
         "phase1_profit_init_code_ratio": getattr(args, "phase1_profit_init_code_ratio", None),
         "phase1_profit_reset_top_ratio": getattr(args, "phase1_profit_reset_top_ratio", None),
+        "phase1_low_usage_reset_threshold": getattr(args, "phase1_low_usage_reset_threshold", None),
         "phase1_selection_min_realizable_proxy_return_mean": getattr(
             args, "phase1_selection_min_realizable_proxy_return_mean", None,
         ),

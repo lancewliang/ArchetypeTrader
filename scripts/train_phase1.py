@@ -841,6 +841,7 @@ def train_one_epoch(
             metrics.code_counts,
             trajectory_returns=last_traj_returns,
             top_ratio=config.phase1_profit_reset_top_ratio,
+            min_usage_ratio=getattr(config, "phase1_low_usage_reset_threshold", 0.0),
         )
 
     return metrics, z_e_all, a_demo_all, traj_return_all
@@ -1025,6 +1026,9 @@ def save_checkpoint(
             "phase1_profit_init_top_ratio": config.phase1_profit_init_top_ratio,
             "phase1_profit_init_code_ratio": config.phase1_profit_init_code_ratio,
             "phase1_profit_reset_top_ratio": config.phase1_profit_reset_top_ratio,
+            "phase1_low_usage_reset_threshold": getattr(
+                config, "phase1_low_usage_reset_threshold", 0.0,
+            ),
             "discount_factor": config.discount_factor,
             "commission_rate": config.commission_rate,
                 "dp_commission_rate": config.dp_commission_rate,
@@ -1119,7 +1123,7 @@ def main() -> None:
         "num_archetypes=%d, num_trajectories=%d, vq_beta0=%.2f, sampling_seed=%d, "
         "sampling_mode=%s(%.2f/%.2f), align_w=%.3f, align_target=%.2f, return_w=%.3f, "
         "return_hidden=%d, return_bins=%d, return_soft=%.2f, sep_w=%.3f, sep_margin=%.2f, "
-        "init_top=%.2f, init_code=%.2f, reset_top=%.2f",
+        "init_top=%.2f, init_code=%.2f, reset_top=%.2f, low_usage_reset=%.3f",
         config.phase1_epochs, config.batch_size, config.learning_rate, config.latent_dim,
         config.num_archetypes, config.num_trajectories, config.vq_beta0, config.phase1_sampling_seed,
         config.phase1_start_sampling_mode, config.phase1_stratified_ratio, config.phase1_importance_ratio,
@@ -1134,6 +1138,7 @@ def main() -> None:
         config.phase1_profit_init_top_ratio,
         config.phase1_profit_init_code_ratio,
         config.phase1_profit_reset_top_ratio,
+        float(getattr(config, "phase1_low_usage_reset_threshold", 0.0)),
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

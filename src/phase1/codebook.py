@@ -335,23 +335,36 @@ class VQCodebook(nn.Module):
         code_counts: np.ndarray,
         trajectory_returns: Tensor | None = None,
         top_ratio: float = 0.0,
+        min_usage_ratio: float = 0.0,
     ) -> int:
-        """将死码重置为当前 z_e 分布中的采样点（加少量噪声）。
+        """将死码/低使用码重置为当前 z_e 分布中的采样点（加少量噪声）。
 
-        在每个 Phase B epoch 结束后调用。死码定义为 code_counts == 0 的条目。
+        在每个 Phase B epoch 结束后调用。
+        - 死码: code_counts == 0
+        - 低使用码: 0 < usage_ratio < min_usage_ratio（当 min_usage_ratio > 0 时启用）
 
         Args:
             z_e_batch: 当前 epoch 最后一个 batch 的 z_e (batch, code_dim)
             code_counts: 当前 epoch 各码本条目的使用计数 (num_codes,)
             trajectory_returns: 当前 batch 的轨迹总收益，用于偏向高收益样本
             top_ratio: 若 >0，则优先从高收益样本 top 比例中重置死码
+            min_usage_ratio: 低使用率阈值（0~1）；0 表示仅重置死码
 
         Returns:
-            重置的死码数量
+            重置的码本条目数量
         """
+        total_count = int(np.sum(code_counts))
+        ratio_threshold = float(np.clip(min_usage_ratio, 0.0, 1.0))
+
         dead_mask = code_counts == 0
-        dead_indices = np.where(dead_mask)[0]
-        if len(dead_indices) == 0:
+        low_usage_mask = np.zeros_like(dead_mask, dtype=bool)
+        if ratio_threshold > 0.0 and total_count > 0:
+            usage_ratio = code_counts.astype(np.float64) / float(total_count)
+            low_usage_mask = (code_counts > 0) & (usage_ratio < ratio_threshold)
+
+        reset_mask = dead_mask | low_usage_mask
+        reset_indices = np.where(reset_mask)[0]
+        if len(reset_indices) == 0:
             return 0
 
         device = self.embeddings.weight.device
@@ -367,10 +380,22 @@ class VQCodebook(nn.Module):
                 top_idx = torch.topk(returns, k=top_n, largest=True).indices
                 pool = z[top_idx]
 
-        for i, idx in enumerate(dead_indices):
+        for i, idx in enumerate(reset_indices):
             sampled = pool[i % pool.shape[0]]
             noise = torch.randn_like(sampled) * 1e-3
             self.embeddings.weight.data[idx] = sampled + noise
 
-        logger.info("重置 %d 个死码 (indices=%s)", len(dead_indices), dead_indices.tolist())
-        return len(dead_indices)
+        dead_count = int(np.sum(dead_mask))
+        low_usage_count = int(np.sum(low_usage_mask))
+        if low_usage_count > 0:
+            logger.info(
+                "重置 %d 个码本条目 (dead=%d, low_usage=%d, threshold=%.4f, indices=%s)",
+                len(reset_indices),
+                dead_count,
+                low_usage_count,
+                ratio_threshold,
+                reset_indices.tolist(),
+            )
+        else:
+            logger.info("重置 %d 个死码 (indices=%s)", len(reset_indices), reset_indices.tolist())
+        return len(reset_indices)
