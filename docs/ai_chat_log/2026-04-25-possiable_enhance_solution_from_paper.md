@@ -573,3 +573,54 @@
 
 - 到当前为止，没有任何一条 `Phase III` 机制改动带来了收益改良
 - 继续在现有分支上累积实验代码，只会增加维护成本并污染后续判断
+
+## 2026-04-26 补充：batch_11-p3 回归验证与收口结论
+
+### 一、实验目的
+
+在已有结论基础上，再做一轮“最小可行改造”回归验证，确认以下方向是否能带来增益：
+
+1. `PolicyAdapter` 改为 risk-brake 语义（仅允许向 `flat` 收敛，不允许 `base=flat` 开新仓）
+2. hindsight 候选与推理语义对齐（只保留 `short->flat` 与 `long->flat`）
+3. 移除 `R_arche` context，训练/推理统一为 `[e_a_sel, a_base, tau_remain]`
+
+对应批次与日志：
+
+- `batch_11-p3`
+- `logs/FU/batch_11-p3/FU_pipeline_20260426_102245.log`
+
+### 二、训练与评估结果
+
+训练：
+
+- `Phase III` 正常完成，无报错
+- 保存模型：`result/FU/batch_11-p3/phase3_archetype_refinement/FU_refinement_agent_beta0.5.pt`
+- 总训练步数：`1000496`
+
+评估结果：
+
+- val: `profit=142836.94`, `TR=4.346277`
+- test: `profit=150571.46`, `TR=5.017258`
+
+结果文件：
+
+- `result/batch_11-p3/evaluation/all_results_phase3_eval_val.json`
+- `result/batch_11-p3/evaluation/all_results_phase3_eval_test.json`
+
+### 三、结论
+
+这轮 `batch_11-p3` 的收益结果与当前统一基线完全一致，未观察到稳定改良。
+
+因此，结合前序 batch（`batch_04` 到 `batch_10`）的全部证据，最终结论保持不变：
+
+1. `Phase III` 在当前数据与执行约束下尚未证明可稳定提升收益。
+2. 即使采用更强约束（risk-brake）与更干净 context（移除 `R_arche`），也未获得正向增益。
+3. 阶段三改进工作到此暂时收口，后续不再继续堆叠机制。
+
+### 四、执行决议（本次）
+
+按本次决议执行：
+
+- 保留本次日志与结果文件用于归档
+- 将本轮 Phase III 代码改动全部回滚
+- `Phase III` 暂停改进，后续优先保障稳定基线与可维护性
