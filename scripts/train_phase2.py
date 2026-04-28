@@ -117,8 +117,8 @@ def collect_rollout_batch(
         - ground-truth label: â_sel = VQ encoder + codebook(demo chunk)。
 
     性能优化:
-        - batch decoder: 一次前向传播为所有 horizon 生成 micro actions，
-          避免逐 horizon 调用 decoder 的 Python 循环开销；
+        - batch decoder: 沿 batch 维并行多个 horizon，但在时间维严格按前缀逐步解码，
+          避免当前动作看到后续状态；
         - vectorized env: 持仓映射/价差/佣金全部 NumPy 向量化，
           仅 LOB slippage 仍需逐行查 DataFrame；
         - need_diagnostics: 非日志步跳过诊断统计，减少不必要的计算。
@@ -164,7 +164,7 @@ def collect_rollout_batch(
             device,
         )
 
-    # ---- 批量 decoder 推理: 一次前向传播生成所有 horizon 的 micro actions ----
+    # ---- 批量 decoder 推理: 沿 batch 维并行，但按前缀逐步生成 micro actions ----
     all_actions_np = batch_decode_actions(
         decoder=decoder,
         codebook=codebook,
@@ -921,6 +921,11 @@ def main() -> None:
         code_dim=decoder.code_dim,
         hidden_dim=decoder.hidden_dim,
         action_dim=decoder.action_dim,
+        decoder_arch=decoder.decoder_arch,
+        transformer_layers=decoder.transformer_layers,
+        transformer_heads=decoder.transformer_heads,
+        transformer_ffn_dim=decoder.transformer_ffn_dim,
+        transformer_dropout=decoder.transformer_dropout,
     ).to(eval_device)
     eval_decoder.load_state_dict(decoder.state_dict(), strict=True)
     for param in eval_encoder.parameters():

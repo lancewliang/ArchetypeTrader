@@ -32,6 +32,26 @@ from src.utils.progress import should_disable_tqdm
 logger = get_logger(__name__)
 
 
+def generate_current_base_action(
+    decoder: VQDecoder,
+    z_q: torch.Tensor,
+    prefix_states: np.ndarray,
+    device: torch.device,
+) -> int:
+    """基于当前可见前缀状态，在线生成当前步的 base action。"""
+    if prefix_states.ndim != 2:
+        raise ValueError(f"prefix_states 应为 2D 数组，收到 shape={prefix_states.shape}")
+
+    states_t = torch.tensor(
+        prefix_states, dtype=torch.float32, device=device,
+    ).unsqueeze(0)
+
+    with torch.no_grad():
+        action = decoder.decode_causally_with_single_trade_constraint(states_t, z_q)[0, -1]
+
+    return int(action.item())
+
+
 def generate_base_actions(
     decoder: VQDecoder,
     z_q: torch.Tensor,
@@ -48,9 +68,181 @@ def generate_base_actions(
     ).unsqueeze(0)
 
     with torch.no_grad():
-        actions = decoder.decode_with_single_trade_constraint(states_t, z_q).squeeze(0)
+        actions = decoder.decode_causally_with_single_trade_constraint(states_t, z_q).squeeze(0)
 
     return actions.cpu().numpy()
+
+
+def run_online_horizon_inference(
+    env: TradingEnv,
+    horizon_idx: int,
+    decoder: VQDecoder,
+    z_q: torch.Tensor,
+    refinement_agent: RefinementAgent | None,
+    policy_adapter: PolicyAdapter,
+    e_a_sel: np.ndarray,
+    device: torch.device,
+    horizon: int,
+    tracker: PortfolioTracker,
+) -> List[float]:
+    """按实时在线方式，在一个 horizon 内逐步生成并执行动作。
+
+    与 `run_horizon_inference` 的区别：
+    - 不预先生成整段 base_actions；
+    - 每个时间步只根据当前可见状态前缀生成当前步 `a_base_t`；
+    - 执行顺序更接近真实交易系统：新 bar 到来 -> 决策 -> 下单 -> 记账。
+    """
+    state = env.reset(horizon_idx)
+    t_start = horizon_idx * env.horizon
+    initial_price = env.prices[t_start]
+
+    # R_arche 归一化分母: m × p_0（初始名义价值），与训练一致
+    notional = float(env.m) * float(initial_price)
+    if notional <= 0.0:
+        notional = 1.0
+
+    # 在线前缀缓存: 第 τ 步动作只能依赖 s_{t:t+τ}
+    prefix_states = [np.asarray(state, dtype=np.float32).copy()]
+
+    # 先基于首个状态拿到首步动作，再决定是否对上一个 horizon 做 settle。
+    first_action = generate_current_base_action(
+        decoder=decoder,
+        z_q=z_q,
+        prefix_states=np.stack(prefix_states, axis=0),
+        device=device,
+    )
+
+    prev_position = tracker.state.position
+    settle_slippage = 0.0
+    if prev_position != 0 and env.states_dataframe is not None:
+        settle_delta = -prev_position
+        state_dict = env.states_dataframe.row(t_start, named=True)
+        settle_slippage = round(
+            TradingEnv.compute_lob_slippage(settle_delta, state_dict, initial_price), 2,
+        )
+
+    pre_settle_value = tracker.compute_total_value(
+        prev_position, initial_price,
+    )[2]
+    if pre_settle_value <= 0.0:
+        pre_settle_value = 1.0
+
+    tracker.settle_previous_horizon(
+        initial_price, t_start,
+        new_first_action=first_action,
+        m=env.m,
+        commission_rate=env.commission_rate,
+        slippage=settle_slippage,
+    )
+
+    current_position = tracker.state.position
+    env._position = current_position
+
+    step_rate_returns: List[float] = []
+    a_base_prev = first_action
+    has_adjusted = False
+    cumulative_reward = 0.0
+
+    portfolio_value = tracker.compute_total_value(
+        current_position, initial_price,
+    )[2]
+    if portfolio_value <= 0.0:
+        portfolio_value = 1.0
+
+    if abs(portfolio_value - pre_settle_value) > 1e-6:
+        settle_return = (portfolio_value - pre_settle_value) / pre_settle_value
+        step_rate_returns.append(settle_return)
+
+    for step_idx in range(horizon):
+        prefix_array = np.stack(prefix_states, axis=0)
+        a_base = generate_current_base_action(
+            decoder=decoder,
+            z_q=z_q,
+            prefix_states=prefix_array,
+            device=device,
+        )
+
+        s_ref1 = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+        tau_remain = (horizon - step_idx) / horizon
+        normalized_reward = cumulative_reward / notional
+        context = np.concatenate([
+            e_a_sel,
+            np.array([a_base], dtype=np.float32),
+            np.array([normalized_reward], dtype=np.float32),
+            np.array([tau_remain], dtype=np.float32),
+        ])
+        s_ref2 = torch.tensor(context, dtype=torch.float32, device=device).unsqueeze(0)
+
+        with torch.no_grad():
+            if refinement_agent is not None:
+                action_probs, _ = refinement_agent(s_ref1, s_ref2)
+                a_ref_idx = torch.argmax(action_probs, dim=-1).item()
+                a_ref = a_ref_idx - 1
+            else:
+                a_ref = 0
+
+        a_final, has_adjusted = policy_adapter.compute_final_action(
+            a_base, a_base_prev, a_ref, has_adjusted,
+        )
+
+        old_position = current_position
+        t = t_start + step_idx
+        exec_price = float(env.prices[t])
+
+        next_state, reward, done, info = env.step(a_final)
+        cumulative_reward += reward
+        new_position = info["position"]
+        delta_position = new_position - old_position
+
+        if delta_position == 0:
+            commission, slippage = 0.0, 0.0
+        else:
+            abs_delta = abs(delta_position)
+            commission = round(env.commission_rate * abs_delta * exec_price, 2)
+            if env.states_dataframe is not None:
+                state_dict = env.states_dataframe.row(t, named=True)
+                if old_position != 0 and new_position != 0 and (
+                    (old_position > 0) != (new_position > 0)
+                ):
+                    close_delta = -old_position
+                    open_delta = new_position
+                    slippage_close = TradingEnv.compute_lob_slippage(
+                        close_delta, state_dict, exec_price,
+                    )
+                    slippage_open = TradingEnv.compute_lob_slippage(
+                        open_delta, state_dict, exec_price,
+                    )
+                    slippage = round(slippage_close + slippage_open, 2)
+                else:
+                    slippage = round(TradingEnv.compute_lob_slippage(
+                        delta_position, state_dict, exec_price,
+                    ), 2)
+            else:
+                slippage = 0.0
+
+        tracker.update_cash_for_trade(old_position, new_position, exec_price, t)
+        tracker.record_step(t, a_final, exec_price, old_position, new_position, commission, slippage)
+
+        current_position = new_position
+
+        _, _, new_total_value, _ = tracker.compute_total_value(
+            new_position, exec_price,
+        )
+        rate_return = (new_total_value - portfolio_value) / portfolio_value
+        step_rate_returns.append(rate_return)
+        portfolio_value = new_total_value
+        if portfolio_value <= 0.0:
+            portfolio_value = 1e-8
+
+        state = next_state
+        a_base_prev = a_base
+
+        if done:
+            break
+
+        prefix_states.append(np.asarray(next_state, dtype=np.float32).copy())
+
+    return step_rate_returns
 
 
 def compute_base_return(
@@ -331,8 +523,6 @@ def evaluate_pair(
     ):
         h = test_env.horizon
         start = h_idx * h
-        end = min(start + h, len(test_env.states))
-        horizon_states = test_env.states[start:end]
 
         # Phase II: 选择原型
         state_0 = test_env.states[start]
@@ -346,16 +536,13 @@ def evaluate_pair(
         z_q = e_a_sel_t.unsqueeze(0)
         e_a_sel = e_a_sel_t.detach().cpu().numpy()
 
-        # Phase I: 生成 base actions
-        base_actions = generate_base_actions(decoder, z_q, horizon_states, device)
-
-        # Phase III: Refinement（val split 时 refinement_agent 为 None，直接用 base actions）
-        step_returns = run_horizon_inference(
-            env=test_env,
-            horizon_idx=h_idx,
-            base_actions=base_actions,
+        step_returns = run_online_horizon_inference(
             refinement_agent=refinement_agent,
             policy_adapter=PolicyAdapter(),
+            env=test_env,
+            horizon_idx=h_idx,
+            decoder=decoder,
+            z_q=z_q,
             e_a_sel=e_a_sel,
             device=device,
             horizon=h,

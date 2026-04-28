@@ -38,6 +38,11 @@ class Config:
 
     # Phase I 配置
     lstm_hidden_dim: int = 256
+    decoder_arch: str = "lstm_causal"  # 可选: lstm_causal / bilstm / causal_transformer
+    decoder_transformer_layers: int = 2
+    decoder_transformer_heads: int = 4
+    decoder_transformer_ffn_dim: int | None = None  # None 表示自动使用 4 * lstm_hidden_dim
+    decoder_transformer_dropout: float = 0.0
     latent_dim: int = 32  # z_e 维度
     num_archetypes: int = 10  # K = 10
     vq_beta0: float = 0.25  # 承诺损失系数
@@ -239,6 +244,37 @@ def parse_args(argv: list | None = None) -> Config:
         type=int,
         default=None,
         help="Phase I encoder/decoder LSTM 隐藏层维度",
+    )
+    parser.add_argument(
+        "--decoder-arch",
+        type=str,
+        default=None,
+        choices=["lstm_causal", "bilstm", "causal_transformer"],
+        help="Phase I decoder 架构",
+    )
+    parser.add_argument(
+        "--decoder-transformer-layers",
+        type=int,
+        default=None,
+        help="decoder_arch=causal_transformer 时的层数",
+    )
+    parser.add_argument(
+        "--decoder-transformer-heads",
+        type=int,
+        default=None,
+        help="decoder_arch=causal_transformer 时的注意力头数",
+    )
+    parser.add_argument(
+        "--decoder-transformer-ffn-dim",
+        type=int,
+        default=None,
+        help="decoder_arch=causal_transformer 时的 FFN 隐藏层维度（默认 4*hidden_dim）",
+    )
+    parser.add_argument(
+        "--decoder-transformer-dropout",
+        type=float,
+        default=None,
+        help="decoder_arch=causal_transformer 时的 dropout",
     )
     parser.add_argument(
         "--vq-beta0", type=float, default=None, help="VQ 承诺损失系数"
@@ -586,10 +622,36 @@ def parse_args(argv: list | None = None) -> Config:
         parser.error("--phase1-importance-ratio 必须 >= 0")
     if args.phase1_sampling_strata is not None and args.phase1_sampling_strata < 2:
         parser.error("--phase1-sampling-strata 必须 >= 2")
-    for name in ["latent_dim", "lstm_hidden_dim", "phase2_hidden_dim", "phase2_bottleneck_dim"]:
+    for name in [
+        "latent_dim",
+        "lstm_hidden_dim",
+        "phase2_hidden_dim",
+        "phase2_bottleneck_dim",
+        "decoder_transformer_layers",
+        "decoder_transformer_heads",
+    ]:
         value = getattr(args, name, None)
         if value is not None and value < 1:
             parser.error(f"--{name.replace('_', '-')} 必须 >= 1")
+    if args.decoder_transformer_ffn_dim is not None and args.decoder_transformer_ffn_dim < 1:
+        parser.error("--decoder-transformer-ffn-dim 必须 >= 1")
+    if (
+        args.decoder_transformer_dropout is not None
+        and not 0.0 <= args.decoder_transformer_dropout < 1.0
+    ):
+        parser.error("--decoder-transformer-dropout 必须在 [0, 1) 范围内")
+    default_cfg = Config()
+    effective_decoder_arch = args.decoder_arch or default_cfg.decoder_arch
+    effective_hidden_dim = args.lstm_hidden_dim or default_cfg.lstm_hidden_dim
+    effective_transformer_heads = (
+        args.decoder_transformer_heads or default_cfg.decoder_transformer_heads
+    )
+    if effective_decoder_arch == "causal_transformer":
+        if effective_hidden_dim % effective_transformer_heads != 0:
+            parser.error(
+                "--lstm-hidden-dim 必须能被 --decoder-transformer-heads 整除 "
+                "(当 --decoder-arch=causal_transformer)",
+            )
     if args.phase1_importance_vol_weight is not None and args.phase1_importance_vol_weight < 0:
         parser.error("--phase1-importance-vol-weight 必须 >= 0")
     if args.phase1_importance_net_weight is not None and args.phase1_importance_net_weight < 0:
@@ -678,6 +740,11 @@ def parse_args(argv: list | None = None) -> Config:
         "num_trajectories": getattr(args, "num_trajectories", None),
         "phase1_epochs": getattr(args, "phase1_epochs", None),
         "latent_dim": getattr(args, "latent_dim", None),
+        "decoder_arch": getattr(args, "decoder_arch", None),
+        "decoder_transformer_layers": getattr(args, "decoder_transformer_layers", None),
+        "decoder_transformer_heads": getattr(args, "decoder_transformer_heads", None),
+        "decoder_transformer_ffn_dim": getattr(args, "decoder_transformer_ffn_dim", None),
+        "decoder_transformer_dropout": getattr(args, "decoder_transformer_dropout", None),
         "vq_beta0": getattr(args, "vq_beta0", None),
         "phase1_sampling_seed": getattr(args, "phase1_sampling_seed", None),
         "phase1_start_sampling_mode": getattr(args, "phase1_start_sampling_mode", None),

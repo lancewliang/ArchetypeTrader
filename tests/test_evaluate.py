@@ -20,8 +20,10 @@ from src.evaluation.portfolio_tracker import (
 )
 from src.evaluation.inference_runner import (
     generate_base_actions,
+    generate_current_base_action,
     compute_base_return,
     run_horizon_inference,
+    run_online_horizon_inference,
 )
 from src.phase1.codebook import VQCodebook
 from src.phase1.vq_decoder import VQDecoder
@@ -504,6 +506,16 @@ class TestGenerateBaseActions:
         a2 = generate_base_actions(decoder, z_q, horizon_states, device)
         np.testing.assert_array_equal(a1, a2)
 
+    def test_current_action_matches_full_sequence_last_step(self, env, decoder, codebook, device):
+        z_q = codebook.embeddings.weight[0].unsqueeze(0)
+        horizon_states = env.states[:HORIZON]
+        full_actions = generate_base_actions(decoder, z_q, horizon_states, device)
+
+        prefix_states = horizon_states[:7]
+        current_action = generate_current_base_action(decoder, z_q, prefix_states, device)
+
+        assert current_action == int(full_actions[6])
+
 
 class TestComputeBaseReturn:
     """compute_base_return 与 TradingEnv 集成。"""
@@ -641,3 +653,47 @@ class TestRunHorizonInference:
         torch.manual_seed(0)
         r2, t2 = self._run_one_horizon(env, refinement_agent, device)
         np.testing.assert_array_almost_equal(r1, r2)
+
+    def test_online_path_matches_predecoded_path_without_refinement(self, env, device):
+        codebook = VQCodebook(num_codes=NUM_ARCHETYPES, code_dim=LATENT_DIM).to(device)
+        decoder = VQDecoder(state_dim=STATE_DIM, code_dim=LATENT_DIM, hidden_dim=32, action_dim=3).to(device)
+        decoder.eval()
+        codebook.eval()
+
+        z_q = codebook.embeddings.weight[0].unsqueeze(0)
+        e_a_sel = codebook.embeddings.weight[0].detach().cpu().numpy()
+        horizon_states = env.states[:HORIZON]
+        base_actions = generate_base_actions(decoder, z_q, horizon_states, device)
+
+        initial_capital = float(env.m) * float(env.prices[0])
+
+        tracker_predecoded = PortfolioTracker(initial_capital)
+        step_returns_predecoded = run_horizon_inference(
+            env=env,
+            horizon_idx=0,
+            base_actions=base_actions,
+            refinement_agent=None,
+            policy_adapter=PolicyAdapter(),
+            e_a_sel=e_a_sel,
+            device=device,
+            horizon=HORIZON,
+            tracker=tracker_predecoded,
+        )
+
+        env_online = _make_env(T=48, horizon=12)
+        tracker_online = PortfolioTracker(initial_capital)
+        step_returns_online = run_online_horizon_inference(
+            env=env_online,
+            horizon_idx=0,
+            decoder=decoder,
+            z_q=z_q,
+            refinement_agent=None,
+            policy_adapter=PolicyAdapter(),
+            e_a_sel=e_a_sel,
+            device=device,
+            horizon=HORIZON,
+            tracker=tracker_online,
+        )
+
+        np.testing.assert_allclose(step_returns_online, step_returns_predecoded)
+        assert tracker_online.records == tracker_predecoded.records

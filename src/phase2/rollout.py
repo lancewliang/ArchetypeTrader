@@ -56,22 +56,24 @@ def batch_decode_actions(
     device: torch.device,
     normalizer: StateNormalizer | None = None,
 ) -> np.ndarray:
-    """批量解码: 对一批 horizon 用对应 archetype 生成 micro actions。
+    """批量按步解码: 对一批 horizon 用对应 archetype 生成 micro actions。
 
-    # Section 4.2: 冻结 Decoder 生成 micro actions
+    # Section 4.2: 冻结 Decoder 逐步生成 micro actions
     # 1. 收集 horizon 内所有状态
-    # 2. Decoder 根据状态和 archetype code 生成 action logits
-    # 3. 使用 single trade constraint 得到 micro actions
+    # 2. 对第 τ 步，仅把前缀状态 s_{t:t+τ} 喂给 decoder
+    # 3. 在当前前缀上施加 single-trade 约束并取最后一个动作
+    # 4. 顺序重复 h 次，避免当前动作看到后续状态
 
     功能说明:
         该函数是 run_horizon_with_decoder 的批量版本，负责把"高层 archetype 决策"
         转换为低层 micro actions。对一批 horizon，根据选定的 archetype，
-        通过冻结的 decoder 生成整段 micro action 序列。
+        通过冻结的 decoder 逐步生成整段 micro action 序列。
 
     论文相关:
         - 对应 Section 4.2 中：选定 archetype 后，将其 code e_{a_sel}
           输入 frozen decoder p_theta_d(a_base | s, e_{a_sel})；
-        - 批量处理多个 horizon，提高计算效率。
+        - 仍然沿 batch 维并行多个 horizon，但每个时间步只暴露当前可见前缀，
+          避免未来信息泄漏。
 
     Args:
         decoder: 冻结的 VQ Decoder
@@ -105,7 +107,7 @@ def batch_decode_actions(
     z_q_batch = codebook.embeddings.weight[archetype_indices.long()]
 
     with torch.no_grad():
-        actions = decoder.decode_with_single_trade_constraint(states_t, z_q_batch)
+        actions = decoder.decode_causally_with_single_trade_constraint(states_t, z_q_batch)
 
     return actions.detach().cpu().numpy()
 

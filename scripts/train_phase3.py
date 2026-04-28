@@ -98,15 +98,53 @@ def load_phase1_model(config, pair: str, device: torch.device):
 
     logger.info("加载 Phase I 模型: %s", model_path)
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
+    ckpt_config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
+    ckpt_state_dim = int(ckpt_config.get("state_dim", config.get_state_dim(pair)))
+    ckpt_action_dim = int(ckpt_config.get("action_dim", config.action_dim))
+    ckpt_latent_dim = int(ckpt_config.get("latent_dim", config.latent_dim))
+    ckpt_num_archetypes = int(ckpt_config.get("num_archetypes", config.num_archetypes))
+    ckpt_hidden_dim = int(ckpt_config.get("lstm_hidden_dim", config.lstm_hidden_dim))
+    ckpt_decoder_arch = str(ckpt_config.get("decoder_arch", "bilstm"))
+    ckpt_transformer_layers = int(
+        ckpt_config.get(
+            "decoder_transformer_layers",
+            getattr(config, "decoder_transformer_layers", 2),
+        ),
+    )
+    ckpt_transformer_heads = int(
+        ckpt_config.get(
+            "decoder_transformer_heads",
+            getattr(config, "decoder_transformer_heads", 4),
+        ),
+    )
+    ckpt_transformer_ffn_dim_raw = ckpt_config.get(
+        "decoder_transformer_ffn_dim",
+        getattr(config, "decoder_transformer_ffn_dim", None),
+    )
+    ckpt_transformer_dropout = float(
+        ckpt_config.get(
+            "decoder_transformer_dropout",
+            getattr(config, "decoder_transformer_dropout", 0.0),
+        ),
+    )
 
     codebook = VQCodebook(
-        num_codes=config.num_archetypes, code_dim=config.latent_dim,
+        num_codes=ckpt_num_archetypes, code_dim=ckpt_latent_dim,
     ).to(device)
     codebook.load_state_dict(ckpt["codebook"])
 
     decoder = VQDecoder(
-        state_dim=config.get_state_dim(pair), code_dim=config.latent_dim,
-        hidden_dim=config.lstm_hidden_dim, action_dim=config.action_dim,
+        state_dim=ckpt_state_dim, code_dim=ckpt_latent_dim,
+        hidden_dim=ckpt_hidden_dim, action_dim=ckpt_action_dim,
+        decoder_arch=ckpt_decoder_arch,
+        transformer_layers=ckpt_transformer_layers,
+        transformer_heads=ckpt_transformer_heads,
+        transformer_ffn_dim=(
+            int(ckpt_transformer_ffn_dim_raw)
+            if ckpt_transformer_ffn_dim_raw is not None
+            else None
+        ),
+        transformer_dropout=ckpt_transformer_dropout,
     ).to(device)
     decoder.load_state_dict(ckpt["decoder"])
 
@@ -165,14 +203,14 @@ def generate_base_actions(
 ) -> np.ndarray:
     """用冻结的 Decoder 把原型向量 z_q 解码为 base action 序列 (h,)。
 
-    Decoder 是 Phase I 训练好的 LSTM，输入整个 horizon 的 states 和原型向量，
-    输出满足"单次交易约束"的动作序列。这里 batch=1（单个 horizon）。
+    Decoder 是 Phase I 训练好的 LSTM。这里按前缀逐步解码，确保第 τ 步 base action
+    只依赖当前可见状态 s_{t:t+τ}，避免整段 horizon 一次性暴露未来信息。
     """
     states_t = torch.tensor(
         horizon_states, dtype=torch.float32, device=device,
     ).unsqueeze(0)  # (1, h, state_dim)
     with torch.no_grad():
-        actions = decoder.decode_with_single_trade_constraint(
+        actions = decoder.decode_causally_with_single_trade_constraint(
             states_t, z_q,
         ).squeeze(0)  # (h,)
     return actions.cpu().numpy()
@@ -532,7 +570,7 @@ def save_checkpoint(path: str, agent: RefinementAgent, config, **extra):
             "agent": agent.state_dict(),
             "config": {
                 "state_dim": agent.market_dim,
-                "latent_dim": config.latent_dim,
+                "latent_dim": max(int(agent.context_dim) - 3, 1),
                 "num_archetypes": config.num_archetypes,
                 "phase3_total_steps": config.phase3_total_steps,
                 "refinement_hidden_dim": config.refinement_hidden_dim,
@@ -614,7 +652,7 @@ def main() -> None:
         sys.exit(1)
 
     # --- RefinementAgent ---
-    context_dim = config.latent_dim + 3
+    context_dim = codebook.code_dim + 3
     state_dim = config.get_state_dim(pair)
     refinement_agent = RefinementAgent(
         market_dim=state_dim,

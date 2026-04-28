@@ -257,6 +257,7 @@ class TestVQDecoderInit:
         assert dec.code_dim == 16
         assert dec.hidden_dim == 128
         assert dec.action_dim == 3
+        assert dec.decoder_arch == "lstm_causal"
 
     def test_custom_params(self):
         dec = VQDecoder(state_dim=10, code_dim=8, hidden_dim=64, action_dim=5)
@@ -267,13 +268,26 @@ class TestVQDecoderInit:
 
     def test_lstm_layer_dims(self):
         dec = VQDecoder(state_dim=45, code_dim=16, hidden_dim=128, action_dim=3)
-        # BiLSTM input: state_dim + code_dim
+        # Causal LSTM input: state_dim + code_dim
+        assert dec.lstm.input_size == 45 + 16
+        assert dec.lstm.hidden_size == 128
+        assert dec.lstm.bidirectional is False
+        # Output projection: hidden_dim → action_dim
+        assert dec.output_proj.in_features == 128
+        assert dec.output_proj.out_features == 3
+
+    def test_bilstm_layer_dims(self):
+        dec = VQDecoder(
+            state_dim=45,
+            code_dim=16,
+            hidden_dim=128,
+            action_dim=3,
+            decoder_arch="bilstm",
+        )
         assert dec.lstm.input_size == 45 + 16
         assert dec.lstm.hidden_size == 128
         assert dec.lstm.bidirectional is True
-        # Output projection: 2 * hidden_dim → action_dim (bidirectional)
         assert dec.output_proj.in_features == 2 * 128
-        assert dec.output_proj.out_features == 3
 
 
 class TestVQDecoderForward:
@@ -303,6 +317,21 @@ class TestVQDecoderForward:
 
     def test_output_shape_custom_dims(self):
         dec = VQDecoder(state_dim=10, code_dim=8, hidden_dim=64, action_dim=5)
+        states = torch.randn(3, 20, 10)
+        z_q = torch.randn(3, 8)
+        logits = dec(states, z_q)
+        assert logits.shape == (3, 20, 5)
+
+    def test_output_shape_causal_transformer(self):
+        dec = VQDecoder(
+            state_dim=10,
+            code_dim=8,
+            hidden_dim=64,
+            action_dim=5,
+            decoder_arch="causal_transformer",
+            transformer_layers=1,
+            transformer_heads=4,
+        )
         states = torch.randn(3, 20, 10)
         z_q = torch.randn(3, 8)
         logits = dec(states, z_q)
@@ -376,6 +405,47 @@ class TestVQDecoderForward:
             seq = actions[b].numpy()
             changes = sum(1 for i in range(1, len(seq)) if seq[i] != seq[i - 1])
             assert changes <= 1, f"batch {b}: {changes} changes, expected <= 1"
+
+    def test_causal_single_trade_constraint_output_shape(self):
+        """因果 single-trade 推理输出 shape 正确"""
+        dec = VQDecoder(state_dim=45)
+        dec.eval()
+        states = torch.randn(4, 72, 45)
+        z_q = torch.randn(4, 16)
+        actions = dec.decode_causally_with_single_trade_constraint(states, z_q)
+        assert actions.shape == (4, 72)
+        assert (actions >= 0).all()
+        assert (actions < 3).all()
+
+    def test_causal_single_trade_constraint_max_one_change(self):
+        """因果推理在线锁定后仍应最多一次动作变化"""
+        dec = VQDecoder(state_dim=45)
+        dec.eval()
+        states = torch.randn(8, 72, 45)
+        z_q = torch.randn(8, 16)
+        actions = dec.decode_causally_with_single_trade_constraint(states, z_q)
+        for b in range(8):
+            seq = actions[b].numpy()
+            changes = sum(1 for i in range(1, len(seq)) if seq[i] != seq[i - 1])
+            assert changes <= 1, f"batch {b}: {changes} changes, expected <= 1"
+
+    def test_causal_decode_prefix_invariant_to_future_suffix(self):
+        """共享前缀的两个序列，在共享前缀上的因果动作必须一致"""
+        dec = VQDecoder(state_dim=45)
+        dec.eval()
+
+        prefix_len = 12
+        states_a = torch.randn(1, 24, 45)
+        states_b = states_a.clone()
+        states_b[:, prefix_len:, :] = torch.randn_like(states_b[:, prefix_len:, :])
+        z_q = torch.randn(1, 16)
+
+        actions_a = dec.decode_causally_with_single_trade_constraint(states_a, z_q)
+        actions_b = dec.decode_causally_with_single_trade_constraint(states_b, z_q)
+
+        assert torch.equal(actions_a[:, :prefix_len], actions_b[:, :prefix_len]), (
+            "causal decode 不应因未来 suffix 不同而改变共享前缀内的动作"
+        )
 
 
 # ============================================================

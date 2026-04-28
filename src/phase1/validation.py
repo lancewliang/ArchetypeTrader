@@ -495,6 +495,12 @@ def _compute_classification_report(confusion: np.ndarray) -> Dict[str, Dict[str,
 def _load_phase1_models(checkpoint: Dict[str, Any], device: torch.device) -> Tuple[VQEncoder, VQCodebook, VQDecoder, Dict[str, Any]]:
     """根据 checkpoint 中保存的配置还原 encoder / codebook / decoder。"""
     model_config = checkpoint.get("config", {})
+    decoder_arch = str(model_config.get("decoder_arch", "bilstm"))
+    transformer_layers = int(model_config.get("decoder_transformer_layers", 2))
+    transformer_heads = int(model_config.get("decoder_transformer_heads", 4))
+    transformer_ffn_dim_raw = model_config.get("decoder_transformer_ffn_dim", None)
+    transformer_dropout = float(model_config.get("decoder_transformer_dropout", 0.0))
+
     encoder = VQEncoder(
         state_dim=int(model_config["state_dim"]),
         action_dim=int(model_config["action_dim"]),
@@ -510,6 +516,15 @@ def _load_phase1_models(checkpoint: Dict[str, Any], device: torch.device) -> Tup
         code_dim=int(model_config["latent_dim"]),
         hidden_dim=int(model_config["lstm_hidden_dim"]),
         action_dim=int(model_config["action_dim"]),
+        decoder_arch=decoder_arch,
+        transformer_layers=transformer_layers,
+        transformer_heads=transformer_heads,
+        transformer_ffn_dim=(
+            int(transformer_ffn_dim_raw)
+            if transformer_ffn_dim_raw is not None
+            else None
+        ),
+        transformer_dropout=transformer_dropout,
     ).to(device)
 
     encoder.load_state_dict(checkpoint["encoder"], strict=True)

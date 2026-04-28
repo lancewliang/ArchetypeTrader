@@ -76,7 +76,8 @@ def evaluate_on_validation(
         direct flips / archetype histogram 等诊断项，便于区分"方向错"和"成本过高"。
 
     性能优化: 使用 batch_decode_actions + vectorized_execute_horizons
-    替代逐 horizon 的 Python 循环。
+    替代逐 horizon 的 Python 循环；其中 batch_decode_actions 仍会在 batch 维并行，
+    但每个时间步只使用当前前缀状态。
 
     论文相关:
         - 对应 Section 4.2 的 inference 过程；
@@ -168,7 +169,8 @@ def evaluate_training_subset_diagnostics(
         共 K+3 次 batch_decode_actions + vectorized_execute_horizons。
         改为把所有策略的 actions 堆叠成 ((K+3)×subset_size,) 的大批量，
         一次 batch_decode_actions + 一次 vectorized_execute_horizons 完成，
-        decoder 前向和 LOB slippage 预提取各只做一次。
+        LOB slippage 预提取只做一次；decoder 虽然需要逐步看前缀，但仍可沿 batch
+        维统一并行。
 
     论文相关:
         这一步并不改变论文算法本身，而是对 Section 4.2 的 archetype selector
@@ -225,7 +227,7 @@ def evaluate_training_subset_diagnostics(
 
     archetype_t = torch.tensor(all_archetypes, dtype=torch.long, device=device)
 
-    # 一次 batch_decode_actions：decoder 前向只跑一次
+    # 一次 batch_decode_actions：所有策略统一做因果解码
     all_actions_np = batch_decode_actions(
         decoder=decoder, codebook=codebook, env=train_env,
         horizon_indices=tiled_horizon_indices,

@@ -87,6 +87,11 @@ def save_checkpoint(
             "latent_dim": config.latent_dim,
             "num_archetypes": config.num_archetypes,
             "lstm_hidden_dim": config.lstm_hidden_dim,
+            "decoder_arch": decoder.decoder_arch,
+            "decoder_transformer_layers": decoder.transformer_layers,
+            "decoder_transformer_heads": decoder.transformer_heads,
+            "decoder_transformer_ffn_dim": decoder.transformer_ffn_dim,
+            "decoder_transformer_dropout": decoder.transformer_dropout,
             "phase1_epochs": config.phase1_epochs,
             "pretrain_epochs": config.pretrain_epochs,
             "learning_rate": config.learning_rate,
@@ -152,22 +157,60 @@ def load_models_from_phase1_checkpoint(
         (encoder, codebook, decoder) 模型元组
     """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dim = config.get_state_dim(pair)
+    ckpt_config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+    state_dim = int(ckpt_config.get("state_dim", config.get_state_dim(pair)))
+    action_dim = int(ckpt_config.get("action_dim", config.action_dim))
+    latent_dim = int(ckpt_config.get("latent_dim", config.latent_dim))
+    num_archetypes = int(ckpt_config.get("num_archetypes", config.num_archetypes))
+    lstm_hidden_dim = int(ckpt_config.get("lstm_hidden_dim", config.lstm_hidden_dim))
+    decoder_arch = str(ckpt_config.get("decoder_arch", "bilstm"))
+    transformer_layers = int(
+        ckpt_config.get(
+            "decoder_transformer_layers",
+            getattr(config, "decoder_transformer_layers", 2),
+        ),
+    )
+    transformer_heads = int(
+        ckpt_config.get(
+            "decoder_transformer_heads",
+            getattr(config, "decoder_transformer_heads", 4),
+        ),
+    )
+    transformer_ffn_dim_raw = ckpt_config.get(
+        "decoder_transformer_ffn_dim",
+        getattr(config, "decoder_transformer_ffn_dim", None),
+    )
+    transformer_dropout = float(
+        ckpt_config.get(
+            "decoder_transformer_dropout",
+            getattr(config, "decoder_transformer_dropout", 0.0),
+        ),
+    )
+
     encoder = VQEncoder(
         state_dim=state_dim,
-        action_dim=config.action_dim,
-        hidden_dim=config.lstm_hidden_dim,
-        latent_dim=config.latent_dim,
+        action_dim=action_dim,
+        hidden_dim=lstm_hidden_dim,
+        latent_dim=latent_dim,
     ).to(device)
     codebook = VQCodebook(
-        num_codes=config.num_archetypes,
-        code_dim=config.latent_dim,
+        num_codes=num_archetypes,
+        code_dim=latent_dim,
     ).to(device)
     decoder = VQDecoder(
         state_dim=state_dim,
-        code_dim=config.latent_dim,
-        hidden_dim=config.lstm_hidden_dim,
-        action_dim=config.action_dim,
+        code_dim=latent_dim,
+        hidden_dim=lstm_hidden_dim,
+        action_dim=action_dim,
+        decoder_arch=decoder_arch,
+        transformer_layers=transformer_layers,
+        transformer_heads=transformer_heads,
+        transformer_ffn_dim=(
+            int(transformer_ffn_dim_raw)
+            if transformer_ffn_dim_raw is not None
+            else None
+        ),
+        transformer_dropout=transformer_dropout,
     ).to(device)
     encoder.load_state_dict(checkpoint["encoder"], strict=True)
     codebook.load_state_dict(checkpoint["codebook"], strict=True)

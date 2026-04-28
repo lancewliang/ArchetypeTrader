@@ -47,6 +47,29 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
     ckpt_latent_dim = int(ckpt_config.get("latent_dim", config.latent_dim))
     ckpt_num_archetypes = int(ckpt_config.get("num_archetypes", config.num_archetypes))
     ckpt_lstm_hidden_dim = int(ckpt_config.get("lstm_hidden_dim", config.lstm_hidden_dim))
+    ckpt_decoder_arch = str(ckpt_config.get("decoder_arch", "bilstm"))
+    ckpt_transformer_layers = int(
+        ckpt_config.get(
+            "decoder_transformer_layers",
+            getattr(config, "decoder_transformer_layers", 2),
+        ),
+    )
+    ckpt_transformer_heads = int(
+        ckpt_config.get(
+            "decoder_transformer_heads",
+            getattr(config, "decoder_transformer_heads", 4),
+        ),
+    )
+    ckpt_transformer_ffn_dim_raw = ckpt_config.get(
+        "decoder_transformer_ffn_dim",
+        getattr(config, "decoder_transformer_ffn_dim", None),
+    )
+    ckpt_transformer_dropout = float(
+        ckpt_config.get(
+            "decoder_transformer_dropout",
+            getattr(config, "decoder_transformer_dropout", 0.0),
+        ),
+    )
 
     if ckpt_state_dim != expected_state_dim:
         logger.warning(
@@ -79,6 +102,15 @@ def load_phase1_model(config: Any, pair: str, device: torch.device):
         code_dim=ckpt_latent_dim,
         hidden_dim=ckpt_lstm_hidden_dim,
         action_dim=ckpt_action_dim,
+        decoder_arch=ckpt_decoder_arch,
+        transformer_layers=ckpt_transformer_layers,
+        transformer_heads=ckpt_transformer_heads,
+        transformer_ffn_dim=(
+            int(ckpt_transformer_ffn_dim_raw)
+            if ckpt_transformer_ffn_dim_raw is not None
+            else None
+        ),
+        transformer_dropout=ckpt_transformer_dropout,
     ).to(device)
     decoder.load_state_dict(checkpoint["decoder"])
 

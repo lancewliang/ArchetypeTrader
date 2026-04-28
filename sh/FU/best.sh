@@ -1,4 +1,4 @@
-./run_pipeline.sh FU batch_03-short-1 \
+./run_pipeline.sh FU batch_01 \
   --cycle-feature-sets short \
   --phase1-codebook-separation-weight 0.08 \
   --phase1-codebook-separation-margin 0.15 \

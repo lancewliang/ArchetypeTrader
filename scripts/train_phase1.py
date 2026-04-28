@@ -607,6 +607,11 @@ def build_models(
         code_dim=config.latent_dim,
         hidden_dim=config.lstm_hidden_dim,
         action_dim=config.action_dim,
+        decoder_arch=config.decoder_arch,
+        transformer_layers=config.decoder_transformer_layers,
+        transformer_heads=config.decoder_transformer_heads,
+        transformer_ffn_dim=config.decoder_transformer_ffn_dim,
+        transformer_dropout=config.decoder_transformer_dropout,
     ).to(device)
 
     logger.info(
@@ -1001,6 +1006,11 @@ def save_checkpoint(
             "latent_dim": config.latent_dim,
             "num_archetypes": config.num_archetypes,
             "lstm_hidden_dim": config.lstm_hidden_dim,
+            "decoder_arch": decoder.decoder_arch,
+            "decoder_transformer_layers": decoder.transformer_layers,
+            "decoder_transformer_heads": decoder.transformer_heads,
+            "decoder_transformer_ffn_dim": decoder.transformer_ffn_dim,
+            "decoder_transformer_dropout": decoder.transformer_dropout,
             "phase1_epochs": config.phase1_epochs,
             "pretrain_epochs": config.pretrain_epochs,
             "learning_rate": config.learning_rate,
