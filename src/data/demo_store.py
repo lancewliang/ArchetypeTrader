@@ -7,11 +7,13 @@
 """
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import List, Optional
 
 from src.utils import feather_io
+from src.trading.cost_model import ExecutionBook
 
 from .horizon_builder import HorizonRecord
 
@@ -58,7 +60,7 @@ class Phase1DemoStore:
         实现要点
         --------
         - 大数组按列写出（states/prices）；polars 会保留嵌套 list dtype。
-        - ``execution_books`` 不写入（盘口体积大且 cache 命中后不需要 replay）。
+        - ``execution_books`` 以 JSON 字符串写入，便于后续 replay / failure case 复盘。
         - ``_config_hash`` / ``_schema_hash`` 作为列存入，避免依赖文件级 metadata。
         """
         import polars as pl
@@ -79,6 +81,10 @@ class Phase1DemoStore:
                     "augmentation_type": d.augmentation_type,
                     "states": d.states,
                     "prices": d.prices,
+                    "execution_books": json.dumps(
+                        [_execution_book_to_dict(book) for book in d.execution_books],
+                        separators=(",", ":"),
+                    ),
                     "actions": d.actions if d.actions is not None else [],
                     "rewards": d.rewards if d.rewards is not None else [],
                     "_config_hash": self.config_hash,
@@ -99,8 +105,7 @@ class Phase1DemoStore:
 
         Notes
         -----
-        反序列化时 ``execution_books`` 不还原（保存时也未写入）；
-        cache 主要供 trainer 内部 tensor 准备使用，命中后不需要再 replay 老师轨迹。
+        反序列化时会还原 ``execution_books``，保证 cache 可用于 replay / failure case。
         """
         target = Path(path) if path else self.artifacts_dir / "demos_train.feather"
         frame = feather_io.read_ipc(target)
@@ -117,10 +122,13 @@ class Phase1DemoStore:
             raise ValueError(
                 f"demos cache 的 schema_hash 与当前不一致; 应重新生成。"
             )
-        # 注意: 反序列化时 execution_books 不还原（保存时未写入）；
-        # demo cache 主要用于 trainer 内部 tensor 准备，cache 命中后不需要重 replay。
         records: List[HorizonRecord] = []
         for row in frame.iter_rows(named=True):
+            books_payload = row.get("execution_books", "[]")
+            books = [
+                _execution_book_from_dict(item)
+                for item in json.loads(books_payload or "[]")
+            ]
             records.append(
                 HorizonRecord(
                     sample_id=row["sample_id"],
@@ -133,7 +141,7 @@ class Phase1DemoStore:
                     strata_label=row["strata_label"],
                     states=row["states"],
                     prices=row["prices"],
-                    execution_books=[],  # cache 不还原盘口
+                    execution_books=books,
                     actions=row["actions"] or None,
                     rewards=row["rewards"] or None,
                     is_augmented=row["is_augmented"],
@@ -179,3 +187,23 @@ class Phase1DemoStore:
                 )
             )
         return out
+
+
+def _execution_book_to_dict(book: ExecutionBook) -> dict:
+    return {
+        "ask_prices": list(book.ask_prices),
+        "ask_sizes": list(book.ask_sizes),
+        "bid_prices": list(book.bid_prices),
+        "bid_sizes": list(book.bid_sizes),
+        "mark_price": float(book.mark_price),
+    }
+
+
+def _execution_book_from_dict(payload: dict) -> ExecutionBook:
+    return ExecutionBook(
+        ask_prices=tuple(float(v) for v in payload.get("ask_prices", [])),
+        ask_sizes=tuple(float(v) for v in payload.get("ask_sizes", [])),
+        bid_prices=tuple(float(v) for v in payload.get("bid_prices", [])),
+        bid_sizes=tuple(float(v) for v in payload.get("bid_sizes", [])),
+        mark_price=float(payload.get("mark_price", 0.0)),
+    )

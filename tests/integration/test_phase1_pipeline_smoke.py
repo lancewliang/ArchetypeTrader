@@ -141,6 +141,9 @@ def test_pipeline_smoke_writes_required_artifacts(smoke_artifacts):
         a.phase1_report,
         a.composite_score_sensitivity_json,
         a.sampling_leakage_diagnostics_json,
+        a.artifacts_dir / "action_diagnostics.json",
+        a.artifacts_dir / "horizon_boundary_diagnostics.json",
+        a.artifacts_dir / "code_stability_diagnostics.json",
     ]:
         assert path.exists(), f"missing artifact: {path}"
 

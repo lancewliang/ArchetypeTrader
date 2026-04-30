@@ -9,6 +9,7 @@ from src.evaluation.phase1_metrics import (
     code_usage_ratio,
     codebook_perplexity,
     composite_score_sensitivity,
+    composite_score_sensitivity_across_epochs,
     phase1_composite_score,
     return_capture_ratio,
 )
@@ -54,3 +55,18 @@ def test_composite_sensitivity_returns_per_perturbation():
     assert len(out["results"]) == 2
     for r in out["results"]:
         assert "score" in r
+
+
+def test_composite_sensitivity_across_epochs_reselects_best():
+    epochs = [
+        {"epoch": 0, "a": 1.0, "b": 0.0, "code_usage_ratio": 0.8},
+        {"epoch": 1, "a": 0.0, "b": 2.0, "code_usage_ratio": 0.9},
+    ]
+    out = composite_score_sensitivity_across_epochs(
+        epochs,
+        base_weights={"a": 1.0, "b": 0.0},
+        perturbations=[{"a": -1.0, "b": 1.0}],
+    )
+    assert out["base_best"]["best_epoch"] == 0
+    assert out["results"][0]["best_epoch"] == 1
+    assert out["best_epoch_drift"] is True

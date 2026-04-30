@@ -13,13 +13,18 @@ evaluate_epoch 流程:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from src.config.phase1_config import SelectionPolicyConfig
 from src.data.dataset import Phase1DemoDataset, collate_phase1
 from src.data.horizon_builder import HorizonRecord
 
-from .metrics.action import switch_metrics, single_trade_consistency_rate, weighted_reconstruction_accuracy
+from .metrics.action import (
+    action_confusion_matrix,
+    switch_metrics,
+    single_trade_consistency_rate,
+    weighted_reconstruction_accuracy,
+)
 from .metrics.archetype import dp_teacher_quality, per_code_summary
 from .metrics.behavior import (
     decoder_sensitivity_to_code,
@@ -37,8 +42,10 @@ from .metrics.risk import (
     sortino_ratio,
 )
 from .phase1_metrics import (
+    codebook_displacement,
     code_usage_ratio,
     codebook_perplexity,
+    epoch_code_stability,
     reconstruction_accuracy,
     return_capture_ratio,
     regret_to_dp,
@@ -53,6 +60,7 @@ class EpochMetrics:
     metrics: Dict[str, float] = field(default_factory=dict)
     per_code_metrics: Dict[int, Dict[str, float]] = field(default_factory=dict)
     per_horizon_replay_records: List[dict] = field(default_factory=list)
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
 
@@ -86,6 +94,8 @@ class Phase1Evaluator:
         # 否则 val/test code_id 会和 train 不在同一表征空间，所有 capture / regret
         # 都会被误读。
         self.reward_normalizer = reward_normalizer
+        self._previous_code_ids: Optional[List[int]] = None
+        self._previous_codebook: Optional[List[List[float]]] = None
 
     def evaluate_epoch(
         self,
@@ -185,6 +195,9 @@ class Phase1Evaluator:
         out.metrics["switch_point_recall"] = sw.switch_point_recall
         out.metrics["switch_direction_accuracy"] = sw.switch_direction_accuracy
         out.metrics["switch_timing_error_mean"] = sw.switch_timing_error_mean
+        cm = action_confusion_matrix(true_actions, pred_actions)
+        out.metrics["confusion_matrix"] = cm.matrix
+        out.metrics["action_precision_recall_per_class"] = cm.per_class()
 
         # ---- VQ 指标 ----
         K = model.quantizer.num_codes
@@ -193,11 +206,29 @@ class Phase1Evaluator:
         codebook_list = model.quantizer.codebook.detach().cpu().tolist()
         out.metrics["inter_code_distance"] = inter_code_distance(codebook_list)
         out.metrics["silhouette_score"] = latent_silhouette_score(z_e_tensor, all_code_ids)
+        if self._previous_code_ids is not None and len(self._previous_code_ids) == len(all_code_ids):
+            out.metrics["epoch_code_stability"] = epoch_code_stability(
+                self._previous_code_ids, all_code_ids
+            )
+        else:
+            out.metrics["epoch_code_stability"] = 1.0
+        displacement = (
+            codebook_displacement(codebook_list, self._previous_codebook)
+            if self._previous_codebook is not None
+            else {}
+        )
+        if displacement:
+            out.metrics["codebook_displacement_mean"] = sum(displacement.values()) / len(displacement)
+            out.metrics["codebook_displacement_max"] = max(displacement.values())
+        else:
+            out.metrics["codebook_displacement_mean"] = 0.0
+            out.metrics["codebook_displacement_max"] = 0.0
 
         # ---- replay: teacher / student ----
         teacher_records: List[HorizonReplayRecord] = []
         student_records: List[HorizonReplayRecord] = []
         per_horizon_replay: List[dict] = []
+        decoded_actions: List[List[int]] = []
         for rec, code_id in zip(probe_records, all_code_ids):
             teacher = self.replay_evaluator.replay_dp_teacher(rec)
             student = self.replay_evaluator.replay_student_online(
@@ -205,6 +236,7 @@ class Phase1Evaluator:
             )
             teacher_records.append(teacher)
             student_records.append(student)
+            decoded_actions.append(list(student.student_actions))
             per_horizon_replay.append(
                 {
                     "sample_id": rec.sample_id,
@@ -239,6 +271,15 @@ class Phase1Evaluator:
         out.metrics["val_return_capture_ratio"] = return_capture_ratio(student_total, teacher_total)
         out.metrics["val_regret_to_dp"] = regret_to_dp(student_total, teacher_total)
         out.metrics["val_cost_paid"] = sum(r.cost_paid for r in student_records)
+        boundary = self.replay_evaluator.evaluate_horizon_boundaries(
+            probe_records, decoded_actions
+        )
+        out.metrics["horizon_boundary_turnover_cost"] = (
+            boundary.horizon_boundary_turnover_cost
+        )
+        out.metrics["horizon_boundary_position_consistency"] = (
+            boundary.horizon_boundary_position_consistency
+        )
 
         # 风险指标: 把所有 student step returns 拼起来再算
         flat_student_steps: List[float] = []
@@ -260,6 +301,7 @@ class Phase1Evaluator:
         tq = dp_teacher_quality(teacher_horizons, flat_teacher_steps, self.annualization_factor)
         out.metrics["val_dp_teacher_sharpe"] = tq.val_dp_teacher_sharpe
         out.metrics["val_dp_teacher_profitable_ratio"] = tq.val_dp_teacher_profitable_ratio
+        out.metrics["dp_teacher_return_distribution"] = tq.return_distribution
 
         # ---- per-archetype ----
         diag = per_code_summary(
@@ -279,7 +321,11 @@ class Phase1Evaluator:
                 "avg_return": s.avg_return,
                 "win_rate": s.win_rate,
                 "no_trade_ratio": s.no_trade_ratio,
+                "switch_point_distribution": s.switch_point_distribution,
             }
+        out.metrics["per_code_switch_point_distribution"] = {
+            str(s.code_id): s.switch_point_distribution for s in diag.per_code
+        }
         out.metrics["active_trade_code_count"] = float(diag.active_trade_code_count)
         out.metrics["no_trade_code_concentration_top1"] = diag.no_trade_code_concentration["top1"]
         out.metrics["no_trade_code_concentration_top2"] = diag.no_trade_code_concentration["top2"]
@@ -304,6 +350,47 @@ class Phase1Evaluator:
         if out.metrics.get("val_dp_teacher_profitable_ratio", 1.0) < 0.3:
             out.warnings.append("DP teacher profitable_ratio 低，return_capture_ratio 不可单独解读为学得好")
 
+        out.diagnostics = {
+            "action": {
+                "confusion_matrix": cm.matrix,
+                "action_precision_recall_per_class": cm.per_class(),
+                "switch_timing_error_distribution": sw.switch_timing_error_distribution,
+            },
+            "risk": {
+                "val_sharpe_ratio": out.metrics["val_sharpe_ratio"],
+                "val_sortino_ratio": out.metrics["val_sortino_ratio"],
+                "val_max_drawdown": out.metrics["val_max_drawdown"],
+                "val_calmar_ratio": out.metrics["val_calmar_ratio"],
+            },
+            "archetype_separation": {
+                "code_usage_ratio": out.metrics["code_usage_ratio"],
+                "perplexity": out.metrics["perplexity"],
+                "inter_code_distance": out.metrics["inter_code_distance"],
+                "silhouette_score": out.metrics["silhouette_score"],
+                "per_code_metrics": {str(k): v for k, v in out.per_code_metrics.items()},
+                "dp_teacher_return_distribution": tq.return_distribution,
+            },
+            "archetype_behavior": {
+                "active_trade_code_count": out.metrics["active_trade_code_count"],
+                "no_trade_code_concentration_top1": out.metrics["no_trade_code_concentration_top1"],
+                "no_trade_code_concentration_top2": out.metrics["no_trade_code_concentration_top2"],
+                "per_code_switch_point_distribution": out.metrics["per_code_switch_point_distribution"],
+                "inter_code_action_diversity": out.metrics.get("inter_code_action_diversity", 0.0),
+                "decoder_sensitivity_to_code": out.metrics.get("decoder_sensitivity_to_code", 0.0),
+            },
+            "horizon_boundary": {
+                "horizon_boundary_turnover_cost": out.metrics["horizon_boundary_turnover_cost"],
+                "horizon_boundary_position_consistency": out.metrics["horizon_boundary_position_consistency"],
+            },
+            "code_stability": {
+                "epoch_code_stability": out.metrics["epoch_code_stability"],
+                "codebook_displacement": displacement,
+                "codebook_displacement_mean": out.metrics["codebook_displacement_mean"],
+                "codebook_displacement_max": out.metrics["codebook_displacement_max"],
+            },
+        }
+        self._previous_code_ids = list(all_code_ids)
+        self._previous_codebook = [list(row) for row in codebook_list]
         return out
 
     def _behavior_probe(self, model, records: List[HorizonRecord]):

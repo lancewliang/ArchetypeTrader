@@ -148,3 +148,76 @@ def composite_score_sensitivity(
         score, debug = phase1_composite_score(metrics, weights)
         results.append({"perturbation": delta, "score": score, "weights": weights, "debug": debug})
     return {"base_score": base_score, "base_debug": base_debug, "results": results}
+
+
+def composite_score_sensitivity_across_epochs(
+    epoch_metrics: Sequence[Dict[str, float]],
+    base_weights: Dict[str, float],
+    perturbations: List[Dict[str, float]],
+) -> dict:
+    """权重 sensitivity: 对全部 epoch metrics 重新选择 best epoch。
+
+    设计 §9.5 要求观察不同权重下 best epoch 是否漂移。该函数不只对
+    单个 best metrics 重算分数，而是对 manifest 中所有 epoch metrics
+    逐个打分，再按每组权重选出新的 best。
+    """
+    metrics_list = [dict(m) for m in epoch_metrics]
+    if not metrics_list:
+        return {
+            "base_best": None,
+            "results": [],
+            "best_epoch_drift": False,
+            "best_epochs": [],
+        }
+    eligible_metrics = [
+        m for m in metrics_list
+        if m.get("_manifest_verdict") not in {"reject", "fatal"}
+    ] or metrics_list
+
+    def _best_for(weights: Dict[str, float]) -> dict:
+        best_payload = None
+        best_score = -float("inf")
+        best_debug = {}
+        for payload in eligible_metrics:
+            score, debug = phase1_composite_score(payload, weights)
+            if score > best_score:
+                best_score = score
+                best_debug = debug
+                best_payload = payload
+        assert best_payload is not None
+        core = {
+            key: best_payload.get(key)
+            for key in (
+                "code_usage_ratio",
+                "val_return_capture_ratio",
+                "val_max_drawdown",
+                "val_sharpe_ratio",
+                "phase1_composite_score",
+            )
+            if key in best_payload
+        }
+        return {
+            "best_epoch": int(best_payload.get("epoch", -1)),
+            "score": best_score,
+            "weights": dict(weights),
+            "debug": best_debug,
+            "core_metrics": core,
+        }
+
+    base_best = _best_for(base_weights)
+    results = []
+    best_epochs = [base_best["best_epoch"]]
+    for delta in perturbations:
+        weights = dict(base_weights)
+        for key, value in delta.items():
+            weights[key] = weights.get(key, 0.0) + value
+        best = _best_for(weights)
+        best["perturbation"] = dict(delta)
+        results.append(best)
+        best_epochs.append(best["best_epoch"])
+    return {
+        "base_best": base_best,
+        "results": results,
+        "best_epoch_drift": len(set(best_epochs)) > 1,
+        "best_epochs": best_epochs,
+    }

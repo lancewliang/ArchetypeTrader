@@ -25,7 +25,9 @@ from src.data.schema import InputSchemaValidator
 from src.data.stratified_sampler import StratifiedWindowSampler
 from src.data.window_indexer import SlidingWindowIndexer
 from src.evaluation.phase1_evaluator import Phase1Evaluator
-from src.evaluation.phase1_metrics import composite_score_sensitivity
+from src.evaluation.phase1_metrics import (
+    composite_score_sensitivity_across_epochs,
+)
 from src.evaluation.phase1_replay import Phase1ReplayEvaluator
 from src.evaluation.phase1_report import Phase1ReportWriter, ReportPaths
 from src.models.encoder_inputs import RewardNormalizer
@@ -95,6 +97,7 @@ class Phase1Trainer:
         self.config = apply_paper_strict_overrides(config)
         self._sampling_health_reports: Dict[str, dict] = {}
         self._dead_code_restart_events: List[dict] = []
+        self._best_epoch_diagnostics: Dict[str, Any] = {}
 
     # ---------- 入口 ----------
 
@@ -291,8 +294,8 @@ class Phase1Trainer:
 
         # 11. composite sensitivity + 报告
         best_metrics_payload = self._best_metrics(ckpt)
-        sensitivity = composite_score_sensitivity(
-            best_metrics_payload,
+        sensitivity = composite_score_sensitivity_across_epochs(
+            self._all_epoch_metrics(ckpt),
             base_weights=self.config.selection_policy.metric_weights,
             perturbations=self.config.selection_policy.composite_score_sensitivity_perturbations,
         )
@@ -330,6 +333,11 @@ class Phase1Trainer:
             "signoff_blocked_reason", ""
         )
         writer.write_final_report(report_summary)
+        if self._best_epoch_diagnostics:
+            diagnostics_payload = dict(self._best_epoch_diagnostics)
+            diagnostics_payload["sampling_leakage"] = leakage_payload
+            diagnostics_payload["composite_score_sensitivity"] = sensitivity
+            writer.write_diagnostics(diagnostics_payload)
 
         # 采样诊断 JSON: 主实验记录 hindsight bias warning 与 followup batch
         leakage_path = artifacts_dir / "sampling_leakage_diagnostics.json"
@@ -709,6 +717,8 @@ class Phase1Trainer:
             checkpoint.save_last(state, metrics_for_select, epoch)
             checkpoint.save_periodic(state, metrics_for_select, epoch, self.config.training.save_every)
             checkpoint.commit_verdict(state, metrics_for_select, verdict, epoch)
+            if verdict.decision == "promote_to_best":
+                self._best_epoch_diagnostics = dict(ep_metrics.diagnostics)
             history = policy.update_history(history, metrics_for_select, verdict)
         return history
 
@@ -789,11 +799,13 @@ class Phase1Trainer:
             for rec, code_id in zip(recs, code_ids.tolist()):
                 # demo_return 必须使用原始 rewards（actual return），而不是 normalizer 后的值。
                 demo_return = sum(rec.rewards or [])
+                action_seq = list(rec.actions or [])
+                switch_seq = action_seq[:-1] if len(action_seq) > 1 else action_seq
                 num_switches = sum(
-                    1 for i in range(1, len(rec.actions or []))
-                    if rec.actions[i] != rec.actions[i - 1]
+                    1 for i in range(1, len(switch_seq))
+                    if switch_seq[i] != switch_seq[i - 1]
                 )
-                is_no_trade = all(a == 1 for a in (rec.actions or []))
+                is_no_trade = all(a == 1 for a in action_seq)
                 labels.append(
                     HorizonLabel(
                         sample_id=rec.sample_id,
@@ -896,6 +908,20 @@ class Phase1Trainer:
             return read_json(best.metrics_path)
         except Exception:
             return {}
+
+    def _all_epoch_metrics(self, ckpt: Phase1CheckpointManager) -> List[dict]:
+        """从 manifest 读取每个 epoch 的 metrics，用于 sensitivity 重新选 best。"""
+        out: List[dict] = []
+        for entry in ckpt.load_manifest():
+            try:
+                payload = read_json(entry.metrics_path)
+            except Exception:
+                continue
+            payload.setdefault("epoch", entry.epoch)
+            payload.setdefault("_manifest_verdict", entry.verdict)
+            payload.setdefault("_manifest_is_best", entry.is_best)
+            out.append(payload)
+        return out
 
     def _build_final_summary(self, *, metrics, reject_stats, normalizer, best_epoch, no_trade_ratio: float = 0.0) -> dict:
         cost = self.config.dp.cost_config

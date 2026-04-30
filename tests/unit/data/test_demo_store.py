@@ -5,6 +5,17 @@ import pytest
 
 from src.data.demo_store import HorizonLabel, Phase1DemoStore
 from src.data.horizon_builder import HorizonRecord
+from src.trading.cost_model import ExecutionBook
+
+
+def _book(mark: float = 100.0) -> ExecutionBook:
+    return ExecutionBook(
+        ask_prices=(mark + 0.1,) * 5,
+        ask_sizes=(10.0,) * 5,
+        bid_prices=(mark - 0.1,) * 5,
+        bid_sizes=(10.0,) * 5,
+        mark_price=mark,
+    )
 
 
 def _record(sample_id: str = "s0", h: int = 4):
@@ -17,7 +28,7 @@ def _record(sample_id: str = "s0", h: int = 4):
         strata_label="up|low|mixed",
         states=[[0.0] for _ in range(h)],
         prices=[100.0] * (h + 1),
-        execution_books=[],  # demo cache 无需还原
+        execution_books=[_book(100.0 + i) for i in range(h)],
         actions=[1] * h,
         rewards=[0.0] * h,
     )
@@ -29,6 +40,8 @@ def test_save_and_load_demos_roundtrip(tmp_path):
     assert path.exists()
     loaded = store.load_demos()
     assert {r.sample_id for r in loaded} == {"a", "b"}
+    assert len(loaded[0].execution_books) == 4
+    assert loaded[0].execution_books[0].mark_price == 100.0
 
 
 def test_load_with_mismatched_hash_raises(tmp_path):

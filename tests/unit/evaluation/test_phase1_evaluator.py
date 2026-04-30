@@ -90,8 +90,17 @@ def test_evaluate_epoch_returns_required_metric_keys():
         "val_max_drawdown",
         "inter_code_action_diversity",
         "decoder_sensitivity_to_code",
+        "confusion_matrix",
+        "action_precision_recall_per_class",
+        "horizon_boundary_turnover_cost",
+        "horizon_boundary_position_consistency",
+        "dp_teacher_return_distribution",
+        "epoch_code_stability",
+        "per_code_switch_point_distribution",
     }
     assert required.issubset(out.metrics.keys())
+    assert "action" in out.diagnostics
+    assert "horizon_boundary" in out.diagnostics
 
 
 def test_fast_probe_uses_subset():
