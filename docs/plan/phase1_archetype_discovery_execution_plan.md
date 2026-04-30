@@ -70,6 +70,38 @@ PY
 
 按以下顺序生成代码，每一步完成后运行对应测试，避免一次性生成大面积不可定位的问题。
 
+### 3.0 执行状态看板
+
+后续每完成一个 Step，就在本表中把对应单元从 `[ ]` 改为 `[x]`，并在“备注”中记录关键产物、测试命令或阻塞原因。建议只在该 Step 的代码、测试、审查都完成后，才把“状态”改为 `DONE`。
+
+状态约定:
+
+| 状态 | 含义 |
+| --- | --- |
+| `TODO` | 尚未开始 |
+| `IN_PROGRESS` | 正在实现或测试 |
+| `BLOCKED` | 被依赖、数据、接口或决策阻塞 |
+| `DONE` | 代码、测试、审查和产物验收均完成 |
+
+| Step | 范围 | 代码 | 单元测试 | 集成/验收 | 代码审查 | 状态 | 备注 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Step 1 | 配置与基础 IO | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 2 | 数据读取与 schema 校验 | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 3 | 滑窗、分层采样与采样健康检查 | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 4 | 成本模型、reward alignment 与交易环境 | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 5 | horizon 构造与 demonstration store | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 6 | Single-trade DP planner | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 7 | VQ 模型组件 | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 8 | Phase I 指标与 replay 评估 | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 9 | checkpoint、报告与训练器 | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 10 | 集成入口 | [ ] | [ ] | [ ] | [ ] | TODO |  |
+
+Step 完成记录:
+
+| 日期 | Step | 完成内容 | 验证命令 | 结果 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |
+
 ### Step 1: 配置与基础 IO
 
 生成文件:
@@ -757,17 +789,31 @@ python tests/fixtures/phase1/generate_phase1_fixtures.py
 - codebook update method 写入 config/report。
 - `code_usage_ratio` guardrail 参与 best checkpoint 选择。
 
+性能代码审查:
+
+- DP 只对 sampled horizons、补采样 horizons 和显式评估 horizons 运行；不得先对全部候选窗口跑 DP 后再按 DP 收益挑选训练样本。
+- DP transition reward 预计算只缓存当前 horizon 内允许的 execution/markout 行，不能跨 horizon 或跨 split 复用。
+- 并行 DP 必须 deterministic: 固定 seed、固定 sampled window index、固定输出排序，同一输入重复运行得到相同 `sample_id/actions/rewards/total_return`。
+- DP shard、tensor cache 和中间产物必须携带 `phase1_config_hash`、`input_schema_hash`、`reward_alignment` 和 `cost_config`；任一字段变化必须失效重算。
+- DataLoader worker 只读取当前 split 的 tensor cache 或 demo 数据，不读取 validation/test 数据，不执行重新采样。
+- `RewardNormalizer`、kmeans warmup、EMA update、dead-code restart 和 usage regularization 只基于 train batch。
+- fast validation probe 必须在训练前固定，报告中必须区分 `fast_val_metrics` 和 `full_val_metrics`。
+- best checkpoint 选择不得只依赖动态 probe；正式 best candidate 必须跑 full validation 或配置明确的固定 validation subset。
+- mixed precision、`torch.compile`、cuDNN benchmark 等优化不得改变 decoder 因果结构、reward alignment、成本模型和 split 边界。
+- `phase1_report.json` 必须包含 DP 生成耗时、horizons/sec、train epoch 耗时、samples/sec、tensor cache hit/miss 和 fast/full validation 配置。
+
 产物审查:
 
 - 所有输出写入 `artifacts/{PAIR}/{BATCH_ID}/phase1/`。
 - `phase1_config.yaml` 可复现实验配置。
 - `checkpoint_manifest.json` 记录 best/last/拒绝原因。
-- `phase1_report.json` 包含采样、模型、风险、行为诊断。
+- `phase1_report.json` 包含采样、模型、风险、行为诊断和性能诊断。
 
 测试审查:
 
 - 单元测试覆盖 DP 单次切换约束。
 - 单元测试覆盖 decoder 因果性。
+- 单元测试覆盖 DP 并行 deterministic、cache hash 失效和 fast/full validation 指标分离。
 - 集成测试覆盖完整 CLI。
 - fixture 小而确定，seed 固定。
 
@@ -866,6 +912,6 @@ Phase I 代码生成完成需要同时满足:
 - `pytest tests/unit -q` 通过。
 - `pytest tests/integration -q` 通过。
 - smoke 训练能生成完整 artifacts。
-- `phase1_report.json` 包含采样健康、VQ、重构、replay、风险、codebook 诊断字段。
+- `phase1_report.json` 包含采样健康、VQ、重构、replay、风险、codebook 和性能诊断字段。
 - `best_vq_model.pt`、`decoder.pt`、`codebook.pt`、`horizon_labels_*.feather` 可被 Phase II 读取。
-- 代码审查清单全部通过，特别是 decoder 因果性和 DP 使用边界。
+- 代码审查清单全部通过，特别是 decoder 因果性、DP 使用边界和性能优化边界。

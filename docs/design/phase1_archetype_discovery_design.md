@@ -1589,7 +1589,144 @@ for each minute tau in [t, t+h-1]:
 
 换句话说，Phase I 允许用未来信息构造“老师答案”，但不允许训练出一个在执行时依赖未来信息的学生模型。
 
-### 6.8 训练轮数与版本策略
+### 6.8 性能与可扩展性设计
+
+Phase I 的主要计算瓶颈有两个:
+
+1. 对最终 sampled horizons 运行 Single-trade DP，并在 no-trade 超阈值或数据增强时可能补跑 DP。
+2. 训练 VQ encoder-decoder，并在 validation replay、codebook 诊断和 label 导出时反复做模型推理。
+
+性能优化只能改变计算组织方式，不能改变数据可见性边界、reward alignment、成本模型或 checkpoint 选择语义。任何缓存、并行或近似评估都必须写入 `phase1_config.yaml` 和 `phase1_report.json`，保证实验可复现和可审计。
+
+#### 6.8.1 DP 性能设计
+
+Single-trade DP 的状态空间很小。对单个 horizon，状态为 `(t, action, changed)`，其中 `action=3`、`changed=2`，转移候选最多 `3` 个，因此理论复杂度约为:
+
+```text
+O(h * 3 * 2 * 3)
+```
+
+当 `h=72` 时，DP 本身不是大问题，真正的成本通常来自逐 horizon 构造盘口、重复计算交易成本、Python 循环和 IO。第一版应按以下方式优化:
+
+| 优化项 | 设计 | 泄漏边界 |
+| --- | --- | --- |
+| 只对 sampled horizons 跑 DP | 滑窗阶段只计算轻量分层统计，最终采样后才生成 DP demonstration | 采样仍可使用配置允许的 hindsight/prospective strata；不额外用 DP 结果选择样本，除非进入明确的 no-trade 控制流程并写入报告 |
+| 预计算 transition reward | 对每个 horizon 先构造 `[h, 3, 3]` 的 `transition_reward` 和 `transition_valid`，DP 只查表 | reward 仍只使用该 horizon 内允许的 execution/markout 行，不跨 horizon |
+| 成本模型批量化 | 对每个 execution row 预先计算 `prev_action -> target_action` 的 fee/slippage/fill info | 不改变 `CostModel` 公式；只缓存相同输入的计算结果 |
+| horizon 独立并行 | `Phase1DemoGenerator` 使用 process pool 或 joblib 按 chunk 并行 DP，最后按 `sample_id` 恢复稳定顺序 | 每个 worker 只接收当前 horizon 数据和只读配置，不读取模型、validation 指标或 test 数据 |
+| 分块写入 | DP metadata 和 demonstration records 分块写入临时目录，成功后合并为 `demos_train.feather` | 中间 shard 必须包含 config hash 和 schema hash，避免混用不同配置 |
+| 断点续跑 | 已完成的 sample_id 可跳过，重新运行时校验 config hash、input schema hash、reward alignment 和 cost_config | 不允许在 cost_config 变化后复用旧 DP 结果 |
+
+DP 实现要求:
+
+- `SingleTradeDPPlanner` 内部不直接访问原始全量 DataFrame，只接收一个 horizon record。
+- `Phase1DemoGenerator` 可以并行，但必须 deterministic: 固定 seed、固定 sampled window index、固定输出排序。
+- `transition_reward` 预计算必须同时保存或可重算 `fee/slippage/fill_price/valid_transition`，用于 replay 对齐和错误排查。
+- no-trade 二次补采样如果需要额外跑 DP，只能从 train candidate pool 中补采样，并把过滤、补采样和重跑数量写入 `phase1_report.json`。
+- val/test 的 DP teacher 标签可以离线生成用于评估和 label 导出，但不能参与模型训练、训练采样或超参搜索之外的 test 报告。
+
+禁止的 DP 性能“优化”:
+
+- 先对全部候选窗口跑 DP，再用 DP 收益挑选训练样本，除非这是一个单独标注的 hindsight demonstration curation 实验，并且不把结果解释为前瞻预测能力。
+- 用 validation/test 的 DP 收益分布调整 train 采样策略。
+- 为了提速省略手续费、盘口深度滑点或 reward alignment。
+- 在 Phase II/III replay 或线上推理中动态调用 DP。
+
+#### 6.8.2 VQ/VAE-style 训练性能设计
+
+本文档的 Phase I 模型是 VQ encoder-decoder，不是标准连续 VAE；但训练性能瓶颈与 VAE 类模型相似，主要在序列 encoder/decoder 前向、codebook 最近邻、validation replay 和诊断输出。建议实现以下优化:
+
+| 优化项 | 设计 | 泄漏边界 |
+| --- | --- | --- |
+| tensor cache | Feather 是审计产物；训练前可从 `demos_train.feather` 生成 train-only tensor cache，例如 `tensor_cache_train.pt` 或 memory-mapped tensor shard | cache 必须由当前 split 自己生成，携带 schema/config hash；val/test cache 不参与 train fit |
+| 固定长度 batch | horizon 固定为 `h=72`，Dataset 直接返回 dense tensors `[h, feature_dim]`、`[h]`、`[h]` | 不做跨 split padding 统计或状态 scaler fit |
+| DataLoader 优化 | 使用 `num_workers`、`persistent_workers`、`prefetch_factor`、`pin_memory`，batch 内只做张量拼接，不做 Polars 查询 | worker 不读取 validation/test，也不重新采样 |
+| mixed precision | GPU 上可启用 `torch.cuda.amp` 或 `torch.amp` 加速 LSTM/MLP/CE loss | 数值差异写入 config；checkpoint 指标仍用同一评估流程 |
+| codebook 距离批量化 | `VectorQuantizer` 用矩阵公式批量计算 `||z_e-e_i||^2`，避免 Python for-loop | codebook 初始化和更新只使用 train batches |
+| kmeans warmup 限流 | `kmeans_warmup_batches` 限制只从 train 前若干 batch 或固定 train sample 子集收集 `z_e` | 不使用 val/test encoder output 初始化 codebook |
+| 评估分层 | 每个 epoch 用固定 validation probe 计算快速指标；`best` 候选、周期 checkpoint 或训练结束时跑完整 validation replay | probe 必须在训练前按 seed/stride 固定，不能根据模型表现动态更换 |
+| 诊断降频 | latent snapshot、t-SNE、failure case HTML 按 `log_every_epochs` 或 best checkpoint 触发 | 诊断只观察，不参与训练梯度；test 诊断只能在最终冻结模型后运行 |
+| 编译与内核优化 | 可选 `torch.compile`、cuDNN benchmark、梯度裁剪和 fused optimizer | 必须保证 decoder 仍是单向因果结构 |
+
+训练数据读取建议:
+
+- `demos_train.feather`、`demos_val.feather` 和 label 文件作为可审计主产物保存。
+- 训练器首次运行时可生成 `artifacts/{PAIR}/{BATCH_ID}/phase1/tensor_cache/`，缓存 `states/actions/rewards/prices/meta_index`。
+- tensor cache 必须记录:
+  - `split`
+  - `input_schema_hash`
+  - `phase1_config_hash`
+  - `reward_alignment`
+  - `feature_columns`
+  - `price_column`
+  - `num_samples`
+- 若上述任一字段变化，cache 必须失效并重新生成。
+
+VQ 训练实现要求:
+
+- `RewardNormalizer.fit_train()` 只使用 train demonstration rewards；val/test 只调用 `transform()`。
+- k-means warmup、EMA update、dead-code restart 和 usage regularization 只基于 train batches。
+- validation replay 可以为了速度使用固定 probe，但 checkpoint manifest 必须区分 `fast_val_metrics` 和 `full_val_metrics`。
+- `phase1_composite_score` 用于正式 best 选择时，默认应基于 full validation 或配置明确的 fixed validation subset；该 subset 必须在训练前确定。
+- test split 只用于最终冻结模型的报告，不参与 early stopping、best checkpoint 选择、codebook 初始化或任何训练超参调整。
+
+建议新增性能配置:
+
+```yaml
+performance:
+  dp:
+    num_workers: 8
+    chunk_size: 512
+    precompute_transition_rewards: true
+    resume_demo_generation: true
+    deterministic_output_order: true
+  data:
+    use_tensor_cache: true
+    tensor_cache_dir: tensor_cache
+    invalidate_cache_on_config_change: true
+  training:
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2
+    mixed_precision: true
+    torch_compile: false
+    gradient_clip_norm: 1.0
+  evaluation:
+    fast_val_probe_size: 2048
+    full_val_every_epochs: 5
+    run_full_val_on_best_candidate: true
+    run_test_only_after_training: true
+```
+
+性能报告字段建议:
+
+```json
+{
+  "performance": {
+    "dp_num_workers": 8,
+    "dp_generation_seconds": 0.0,
+    "dp_horizons_per_second": 0.0,
+    "tensor_cache_enabled": true,
+    "tensor_cache_hit": false,
+    "train_epoch_seconds_mean": 0.0,
+    "train_samples_per_second": 0.0,
+    "fast_val_probe_size": 2048,
+    "full_val_every_epochs": 5,
+    "mixed_precision": true
+  }
+}
+```
+
+性能验收:
+
+- DP 生成、训练和评估必须分别计时，并写入 `phase1_report.json`。
+- 开启并行 DP 后，固定 seed 和同一 sampled window index 应生成相同 `sample_id/actions/rewards/total_return`。
+- 开启 tensor cache 后，训练结果应与直接读取 Feather 的结果在可接受数值误差内一致。
+- mixed precision 只能影响训练速度和浮点舍入，不得改变 decoder 因果性、reward alignment 或 split 边界。
+- 快速 validation probe 的指标不能冒充完整 validation；报告必须明确 probe size、固定方式和 full validation 频率。
+
+### 6.9 训练轮数与版本策略
 
 Phase I 默认训练 `100` epochs，与论文实验设置一致。训练轮数必须配置化:
 
@@ -1976,6 +2113,8 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 | demonstration 太理想化 | Phase II 回测收益弱 | 第一阶段强制启用手续费和盘口深度逐档滑点，禁止使用 `fixed_bps` |
 | 输入数据存在未来信息 | 验证/测试表现异常好 | 审计外部数据文件的字段来源，本项目不重新生成因子 |
 | decoder 只记忆动作位置 | 泛化弱 | 增加 validation horizon、多资产训练或 action label smoothing |
+| DP 生成耗时过长 | 30k horizon 加 no-trade 补采样或增强后生成 demonstration 变慢 | 只对 sampled horizons 跑 DP；预计算 `[h,3,3]` transition reward；按 horizon 并行；缓存带 config hash 的 DP shard |
+| 快速验证误导 checkpoint | fast validation probe 指标好，但 full validation replay 表现差 | probe 在训练前固定；best candidate 必须跑 full validation 或明确配置的 fixed full subset；报告区分 `fast_val_metrics` 和 `full_val_metrics` |
 
 ## 11. 与后续阶段的接口
 
