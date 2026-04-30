@@ -223,18 +223,30 @@ return_bin=up, vol_bin=high, pattern_bin=mixed
 stratification:
   mode: hindsight_horizon        # hindsight_horizon | prospective_past
   prospective_lookback_minutes: 1440
-  require_prospective_diagnostic: true
+  require_prospective_diagnostic: true     # 强制；未提供对照实验时 Phase I 不可签收
   diagnostic_pair_batch_id: batch_002_prospective_strata
   report_hindsight_bias_warning: true
+  hindsight_vs_prospective_max_delta:      # 后视/前瞻核心指标差异上限，超过则告警
+    val_return_capture_ratio: 0.20
+    val_sharpe_ratio: 0.50
+    val_max_drawdown: 0.10
+    code_usage_ratio: 0.10
 sampling_health:
   max_no_trade_ratio: 0.25
   flat_low_vol_max_ratio: 0.15
   min_gap_between_samples: 36   # h=72 时取 h/2，最多允许 50% 重叠
   max_overlap_ratio: 0.5
-  split_boundary_embargo: 72    # train/val/test 边界至少间隔一个 horizon
+  split_boundary_embargo: 73    # 必须同时覆盖 paper_formula 的 markout 行 (h+1)
+  next_row_split_boundary_embargo: 74      # next_row_execution 模式下覆盖 (h+2)
   warn_only: false
   allow_overlap_relaxation: false
 ```
+
+强制 prospective 对照实验语义:
+
+- `require_prospective_diagnostic=true` 时，hindsight 主实验和 prospective 诊断必须使用相同 `num_demos`、`seed`、`min_gap_between_samples`、`cost_config` 和训练超参，仅 `stratification_mode` 与 `BATCH_ID` 不同。
+- 主实验完成后必须读取诊断批次的 `phase1_report.json`，按 `hindsight_vs_prospective_max_delta` 比较核心指标。任一指标差异超过阈值时，主实验 `phase1_report.json` 必须写入 `hindsight_bias_warning="exceeded"`，且主实验的 `best_vq_model.pt` 不可被声明为 sign-off 版本。
+- 若上游交付时间紧急、确实只能跑单批 hindsight，必须显式在 CLI 加 `--allow-missing-prospective-diagnostic` 才能继续，并在 `sampling_leakage_diagnostics.json` 写入 `risk_acknowledged_by`、`reason`、`expected_sign_off_followup_batch_id`，否则训练入口直接退出。
 
 `window_overlap_ratio` 定义为相邻已采样窗口的平均重叠比例，单对窗口可按 `max(0, h - gap) / h` 计算。`h=72` 时，`min_gap_between_samples=36` 对应最多 36 分钟重叠，即 50% overlap；不再使用 `min_gap=12` / `max_overlap=0.85` 作为默认值，因为 83%-85% 重叠会显著提高样本时间自相关。
 
@@ -251,7 +263,12 @@ sampling_health:
 - `vq_archetype.py` 只组装模型，不把 encoder input adapter、quantizer 更新、loss 全部写在一个文件里。
 - reward 对齐、成本、env replay 必须是共享基础设施，DP teacher 和 student replay 不各自实现一套。
 
-建议模块结构如下，和 `run_pipeline.sh` 中预留的 `scripts/train_phase1.py` 对齐:
+建议模块结构如下，和 `run_pipeline.sh` 中预留的 `scripts/train_phase1.py` 对齐。本次设计相比第一版做了以下工程合并和子包化，避免顶层目录文件过多、`envs/` 与 `trading/` 边界含糊以及 checkpoint manager 兼任 best 选择策略的问题:
+
+- 合并 `src/envs/` 与 `src/trading/`，统一为 `src/trading/`，env、cost、reward 对齐放在同一边界内。
+- `src/evaluation/` 引入 `metrics/` 与 `diagnostics/` 子包，减少顶层文件数并按职责分组。
+- 新增 `src/trainers/selection_policy.py`，把 best checkpoint 选择规则、guardrail 与拒绝原因从 `phase1_checkpoint.py` 抽离，让 checkpoint manager 只做 IO。
+- `src/utils/io.py` 改名为 `feather_io.py`，明确职责，避免成为通用杂货抽屉。
 
 ```text
 scripts/train_phase1.py
@@ -278,25 +295,27 @@ src/models/vq_losses.py
 
 src/trainers/phase1_trainer.py
 src/trainers/phase1_checkpoint.py
+src/trainers/selection_policy.py
+
+src/trading/env.py
+src/trading/cost_model.py
+src/trading/reward_alignment.py
 
 src/evaluation/phase1_evaluator.py
 src/evaluation/phase1_replay.py
 src/evaluation/phase1_metrics.py
-src/evaluation/action_metrics.py
-src/evaluation/risk_metrics.py
-src/evaluation/archetype_diagnostics.py
-src/evaluation/behavior_diagnostics.py
-src/evaluation/code_stability.py
-src/evaluation/latent_visualization.py
-src/evaluation/failure_case_report.py
 src/evaluation/phase1_report.py
+src/evaluation/metrics/__init__.py
+src/evaluation/metrics/action.py
+src/evaluation/metrics/risk.py
+src/evaluation/metrics/archetype.py
+src/evaluation/metrics/behavior.py
+src/evaluation/metrics/stability.py
+src/evaluation/diagnostics/__init__.py
+src/evaluation/diagnostics/latent_visualization.py
+src/evaluation/diagnostics/failure_case_report.py
 
-src/envs/trading_env.py
-src/envs/reward_alignment.py
-
-src/trading/cost_model.py
-
-src/utils/io.py
+src/utils/feather_io.py
 ```
 
 ### 4.1 `scripts/train_phase1.py`
@@ -400,7 +419,7 @@ Planner 层负责生成离线 teacher demonstration，不参与 Phase II/III 在
 | --- | --- |
 | `single_trade_dp.py` | 实现论文 Algorithm 1 的 single-trade DP |
 | `demo_generator.py` | 批量调用 DP，为 sampled horizons 生成 actions/rewards/DP metadata |
-| `src/envs/reward_alignment.py` | 提供 `paper_formula` / `next_row_execution` 的统一行号映射，供 DP、env、replay 共用 |
+| `src/trading/reward_alignment.py` | 提供 `paper_formula` / `next_row_execution` 的统一行号映射，供 DP、env、replay 共用 |
 
 `SingleTradeDPPlanner` 输入:
 
@@ -524,7 +543,7 @@ class VQArchetypeModel:
 - 检查 codebook 是否塌缩。
 - 调用 `Phase1ReplayEvaluator` 获取真实收益指标，但不直接实现交易 replay 逻辑。
 - 汇总风险调整收益、per-archetype、切换点、per-class action、archetype 可区分性、decoder 行为多样性、horizon 边界衔接、epoch 稳定性和 DP teacher 质量诊断。
-- 为 `latent_visualization.py` 提供固定 probe batch 的中间表示，为 `failure_case_report.py` 提供 per-horizon replay records。
+- 为 `diagnostics/latent_visualization.py` 提供固定 probe batch 的中间表示，为 `diagnostics/failure_case_report.py` 提供 per-horizon replay records。
 - 输出 epoch-level metrics，供 trainer 和 checkpoint manager 使用。
 
 评估层按指标域拆分，`phase1_evaluator.py` 只做调度和聚合:
@@ -533,14 +552,14 @@ class VQArchetypeModel:
 | --- | --- |
 | `phase1_evaluator.py` | 调用模型推理、收集 batch outputs、调度各类 metric/replay、形成 epoch metrics |
 | `phase1_replay.py` | student/teacher replay、边界换仓 replay |
-| `phase1_metrics.py` | 通用指标门面和组合指标计算 |
-| `action_metrics.py` | reconstruction、per-class precision/recall、confusion matrix、switch metrics |
-| `risk_metrics.py` | Sharpe、Sortino、MDD、Calmar、equity curve 统计 |
-| `archetype_diagnostics.py` | per-code return/win/no-trade/switch distribution |
-| `behavior_diagnostics.py` | action entropy、inter-code action diversity、decoder sensitivity |
-| `code_stability.py` | epoch code stability、Hungarian matched stability |
-| `latent_visualization.py` | TensorBoard embedding、PCA/t-SNE latent snapshot、codebook movement 可视化数据 |
-| `failure_case_report.py` | 自动筛选极端 horizon，生成价格/动作/持仓/收益 HTML 错题本 |
+| `phase1_metrics.py` | 通用指标门面和组合指标计算，重新导出 `metrics/` 子包稳定 API |
+| `metrics/action.py` | reconstruction、per-class precision/recall、confusion matrix、switch metrics |
+| `metrics/risk.py` | Sharpe、Sortino、MDD、Calmar、equity curve 统计 |
+| `metrics/archetype.py` | per-code return/win/no-trade/switch distribution |
+| `metrics/behavior.py` | action entropy、inter-code action diversity、decoder sensitivity |
+| `metrics/stability.py` | epoch code stability、Hungarian matched stability |
+| `diagnostics/latent_visualization.py` | TensorBoard embedding、PCA/t-SNE latent snapshot、codebook movement 可视化数据 |
+| `diagnostics/failure_case_report.py` | 自动筛选极端 horizon，生成价格/动作/持仓/收益 HTML 错题本 |
 | `phase1_report.py` | `phase1_report.json`、诊断 JSON/feather 的写入和 schema 校验 |
 
 边界约束:
@@ -680,10 +699,11 @@ class Phase1ReplayEvaluator:
 | --- | --- | --- |
 | `phase1_evaluator.py` | 重构指标、codebook 指标、汇总 replay 指标、生成 epoch metrics | 逐笔成交、盘口滑点、收益 replay |
 | `phase1_replay.py` | validation online replay、student/teacher 净收益、regret/capture ratio、horizon 边界换仓成本 | checkpoint 保存、best 选择、底层成交成本计算 |
-| `envs/trading_env.py` | 状态推进、动作执行、position/cash/nav/reward/done 统一语义 | 模型训练、checkpoint 选择 |
+| `trading/env.py` | 状态推进、动作执行、position/cash/nav/reward/done 统一语义 | 模型训练、checkpoint 选择 |
 | `trading/cost_model.py` | 盘口逐档成交、手续费、滑点和未成交处理 | 模型推理、指标汇总 |
+| `trading/reward_alignment.py` | `paper_formula` / `next_row_execution` 行号映射 | 状态推进、成交计算 |
 
-### 4.9 `src/envs/trading_env.py`
+### 4.9 `src/trading/env.py`
 
 职责:
 
@@ -744,7 +764,7 @@ class LobDepthCostModel:
 - 为 `phase1_evaluator.py` 和 `phase1_replay.py` 提供可复用的 metric 实现。
 - 避免 Phase II/III 的 RL 指标和 Phase I 的 VQ/replay 指标混在一个通用 `metrics.py` 中。
 
-实现上可以将具体函数拆到 `action_metrics.py`、`risk_metrics.py`、`archetype_diagnostics.py`、`behavior_diagnostics.py`、`code_stability.py`，再由 `phase1_metrics.py` 统一导出稳定 API。
+实现上把具体函数拆到 `metrics/action.py`、`metrics/risk.py`、`metrics/archetype.py`、`metrics/behavior.py`、`metrics/stability.py`，再由 `phase1_metrics.py` 统一导出稳定 API；`metrics/__init__.py` 不直接 re-export，避免循环依赖。
 
 指标范围:
 
@@ -811,7 +831,7 @@ def boundary_health_warnings(report, config): ...
 
 行为多样性指标必须固定同一批 validation `states`，分别用 `K` 个 code 解码，再比较输出动作或 logits。这样可以发现“codebook 向量距离很远，但 decoder 对 `z_q` 不敏感，输出几乎相同”的问题。`epoch_code_stability` 默认使用 code id 直接一致率；若出现 code id 交换，可额外用 codebook 距离做 Hungarian matching 后输出 `epoch_code_stability_matched`，用于区分标签漂移和纯编号交换。
 
-### 4.12 `src/evaluation/latent_visualization.py`
+### 4.12 `src/evaluation/diagnostics/latent_visualization.py`
 
 职责:
 
@@ -872,7 +892,7 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/latent_projections/epoch_{epoch}_{layer}_{met
 artifacts/{PAIR}/{BATCH_ID}/phase1/latent_visualization_manifest.json
 ```
 
-### 4.13 `src/evaluation/failure_case_report.py`
+### 4.13 `src/evaluation/diagnostics/failure_case_report.py`
 
 职责:
 
@@ -940,10 +960,9 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/failure_cases/case_assets/
 
 职责:
 
-- 统一保存和加载 Phase I checkpoint。
-- 比较当前 epoch 指标与历史 best。
+- 只做 checkpoint 持久化与读取，不嵌入 best 选择规则或 guardrail。
 - 原子写入 `best_vq_model.pt`、`last_vq_model.pt` 和 `checkpoints/epoch_*.pt`。
-- 在 `checkpoint_manifest.json` 中记录每个 checkpoint 的 epoch、指标、路径、是否 best。
+- 在 `checkpoint_manifest.json` 中记录每个 checkpoint 的 epoch、路径、文件 hash、metrics 引用与 `selection_policy` 给出的 verdict（`best/rejected/periodic`）。
 - 支持从 `last_vq_model.pt` 恢复训练。
 - 避免和 Phase II/III 的 RL checkpoint 管理混用。
 
@@ -953,11 +972,46 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/failure_cases/case_assets/
 class Phase1CheckpointManager:
     def save_last(self, state, metrics): ...
     def save_periodic(self, state, metrics, epoch): ...
-    def maybe_save_best(self, state, metrics): ...
+    def commit_verdict(self, verdict): ...   # 由 selection_policy 决定是否 promote 为 best
     def load(self, path): ...
 ```
 
-### 4.15 `src/evaluation/phase1_report.py`
+边界约束:
+
+- 不直接判断 `code_usage_ratio`、`val_max_drawdown` 等业务阈值；这些规则全部进入 `selection_policy.py`。
+- 不写 `phase1_report.json`，只维护 `checkpoint_manifest.json`。
+
+### 4.15 `src/trainers/selection_policy.py`
+
+职责:
+
+- 集中 best checkpoint 选择规则、风险 guardrail、行为 guardrail、teacher quality guardrail 与 dead-code restart 后的冷却期。
+- 输入 epoch metrics，输出 `SelectionVerdict`（`promote_to_best | reject_with_reason | keep_as_periodic`）。
+- 显式记录拒绝原因，写入 `checkpoint_manifest.json`。
+
+核心类建议:
+
+```python
+class SelectionVerdict:
+    decision: Literal["promote_to_best", "reject", "keep_as_periodic"]
+    reasons: list[str]
+    composite_score: float
+
+class Phase1SelectionPolicy:
+    def evaluate(self, metrics, history) -> SelectionVerdict: ...
+    def should_block_due_to_codebook(self, metrics) -> tuple[bool, str | None]: ...
+    def should_block_due_to_risk(self, metrics) -> tuple[bool, str | None]: ...
+    def should_block_due_to_behavior(self, metrics) -> tuple[bool, str | None]: ...
+    def should_block_due_to_teacher_quality(self, metrics) -> tuple[bool, str | None]: ...
+```
+
+边界约束:
+
+- 无 IO；只接收 metrics 和历史 best 状态，返回 verdict。
+- 不重新计算指标；所有阈值来自 `phase1_config.py` 的 `selection_metric / metric_weights / risk_guardrails / behavior_guardrails / teacher_quality_guardrails`。
+- 与 `phase1_evaluator.py` 的关系: evaluator 输出指标，policy 把指标翻译成 best 决策；evaluator 不知道任何阈值。
+
+### 4.16 `src/evaluation/phase1_report.py`
 
 职责:
 
@@ -980,7 +1034,20 @@ class Phase1ReportWriter:
 边界约束:
 
 - `phase1_report.py` 只负责序列化和 schema 校验，不重新计算指标。
-- `phase1_checkpoint.py` 负责 checkpoint manifest；`phase1_report.py` 可以引用 manifest，但不决定 best checkpoint。
+- `phase1_checkpoint.py` 负责 checkpoint manifest，`selection_policy.py` 决定 best checkpoint，`phase1_report.py` 引用两者但不参与决策。
+
+### 4.17 `src/utils/feather_io.py`
+
+职责:
+
+- 集中 Feather/Arrow IPC 的读写适配（`polars.read_ipc` / `DataFrame.write_ipc`）、原子写、临时目录合并。
+- 提供 `read_jsonl`、`write_jsonl`、`atomic_write_json` 等少量底层 IO 帮助函数，供 `demo_store.py`、`phase1_report.py` 与 `phase1_checkpoint.py` 共用。
+- 不引入业务字段含义，不引用 schema、配置或模型对象。
+
+边界约束:
+
+- 不做 schema 校验，校验交给 `src/data/schema.py` 与 `Phase1ReportWriter.validate_schema`。
+- 不维护任何全局状态。
 
 ## 5. Single-trade DP 设计
 
@@ -1015,6 +1082,15 @@ c + \mathbf{1}[i \neq j] \leq 1
 $$
 
 这会过滤掉频繁开平仓的噪声轨迹，使 demonstration 更接近论文中“捕捉主要交易机会”的设定。
+
+末步动作处理（论文 Algorithm 1 第 13 行）:
+
+论文最后一步令 `\hat{a}_{N-1} \leftarrow \hat{a}_{N-2}`，原因是 DP 反向递推时 `t=N-1` 没有后继状态，无法用 mark price 差估算收益，因此用倒数第二步动作复制以保持持仓连续。工程实现必须显式遵循这一规则:
+
+- DP 主循环只填 `t \in [0, N-2]` 的 `\hat{a}_t`；`\hat{a}_{N-1}` 不参与最优化。
+- 在 `SingleTradeDPPlanner.plan()` 返回前赋值 `actions[N-1] = actions[N-2]`，并且不计入 `num_switches`。
+- 末步 reward `rewards[N-1]` 仍按 `paper_formula` 用 `p_N - p_{N-1}` 结算（即正常算 markout）；这是末步行为可计入收益的唯一来源，必须保证窗口覆盖了第 `N` 行价格。
+- 单元测试必须覆盖以下场景: 价格在 `t=N-1` 仍处于 long 仓位；价格在 `t=N-1` 已经回到 flat。两种情况下 `actions[N-1]` 都等于 `actions[N-2]`。
 
 ### 5.3 Reward 计算
 
@@ -1109,14 +1185,29 @@ cost_config:
   mark_price: mid_price
   execution_lag: 0  # paper_formula 固定为同 row 成交；next_row_execution 时设为 1
   insufficient_depth_policy: reject_transition
+  reject_transition_health:
+    max_horizon_reject_rate: 0.10        # 单 horizon 内被拒绝的换仓转移占比上限
+    max_dataset_reject_rate: 0.05        # 全部 sampled horizons 累计拒绝率上限
+    fail_when_exceeded: true             # 超阈值时阻止 demo 生成而不是只 warning
 ```
+
+`reject_transition` 监控:
+
+`reject_transition` 表示在 `execution_row` 的盘口五档深度无法容纳目标仓位变化时，该换仓转移在 DP 中被禁用、在 student replay 中被跳过。它是真实数据质量的直接信号: 如果某段历史盘口稀薄，DP 可能找不到合法 single trade，导致 `no_trade_ratio` 虚高、archetype 被 no-trade 模式占据；student replay 中频繁触发 `unfilled_transition` 也会让 `val_return_capture_ratio` 系统性偏低。因此必须在 DP 生成阶段统计并报告:
+
+- `dataset_reject_rate = num_rejected_transitions / num_evaluated_transitions`
+- `per_horizon_reject_rate`: 每个 horizon 内被拒绝转移占该 horizon 评估转移总数的比例分布
+- `worst_reject_horizons`: top-K 拒绝率最高的 horizon 列表，关联 strata 与时间段
+- `reject_by_action_pair`: 按 `(prev_action, target_action)` 分类的拒绝次数，定位是 ask 还是 bid 侧深度不足
+
+`Phase1DemoGenerator` 必须把上述字段写入 `phase1_report.json`。当 `dataset_reject_rate > max_dataset_reject_rate` 或任一 horizon `per_horizon_reject_rate > max_horizon_reject_rate` 时，默认 `fail_when_exceeded=true` 应阻止后续训练，并提示数据质量或采样策略问题。
 
 约束:
 
 - `fee_exec` 和 `slippage_exec` 在 DP 生成 demonstration 时必须启用。
 - `rewards` 字段保存的是扣除手续费和滑点后的净收益。
 - evaluator 的 `val_demo_return_replay` 必须使用同一份 `cost_config` 重新 replay。
-- `phase1_config.yaml` 和 `phase1_report.json` 必须记录最终使用的 `cost_config`。
+- `phase1_config.yaml` 和 `phase1_report.json` 必须记录最终使用的 `cost_config` 与 reject 统计。
 
 ### 5.4 No-trade 样本处理
 
@@ -1291,17 +1382,31 @@ encoder_input:
   action_embedding_dim: 16
   reward_embedding_dim: 16
   fusion_dim: 128
-  reward_normalization: train_reward_standard
-  reward_clip_value: 5.0
+  reward_normalization: train_reward_robust   # 默认 robust，避免重尾收益削弱大行情信号
+  reward_clip_value: 8.0                      # 配合 robust 放宽 clip，仅截断异常 outlier
+  fallback_to_standard_when:
+    train_reward_kurtosis_below: 6.0          # 当 train reward 接近近似正态时回退到 standard
 ```
 
-`reward_normalization=train_reward_standard` 表示只在 train demonstration 的 `rewards` 上拟合:
+`reward_normalization=train_reward_robust` 是新默认值。它使用 train demonstration `rewards` 的 median 和 MAD 拟合:
 
 $$
-\hat r_t=\operatorname{clip}\left(\frac{r_t-\mu_r}{\max(\sigma_r,\epsilon)}, -c, c\right)
+\hat r_t=\operatorname{clip}\left(\frac{r_t-\operatorname{median}(r)}{1.4826 \cdot \max(\operatorname{MAD}(r),\epsilon)}, -c, c\right)
 $$
 
-其中 `\mu_r`、`\sigma_r` 和 `clip_value=c` 必须保存到 `reward_normalizer.json` 或 `phase1_config.yaml`，并原样用于 val/test。若 reward 分布重尾，可配置为 `train_reward_robust`，使用 median/MAD 替代 mean/std。
+选 robust 作为默认的原因: 加密分钟级 reward 在大行情段呈重尾分布，`train_reward_standard` 的 `\mu/\sigma` 对极端值敏感、容易把 σ 拉大，进而把核心区间压扁；同时 `clip=5.0` 会把 1% 量级的极端机会硬截断，削弱 encoder 学习"大切换点"的能力。robust 标准化对 outlier 不敏感、配合 `clip=8.0` 只截断真正的异常 tick。
+
+`reward_normalization=train_reward_standard` 仍保留为可选，用于:
+
+- 严格复现论文实验（论文未指定标准化方法）；
+- 当 train reward 通过 kurtosis 检验接近正态时（默认 `fallback_to_standard_when.train_reward_kurtosis_below=6.0`），训练入口可以自动建议回退；该回退必须由 `phase1_report.json` 显式记录 `reward_normalization_resolved=train_reward_standard` 与 `reason="kurtosis_below_threshold"`。
+
+无论使用哪种归一化，统计量和 `clip_value=c` 必须保存到 `reward_normalizer.json`，并原样用于 val/test。
+
+健康指标:
+
+- `reward_norm_clip_ratio` 在 robust 模式下应明显低于 standard 模式；超过 5% 即提示 reward 分布异常。
+- `reward_robust_kurtosis`、`reward_robust_skew` 在 `phase1_report.json` 中并行记录，便于审计选用 robust 还是 standard。
 
 这一步属于 Phase I encoder 的模型输入适配，不属于市场特征工程: 不重新生成因子、不改写原始状态列，也不在 val/test 上拟合统计量。`states` 若已由外部数据文件标准化则直接进入 `state_adapter`；若状态量级差异较大，优先使用 `state_adapter` 内部的 `LayerNorm`，不要在本阶段重新拟合状态特征 scaler。
 
@@ -1492,15 +1597,28 @@ codebook_health:
   max_dominant_code_ratio: 0.5
   usage_regularization_weight: 0.01
   dead_code_patience: 5
-  dead_code_restart: true
+  dead_code_restart: true                # 默认强制开启，作为 collapse 的第一道防线
   restart_source: high_reconstruction_error_samples
+  restart_cooldown_epochs: 3             # restart 后冷却 N 个 epoch 才允许该 epoch 参与 best 选择
+  consecutive_collapse_epoch_limit: 10   # 连续 N 个 epoch 仍 collapse 时停止训练并报错退出
   local_optimum_escape:
-    enabled: false
-    perturbation_probability_per_epoch: 0.0
+    enabled: false                       # 仅在 dead_code_restart 无法挽救时由人工开启
+    triggers:
+      stagnant_usage_epochs: 8           # code_usage_ratio 连续不变化达到 epoch 数
+      stagnant_perplexity_epochs: 8
+      best_score_no_improve_epochs: 15
+    perturbation_probability_per_epoch: 0.05
     perturbation_std_ratio: 0.01
     min_epochs_between_perturbations: 10
-    trigger_on_stagnant_usage: true
+    only_perturb_low_usage_codes: true   # 不允许扰动 dominant code，避免破坏稳定 archetype
 ```
+
+默认行为说明:
+
+- `dead_code_restart=true` 是默认配置，不允许在严格复现论文以外的实验中关闭。论文公式 (4) 与 dead-code restart 不冲突: restart 只重置 codebook embedding 不改变 loss 形式。
+- `usage_regularization_weight=0.01` 默认开启；严格复现论文公式 (4) 时显式设为 `0`，并在 `phase1_config.yaml` 标记 `paper_strict_reproduction=true`。
+- `local_optimum_escape` 默认仍然关闭，但触发条件被显式化: 只有 `dead_code_restart` 在 `consecutive_collapse_epoch_limit` 内未能恢复 `code_usage_ratio` 时才考虑启用，且必须新建独立 `BATCH_ID` 而不是在主实验里启用。
+- 当 `dead_code_restart` 在 `consecutive_collapse_epoch_limit` 内连续触发但 `code_usage_ratio` 仍 `< min_code_usage_ratio` 时，trainer 必须以非零退出码停止训练并把 `phase1_report.json.code_assignment_drift_warning=true`、`phase1_report.json.fatal_collapse=true` 写入产物，避免静默产出无效 codebook。
 
 usage regularization 是工程稳定项，用于降低 codebook collapse 风险。严格复现论文公式 (4) 时应设置 `usage_regularization_weight=0`；当训练中出现 collapse 风险时，可启用该辅助项。它不改变 VQ encoder-decoder 架构和最近邻量化公式，只是在训练目标上增加可配置正则。
 
@@ -2000,13 +2118,14 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - `window_index_train.feather` 必须保存全部候选窗口统计和最终采样标记。
 - 分层采样后，各 strata 的样本数应进入 `phase1_report.json`。
 - 若 `stratification_mode=hindsight_horizon`，`phase1_report.json` 必须记录 `is_hindsight_stratification=true` 和 `hindsight_bias_warning`，并在实验汇总中标注其验证指标可能受后视采样选择影响。
-- 若 `require_prospective_diagnostic=true`，必须提供一个独立 `BATCH_ID` 的 `prospective_past` 分层诊断实验，并在 `sampling_leakage_diagnostics.json` 中记录后视/前瞻分层的核心验证指标差异。
+- **强制 prospective 对照（sign-off 阻塞）**: 默认 `require_prospective_diagnostic=true`。主实验必须配套一个 `stratification_mode=prospective_past` 的独立 `BATCH_ID` 诊断实验，并在 `sampling_leakage_diagnostics.json` 中记录后视/前瞻分层的核心验证指标差异。差异超过 `hindsight_vs_prospective_max_delta` 时主实验 `phase1_report.json` 必须写 `hindsight_bias_warning="exceeded"`，且 `best_vq_model.pt` 不可被声明为 sign-off 版本。仅当 CLI 显式传 `--allow-missing-prospective-diagnostic` 时允许放行，并必须在 `sampling_leakage_diagnostics.json` 中写入 `risk_acknowledged_by` 与 `expected_sign_off_followup_batch_id`。
 - 前瞻性分层只能使用 horizon 起点之前的窗口统计；过去 24 小时波动率等 lookback 指标不得读取 `t` 之后的数据。
 - flat/低波动 strata 的最终样本比例不得超过 `flat_low_vol_max_ratio`。
 - 默认 `min_gap_between_samples` 应不低于 `h/2`；`h=72` 时默认值为 `36`。
 - 默认 `max_overlap_ratio` 应不高于 `0.5`；不再接受 `0.85` 作为默认健康阈值。
 - `window_overlap_ratio`、`min_sample_gap`、`mean_sample_gap`、`split_boundary_gap`、`effective_min_gap_between_samples` 必须进入 `phase1_report.json`。
 - 若 `window_overlap_ratio > max_overlap_ratio` 或 `min_sample_gap < min_gap_between_samples`，默认应阻止数据构建；只有 `warn_only=true` 时才降级为 `sampling_health_warnings`。
+- **markout 边界保护**: `split_boundary_embargo` 必须同时覆盖 markout 行: `paper_formula` 模式下默认值为 `h+1=73`，`next_row_execution` 模式下默认值为 `h+2=74`。任何 horizon 的 `last_markout_row` 都不得越过 train/val/test 文件的真实数据末行；越界 horizon 必须被裁掉，不允许用 NaN/前向填充。
 - 若 `split_boundary_gap < split_boundary_embargo`，必须在 `sampling_health_warnings` 中提醒 train/val/test 时间边界过近；默认 `warn_only=false` 时应阻止数据构建或裁掉边界窗口。
 - 固定 `seed` 后，重复运行得到相同的 `sample_id/window_start`。
 
@@ -2026,12 +2145,14 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 
 - action 只包含 `{0,1,2}`。
 - strict single-trade 模式下，每个样本最多一次 action 切换。
+- 末步动作必须按论文 Algorithm 1 第 13 行赋值 `actions[N-1] = actions[N-2]`，且不计入 `num_switches`；单元测试必须验证两种典型场景（末步仍持 long、末步已回到 flat）。
 - reward 计算必须按 `reward_alignment` 对齐: 默认 `paper_formula` 使用 `p_{t+1}^{mark}-p_t^{mark}`，可选 `next_row_execution` 使用后移一行的成交和结算。两种模式都必须使用成交行盘口逐档估算滑点，并可由 `prices/order_books/actions/cost_config` 复现。
 - 若使用 `next_row_execution`，`phase1_report.json` 和 `checkpoint_manifest.json` 必须标注该结果不直接与论文 Phase I reward 公式比较。
 - `phase1_config.yaml`、`demos_train.feather`、DP planner 和 replay env 使用的 `env_config/cost_config` 必须一致。
 - `no_trade_ratio` 必须小于等于 `max_no_trade_ratio`，并被记录进报告。
 - 若触发 no-trade 过滤或补采样，`filtered_no_trade_count` 和 `resampled_horizon_count` 必须写入报告。
 - 若 `no_trade_ratio > max_no_trade_ratio`，必须在 `sampling_health_warnings` 中提醒调整 `flat_low_vol_max_ratio` 或 `min_profit_gate`。
+- **盘口深度拒绝率验收**: `dataset_reject_rate`、`per_horizon_reject_rate` 分布、`worst_reject_horizons`、`reject_by_action_pair` 必须进入 `phase1_report.json`；当 `dataset_reject_rate > max_dataset_reject_rate` 或任一 horizon `per_horizon_reject_rate > max_horizon_reject_rate` 且 `fail_when_exceeded=true` 时，DP demo 生成必须以非零退出码失败，不得静默绕过。
 
 ### 9.5 VQ 验收
 
@@ -2039,9 +2160,12 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - `val_weighted_reconstruction_accuracy`、`val_non_flat_accuracy`、`switch_point_recall` 必须进入 report。
 - codebook 使用率不低于 70%。
 - perplexity 不能长期塌缩到 1。
-- 若出现 dead code，必须执行配置化 dead-code restart，并在报告中记录。
+- 若出现 dead code，必须执行默认开启的 dead-code restart，并在报告中记录 `dead_code_restarts` 与每次 restart 的 epoch、code_id、来源样本。
+- 当 `dead_code_restart` 在 `consecutive_collapse_epoch_limit` 内仍未恢复 `code_usage_ratio`，trainer 必须以非零退出码停止训练并写入 `fatal_collapse=true`。
 - encoder 不允许 raw concat `[state_t, action_embedding_t, reward_t]` 后直接输入 LSTM；必须通过 state/action/reward 三路 adapter，并对 `reward_t` 做 train-only normalization。
-- `reward_normalizer.json` 必须保存 train reward 统计量，val/test 不得重新拟合；`reward_norm_clip_ratio` 和 `reward_embedding_norm_ratio` 必须进入 report。
+- 默认 `reward_normalization=train_reward_robust`；若自动回退到 `train_reward_standard`，`phase1_report.json` 必须记录 `reward_normalization_resolved` 与回退原因（`reason="kurtosis_below_threshold"`）。
+- `reward_normalizer.json` 必须保存 train reward 统计量（包括 median、MAD、kurtosis、skew），val/test 不得重新拟合；`reward_norm_clip_ratio`、`reward_embedding_norm_ratio`、`reward_robust_kurtosis`、`reward_robust_skew` 必须进入 report。
+- **`phase1_composite_score` 权重敏感性试验**: 主实验完成后必须额外做一次权重 sensitivity 检查，固定 metrics、变换 `metric_weights`（建议 `switch_point_recall` ±0.10、`val_return_capture_ratio` ±0.10、`val_sharpe_ratio` ±0.05），观察 best epoch 是否漂移到不同 checkpoint。结果写入 `composite_score_sensitivity.json`，至少包含: 每组权重下 best epoch 的 `composite_score`、`code_usage_ratio`、`val_return_capture_ratio`、`val_max_drawdown`。若不同权重下 best epoch 完全不同且核心指标差异较大，必须在 `phase1_report.json` 写入 `composite_weight_sensitivity_warning=true` 并提示固定权重存在过拟合 selection 风险。
 - decoder 能在不给 DP 的情况下，根据 `states + code_id` 生成 base actions。
 - evaluator 必须输出 validation 的 `student_online_net_return`、`dp_teacher_net_return`、`return_capture_ratio` 和 `regret_to_dp`。
 - evaluator 必须输出风险调整收益指标: `val_sharpe_ratio`、`val_sortino_ratio`、`val_max_drawdown`、`val_calmar_ratio`。
@@ -2095,8 +2219,12 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 
 | 风险 | 表现 | 处理 |
 | --- | --- | --- |
-| 后视分层导致验证指标虚高 | `horizon_return`、`realized_volatility`、`draw_pattern` 使用 horizon 内统计量，模型在被事后筛选过的相似候选中验证 | 报告标注 `is_hindsight_stratification=true` 和 `hindsight_bias_warning`；增加 `prospective_past` 分层诊断批次，并通过 `sampling_leakage_diagnostics.json` 对比核心指标 |
-| codebook collapse | 大部分样本落到同一个 code | 已内置 `codebook_health` 监控、usage regularization、dead-code restart 和 best checkpoint 拒绝规则 |
+| 后视分层导致验证指标虚高 | `horizon_return`、`realized_volatility`、`draw_pattern` 使用 horizon 内统计量，模型在被事后筛选过的相似候选中验证 | **强制** prospective 对照: `require_prospective_diagnostic=true`；`hindsight_vs_prospective_max_delta` 超阈则 `best_vq_model.pt` 不可 sign-off，CLI 必须显式 `--allow-missing-prospective-diagnostic` 才允许放行 |
+| codebook collapse | 大部分样本落到同一个 code | 默认开启 `dead_code_restart`、`usage_regularization`、`consecutive_collapse_epoch_limit` 强制中止与 best checkpoint 拒绝规则；连续 collapse 时训练以非零退出码结束 |
+| 盘口深度不足导致 DP 找不到合法 single trade | `dataset_reject_rate` / `per_horizon_reject_rate` 升高，`no_trade_ratio` 虚高，archetype 被 no-trade 模式占据 | DP 阶段统计 `reject_transition` 全量指标；超阈值时默认 `fail_when_exceeded=true` 阻止训练，提示数据质量问题 |
+| reward 重尾被 standard normalization 削弱 | `reward_clip_value=5.0` 把大行情切换点信号剪掉，encoder 学不到极端机会 | 默认 `train_reward_robust`（median/MAD）+ `clip=8.0`；通过 kurtosis 检验决定是否回退 standard，回退原因写入 report |
+| `phase1_composite_score` 固定权重过拟合 selection | 不同权重组合下 best epoch 显著漂移 | 主实验后跑权重 sensitivity，写入 `composite_score_sensitivity.json`；指标差异大时打 `composite_weight_sensitivity_warning=true` |
+| markout 行越过 split 边界 | `last_markout_row` 超出 train/val/test 文件实际行数 | `split_boundary_embargo` 默认改为 `h+1` (paper) / `h+2` (next_row)；越界 horizon 必须裁掉，禁止 NaN/前向填充 |
 | codebook 初始化/更新不稳定 | 随机初始化导致 early dead code，或梯度更新导致 code 抖动 | 默认 `kmeans_warmup + ema`；严格复现论文公式时用 `random_normal + gradient`，并在 manifest 记录 |
 | codebook 卡在局部最优 | `kmeans_warmup + ema` 让早期聚类持续自我强化，少量新样本难以重新探索 | 用独立 `BATCH_ID` 做 seed、初始化和分层方式对照；必要时启用低概率扰动或 dead-code restart，并记录 `codebook_perturbation_log` |
 | 只看最终数字导致误判 | 100 epoch 后只看到低分或高分，无法知道是早期坍缩、后期漂移、decoder 忽略 code 还是少数极端 horizon 拖累 | 训练中写 TensorBoard latent/codebook 演化；训练后自动生成 failure case HTML 错题本 |

@@ -1,8 +1,25 @@
-# Core dependencies
+# ArchetypeTrader Phase I 依赖
+# torch 由 conda 或独立安装管理（CUDA 版本因机器而异），
+# 这里只声明纯 Python 依赖。
+
+# 核心数据
+polars>=0.20.0
 pyarrow>=14.0.0
 numpy>=1.24.0
-polars>=0.20.0 
-# Training (managed by conda environment.yml or pip install)
+
+# 训练辅助
 tqdm>=4.64.0
-#pytorch 2.9.1
+PyYAML>=6.0.0
+pydantic>=2.0.0
+
+# 评估与诊断
+scikit-learn>=1.4.0     # kmeans warmup / silhouette / matched stability
+tensorboard>=2.15.0     # latent / codebook 演化诊断
+matplotlib>=3.8.0       # failure case HTML 图表 (可选; 第一版可先 SVG fallback)
+
+# 测试
+pytest>=8.0.0
+pytest-cov>=5.0.0
+
+# 兼容旧脚本（不主推）
 pandas>=2.0.0

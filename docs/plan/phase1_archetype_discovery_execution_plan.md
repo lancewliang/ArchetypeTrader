@@ -87,14 +87,14 @@ PY
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Step 1 | 配置与基础 IO | [ ] | [ ] | [ ] | [ ] | TODO |  |
 | Step 2 | 数据读取与 schema 校验 | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 3 | 滑窗、分层采样与采样健康检查 | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 4 | 成本模型、reward alignment 与交易环境 | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 3 | 滑窗、分层采样与采样健康检查（含 prospective 对照入口） | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 4 | 成本模型、reward alignment 与交易环境（统一 `src/trading/`） | [ ] | [ ] | [ ] | [ ] | TODO |  |
 | Step 5 | horizon 构造与 demonstration store | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 6 | Single-trade DP planner | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 7 | VQ 模型组件 | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 8 | Phase I 指标与 replay 评估 | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 9 | checkpoint、报告与训练器 | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 10 | 集成入口 | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 6 | Single-trade DP planner（含末步处理 + reject_transition 统计） | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 7 | VQ 模型组件（默认 robust reward normalization） | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 8 | Phase I 指标与 replay 评估（`evaluation/metrics/` + `evaluation/diagnostics/` 子包） | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 9 | checkpoint、selection policy、报告与训练器 | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 10 | 集成入口（含 prospective 对照 BATCH_ID + composite weight sensitivity） | [ ] | [ ] | [ ] | [ ] | TODO |  |
 
 Step 完成记录:
 
@@ -108,16 +108,17 @@ Step 完成记录:
 
 ```text
 src/config/phase1_config.py
-src/utils/io.py
+src/utils/feather_io.py
 scripts/train_phase1.py
 ```
 
 核心内容:
 
-- `Phase1Config`: 输入路径、输出路径、horizon、采样、成本、模型、训练、checkpoint 配置。
-- CLI 参数解析: `--pair`、`--train-batch-id`、`--train-file`、`--val-file`、`--test-file`、`--horizon`、`--num-demos`、`--epochs`、`--seed` 等。
+- `Phase1Config`: 输入路径、输出路径、horizon、采样、成本、模型、训练、checkpoint、selection policy guardrail、`stratification_mode` 与 `require_prospective_diagnostic` 配置。
+- CLI 参数解析: `--pair`、`--train-batch-id`、`--train-file`、`--val-file`、`--test-file`、`--horizon`、`--num-demos`、`--epochs`、`--seed`、`--stratification-mode`、`--diagnostic-pair-batch-id`、`--allow-missing-prospective-diagnostic` 等。
 - 输出目录: `artifacts/{PAIR}/{BATCH_ID}/phase1/`。
 - 写入 `phase1_config.yaml`。
+- `feather_io.py` 仅提供 Feather/Arrow IPC 读写、原子写、shard 合并、`atomic_write_json` 与 `read/write_jsonl`，不引入业务字段含义。
 
 验收:
 
@@ -161,8 +162,8 @@ src/data/sampling_health.py
 
 核心内容:
 
-- `SlidingWindowIndexer` 支持 `paper_formula` 和 `next_row_execution`。
-- `StratifiedWindowSampler` 支持 `hindsight_horizon` 和 `prospective_past`。
+- `SlidingWindowIndexer` 支持 `paper_formula` 和 `next_row_execution`；`split_boundary_embargo` 默认 `h+1` (paper) 或 `h+2` (next_row)，确保 `last_markout_row` 不越过 split 边界。
+- `StratifiedWindowSampler` 支持 `hindsight_horizon` 和 `prospective_past`；prospective 模式只读 `t` 之前的 lookback 统计。
 - 采样策略支持 `stratified_uniform` 和 `stratified_proportional`。
 - 实现 `min_gap_between_samples`、`flat_low_vol_max_ratio`。
 - `SamplingHealthChecker` 输出:
@@ -170,8 +171,10 @@ src/data/sampling_health.py
   - `min_sample_gap`
   - `mean_sample_gap`
   - `flat_low_vol_sample_ratio`
+  - `split_boundary_gap`
   - `sampling_health_warnings`
 - 写入 `window_index_train.feather`、`window_index_val.feather`、`window_index_test.feather`。
+- 训练入口必须能在缺失 `--diagnostic-pair-batch-id` 时拒绝启动主实验，除非传入 `--allow-missing-prospective-diagnostic` 并把原因写入 `sampling_leakage_diagnostics.json`。
 
 验收:
 
@@ -183,12 +186,14 @@ pytest tests/unit/data/test_sampling_health.py
 
 ### Step 4: 成本模型、reward alignment 与交易环境
 
+合并原 `src/envs/` 和 `src/trading/` 为统一的 `src/trading/`，避免 env 与 cost 模型跨包又强耦合的问题。
+
 生成文件:
 
 ```text
-src/envs/reward_alignment.py
+src/trading/reward_alignment.py
 src/trading/cost_model.py
-src/envs/trading_env.py
+src/trading/env.py
 ```
 
 核心内容:
@@ -199,19 +204,19 @@ src/envs/trading_env.py
 - `LobDepthCostModel`:
   - long/平空走 ask 档。
   - short/平多走 bid 档。
-  - 五档深度不足按 `reject_transition` 处理。
+  - 五档深度不足按 `reject_transition` 处理，并暴露 `reject_event` 让 DP/replay 收集统计。
   - 计算 fee、slippage、fill price、filled qty。
 - `TradingEnv`:
   - action `{0,1,2}` 映射到 position `{-1,0,1}`。
   - 支持 `initial_position != 0`。
-  - `step()` 返回净 reward 和成交 info。
+  - `step()` 返回净 reward 和成交 info（含 `reject_event`）。
 
 验收:
 
 ```bash
-pytest tests/unit/envs/test_reward_alignment.py
+pytest tests/unit/trading/test_reward_alignment.py
 pytest tests/unit/trading/test_cost_model.py
-pytest tests/unit/envs/test_trading_env.py
+pytest tests/unit/trading/test_env.py
 ```
 
 ### Step 5: horizon 构造与 demonstration store
@@ -263,13 +268,18 @@ src/planners/demo_generator.py
 - 初始 action 为 flat，即 `1`。
 - 最多一次动作切换。
 - 转移 reward 必须通过 `TradingEnv` 或共享 cost/reward 接口计算。
+- 末步动作严格按论文 Algorithm 1 第 13 行: `actions[N-1] = actions[N-2]`，不计入 `num_switches`；末步 `rewards[N-1]` 仍按 `paper_formula` 用 `p_N - p_{N-1}` 结算（窗口必须覆盖第 `N` 行价格）。
 - 输出:
   - `actions`
   - `rewards`
   - `total_return`
   - `num_switches`
   - `is_no_trade`
-- `Phase1DemoGenerator` 批量生成 train/val/test horizon 的 DP 标签。
+  - `reject_events`（来自 `TradingEnv` / `LobDepthCostModel` 的转移拒绝事件）
+- `Phase1DemoGenerator`:
+  - 批量生成 train/val/test horizon 的 DP 标签。
+  - 汇总 `dataset_reject_rate`、`per_horizon_reject_rate` 分布、`worst_reject_horizons`、`reject_by_action_pair`，写入 `phase1_report.json`。
+  - 当 `dataset_reject_rate > max_dataset_reject_rate` 或任一 horizon `per_horizon_reject_rate > max_horizon_reject_rate` 且 `fail_when_exceeded=true` 时，以非零退出码失败。
 
 验收:
 
@@ -277,6 +287,8 @@ src/planners/demo_generator.py
 pytest tests/unit/planners/test_single_trade_dp.py
 pytest tests/unit/planners/test_demo_generator.py
 ```
+
+测试必须包含末步两种典型场景（末步仍持 long、末步已回到 flat）以及 reject_transition 触发 `fail_when_exceeded` 的集成路径。
 
 ### Step 7: VQ 模型组件
 
@@ -291,13 +303,14 @@ src/models/vq_archetype.py
 
 核心内容:
 
-- `RewardNormalizer` 只在 train rewards 上 fit。
+- `RewardNormalizer` 只在 train rewards 上 fit；默认 `train_reward_robust`（median/MAD），通过 kurtosis 检验自动决定是否回退到 `train_reward_standard`，决议结果与统计量写入 `reward_normalizer.json`。
 - `EncoderInputAdapter` 分别处理 state/action/reward。
 - `ArchetypeEncoder`: LSTM encoder，输出 `z_e`。
 - `VectorQuantizer`:
   - 支持 `random_normal`、`sample_encoder_outputs`、`kmeans_warmup`。
   - 支持 `gradient` 和 `ema` 更新。
-  - 输出 `code_id`、`z_q`、usage stats。
+  - 输出 `code_id`、`z_q`、usage stats、dead-code 列表。
+  - 默认 `dead_code_restart=true`，`restart_source=high_reconstruction_error_samples`，并暴露 restart cooldown 状态供 `selection_policy` 使用。
 - `ArchetypeDecoder`:
   - 单向 LSTM。
   - 只使用 `state_t/past states + z_q`。
@@ -306,7 +319,7 @@ src/models/vq_archetype.py
   - reconstruction CE
   - VQ loss
   - commitment loss
-  - 可选 usage regularization
+  - 默认开启的 `usage_regularization`，严格复现论文公式 (4) 时由 `Phase1Config.paper_strict_reproduction=true` 关闭。
 
 验收:
 
@@ -319,13 +332,18 @@ pytest tests/unit/models/test_vq_archetype.py
 
 ### Step 8: Phase I 指标与 replay 评估
 
-生成文件:
+生成文件（按 `metrics/` 与 `diagnostics/` 子包组织，减少顶层文件数并按职责分组）:
 
 ```text
-src/evaluation/action_metrics.py
-src/evaluation/risk_metrics.py
-src/evaluation/archetype_diagnostics.py
-src/evaluation/behavior_diagnostics.py
+src/evaluation/metrics/__init__.py
+src/evaluation/metrics/action.py
+src/evaluation/metrics/risk.py
+src/evaluation/metrics/archetype.py
+src/evaluation/metrics/behavior.py
+src/evaluation/metrics/stability.py
+src/evaluation/diagnostics/__init__.py
+src/evaluation/diagnostics/latent_visualization.py
+src/evaluation/diagnostics/failure_case_report.py
 src/evaluation/phase1_metrics.py
 src/evaluation/phase1_replay.py
 src/evaluation/phase1_evaluator.py
@@ -364,45 +382,56 @@ src/evaluation/phase1_evaluator.py
 验收:
 
 ```bash
-pytest tests/unit/evaluation/test_action_metrics.py
-pytest tests/unit/evaluation/test_risk_metrics.py
+pytest tests/unit/evaluation/metrics/test_action.py
+pytest tests/unit/evaluation/metrics/test_risk.py
+pytest tests/unit/evaluation/metrics/test_archetype.py
+pytest tests/unit/evaluation/metrics/test_behavior.py
+pytest tests/unit/evaluation/metrics/test_stability.py
+pytest tests/unit/evaluation/diagnostics/test_latent_visualization.py
+pytest tests/unit/evaluation/diagnostics/test_failure_case_report.py
 pytest tests/unit/evaluation/test_phase1_metrics.py
 pytest tests/unit/evaluation/test_phase1_replay.py
 pytest tests/unit/evaluation/test_phase1_evaluator.py
 ```
 
-### Step 9: checkpoint、报告与训练器
+### Step 9: checkpoint、selection policy、报告与训练器
 
 生成文件:
 
 ```text
 src/trainers/phase1_checkpoint.py
+src/trainers/selection_policy.py
 src/evaluation/phase1_report.py
 src/trainers/phase1_trainer.py
 ```
 
 核心内容:
 
-- `Phase1CheckpointManager`:
+- `Phase1CheckpointManager` 只做 IO:
   - 保存 `last_vq_model.pt`
-  - 保存 `best_vq_model.pt`
+  - 接收 `selection_policy` 给出的 verdict 后才决定是否 promote 为 `best_vq_model.pt`
   - 可选保存 `checkpoints/epoch_*.pt`
-  - 写入 `checkpoint_manifest.json`
-- best checkpoint 选择:
-  - 默认使用 `phase1_composite_score`
-  - `code_usage_ratio < min_code_usage_ratio` 不可成为 best
-  - 风险 guardrail 不通过时记录拒绝原因
+  - 写入 `checkpoint_manifest.json`，含 verdict 与拒绝原因
+- `Phase1SelectionPolicy`:
+  - 集中 best 选择规则、`code_usage_ratio` guardrail、`risk_guardrails`、`behavior_guardrails`、`teacher_quality_guardrails`、dead-code restart cooldown 与 `consecutive_collapse_epoch_limit` fatal 退出。
+  - 输出 `SelectionVerdict(decision, reasons, composite_score)`，无 IO，便于单元测试。
 - `Phase1ReportWriter`:
   - 写入 `phase1_report.json`
   - 写入 `action_diagnostics.json`
   - 写入 `risk_diagnostics.json`
   - 写入 `archetype_behavior_diagnostics.json`
-- `Phase1Trainer` 编排完整训练流程。
+  - 写入 `composite_score_sensitivity.json`（由 trainer 在最终阶段提交）
+  - 写入 `sampling_leakage_diagnostics.json`
+- `Phase1Trainer`:
+  - 编排完整训练流程。
+  - 在最终阶段执行 `phase1_composite_score` 权重 sensitivity 试验（固定 metrics、按预设权重组合重新评估 best epoch），结果交给 `Phase1ReportWriter`。
+  - 在 `consecutive_collapse_epoch_limit` 触发时以非零退出码终止。
 
 验收:
 
 ```bash
 pytest tests/unit/trainers/test_phase1_checkpoint.py
+pytest tests/unit/trainers/test_selection_policy.py
 pytest tests/unit/evaluation/test_phase1_report.py
 pytest tests/unit/trainers/test_phase1_trainer.py
 ```
@@ -419,10 +448,12 @@ run_pipeline.sh
 核心内容:
 
 - `scripts/train_phase1.py` 调用 `Phase1Trainer`。
-- `run_pipeline.sh` 已预留 Phase I 调用，保持参数兼容。
-- 支持小数据 smoke run:
+- 默认情况下，主实验入口在缺失 `--diagnostic-pair-batch-id` 时拒绝启动；通过 `--allow-missing-prospective-diagnostic` + `--risk-acknowledged-by` + `--expected-sign-off-followup-batch-id` 显式放行。
+- `run_pipeline.sh` 已预留 Phase I 调用，保持参数兼容；建议在主实验后追加一次 prospective 诊断 BATCH_ID 的训练命令。
+- 支持小数据 smoke run（含 prospective 诊断对照）:
 
 ```bash
+# 主实验（hindsight 默认）
 python scripts/train_phase1.py \
   --pair AL \
   --train-batch-id smoke_phase1 \
@@ -434,7 +465,24 @@ python scripts/train_phase1.py \
   --num-archetypes 4 \
   --epochs 2 \
   --batch-size 4 \
-  --seed 42
+  --seed 42 \
+  --stratification-mode hindsight_horizon \
+  --diagnostic-pair-batch-id smoke_phase1_prospective
+
+# 配套 prospective 对照
+python scripts/train_phase1.py \
+  --pair AL \
+  --train-batch-id smoke_phase1_prospective \
+  --train-file tests/fixtures/phase1/market_train.feather \
+  --val-file tests/fixtures/phase1/market_val.feather \
+  --test-file tests/fixtures/phase1/market_test.feather \
+  --horizon 8 \
+  --num-demos 12 \
+  --num-archetypes 4 \
+  --epochs 2 \
+  --batch-size 4 \
+  --seed 42 \
+  --stratification-mode prospective_past
 ```
 
 验收:
@@ -494,9 +542,9 @@ pytest tests/integration/test_phase1_pipeline_smoke.py
 - `next_row_execution` prices shape 为 `[h + 2]`。
 - sample_id、start_index、end_index 正确。
 
-### 环境与成本层
+### 交易层（合并后的 `src/trading/`）
 
-`tests/unit/envs/test_reward_alignment.py`
+`tests/unit/trading/test_reward_alignment.py`
 
 - `paper_formula` 行号映射正确。
 - `next_row_execution` 行号映射正确。
@@ -507,16 +555,17 @@ pytest tests/integration/test_phase1_pipeline_smoke.py
 - 买入使用 ask 档。
 - 卖出使用 bid 档。
 - 五档深度足够时 fill price 为加权均价。
-- 深度不足时 reject transition。
+- 深度不足时 reject transition 并暴露 `reject_event`。
 - fee 与 slippage 计算正确。
 
-`tests/unit/envs/test_trading_env.py`
+`tests/unit/trading/test_env.py`
 
 - action 到 position 映射正确。
 - flat -> long 的 reward 扣除成本。
 - long -> flat 的 reward 扣除成本。
 - 支持 non-flat initial position。
 - replay actions 汇总收益等于逐步 step 收益之和。
+- `step()` 返回 `info["reject_event"]` 与 `LobDepthCostModel` 一致。
 
 ### DP 层
 
@@ -528,21 +577,26 @@ pytest tests/integration/test_phase1_pipeline_smoke.py
 - 所有输出 actions 长度为 h。
 - `num_switches <= 1`。
 - DP total_return 等于 env replay return。
+- 末步处理: `actions[N-1] == actions[N-2]`，且不计入 `num_switches`；末步 reward 仍按 `paper_formula` 用 `p_N - p_{N-1}` 计算（场景 A: 末步仍持 long；场景 B: 末步已回到 flat）。
 
 `tests/unit/planners/test_demo_generator.py`
 
 - 批量 horizon 都生成 actions/rewards。
 - no-trade horizon 标记正确。
 - metadata 保留 strata_label 和 sample_id。
+- `dataset_reject_rate` / `per_horizon_reject_rate` / `worst_reject_horizons` 写入 report。
+- 当 `dataset_reject_rate > max_dataset_reject_rate` 且 `fail_when_exceeded=true`，generator 抛出可识别的异常并以非零码退出。
 
 ### 模型层
 
 `tests/unit/models/test_reward_normalizer.py`
 
-- 只用 train rewards fit mean/std。
-- transform 后均值接近 0。
+- 默认 `train_reward_robust` 时 fit median/MAD；transform 后中位数接近 0。
+- `train_reward_standard` 时 fit mean/std；transform 后均值接近 0。
+- 通过 kurtosis 检验自动回退到 standard 时，`reward_normalizer.json` 写入 `resolved` 与 `reason`。
 - clip ratio 统计正确。
-- std 过小时使用 epsilon。
+- std/MAD 过小时使用 epsilon。
+- val/test 严禁重新 fit；仅调用 `transform`。
 
 `tests/unit/models/test_vector_quantizer.py`
 
@@ -561,7 +615,7 @@ pytest tests/integration/test_phase1_pipeline_smoke.py
 
 ### 指标与评估层
 
-`tests/unit/evaluation/test_action_metrics.py`
+`tests/unit/evaluation/metrics/test_action.py`
 
 - reconstruction accuracy 正确。
 - weighted accuracy 正确。
@@ -569,12 +623,26 @@ pytest tests/integration/test_phase1_pipeline_smoke.py
 - confusion matrix 正确。
 - switch recall 和 direction accuracy 正确。
 
-`tests/unit/evaluation/test_risk_metrics.py`
+`tests/unit/evaluation/metrics/test_risk.py`
 
 - 全正收益 sharpe 为正。
 - 下行收益 sortino 有效。
 - max drawdown 正确。
 - calmar 在 drawdown 为 0 时稳定处理。
+
+`tests/unit/evaluation/metrics/test_archetype.py`
+
+- per-code 平均收益、胜率、no-trade ratio 计算正确。
+
+`tests/unit/evaluation/metrics/test_behavior.py`
+
+- per-code action entropy 与 inter-code action diversity 计算正确。
+- decoder sensitivity to code 在固定 states 下能区分不同 code 的输出差异。
+
+`tests/unit/evaluation/metrics/test_stability.py`
+
+- best/last epoch 完全一致时 stability=1。
+- 仅 code id 交换时 `epoch_code_stability_matched` 应高于 raw stability。
 
 `tests/unit/evaluation/test_phase1_metrics.py`
 
@@ -582,6 +650,7 @@ pytest tests/integration/test_phase1_pipeline_smoke.py
 - code_usage_ratio 正确。
 - return_capture_ratio 对 teacher return 接近 0 时稳定。
 - phase1_composite_score 可计算。
+- 权重 sensitivity 函数能产出 `composite_score_sensitivity.json` 所需结构。
 
 `tests/unit/evaluation/test_phase1_replay.py`
 
@@ -594,15 +663,23 @@ pytest tests/integration/test_phase1_pipeline_smoke.py
 `tests/unit/trainers/test_phase1_checkpoint.py`
 
 - 保存 last checkpoint。
-- metric 变好时保存 best。
-- code usage guardrail 不通过时拒绝 best。
-- manifest 写入拒绝原因。
+- 接收 `promote_to_best` verdict 时升级 best；接收 `reject` 时不动 best。
+- manifest 写入 verdict、reasons 与文件 hash。
+
+`tests/unit/trainers/test_selection_policy.py`
+
+- `code_usage_ratio < min_code_usage_ratio` 时返回 `reject`，原因含 `codebook_collapse`。
+- `val_max_drawdown` 超阈时返回 `reject`，原因含 `risk_guardrail`。
+- `inter_code_action_diversity` 不足时 `behavior_guardrails` 触发 `reject`。
+- `dead_code_restart` 冷却期内不允许 promote。
+- `consecutive_collapse_epoch_limit` 命中时返回 `fatal`，由 trainer 转换为非零退出码。
 
 `tests/unit/evaluation/test_phase1_report.py`
 
-- report 包含配置、采样健康、模型指标、风险指标。
+- report 包含配置、采样健康、模型指标、风险指标、reject_transition 指标、composite 权重 sensitivity。
 - JSON 可读。
 - 必需字段缺失时报错。
+- `validate_schema` 对未知字段宽容、对必填字段严格。
 
 ## 5. 集成测试用例计划
 
@@ -662,6 +739,9 @@ artifacts/TEST/integration_smoke/phase1/phase1_report.json
   - `reward_alignment == "paper_formula"`
   - `code_usage_ratio >= 0`
   - `sampling_health_warnings` 字段存在
+  - `reward_normalization_resolved` 字段存在
+  - `dataset_reject_rate` 字段存在
+  - `composite_score_sensitivity` 字段存在或对应 sensitivity JSON 文件存在
 - `input_schema.json` 中:
   - `price_column == "close"`
   - `feature_columns` 不包含 `close`
