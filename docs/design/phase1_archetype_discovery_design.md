@@ -26,6 +26,26 @@ DP 只允许在 Phase I 离线 demonstration 生成和 horizon label 生成时�
 | 损失为 reconstruction + VQ + commitment | `Phase1Loss` 实现论文公式 (4) |
 | Phase II 需要 demonstration label | 对 train/val/test horizon 生成 `code_label` 文件 |
 
+### 2.1 与论文第一阶段的一致性边界
+
+设计文档保留论文第一阶段的核心架构和算法公式:
+
+```text
+sample horizons -> Single-trade DP demonstration -> LSTM encoder -> VQ codebook -> decoder reconstructs actions
+```
+
+以下内容属于工程落地增强，不改变论文第一阶段主干:
+
+| 设计项 | 与论文关系 | 是否改变核心公式 |
+| --- | --- | --- |
+| 滑动窗口后分层采样 30000 个 horizon | 论文只要求采样 `n` 个固定长度 chunk；本设计给出小数据量下的采样实现 | 否 |
+| 手续费和盘口深度滑点 | 论文 MDP 已包含 execution loss 和 commission；本设计细化 `r_t(i->j)` 的成本计算 | 否 |
+| `TradingEnv` / `CostModel` | 工程上统一 reward、成交和 replay 语义 | 否 |
+| checkpoint online replay | 额外验证 student 与 DP teacher 的收益差距 | 否 |
+| causal decoder 约束 | 为避免部署时未来信息泄漏，对 decoder 施加实现约束 | 不改变公式 (3)，但约束其因果实现 |
+| no-trade 样本保留 | 工程配置项；严格复现论文可过滤 no-trade | 不改变 DP 转移，只影响数据集纳入规则 |
+| usage regularization / dead-code restart | codebook collapse 防护；可关闭以严格复现公式 (4) | 开启时会扩展训练 loss，需记录配置 |
+
 ## 3. 数据契约
 
 ### 3.1 输入数据
@@ -156,8 +176,24 @@ return_bin=up, vol_bin=high, pattern_bin=mixed
 
 - 默认 `stratified_uniform`: 每个非空 strata 尽量采样相同数量，剩余额度按 strata 大小补齐。
 - 可选 `stratified_proportional`: 按每个 strata 的候选窗口数量等比例采样。
+- 对 `return_bin=flat` 且 `vol_bin=low` 的 strata 设置采样上限，避免 DP 全 flat 样本过多。
+- 若初次 DP 标注后的 `no_trade_ratio` 超过阈值，触发二次补采样: 从非 flat 或中高波动 strata 中补足被过滤的 horizon。
+- 设置 `min_gap_between_samples` 和 `max_overlap_ratio` 检查相邻采样窗口是否过度重叠；超阈值时在 eval/report 中给出调参提醒。
 - 同一批次必须固定 `seed`，并把被采样的 `window_start` 保存到 `window_index_train.parquet`。
 - val/test 不参与 VQ 训练采样；需要标签时可按固定 stride 枚举，或使用同一分层策略生成评估窗口索引。
+
+采样健康检查配置:
+
+```yaml
+sampling_health:
+  max_no_trade_ratio: 0.25
+  flat_low_vol_max_ratio: 0.15
+  min_gap_between_samples: 12
+  max_overlap_ratio: 0.85
+  warn_only: true
+```
+
+`phase1_evaluator.py` 必须在每次数据构建后输出 `sampling_health_warnings`。这些 warning 不一定中断训练，但必须提示是否需要调整 `flat_low_vol_max_ratio`、`min_profit_gate`、`min_gap_between_samples` 或采样策略。
 
 ## 4. 目录与模块设计
 
@@ -209,6 +245,7 @@ python scripts/train_phase1.py \
 - train/val/test 三个输入文件路径
 - horizon 长度 `h`
 - 滑动窗口参数: `window_stride`, `num_demos`, `sampling_strategy`, `strata_bins`
+- 采样健康检查参数: `max_no_trade_ratio`, `flat_low_vol_max_ratio`, `min_gap_between_samples`, `max_overlap_ratio`
 - DP/交易成本参数: `gamma`, `commission_rate`, `slippage_model=lob_depth`, `execution_lag`, `max_position`, `cost_model`
 - VQ 参数: `hidden_dim=128`, `code_dim=16`, `num_codes=10`, `beta0=0.25`, `usage_regularization_weight`, `dead_code_restart`
 - 训练参数: `batch_size`, `lr`, `epochs`, `seed`, `device`
@@ -447,7 +484,7 @@ class LobDepthCostModel:
 | VQ 指标 | `code_usage_ratio`、`perplexity`、`vq_loss`、`commitment_loss` |
 | 行为结构指标 | `single_trade_consistency_rate`、`no_trade_ratio` |
 | replay 收益指标 | `student_online_net_return`、`dp_teacher_net_return`、`return_capture_ratio`、`regret_to_dp`、`cost_paid` |
-| 采样指标 | `strata_distribution`、`num_candidate_windows`、`num_sampled_horizons` |
+| 采样健康指标 | `strata_distribution`、`num_candidate_windows`、`num_sampled_horizons`、`flat_low_vol_sample_ratio`、`window_overlap_ratio`、`min_sample_gap`、`mean_sample_gap`、`sampling_health_warnings` |
 
 核心函数建议:
 
@@ -457,6 +494,8 @@ def codebook_perplexity(code_ids, num_codes): ...
 def single_trade_consistency(actions): ...
 def return_capture_ratio(student_return, teacher_return): ...
 def regret_to_dp(student_return, teacher_return): ...
+def window_overlap_ratio(sampled_windows, horizon): ...
+def sampling_health_warnings(report, config): ...
 ```
 
 ### 4.12 `src/trainers/phase1_checkpoint.py`
@@ -602,12 +641,32 @@ cost_config:
 
 ### 5.4 No-trade 样本处理
 
-DP 可能发现全程 flat 的收益最高。建议配置化处理:
+DP 可能发现全程 flat 的收益最高。No-trade 处理必须作为数据构建机制实现，而不是只在风险表中提示。
 
-- `keep_no_trade=True`: 保留样本，标记 `is_no_trade=1`。
-- `keep_no_trade=False`: 若 `total_return <= min_profit_gate`，重新采样或过滤。
+配置建议:
 
-论文强调 single trade，但实际市场中无交易 horizon 是有意义的负样本。默认建议保留，并在报告中记录 `no_trade_ratio`。
+```yaml
+no_trade_control:
+  keep_no_trade: true
+  max_no_trade_ratio: 0.25
+  min_profit_gate: 0.0
+  cap_flat_low_vol_strata: true
+  flat_low_vol_max_ratio: 0.15
+  resample_when_exceeded: true
+```
+
+处理流程:
+
+1. 初始分层采样时，对 `return_bin=flat, vol_bin=low` 的 strata 设置配额上限。
+2. 对采样出的 horizon 运行 DP，并标记 `is_no_trade`。
+3. 计算 `no_trade_ratio = no_trade_count / num_demos`。
+4. 若 `no_trade_ratio <= max_no_trade_ratio`，保留当前样本集。
+5. 若 `no_trade_ratio > max_no_trade_ratio`:
+   - 当 `keep_no_trade=True` 时，只保留不超过 `max_no_trade_ratio` 的 no-trade 样本，其余从非 flat 或中高波动 strata 中补采样。
+   - 当 `keep_no_trade=False` 时，过滤 `total_return <= min_profit_gate` 或全 flat 样本，并从候选池补采样直到达到 `num_demos=30000`。
+6. 所有被过滤、补采样和保留的样本数量写入 `phase1_report.json`。
+
+论文文字强调 single trade，且原始表述可理解为每个 horizon 有一次主要交易机会。工程实现中，DP 转移约束保持“最多一次动作切换”，不允许多次交易；若最优解为全 flat，则视为 no-trade horizon。为严格复现论文口径，可设置 `keep_no_trade=False` 过滤 no-trade 样本；为真实交易训练，默认建议 `keep_no_trade=True` 保留负样本，并在报告中记录 `no_trade_ratio`。该配置不改变 Algorithm 1 的 DP 状态和转移形式，只决定是否把全 flat 样本纳入 $\mathcal{D}$。
 
 ## 6. VQ Encoder-Decoder 设计
 
@@ -718,13 +777,15 @@ codebook_health:
   restart_source: high_reconstruction_error_samples
 ```
 
+usage regularization 是工程稳定项，用于降低 codebook collapse 风险。严格复现论文公式 (4) 时应设置 `usage_regularization_weight=0`；当训练中出现 collapse 风险时，可启用该辅助项。它不改变 VQ encoder-decoder 架构和最近邻量化公式，只是在训练目标上增加可配置正则。
+
 usage regularization 目标是鼓励 batch 内 code 分布接近均匀分布:
 
 $$
 L_{usage}=KL(U(K)\|p_{code})
 $$
 
-训练总损失扩展为:
+启用后训练总损失扩展为:
 
 $$
 L_{total}=L_{rec}+L_{vq}+\beta_0L_{commit}+\lambda_{usage}L_{usage}
@@ -907,6 +968,14 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
   "mean_demo_return": 0.0,
   "median_demo_return": 0.0,
   "no_trade_ratio": 0.0,
+  "no_trade_count": 0,
+  "filtered_no_trade_count": 0,
+  "resampled_horizon_count": 0,
+  "flat_low_vol_sample_ratio": 0.0,
+  "window_overlap_ratio": 0.0,
+  "min_sample_gap": 0,
+  "mean_sample_gap": 0.0,
+  "sampling_health_warnings": [],
   "num_train_rows": 450000,
   "num_candidate_windows": 449927,
   "sampling_strategy": "stratified_uniform",
@@ -946,6 +1015,9 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - 最终进入 `demos_train.parquet` 的训练 horizon 数量应等于 `num_demos=30000`。
 - `window_index_train.parquet` 必须保存全部候选窗口统计和最终采样标记。
 - 分层采样后，各 strata 的样本数应进入 `phase1_report.json`。
+- flat/低波动 strata 的最终样本比例不得超过 `flat_low_vol_max_ratio`。
+- `window_overlap_ratio`、`min_sample_gap`、`mean_sample_gap` 必须进入 `phase1_report.json`。
+- 若 `window_overlap_ratio > max_overlap_ratio` 或 `min_sample_gap < min_gap_between_samples`，必须在 `sampling_health_warnings` 中提醒调整 `min_gap_between_samples` 或采样策略。
 - 固定 `seed` 后，重复运行得到相同的 `sample_id/window_start`。
 
 ### 9.3 DP 验收
@@ -954,7 +1026,9 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - strict single-trade 模式下，每个样本最多一次 action 切换。
 - reward 计算必须按 next-row execution 对齐，使用成交行盘口逐档估算滑点，并可由 `prices/order_books/actions/cost_config` 复现。
 - `phase1_config.yaml`、`demos_train.parquet`、DP planner 和 replay env 使用的 `env_config/cost_config` 必须一致。
-- `no_trade_ratio` 被记录并进入报告。
+- `no_trade_ratio` 必须小于等于 `max_no_trade_ratio`，并被记录进报告。
+- 若触发 no-trade 过滤或补采样，`filtered_no_trade_count` 和 `resampled_horizon_count` 必须写入报告。
+- 若 `no_trade_ratio > max_no_trade_ratio`，必须在 `sampling_health_warnings` 中提醒调整 `flat_low_vol_max_ratio` 或 `min_profit_gate`。
 
 ### 9.4 VQ 验收
 
@@ -988,8 +1062,8 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 | 风险 | 表现 | 处理 |
 | --- | --- | --- |
 | codebook collapse | 大部分样本落到同一个 code | 已内置 `codebook_health` 监控、usage regularization、dead-code restart 和 best checkpoint 拒绝规则 |
-| DP 全 flat 过多 | `no_trade_ratio` 过高 | 在分层采样中降低 flat/低波动窗口配额，或设置 `min_profit_gate` |
-| 滑动窗口高度重叠 | 相邻样本过于相似 | 分层后再采样，必要时设置 `min_gap_between_samples` |
+| DP 全 flat 过多 | `no_trade_ratio` 过高 | eval 输出 `sampling_health_warnings`，提醒调整 `flat_low_vol_max_ratio`、`min_profit_gate` 或 `max_no_trade_ratio` |
+| 滑动窗口高度重叠 | 相邻样本过于相似 | eval 输出 `window_overlap_ratio/min_sample_gap` 和 warning，提醒设置或增大 `min_gap_between_samples` |
 | demonstration 太理想化 | Phase II 回测收益弱 | 第一阶段强制启用手续费和盘口深度逐档滑点，禁止使用 `fixed_bps` |
 | 输入数据存在未来信息 | 验证/测试表现异常好 | 审计外部数据文件的字段来源，本项目不重新生成因子 |
 | decoder 只记忆动作位置 | 泛化弱 | 增加 validation horizon、多资产训练或 action label smoothing |
