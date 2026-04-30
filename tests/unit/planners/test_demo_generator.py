@@ -93,7 +93,8 @@ def test_reject_stats_collected_when_depth_thin():
     record = _make_record(prices, books)
     _, stats = gen.generate([record])
     # 至少 dataset_reject_rate > 0
-    assert stats.dataset_reject_rate >= 0.0
+    assert stats.dataset_reject_rate > 0.0
+    assert stats.reject_by_action_pair
 
 
 def test_fail_when_dataset_reject_rate_exceeds():
@@ -113,4 +114,4 @@ def test_only_warns_when_fail_when_exceeded_false():
     record = _make_record(prices, books)
     horizons, stats = gen.generate([record])
     assert horizons  # 不抛错
-    assert stats.dataset_reject_rate >= 0.0
+    assert stats.dataset_reject_rate > 0.0

@@ -4,8 +4,10 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,6 +37,7 @@ from src.trading.cost_model import LobDepthCostModel
 from src.trading.env import TradingEnv
 from src.trading.reward_alignment import RewardAlignment
 from src.utils.feather_io import atomic_write_json
+from src.utils.feather_io import read_json
 
 from .phase1_checkpoint import Phase1CheckpointManager, Phase1FatalCollapse
 from .selection_policy import (
@@ -90,6 +93,8 @@ class Phase1Trainer:
     def __init__(self, config: Phase1Config) -> None:
         # paper_strict_reproduction 时同步 codebook 与 encoder 的工程稳定项。
         self.config = apply_paper_strict_overrides(config)
+        self._sampling_health_reports: Dict[str, dict] = {}
+        self._dead_code_restart_events: List[dict] = []
 
     # ---------- 入口 ----------
 
@@ -178,7 +183,7 @@ class Phase1Trainer:
         schema_path = schema_validator.write_schema_json(
             schema, artifacts_dir / "input_schema.json"
         )
-        schema_hash = config_hash  # 这里以 config_hash 为审计标记；避免又算一次。
+        schema_hash = self._schema_hash(schema)
 
         # 3. 滑窗 + 分层采样 + 健康检查
         train_horizons, train_window_path = self._build_horizons_for_split(
@@ -247,7 +252,7 @@ class Phase1Trainer:
         )
 
         try:
-            self._train_loop(
+            history = self._train_loop(
                 model=model,
                 loss_fn=loss_fn,
                 optimizer=optimizer,
@@ -266,9 +271,12 @@ class Phase1Trainer:
             raise Phase1FatalError(str(exc)) from exc
 
         # 9. 用 best checkpoint 导出 horizon labels
-        best_state = ckpt.load(ckpt.best_path) if ckpt.best_path.exists() else None
-        if best_state is not None:
-            self._reload_state(model, best_state)
+        if not ckpt.best_path.exists():
+            raise Phase1FatalError(
+                "训练结束后没有可用 best_vq_model.pt；禁止导出 Phase II artifacts。"
+            )
+        best_state = ckpt.load(ckpt.best_path)
+        self._reload_state(model, best_state)
         labels_paths = self._export_horizon_labels(
             model,
             store=store,
@@ -278,13 +286,13 @@ class Phase1Trainer:
 
         # 10. 导出 Phase II/III 产物
         encoder_path, decoder_path, codebook_path = self._export_phase2_artifacts(
-            best_state if best_state is not None else self._snapshot_state(model)
+            best_state
         )
 
         # 11. composite sensitivity + 报告
-        last_metrics_payload = self._latest_metrics(ckpt)
+        best_metrics_payload = self._best_metrics(ckpt)
         sensitivity = composite_score_sensitivity(
-            last_metrics_payload,
+            best_metrics_payload,
             base_weights=self.config.selection_policy.metric_weights,
             perturbations=self.config.selection_policy.composite_score_sensitivity_perturbations,
         )
@@ -303,30 +311,29 @@ class Phase1Trainer:
         report_paths = ReportPaths.from_artifacts_dir(artifacts_dir)
         writer = Phase1ReportWriter(report_paths)
         report_summary = self._build_final_summary(
-            metrics=last_metrics_payload,
+            metrics=best_metrics_payload,
             reject_stats=reject_stats,
             normalizer=norm,
-            best_epoch=history.best_epoch or 0,
+            best_epoch=history.best_epoch if history.best_epoch is not None else 0,
             no_trade_ratio=no_trade_ratio,
+        )
+        leakage_payload = self._build_sampling_leakage_diagnostics(report_summary)
+        report_summary["hindsight_bias_warning"] = leakage_payload["hindsight_bias_warning"]
+        report_summary["hindsight_vs_prospective_metric_delta"] = leakage_payload.get(
+            "hindsight_vs_prospective_metric_delta", {}
+        )
+        report_summary["best_checkpoint_signoff"] = (
+            leakage_payload["hindsight_bias_warning"]
+            in {"ok", "not_required", "not_applicable"}
+        )
+        report_summary["signoff_blocked_reason"] = leakage_payload.get(
+            "signoff_blocked_reason", ""
         )
         writer.write_final_report(report_summary)
 
         # 采样诊断 JSON: 主实验记录 hindsight bias warning 与 followup batch
         leakage_path = artifacts_dir / "sampling_leakage_diagnostics.json"
-        atomic_write_json(
-            {
-                "stratification_mode": self.config.stratification.mode,
-                "is_hindsight_stratification": self.config.stratification.mode == "hindsight_horizon",
-                "diagnostic_pair_batch_id": self.config.stratification.diagnostic_pair_batch_id,
-                "allow_missing_prospective_diagnostic": self.config.allow_missing_prospective_diagnostic,
-                "risk_acknowledged_by": self.config.risk_acknowledged_by,
-                "expected_sign_off_followup_batch_id": self.config.expected_sign_off_followup_batch_id,
-                "hindsight_bias_warning": (
-                    "exceeded" if self._hindsight_warning_triggered(report_summary) else "ok"
-                ),
-            },
-            leakage_path,
-        )
+        atomic_write_json(leakage_payload, leakage_path)
 
         return TrainerArtifacts(
             artifacts_dir=artifacts_dir,
@@ -451,11 +458,12 @@ class Phase1Trainer:
                 flat_low_vol_max_ratio=self.config.sampling_health.flat_low_vol_max_ratio,
                 warn_only=self.config.sampling_health.warn_only,
             )
-            checker.check(
+            report = checker.check(
                 sampled=sampled,
                 split_boundaries={"train_end_row": frame.height - 1},
                 strata_labels=[s.strata_label for s in sampled],
             )
+            self._sampling_health_reports[split] = asdict(report)
 
         # 写 window index
         index_frame = indexer.to_frame(entries)
@@ -656,6 +664,16 @@ class Phase1Trainer:
                 # EMA 更新（gradient 模式下 update_codebook 是 no-op）
                 model.quantizer.update_codebook(outputs.z_e.detach(), outputs.code_id.detach())
 
+            restarted_code_ids = self._maybe_restart_dead_codes(
+                model=model,
+                train_dataset=train_dataset,
+                epoch=epoch,
+            )
+            restart_events = [
+                {"epoch": epoch, "code_id": int(cid)} for cid in restarted_code_ids
+            ]
+            self._dead_code_restart_events.extend(restart_events)
+
             # 保存 last
             state = {"model": model.state_dict(), "epoch": epoch}
             metrics_for_select: Dict[str, Any] = {"epoch": epoch}
@@ -668,6 +686,16 @@ class Phase1Trainer:
                 full_validation=full_val,
             )
             metrics_for_select.update(ep_metrics.metrics)
+            if "val_weighted_reconstruction_accuracy" in metrics_for_select:
+                metrics_for_select["weighted_reconstruction_accuracy"] = metrics_for_select[
+                    "val_weighted_reconstruction_accuracy"
+                ]
+            metrics_for_select["_dead_code_restart_triggered"] = bool(restarted_code_ids)
+            metrics_for_select["_dead_code_restart_cooldown_epochs"] = (
+                self.config.model.codebook.health.restart_cooldown_epochs
+            )
+            metrics_for_select["dead_code_restarts"] = len(restarted_code_ids)
+            metrics_for_select["dead_code_restart_events"] = restart_events
             metrics_for_select["_consecutive_collapse_epochs"] = (
                 history.consecutive_collapse_epochs + (
                     1 if metrics_for_select.get("code_usage_ratio", 1.0) < self.config.selection_policy.min_code_usage_ratio else 0
@@ -676,10 +704,58 @@ class Phase1Trainer:
             metrics_for_select["_consecutive_collapse_limit"] = self.config.model.codebook.health.consecutive_collapse_epoch_limit
 
             verdict = policy.evaluate(metrics_for_select, history)
-            checkpoint.save_last(state, ep_metrics.metrics, epoch)
-            checkpoint.save_periodic(state, ep_metrics.metrics, epoch, self.config.training.save_every)
-            checkpoint.commit_verdict(state, ep_metrics.metrics, verdict, epoch)
+            metrics_for_select["phase1_composite_score"] = verdict.composite_score
+            metrics_for_select["phase1_composite_score_debug"] = verdict.composite_score_debug
+            checkpoint.save_last(state, metrics_for_select, epoch)
+            checkpoint.save_periodic(state, metrics_for_select, epoch, self.config.training.save_every)
+            checkpoint.commit_verdict(state, metrics_for_select, verdict, epoch)
             history = policy.update_history(history, metrics_for_select, verdict)
+        return history
+
+    def _maybe_restart_dead_codes(self, *, model, train_dataset, epoch: int) -> List[int]:
+        """按配置把 dead-code restart 接入训练循环。"""
+        health = self.config.model.codebook.health
+        if not health.dead_code_restart:
+            return []
+        if epoch + 1 < max(health.dead_code_patience, 1):
+            return []
+        try:
+            import torch
+            from torch.utils.data import DataLoader
+        except ImportError:  # pragma: no cover
+            return []
+
+        loader = DataLoader(
+            train_dataset,
+            batch_size=self.config.training.batch_size,
+            shuffle=False,
+            collate_fn=collate_phase1,
+        )
+        z_e_chunks = []
+        err_chunks = []
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            for batch in loader:
+                outputs = model(batch["states"], batch["actions"], batch["rewards"])
+                per_step = torch.nn.functional.cross_entropy(
+                    outputs.action_logits.reshape(-1, outputs.action_logits.shape[-1]),
+                    batch["actions"].reshape(-1),
+                    reduction="none",
+                ).reshape(batch["actions"].shape)
+                z_e_chunks.append(outputs.z_e.detach())
+                err_chunks.append(per_step.mean(dim=1).detach())
+        if was_training:
+            model.train()
+        if not z_e_chunks:
+            return []
+        z_e = torch.cat(z_e_chunks, dim=0)
+        errors = torch.cat(err_chunks, dim=0)
+        return model.quantizer.restart_dead_codes(
+            encoder_outputs=z_e,
+            reconstruction_errors=errors,
+            current_epoch=epoch,
+        )
 
     def _export_horizon_labels(self, model, *, store, horizons_by_split, normalizer=None):
         """对 train/val/test horizon 跑 encoder，得到 ``code_label`` 并写 feather。
@@ -723,8 +799,29 @@ class Phase1Trainer:
                         sample_id=rec.sample_id,
                         start_index=rec.start_index,
                         end_index=rec.end_index,
-                        last_execution_row=rec.start_index + len(rec.execution_books) - 1,
-                        last_markout_row=rec.start_index + len(rec.execution_books),
+                        last_execution_row=(
+                            rec.last_execution_row
+                            if rec.last_execution_row is not None
+                            else rec.start_index
+                            + self.config.horizon
+                            - 1
+                            + (
+                                0
+                                if self.config.dp.cost_config.reward_alignment == "paper_formula"
+                                else 1
+                            )
+                        ),
+                        last_markout_row=(
+                            rec.last_markout_row
+                            if rec.last_markout_row is not None
+                            else rec.start_index
+                            + self.config.horizon
+                            + (
+                                0
+                                if self.config.dp.cost_config.reward_alignment == "paper_formula"
+                                else 1
+                            )
+                        ),
                         strata_label=rec.strata_label,
                         stratification_mode=self.config.stratification.mode,
                         is_augmented=rec.is_augmented,
@@ -776,15 +873,27 @@ class Phase1Trainer:
     def _snapshot_state(self, model) -> Dict[str, Any]:
         return {"model": model.state_dict(), "epoch": -1}
 
-    def _latest_metrics(self, ckpt: Phase1CheckpointManager) -> Dict[str, float]:
-        """从 manifest 中拿到最新 epoch 的 metrics。"""
+    def _schema_hash(self, schema) -> str:
+        canonical = json.dumps(
+            schema.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+    def _best_metrics(self, ckpt: Phase1CheckpointManager) -> Dict[str, float]:
+        """从 manifest 中读取 best epoch 对应的 metrics。"""
         entries = ckpt.load_manifest()
         if not entries:
             return {}
-        latest = entries[-1]
+        best_entries = [e for e in entries if e.is_best]
+        if not best_entries:
+            return {}
+        best = best_entries[-1]
         try:
-            from src.utils.feather_io import read_json
-            return read_json(latest.metrics_path)
+            return read_json(best.metrics_path)
         except Exception:
             return {}
 
@@ -792,6 +901,11 @@ class Phase1Trainer:
         cost = self.config.dp.cost_config
         norm_dict = normalizer.to_dict() if normalizer.stats else {}
         summary = dict(metrics)
+        if "val_weighted_reconstruction_accuracy" in summary:
+            summary.setdefault(
+                "weighted_reconstruction_accuracy",
+                summary["val_weighted_reconstruction_accuracy"],
+            )
         summary.setdefault("reconstruction_accuracy", 0.0)
         summary.setdefault("weighted_reconstruction_accuracy", 0.0)
         summary.setdefault("non_flat_accuracy", 0.0)
@@ -812,10 +926,85 @@ class Phase1Trainer:
         summary["best_epoch"] = best_epoch
         summary["best_checkpoint_path"] = str(self.config.artifacts_dir() / "best_vq_model.pt")
         summary["selection_metric"] = self.config.selection_policy.selection_metric
+        summary["dead_code_restarts"] = len(self._dead_code_restart_events)
+        summary["dead_code_restart_events"] = list(self._dead_code_restart_events)
+        summary.update(self._sampling_health_reports.get("train", {}))
         # composite_sensitivity 主体已写到独立 JSON; 这里只放 path 引用方便审计
         summary["composite_score_sensitivity"] = "composite_score_sensitivity.json"
         return summary
 
     def _hindsight_warning_triggered(self, summary: dict) -> bool:
-        # 第一版没接前瞻对比数据，这里默认不告警；真正比较交给 Phase II 的对照流水线。
-        return False
+        return summary.get("hindsight_bias_warning") == "exceeded"
+
+    def _build_sampling_leakage_diagnostics(self, report_summary: dict) -> dict:
+        """读取 prospective 对照 report 并计算 hindsight/prospective 指标差异。"""
+        payload = {
+            "stratification_mode": self.config.stratification.mode,
+            "is_hindsight_stratification": self.config.stratification.mode == "hindsight_horizon",
+            "diagnostic_pair_batch_id": self.config.stratification.diagnostic_pair_batch_id,
+            "allow_missing_prospective_diagnostic": self.config.allow_missing_prospective_diagnostic,
+            "risk_acknowledged_by": self.config.risk_acknowledged_by,
+            "expected_sign_off_followup_batch_id": self.config.expected_sign_off_followup_batch_id,
+            "hindsight_vs_prospective_metric_delta": {},
+            "missing_metrics": [],
+            "hindsight_bias_warning": "ok",
+            "signoff_blocked_reason": "",
+        }
+        if self.config.stratification.mode != "hindsight_horizon":
+            payload["hindsight_bias_warning"] = "not_applicable"
+            return payload
+        if not self.config.stratification.require_prospective_diagnostic:
+            payload["hindsight_bias_warning"] = "not_required"
+            return payload
+
+        diagnostic_id = self.config.stratification.diagnostic_pair_batch_id
+        if not diagnostic_id:
+            payload["hindsight_bias_warning"] = "missing_acknowledged"
+            payload["signoff_blocked_reason"] = "missing_diagnostic_pair_batch_id"
+            return payload
+
+        prospective_report = (
+            Path(self.config.artifact_root)
+            / self.config.pair
+            / diagnostic_id
+            / "phase1"
+            / "phase1_report.json"
+        )
+        payload["prospective_report_path"] = str(prospective_report)
+        if not prospective_report.exists():
+            if self.config.allow_missing_prospective_diagnostic:
+                payload["hindsight_bias_warning"] = "missing_acknowledged"
+                payload["signoff_blocked_reason"] = "missing_prospective_report"
+                return payload
+            raise Phase1FatalError(
+                f"缺少 prospective 对照报告: {prospective_report}; "
+                "主实验不可 sign-off。"
+            )
+
+        prospective = read_json(prospective_report)
+        exceeded: List[str] = []
+        for metric, max_delta in self.config.stratification.hindsight_vs_prospective_max_delta.items():
+            if metric not in report_summary or metric not in prospective:
+                payload["missing_metrics"].append(metric)
+                continue
+            current_value = float(report_summary[metric])
+            prospective_value = float(prospective[metric])
+            delta = current_value - prospective_value
+            abs_delta = abs(delta)
+            is_exceeded = abs_delta > float(max_delta)
+            if is_exceeded:
+                exceeded.append(metric)
+            payload["hindsight_vs_prospective_metric_delta"][metric] = {
+                "hindsight": current_value,
+                "prospective": prospective_value,
+                "delta": delta,
+                "abs_delta": abs_delta,
+                "max_delta": float(max_delta),
+                "exceeded": is_exceeded,
+            }
+
+        if exceeded:
+            payload["hindsight_bias_warning"] = "exceeded"
+            payload["signoff_blocked_reason"] = "hindsight_vs_prospective_delta_exceeded"
+            payload["exceeded_metrics"] = exceeded
+        return payload

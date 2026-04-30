@@ -10,7 +10,11 @@ def _make_frame(close=(100.0, 100.5, 101.0), extra: dict | None = None):
     import polars as pl
 
     cols = {"timestamp": list(range(len(close))), "close": list(close)}
-    cols["return_1m"] = [0.0] + [(close[i] - close[i - 1]) / close[i - 1] for i in range(1, len(close))]
+    returns = [0.0]
+    for i in range(1, len(close)):
+        prev = close[i - 1]
+        returns.append(0.0 if prev <= 0 else (close[i] - prev) / prev)
+    cols["return_1m"] = returns
     cols["mid_price"] = list(close)
     if extra:
         cols.update(extra)

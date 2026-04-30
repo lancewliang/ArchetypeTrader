@@ -88,6 +88,16 @@ def test_last_step_copies_second_last_when_holding_long():
     assert res.actions[-1] == res.actions[-2]
 
 
+def test_last_step_value_cannot_depend_on_unexecutable_switch():
+    """h=2 时不能把换仓推迟到不可执行的末步。"""
+    planner = _make_planner(commission=0.0)
+    prices = [100.0, 100.0, 110.0]
+    books = [_book(100.0, spread_bps=0.0), _book(100.0, spread_bps=0.0)]
+    res = planner.plan(DPInputs(prices=prices, execution_books=books, horizon=2))
+    assert res.actions == [2, 2]
+    assert res.total_return == pytest.approx(10.0)
+
+
 def test_last_step_copies_second_last_when_back_to_flat():
     """末步已回到 flat 也必须复制。"""
     planner = _make_planner(commission=0.001)

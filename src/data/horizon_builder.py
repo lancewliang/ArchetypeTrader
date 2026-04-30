@@ -26,6 +26,8 @@ class HorizonRecord:
     states: list                       # [h, feature_dim]
     prices: list                       # [h+1] 或 [h+2]
     execution_books: List[ExecutionBook]  # 长度 = h
+    last_execution_row: Optional[int] = None
+    last_markout_row: Optional[int] = None
     actions: Optional[list] = None     # [h]，DP 后填充
     rewards: Optional[list] = None     # [h]，DP 后填充
     is_augmented: bool = False
@@ -144,6 +146,8 @@ class HorizonBuilder:
                     states=states_slice.tolist(),
                     prices=prices_slice.tolist(),
                     execution_books=books,
+                    last_execution_row=sh.last_execution_row,
+                    last_markout_row=sh.last_markout_row,
                 )
             )
         return records

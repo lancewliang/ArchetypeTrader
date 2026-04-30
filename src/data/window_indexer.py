@@ -44,7 +44,7 @@ def _classify_draw(max_up: float, max_down: float) -> str:
 
 def _compute_window_stats(close: Sequence[float], start: int, length: int):
     """horizon 内 horizon_return / realized_vol / draw_pattern。"""
-    closes = [float(close[start + i]) for i in range(length)]
+    closes = [float(close[start + i]) for i in range(length + 1)]
     if closes[0] <= 0 or any(c <= 0 for c in closes):
         return float("nan"), float("nan"), "mixed", float("-inf"), float("inf")
     horizon_return = (closes[-1] - closes[0]) / closes[0]
@@ -71,14 +71,14 @@ def _compute_window_stats(close: Sequence[float], start: int, length: int):
 
 
 def _compute_past_stats(close: Sequence[float], start: int, lookback: int):
-    """前瞻性诊断模式: 只用 ``[start-lookback, start)`` 区间。"""
+    """前瞻性诊断模式: 只用 ``[start-lookback, start]`` 区间。"""
     if start - lookback < 0:
         return float("nan"), float("nan"), "mixed"
-    closes = [float(close[start - lookback + i]) for i in range(lookback)]
-    if closes[0] <= 0:
+    closes = [float(close[start - lookback + i]) for i in range(lookback + 1)]
+    if closes[0] <= 0 or any(c <= 0 for c in closes):
         return float("nan"), float("nan"), "mixed"
     past_ret = (closes[-1] - closes[0]) / closes[0]
-    rets = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, lookback)]
+    rets = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, lookback + 1)]
     if rets:
         mean = sum(rets) / len(rets)
         var = sum((r - mean) ** 2 for r in rets) / max(len(rets) - 1, 1)

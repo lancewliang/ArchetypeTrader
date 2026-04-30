@@ -207,6 +207,7 @@ class StratifiedWindowSampler:
 
         # 每个 strata 内做 min_gap 去相关采样。
         sampled_indices: List[int] = []
+        chosen_starts: List[int] = []
         for label, idx_list in buckets.items():
             quota = quotas.get(label, 0)
             if quota <= 0:
@@ -216,8 +217,10 @@ class StratifiedWindowSampler:
                 entries,
                 quota=quota,
                 min_gap=self.min_gap_between_samples,
+                chosen_starts=chosen_starts,
             )
             sampled_indices.extend(picked)
+            chosen_starts.extend(entries[i].window_start for i in picked)
 
         # 如果由于 gap 约束 + 严禁放宽导致采不满，从其他 strata 补；
         # 仍不够则抛错。
@@ -236,8 +239,10 @@ class StratifiedWindowSampler:
                 entries,
                 quota=shortfall,
                 min_gap=self.min_gap_between_samples,
+                chosen_starts=chosen_starts,
             )
             sampled_indices.extend(picked_extra)
+            chosen_starts.extend(entries[i].window_start for i in picked_extra)
             if len(sampled_indices) < num_samples:
                 if not self.allow_overlap_relaxation:
                     raise RuntimeError(
@@ -252,10 +257,12 @@ class StratifiedWindowSampler:
                     entries,
                     quota=num_samples - len(sampled_indices),
                     min_gap=relaxed_gap,
+                    chosen_starts=chosen_starts,
                 )
                 sampled_indices.extend(picked_extra)
+                chosen_starts.extend(entries[i].window_start for i in picked_extra)
 
-        sampled_indices = sorted(set(sampled_indices))[:num_samples]
+        sampled_indices = list(dict.fromkeys(sampled_indices))[:num_samples]
         result: List[SampledHorizon] = []
         for idx in sampled_indices:
             entry = entries[idx]
@@ -285,20 +292,21 @@ class StratifiedWindowSampler:
         entries: Sequence[WindowIndexEntry],
         quota: int,
         min_gap: int,
+        chosen_starts: Sequence[int] | None = None,
     ) -> List[int]:
         """在 strata 内按 min_gap 去相关采样。
 
         贪心策略: 候选已被随机洗过；按顺序选择，跳过与已选窗口距离 < min_gap 的。
         """
         picked: List[int] = []
-        chosen_starts: List[int] = []
+        all_chosen_starts: List[int] = list(chosen_starts or [])
         for idx in candidate_indices:
             if quota <= 0:
                 break
             start = entries[idx].window_start
-            if all(abs(start - s) >= min_gap for s in chosen_starts):
+            if all(abs(start - s) >= min_gap for s in all_chosen_starts):
                 picked.append(idx)
-                chosen_starts.append(start)
+                all_chosen_starts.append(start)
                 quota -= 1
         return picked
 

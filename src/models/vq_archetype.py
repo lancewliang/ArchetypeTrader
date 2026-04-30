@@ -22,6 +22,14 @@ from .encoder_inputs import EncoderInputAdapter
 from .vector_quantizer import QuantizeOutput, VectorQuantizer
 
 
+def _no_grad():
+    if torch is None:  # pragma: no cover
+        def decorator(fn):
+            return fn
+        return decorator
+    return torch.no_grad()
+
+
 @dataclass
 class ModelOutputs:
     action_logits: "torch.Tensor"
@@ -169,7 +177,7 @@ class VQArchetypeModel(nn.Module if nn is not None else object):  # type: ignore
             code_id=q.code_id,
         )
 
-    @torch.no_grad()
+    @_no_grad()
     def encode(self, states, actions, rewards):
         """仅编码到 ``(code_id, z_e)``，不跑 decoder。
 

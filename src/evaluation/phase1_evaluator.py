@@ -176,6 +176,9 @@ class Phase1Evaluator:
         out.metrics["val_weighted_reconstruction_accuracy"] = weighted_reconstruction_accuracy(
             logits, true_actions, class_weights={0: 2.0, 1: 1.0, 2: 2.0}
         )
+        out.metrics["weighted_reconstruction_accuracy"] = out.metrics[
+            "val_weighted_reconstruction_accuracy"
+        ]
         out.metrics["non_flat_accuracy"] = non_flat_accuracy(logits, true_actions)
         out.metrics["single_trade_consistency_rate"] = single_trade_consistency_rate(pred_actions)
         sw = switch_metrics(true_actions, pred_actions)

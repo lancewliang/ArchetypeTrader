@@ -101,19 +101,16 @@ class Phase1DemoGenerator:
             rec.actions = list(result.actions)
             rec.rewards = list(result.rewards)
 
-            # 转移评估总数: 每步 (prev_a, target_a) ∈ 9 个，但只统计 non-zero delta 转移。
-            # DP 实际评估了所有合法 valid 检查，这里以 horizon * 6 估算（3*3 中含 3 个 delta=0）。
-            evaluated_per_horizon = inputs.horizon * 6
-            rejected = len(result.reject_events)
+            evaluated_per_horizon = result.precompute_evaluated_count
+            rejected = result.precompute_rejected_count
             total_evaluated_transitions += evaluated_per_horizon
             total_rejected_transitions += rejected
             per_horizon_reject_count.append(rejected)
             rate = rejected / max(evaluated_per_horizon, 1)
             per_horizon_reject_rate.append(rate)
 
-            for evt in result.reject_events:
-                key = f"{evt['prev_position']:+d}->{evt['target_position']:+d}"
-                action_pair_counter[key] += 1
+            for key, count in (result.precompute_rejected_by_pair or {}).items():
+                action_pair_counter[key] += count
 
             per_horizon_meta.append(
                 {

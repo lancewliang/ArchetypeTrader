@@ -64,8 +64,18 @@ def test_next_row_prices_length_h_plus_2():
     frame = _frame(20)
     schema = InputSchemaValidator().validate(frame)
     builder = HorizonBuilder(horizon=8, schema=schema, reward_alignment="next_row_execution")
-    rec = builder.build(frame, [_sampled(0, 8)], pair="TEST", split="train")[0]
+    sampled = SampledHorizon(
+        sample_id="s_0",
+        window_start=0,
+        window_end=7,
+        last_execution_row=8,
+        last_markout_row=9,
+        strata_label="up|low|mixed",
+    )
+    rec = builder.build(frame, [sampled], pair="TEST", split="train")[0]
     assert len(rec.prices) == 10
+    assert rec.last_execution_row == 8
+    assert rec.last_markout_row == 9
 
 
 def test_sample_id_start_end_indices_consistent():

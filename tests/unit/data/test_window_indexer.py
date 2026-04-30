@@ -45,6 +45,24 @@ def test_last_execution_and_markout_rows_next_row():
     assert e.last_markout_row == 5
 
 
+def test_hindsight_horizon_return_uses_t_plus_h_markout():
+    indexer = SlidingWindowIndexer(horizon=4, reward_alignment="paper_formula")
+    entries = indexer.enumerate(_make_frame(10), stratification_mode="hindsight_horizon")
+    e = entries[0]
+    assert e.horizon_return == pytest.approx((100.4 - 100.0) / 100.0)
+
+
+def test_prospective_past_return_includes_current_start_row():
+    indexer = SlidingWindowIndexer(
+        horizon=2,
+        reward_alignment="paper_formula",
+        prospective_lookback_minutes=2,
+    )
+    entries = indexer.enumerate(_make_frame(10), stratification_mode="prospective_past")
+    e = entries[2]
+    assert e.past_return == pytest.approx((100.2 - 100.0) / 100.0)
+
+
 def test_invalid_alignment_raises():
     with pytest.raises(ValueError):
         SlidingWindowIndexer(horizon=8, reward_alignment="bad")  # type: ignore[arg-type]

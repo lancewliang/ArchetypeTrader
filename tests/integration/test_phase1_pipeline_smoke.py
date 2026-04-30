@@ -103,6 +103,20 @@ def smoke_artifacts(tmp_path):
     train, val, test = build_fixtures(
         fixtures_dir, FixtureSpec(train_rows=400, val_rows=200, test_rows=200)
     )
+    diagnostic_dir = tmp_path / "artifacts" / "TEST" / "diagnostic_batch" / "phase1"
+    diagnostic_dir.mkdir(parents=True, exist_ok=True)
+    (diagnostic_dir / "phase1_report.json").write_text(
+        json.dumps(
+            {
+                "val_return_capture_ratio": 0.0,
+                "val_sharpe_ratio": 0.0,
+                "val_max_drawdown": 0.0,
+                "code_usage_ratio": 1.0,
+                "phase1_composite_score": 0.0,
+            }
+        ),
+        encoding="utf-8",
+    )
     config = _make_smoke_config(tmp_path, train, val, test)
     trainer = Phase1Trainer(config)
     return trainer.run()

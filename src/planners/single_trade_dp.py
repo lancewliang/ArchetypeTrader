@@ -6,7 +6,7 @@ DP 状态: ``(t, action, changed)``，``action ∈ {0, 1, 2}``，``changed ∈ {
 转移约束: ``c + 1[i ≠ j] ≤ 1``，即 horizon 内最多一次切换。
 
 末步处理（关键修复点）:
-- DP 主循环只填 ``t ∈ [0, N-2]``。
+- DP 在 ``t=N-1`` 只允许保持上一仓位，不允许把切换推迟到末步。
 - ``actions[N-1] = actions[N-2]``，不计入 ``num_switches``。
 - 末步 reward 仍按 reward_alignment 用 markout 行结算。
 
@@ -48,6 +48,9 @@ class DPResult:
     num_switches: int
     is_no_trade: bool
     reject_events: List[dict]
+    precompute_evaluated_count: int = 0
+    precompute_rejected_count: int = 0
+    precompute_rejected_by_pair: dict | None = None
 
 
 class SingleTradeDPPlanner:
@@ -77,7 +80,8 @@ class SingleTradeDPPlanner:
            预算 ``transition_reward[h, 3, 3]`` 与 ``transition_valid[h, 3, 3]``，
            DP 反向递推时只查表，避免反复调用 cost_model。
         2. ``_backward``: 反向递推填 ``V[t, action, changed]``、``Π[t, action, changed]``；
-           ``t ∈ [0, h-1]`` 全部填充（``V[h]=0`` 作为终止），保证 V[h-2] 能感知末步收益。
+           ``t ∈ [0, h-1]`` 全部填充（``V[h]=0`` 作为终止），但末步只允许保持
+           当前仓位，保证 V[h-2] 能感知末步持仓收益且不会依赖不可执行切换。
         3. ``_forward``: 正向回溯 actions（从 ``flat, changed=0`` 起，仅遍历 ``t=0..h-2``）；
            末步按论文 Algorithm 1 第 13 行复制 ``actions[N-1] = actions[N-2]``。
         4. ``_replay``: 把 actions 喂回 env 复算 rewards 与 reject events，
@@ -96,7 +100,14 @@ class SingleTradeDPPlanner:
         if inputs.horizon <= 0:
             raise ValueError(f"horizon 必须 > 0, got {inputs.horizon}")
         # 预算单步转移 reward 与 valid。
-        rewards_table, valid_table, exec_results = self._precompute_transitions(inputs)
+        (
+            rewards_table,
+            valid_table,
+            exec_results,
+            precompute_evaluated_count,
+            precompute_rejected_count,
+            precompute_rejected_by_pair,
+        ) = self._precompute_transitions(inputs)
         V, Pi = self._backward(rewards_table, valid_table, inputs.horizon)
         actions = self._forward(Pi, inputs.horizon)
 
@@ -121,6 +132,9 @@ class SingleTradeDPPlanner:
             num_switches=num_switches,
             is_no_trade=is_no_trade,
             reject_events=reject_events,
+            precompute_evaluated_count=precompute_evaluated_count,
+            precompute_rejected_count=precompute_rejected_count,
+            precompute_rejected_by_pair=precompute_rejected_by_pair,
         )
 
     # ---------- 私有 ----------
@@ -153,6 +167,9 @@ class SingleTradeDPPlanner:
             [[None for _ in range(self.NUM_ACTIONS)] for _ in range(self.NUM_ACTIONS)]
             for _ in range(h)
         ]
+        rejected_by_pair: dict[str, int] = {}
+        evaluated_count = 0
+        rejected_count = 0
 
         for t in range(h):
             rows = self.reward_alignment.rows(t)
@@ -169,6 +186,7 @@ class SingleTradeDPPlanner:
                         rewards_table[t][prev_a][target_a] = reward
                         valid_table[t][prev_a][target_a] = True
                         continue
+                    evaluated_count += 1
                     res = self.cost_model.execute(
                         prev_position=prev_pos,
                         target_position=target_pos,
@@ -178,12 +196,22 @@ class SingleTradeDPPlanner:
                     if res.rejected:
                         valid_table[t][prev_a][target_a] = False
                         rewards_table[t][prev_a][target_a] = _NEG_INF
+                        rejected_count += 1
+                        key = f"{prev_pos:+d}->{target_pos:+d}"
+                        rejected_by_pair[key] = rejected_by_pair.get(key, 0) + 1
                         continue
                     pos_after = res.filled_position
                     reward = pos_after * (p_markout - p_exec) - res.cost
                     rewards_table[t][prev_a][target_a] = reward
                     valid_table[t][prev_a][target_a] = True
-        return rewards_table, valid_table, exec_results
+        return (
+            rewards_table,
+            valid_table,
+            exec_results,
+            evaluated_count,
+            rejected_count,
+            rejected_by_pair,
+        )
 
     def _backward(self, rewards_table, valid_table, horizon: int):
         """反向 DP（严格对齐论文 Algorithm 1 line 2）。
@@ -215,7 +243,11 @@ class SingleTradeDPPlanner:
                 for c in range(2):
                     best_val = _NEG_INF
                     best_action = prev_a  # 默认保持
-                    for target_a in range(self.NUM_ACTIONS):
+                    if t == horizon - 1:
+                        target_actions = (prev_a,)
+                    else:
+                        target_actions = range(self.NUM_ACTIONS)
+                    for target_a in target_actions:
                         switch = 1 if target_a != prev_a else 0
                         new_c = c + switch
                         if new_c > 1:

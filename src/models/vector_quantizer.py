@@ -25,6 +25,14 @@ from src.config.phase1_config import CodebookConfig
 _EPS = 1e-6
 
 
+def _no_grad():
+    if torch is None:  # pragma: no cover
+        def decorator(fn):
+            return fn
+        return decorator
+    return torch.no_grad()
+
+
 @dataclass
 class CodeUsageStats:
     counts: List[int] = field(default_factory=list)
@@ -84,7 +92,7 @@ class VectorQuantizer(nn.Module if nn is not None else object):  # type: ignore[
 
     # ---------- 初始化 ----------
 
-    @torch.no_grad()
+    @_no_grad()
     def warmup_initialize(self, encoder_outputs: "torch.Tensor") -> None:
         """``kmeans_warmup`` / ``sample_encoder_outputs`` 初始化路径。
 
@@ -187,7 +195,7 @@ class VectorQuantizer(nn.Module if nn is not None else object):  # type: ignore[
 
     # ---------- EMA 更新 ----------
 
-    @torch.no_grad()
+    @_no_grad()
     def update_codebook(self, z_e: "torch.Tensor", code_id: "torch.Tensor") -> None:
         """``ema`` 模式更新 codebook embedding；``gradient`` 模式 no-op。
 
@@ -225,7 +233,7 @@ class VectorQuantizer(nn.Module if nn is not None else object):  # type: ignore[
 
     # ---------- dead code restart ----------
 
-    @torch.no_grad()
+    @_no_grad()
     def restart_dead_codes(
         self,
         encoder_outputs: "torch.Tensor",
@@ -268,7 +276,7 @@ class VectorQuantizer(nn.Module if nn is not None else object):  # type: ignore[
 
     # ---------- 统计 ----------
 
-    @torch.no_grad()
+    @_no_grad()
     def usage_stats(self, code_id: "torch.Tensor") -> CodeUsageStats:
         """单 epoch 结束后统计 usage / perplexity / dominant ratio / dead codes。
 

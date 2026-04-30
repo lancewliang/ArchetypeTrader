@@ -31,10 +31,32 @@ echo "========================================================"
 # 传递额外参数（跳过 PAIR 和 BATCH_ID 两个位置参数）
 EXTRA_ARGS=("${@:3}")
 
+has_extra_arg() {
+  local flag="$1"
+  local arg
+  for arg in "${EXTRA_ARGS[@]}"; do
+    if [[ "${arg}" == "${flag}" || "${arg}" == "${flag}="* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+PHASE1_ARGS=()
+if ! has_extra_arg "--train-file"; then
+  PHASE1_ARGS+=(--train-file "data/${PAIR}/train.feather")
+fi
+if ! has_extra_arg "--val-file"; then
+  PHASE1_ARGS+=(--val-file "data/${PAIR}/val.feather")
+fi
+if ! has_extra_arg "--test-file"; then
+  PHASE1_ARGS+=(--test-file "data/${PAIR}/test.feather")
+fi
+
 # --- Phase I: Archetype Discovery ---
 echo ""
 echo ">>> [Phase I] 开始训练 — $(date '+%H:%M:%S')"
-python scripts/train_phase1.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" "${EXTRA_ARGS[@]}"
+python scripts/train_phase1.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" "${PHASE1_ARGS[@]}" "${EXTRA_ARGS[@]}"
 echo ">>> [Phase I] 完成 — $(date '+%H:%M:%S')"
 
 # --- Phase II: Archetype Selection ---

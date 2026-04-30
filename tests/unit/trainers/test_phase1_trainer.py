@@ -64,3 +64,45 @@ def test_apply_paper_strict_disables_engineering_options():
     assert new.model.codebook.health.usage_regularization_weight == 0.0
     assert new.model.codebook.health.dead_code_restart is False
     assert new.model.encoder_input.reward_normalization == "train_reward_standard"
+
+
+def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):
+    import json
+
+    diag_dir = tmp_path / "TEST" / "prospective" / "phase1"
+    diag_dir.mkdir(parents=True)
+    (diag_dir / "phase1_report.json").write_text(
+        json.dumps(
+            {
+                "val_return_capture_ratio": 0.10,
+                "val_sharpe_ratio": 0.20,
+                "val_max_drawdown": 0.05,
+                "code_usage_ratio": 0.80,
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = _config(
+        artifact_root=str(tmp_path),
+        stratification=StratificationConfig(
+            mode="hindsight_horizon",
+            diagnostic_pair_batch_id="prospective",
+            hindsight_vs_prospective_max_delta={
+                "val_return_capture_ratio": 0.20,
+                "val_sharpe_ratio": 0.50,
+                "val_max_drawdown": 0.10,
+                "code_usage_ratio": 0.10,
+            },
+        ),
+    )
+    trainer = Phase1Trainer(config)
+    payload = trainer._build_sampling_leakage_diagnostics(
+        {
+            "val_return_capture_ratio": 0.50,
+            "val_sharpe_ratio": 0.20,
+            "val_max_drawdown": 0.05,
+            "code_usage_ratio": 0.80,
+        }
+    )
+    assert payload["hindsight_bias_warning"] == "exceeded"
+    assert payload["hindsight_vs_prospective_metric_delta"]["val_return_capture_ratio"]["exceeded"]
