@@ -46,6 +46,8 @@ sample horizons -> Single-trade DP demonstration -> LSTM encoder -> VQ codebook 
 | causal decoder 约束 | 为避免部署时未来信息泄漏，对 decoder 施加实现约束 | 不改变公式 (3)，但约束其因果实现 |
 | no-trade 样本保留 | 工程配置项；严格复现论文可过滤 no-trade | 不改变 DP 转移，只影响数据集纳入规则 |
 | usage regularization / dead-code restart | codebook collapse 防护；可关闭以严格复现公式 (4) | 开启时会扩展训练 loss，需记录配置 |
+| 时序对比学习增强 | 训练 encoder 的鲁棒性增强；需作为 ablation 单独报告 | 开启时会增加 `L_tc`，严格复现应关闭 |
+| 合成 horizon 增强 | train-only 样本扩充；合成样本必须重新跑 DP | 不改变 DP 公式，但改变训练数据分布，需单独标注 |
 
 ## 3. 数据契约
 
@@ -178,6 +180,25 @@ next_row_execution:  450000 - 72 - 1 = 449927
 | realized volatility | horizon 内 1 分钟收益标准差 | low / mid / high |
 | draw pattern | `max_drawup` 与 `max_drawdown` 的相对强弱 | upward / downward / mixed |
 
+上述默认分层属于 **后视分层**: `horizon_return`、`realized_volatility` 和 `draw_pattern` 都使用 horizon 内部统计量。它只允许用于离线 demonstration 样本覆盖控制，不能被表述为线上可用的市场状态识别能力。报告必须显式标注 `is_hindsight_stratification=true`，并说明这种采样会让模型更容易在特征相似、事后收益结构相似的候选样本中被选中，因此 validation 指标可能系统性偏高；该结果不单独证明模型具备前瞻预测能力。
+
+为排查“未来函数式采样选择”对指标的影响，必须增加一个前瞻性分层诊断实验。该实验只使用 horizon 起点之前可观测的统计量生成 strata，例如:
+
+| 维度 | 计算方式 | 分桶 |
+| --- | --- | --- |
+| past return | `(close[t] - close[t-L]) / close[t-L]` | down / flat / up |
+| past realized volatility | `t-L` 到 `t` 的 1 分钟收益标准差 | low / mid / high |
+| past draw pattern | lookback 窗口内 `max_drawup` 与 `max_drawdown` 的相对强弱 | upward / downward / mixed |
+
+默认 `L=1440` 分钟，即过去 24 小时；若数据频率不是 1 分钟，应按真实时间跨度换算。前瞻性诊断应与后视分层保持相同 `num_demos`、`seed`、`min_gap_between_samples`、成本模型和训练超参，只改变 `stratification_mode`，并使用不同 `BATCH_ID` 保存产物，例如:
+
+```text
+batch_001_hindsight_strata
+batch_002_prospective_strata
+```
+
+对比报告至少包含 `val_student_online_net_return`、`val_return_capture_ratio`、`val_sharpe_ratio`、`val_max_drawdown`、`code_usage_ratio` 和 `phase1_composite_score` 的差异。若后视分层显著优于前瞻性分层，论文和实验报告只能将其解释为 hindsight demonstration curation 的收益，不能归因于 selector 或 decoder 的预测能力。
+
 组合后得到 strata，例如:
 
 ```text
@@ -198,6 +219,12 @@ return_bin=up, vol_bin=high, pattern_bin=mixed
 采样健康检查配置:
 
 ```yaml
+stratification:
+  mode: hindsight_horizon        # hindsight_horizon | prospective_past
+  prospective_lookback_minutes: 1440
+  require_prospective_diagnostic: true
+  diagnostic_pair_batch_id: batch_002_prospective_strata
+  report_hindsight_bias_warning: true
 sampling_health:
   max_no_trade_ratio: 0.25
   flat_low_vol_max_ratio: 0.15
@@ -236,6 +263,7 @@ src/data/window_indexer.py
 src/data/stratified_sampler.py
 src/data/sampling_health.py
 src/data/horizon_builder.py
+src/data/data_augmentation.py
 src/data/demo_store.py
 src/data/dataset.py
 
@@ -258,6 +286,8 @@ src/evaluation/risk_metrics.py
 src/evaluation/archetype_diagnostics.py
 src/evaluation/behavior_diagnostics.py
 src/evaluation/code_stability.py
+src/evaluation/latent_visualization.py
+src/evaluation/failure_case_report.py
 src/evaluation/phase1_report.py
 
 src/envs/trading_env.py
@@ -299,6 +329,7 @@ python scripts/train_phase1.py \
 - horizon 长度 `h`
 - 滑动窗口参数: `window_stride`, `num_demos`, `sampling_strategy`, `strata_bins`
 - 采样健康检查参数: `max_no_trade_ratio`, `flat_low_vol_max_ratio`, `min_gap_between_samples`, `max_overlap_ratio`, `split_boundary_embargo`, `allow_overlap_relaxation`
+- 数据增强参数: `temporal_contrastive.enabled`, `temporal_shift_bars`, `contrastive_weight`, `synthetic_horizon.enabled`, `synthetic_ratio`, `synthetic_blend_window`
 - DP/交易成本参数: `gamma`, `reward_alignment`, `commission_rate`, `slippage_model=lob_depth`, `execution_lag`, `max_position`, `cost_model`。其中 `execution_lag` 只在 `reward_alignment=next_row_execution` 时作为成交延迟语义使用；`paper_formula` 下行号映射固定为 `execution_row=t, markout_row=t+1`。
 - VQ 参数: `hidden_dim=128`, `code_dim=16`, `num_codes=10`, `beta0=0.25`, `encoder_input`, `codebook.init_method`, `codebook.update_method`, `usage_regularization_weight`, `dead_code_restart`
 - 训练参数: `batch_size`, `lr`, `epochs`, `seed`, `device`
@@ -316,6 +347,7 @@ python scripts/train_phase1.py \
 | `stratified_sampler.py` | 按 strata、no-trade 控制和 `min_gap_between_samples` 做去相关采样 | sampled window index |
 | `sampling_health.py` | 计算 `window_overlap_ratio`、`split_boundary_gap`、采样 warning/fail 条件 | sampling health report |
 | `horizon_builder.py` | 根据窗口索引切出 `states/prices/execution_books/meta` | horizon records |
+| `data_augmentation.py` | 生成 temporal contrastive pair 和 train-only synthetic horizon | augmented horizon records |
 | `demo_store.py` | 保存和加载 DP demonstrations、horizon labels、诊断字段 | `demos_train.parquet` / labels |
 | `dataset.py` | 只负责 PyTorch `Dataset` / `DataLoader` 适配 | tensors for training |
 
@@ -340,6 +372,10 @@ class SamplingHealthChecker:
 class HorizonBuilder:
     def build(self, frame, window_index): ...
 
+class Phase1DataAugmenter:
+    def build_temporal_pairs(self, horizons): ...
+    def build_synthetic_horizons(self, real_horizons): ...
+
 class Phase1DemoStore:
     def save_demos(self, demos): ...
     def load_demos(self, path): ...
@@ -353,6 +389,7 @@ class Phase1DemoDataset(torch.utils.data.Dataset):
 - `dataset.py` 不调用 DP，不执行分层采样，不计算 schema。
 - `stratified_sampler.py` 不读取原始文件，只接收已经生成的 window index 和 strata。
 - `sampling_health.py` 必须能在数据构建后独立重跑，用于审计已有产物。
+- `data_augmentation.py` 只允许读取 train split；val/test 不能做增强，也不能让 synthetic horizon 进入正式测试指标。
 
 ### 4.4 `src/planners/*`
 
@@ -465,6 +502,7 @@ class VQArchetypeModel:
 - 调用 `Phase1DemoGenerator` 生成或加载 `demos_train.parquet`。
 - 训练 VQ encoder-decoder。
 - 每个 epoch 结束后调用 evaluator 在 validation horizon 上计算指标。
+- 按配置触发中间过程诊断: TensorBoard latent/codebook snapshot、PCA/t-SNE 投影和失败案例归档。
 - 根据 `selection_metric` 调用 checkpoint manager 保存 `best_vq_model.pt`。
 - 保存 `last_vq_model.pt` 和可选中间 checkpoint。
 - 用 best checkpoint 生成 horizon code labels。
@@ -485,6 +523,7 @@ class VQArchetypeModel:
 - 检查 codebook 是否塌缩。
 - 调用 `Phase1ReplayEvaluator` 获取真实收益指标，但不直接实现交易 replay 逻辑。
 - 汇总风险调整收益、per-archetype、切换点、per-class action、archetype 可区分性、decoder 行为多样性、horizon 边界衔接、epoch 稳定性和 DP teacher 质量诊断。
+- 为 `latent_visualization.py` 提供固定 probe batch 的中间表示，为 `failure_case_report.py` 提供 per-horizon replay records。
 - 输出 epoch-level metrics，供 trainer 和 checkpoint manager 使用。
 
 评估层按指标域拆分，`phase1_evaluator.py` 只做调度和聚合:
@@ -499,6 +538,8 @@ class VQArchetypeModel:
 | `archetype_diagnostics.py` | per-code return/win/no-trade/switch distribution |
 | `behavior_diagnostics.py` | action entropy、inter-code action diversity、decoder sensitivity |
 | `code_stability.py` | epoch code stability、Hungarian matched stability |
+| `latent_visualization.py` | TensorBoard embedding、PCA/t-SNE latent snapshot、codebook movement 可视化数据 |
+| `failure_case_report.py` | 自动筛选极端 horizon，生成价格/动作/持仓/收益 HTML 错题本 |
 | `phase1_report.py` | `phase1_report.json`、诊断 JSON/parquet 的写入和 schema 校验 |
 
 边界约束:
@@ -711,6 +752,7 @@ class LobDepthCostModel:
 | 重构指标 | `reconstruction_accuracy`、`weighted_reconstruction_accuracy`、`non_flat_accuracy`、`cross_entropy` |
 | VQ 指标 | `code_usage_ratio`、`perplexity`、`vq_loss`、`commitment_loss` |
 | encoder 输入健康指标 | `reward_norm_clip_ratio`、`encoder_input_modality_norms`、`reward_embedding_norm_ratio` |
+| 数据增强指标 | `temporal_contrastive_pair_count`、`contrastive_loss`、`synthetic_horizon_count`、`synthetic_ratio`、`augmentation_health_warnings` |
 | 行为结构指标 | `single_trade_consistency_rate`、`no_trade_ratio` |
 | replay 收益指标 | `student_online_net_return`、`dp_teacher_net_return`、`return_capture_ratio`、`regret_to_dp`、`cost_paid` |
 | 风险调整收益指标 | `sharpe_ratio`、`sortino_ratio`、`max_drawdown`、`calmar_ratio` |
@@ -722,7 +764,9 @@ class LobDepthCostModel:
 | horizon 边界衔接指标 | `horizon_boundary_turnover_cost`、`horizon_boundary_position_consistency` |
 | epoch 稳定性指标 | `epoch_code_stability`、`epoch_code_stability_matched`、`code_assignment_drift_warning` |
 | DP teacher 质量指标 | `val_dp_teacher_sharpe`、`val_dp_teacher_profitable_ratio`、`dp_teacher_return_distribution` |
-| 采样健康指标 | `strata_distribution`、`num_candidate_windows`、`num_sampled_horizons`、`flat_low_vol_sample_ratio`、`window_overlap_ratio`、`min_sample_gap`、`mean_sample_gap`、`split_boundary_gap`、`effective_min_gap_between_samples`、`sampling_health_warnings` |
+| 采样健康指标 | `stratification_mode`、`is_hindsight_stratification`、`strata_distribution`、`num_candidate_windows`、`num_sampled_horizons`、`flat_low_vol_sample_ratio`、`window_overlap_ratio`、`min_sample_gap`、`mean_sample_gap`、`split_boundary_gap`、`effective_min_gap_between_samples`、`sampling_health_warnings` |
+| 分层泄漏诊断指标 | `prospective_diagnostic_required`、`diagnostic_pair_batch_id`、`hindsight_bias_warning`、`hindsight_vs_prospective_metric_delta` |
+| 中间过程诊断指标 | `tensorboard_log_dir`、`latent_snapshot_epochs`、`latent_projection_methods`、`codebook_displacement_by_epoch`、`failure_case_report_path`、`failure_case_counts` |
 
 核心函数建议:
 
@@ -732,6 +776,8 @@ def weighted_reconstruction_accuracy(logits, actions, class_weights): ...
 def non_flat_accuracy(logits, actions): ...
 def codebook_perplexity(code_ids, num_codes): ...
 def encoder_input_health(state_emb, action_emb, reward_emb, reward_norm): ...
+def temporal_contrastive_loss(z_e, pair_ids, temperature=None): ...
+def augmentation_health_warnings(report, config): ...
 def single_trade_consistency(actions): ...
 def return_capture_ratio(student_return, teacher_return): ...
 def regret_to_dp(student_return, teacher_return): ...
@@ -753,6 +799,9 @@ def matched_epoch_code_stability(best_code_ids, last_code_ids, best_codebook, la
 def dp_teacher_quality(dp_horizon_returns, dp_step_returns, annualization_factor): ...
 def window_overlap_ratio(sampled_windows, horizon): ...
 def split_boundary_gap(train_frame, val_frame, test_frame): ...
+def stratification_diagnostics(hindsight_report, prospective_report): ...
+def codebook_displacement(current_codebook, previous_codebook): ...
+def select_failure_cases(horizon_replay_records, top_k): ...
 def sampling_health_warnings(report, config): ...
 def behavior_health_warnings(report, config): ...
 def teacher_quality_warnings(report, config): ...
@@ -761,7 +810,132 @@ def boundary_health_warnings(report, config): ...
 
 行为多样性指标必须固定同一批 validation `states`，分别用 `K` 个 code 解码，再比较输出动作或 logits。这样可以发现“codebook 向量距离很远，但 decoder 对 `z_q` 不敏感，输出几乎相同”的问题。`epoch_code_stability` 默认使用 code id 直接一致率；若出现 code id 交换，可额外用 codebook 距离做 Hungarian matching 后输出 `epoch_code_stability_matched`，用于区分标签漂移和纯编号交换。
 
-### 4.12 `src/trainers/phase1_checkpoint.py`
+### 4.12 `src/evaluation/latent_visualization.py`
+
+职责:
+
+- 在训练中定期抽样同一批 train/val horizon，记录 encoder 中间表示、`z_e`、`z_q` 和 codebook embedding 的演化。
+- 将 latent snapshot 写入 TensorBoard embedding projector，并额外生成 PCA/t-SNE 的 2D 投影数据，便于观察 codebook 移动、坍缩、分离和 code id 交换。
+- 追踪每个 code embedding 的 epoch-to-epoch displacement，辅助判断 `kmeans_warmup + ema` 是否过早锁死局部结构。
+- 输出轻量级可复现数据文件，而不是只生成图片，便于后续用 notebook 或 HTML 重新渲染。
+
+建议配置:
+
+```yaml
+diagnostics:
+  tensorboard:
+    enabled: true
+    log_dir: tensorboard
+    log_every_epochs: 5
+    max_points_per_split: 2000
+    fixed_probe_seed: 2026
+  latent_visualization:
+    enabled: true
+    projections: ["pca", "tsne"]
+    tsne_perplexity: 30
+    tsne_max_iter: 1000
+    capture_layers:
+      - state_embedding
+      - action_embedding
+      - reward_embedding
+      - encoder_hidden_last
+      - z_e
+      - z_q
+      - codebook
+```
+
+可视化约束:
+
+- probe 样本必须固定，默认从 train/val 各抽取最多 `max_points_per_split` 个 horizon；不要每个 epoch 换一批样本，否则轨迹漂移不可解释。
+- TensorBoard metadata 至少包含 `sample_id`、`split`、`code_id`、`strata_label`、`demo_return`、`student_net_return`、`regret_to_dp` 和 `is_no_trade`。
+- PCA 可每次诊断都运行；t-SNE 成本较高，默认只按 `log_every_epochs` 或 checkpoint epoch 运行。
+- 若某些 encoder layer 不存在，应跳过对应 layer 并在 `latent_visualization_manifest.json` 中记录，而不是让训练失败。
+- TensorBoard 只用于诊断，不参与 checkpoint 选择；任何图形结论都必须能回溯到同 epoch 的 metrics 和 snapshot 文件。
+
+核心类建议:
+
+```python
+class LatentVisualizationWriter:
+    def capture_epoch(self, model, probe_dataset, epoch, metrics): ...
+    def write_tensorboard_embeddings(self, snapshots, metadata, epoch): ...
+    def compute_projections(self, snapshots, methods=("pca", "tsne")): ...
+    def write_manifest(self, manifest): ...
+```
+
+输出文件:
+
+```text
+artifacts/{PAIR}/{BATCH_ID}/phase1/tensorboard/
+artifacts/{PAIR}/{BATCH_ID}/phase1/latent_snapshots/epoch_{epoch}.parquet
+artifacts/{PAIR}/{BATCH_ID}/phase1/latent_projections/epoch_{epoch}_{layer}_{method}.parquet
+artifacts/{PAIR}/{BATCH_ID}/phase1/latent_visualization_manifest.json
+```
+
+### 4.13 `src/evaluation/failure_case_report.py`
+
+职责:
+
+- 在 evaluator 完成 validation replay 后，自动筛选最值得人工复盘的 horizon。
+- 将价格曲线、DP action、student action、持仓曲线、step reward、累计收益、成交成本和关键指标组合成独立 HTML 报告。
+- 为每个失败案例保存结构化 JSON，确保 HTML 之外仍可机器读取和复现。
+
+默认筛选规则:
+
+| 案例集 | 排序字段 | 默认数量 | 用途 |
+| --- | --- | --- | --- |
+| `worst_student_return` | `student_net_return` 升序 | 10 | 找学生亏损最严重的 horizon |
+| `largest_regret_to_dp` | `regret_to_dp` 降序 | 10 | 找最没学到老师的 horizon |
+| `largest_cost_paid` | `cost_paid` 降序 | 10 | 找手续费/滑点吞噬收益的 horizon |
+| `switch_mismatch` | `switch_timing_error` 降序或方向错误优先 | 10 | 找切换点和方向错误 |
+| `false_trade_on_no_trade` | no-trade teacher 中 student turnover 最大 | 10 | 找该空仓却乱交易的 horizon |
+
+HTML 报告每个案例至少包含:
+
+- 基本信息: `sample_id`、时间范围、strata、code_id、demo return、student return、DP return、regret、cost paid。
+- 价格面板: close/mid price 曲线，标注 DP 与 student 的开平仓或换向位置。
+- 动作面板: DP action 与 student action 的阶梯图，明确 short/flat/long。
+- 持仓与收益面板: position、step reward、cumulative return、drawdown。
+- 失败标签: 例如 `late_entry`、`wrong_direction`、`over_trading`、`missed_trade`、`cost_dominated`、`decoder_ignored_code`。
+
+建议配置:
+
+```yaml
+diagnostics:
+  failure_cases:
+    enabled: true
+    top_k: 10
+    generate_html: true
+    include_train_cases: false
+    include_val_cases: true
+    include_test_cases: false
+    max_cases_per_report: 50
+    price_columns: ["close", "mid_price"]
+    action_labels:
+      0: short
+      1: flat
+      2: long
+```
+
+核心类建议:
+
+```python
+class FailureCaseReportBuilder:
+    def select_cases(self, horizon_replay_records, top_k): ...
+    def classify_failure_modes(self, case): ...
+    def build_case_payload(self, case, price_frame, actions, positions, rewards): ...
+    def write_html(self, cases, output_path): ...
+    def write_jsonl(self, cases, output_path): ...
+```
+
+输出文件:
+
+```text
+artifacts/{PAIR}/{BATCH_ID}/phase1/failure_cases/failure_cases_val.html
+artifacts/{PAIR}/{BATCH_ID}/phase1/failure_cases/failure_cases_val.jsonl
+artifacts/{PAIR}/{BATCH_ID}/phase1/failure_cases/case_assets/
+```
+
+### 4.14 `src/trainers/phase1_checkpoint.py`
 
 职责:
 
@@ -782,11 +956,12 @@ class Phase1CheckpointManager:
     def load(self, path): ...
 ```
 
-### 4.13 `src/evaluation/phase1_report.py`
+### 4.15 `src/evaluation/phase1_report.py`
 
 职责:
 
 - 统一写入 `phase1_report.json`、`checkpoint_manifest.json` 之外的诊断 JSON/parquet。
+- 统一登记 TensorBoard log dir、latent snapshot/projection manifest 和 failure case HTML/JSONL 路径。
 - 校验 report schema，确保新增指标不会只存在于内存 metrics 中。
 - 汇总 data health、model health、replay health、codebook health、boundary health warning。
 - 保存 report 生成时使用的 config hash、input schema hash 和 checkpoint path，便于审计。
@@ -990,6 +1165,88 @@ no_trade_code_health:
 
 若 no-trade 过度集中，应优先调整 `max_no_trade_ratio`、flat/低波动 strata 配额或 `min_profit_gate`；不建议通过手工指定 code 语义来干预 VQ，因为这会破坏无监督 archetype discovery 的设定。
 
+### 5.4 数据增强
+
+数据增强只用于训练集，并且必须作为可关闭的工程增强记录在 `phase1_config.yaml`、`demos_train.parquet` metadata 和 `phase1_report.json` 中。严格复现论文主实验时应关闭所有增强；开启增强的实验必须使用独立 `BATCH_ID`，避免和无增强基线混在同一产物目录。
+
+#### 5.4.1 时序对比学习增强
+
+目标是让 encoder 对 1-2 个 bar 的微小时序偏移保持稳定，不把同一类交易机会因为入场点轻微偏移而压到完全不同的 latent 区域。
+
+正样本对构造:
+
+1. 对已采样的真实 train horizon `H=[t,t+h-1]`，随机选择 `shift_delta`，默认从 `{-2,-1,1,2}` 中采样。
+2. 构造 `H_shifted=[t+shift_delta,t+shift_delta+h-1]`，要求仍完全位于 train split，且不跨越数据缺口或交易不可用区间。
+3. shifted horizon 必须使用同一套 `HorizonBuilder` 重新切出 `states/prices/order_books`，并重新运行 DP 生成 `actions/rewards`。不能简单平移原 horizon 的 action label，因为最优交易点可能随偏移改变。
+4. 在训练 batch 中保留 `(sample_id_original, sample_id_shifted, contrastive_pair_id)`，用于计算 encoder 输出 `z_e` 的对比损失。
+
+建议配置:
+
+```yaml
+data_augmentation:
+  temporal_contrastive:
+    enabled: false
+    shift_bars: [-2, -1, 1, 2]
+    pair_ratio: 0.5
+    max_pairs: 30000
+    require_same_strata: false
+    rerun_dp_for_shifted: true
+    contrastive_weight: 0.05
+    temperature: 0.1
+```
+
+训练损失可先采用简单稳定的 cosine distance:
+
+$$
+L_{tc}=1-\cos(z_e(H), z_e(H_{shifted}))
+$$
+
+若 batch 内负样本质量足够，可切换为 InfoNCE:
+
+$$
+L_{tc}=-\log
+\frac{\exp(\operatorname{sim}(z_i,z_i^+)/\tau)}
+{\sum_j \exp(\operatorname{sim}(z_i,z_j)/\tau)}
+$$
+
+`z_e` 应使用量化前 encoder 输出，而不是 `z_q`，否则损失会被最近邻离散化截断，无法细致约束 encoder 表示。该损失只拉近微小时序扰动下的表示，不要求 action 序列完全相同；action reconstruction 仍由各自重新 DP 后的 demonstration 监督。
+
+#### 5.4.2 合成 horizon 增强
+
+合成样本用于扩充稀有的转折、多模态或 regime change 场景。它只能作为训练增强，不参与 val/test 指标，也不能用于论文主结果，除非作为单独 ablation 汇报。
+
+合成流程:
+
+1. 从真实 train horizon 中选取两段走势差异较大的片段 `A` 和 `B`，例如 return bin、vol bin 或 draw pattern 不同。
+2. 在拼接点附近使用长度为 `synthetic_blend_window` 的平滑权重，把 `A` 的前半段和 `B` 的后半段拼成长度为 `h` 的合成价格序列。
+3. 对价格和盘口相关字段执行一致变换: mid/close、bid/ask 价格必须保持价差非负，成交量/深度不能为负，状态特征中明确依赖价格尺度的列需要同步重算或标记不可用于合成。
+4. 合成 horizon 必须重新运行 Single-trade DP，生成新的 `actions/rewards`。严禁复用 `A` 或 `B` 原始 action。
+5. metadata 必须记录 `is_synthetic=true`、`source_sample_id_a`、`source_sample_id_b`、`splice_index`、`blend_window`、`synthetic_method` 和合成质量检查结果。
+
+建议配置:
+
+```yaml
+data_augmentation:
+  synthetic_horizon:
+    enabled: false
+    synthetic_ratio: 0.1
+    max_synthetic_horizons: 3000
+    source_selection: contrasting_strata
+    blend_window: 8
+    min_source_distance: 72
+    require_orderbook_consistency: true
+    rerun_dp: true
+    exclude_from_validation: true
+```
+
+合成样本质量 guardrail:
+
+- `synthetic_ratio` 默认不超过 10%，避免模型学到合成伪影。
+- 合成后的价格序列不得出现负价、异常跳变、bid/ask 交叉、深度为负或状态列 NaN/Inf。
+- 若状态特征无法从合成价格和盘口一致重算，应关闭该类合成，或只使用明确不依赖跨片段连续性的特征列。
+- 合成样本必须在 `demos_train.parquet` 中可追踪来源；failure case 和 per-code 诊断需要能区分 real/synthetic。
+- 若合成样本显著提高 train 指标但降低真实 validation replay，应在 `augmentation_health_warnings` 中提示 synthetic overfit。
+
 ## 6. VQ Encoder-Decoder 设计
 
 ### 6.1 Encoder
@@ -1086,6 +1343,12 @@ codebook:
   update_method: ema
   ema_decay: 0.99
   ema_epsilon: 1.0e-5
+  local_optimum_escape:
+    enabled: false
+    perturbation_probability_per_epoch: 0.0
+    perturbation_std_ratio: 0.01
+    min_epochs_between_perturbations: 10
+    trigger_on_stagnant_usage: true
 ```
 
 初始化方式:
@@ -1113,6 +1376,8 @@ codebook:
 
 工程默认可使用 `kmeans_warmup + ema`，因为 30k horizon 且样本高度筛选后，EMA 对 codebook 使用率和 dead-code 风险更稳定。EMA 更新时，VQ loss 仍用于 encoder commitment 和 straight-through 路径，但 codebook embedding 本身由 EMA buffer 更新，不再由 optimizer 对 embedding 直接梯度更新。
 
+需要明确的是，`kmeans_warmup + ema` 虽然稳定，但也可能让 codebook 卡在局部最优: 初始 K-means 聚类把 latent space 的早期划分固定下来，EMA 又会持续强化已被频繁选择的 code，使少量新样本难以推动 codebook 重新探索。因此该配置必须被记录为工程稳定增强，而不是无条件更优的理论设定。
+
 EMA 更新:
 
 $$
@@ -1128,6 +1393,13 @@ e_i \leftarrow \frac{m_i}{N_i+\epsilon}
 $$
 
 其中 `\lambda=ema_decay`。若某个 code 在 `dead_code_patience` 个 epoch 内 `N_i` 过低，应触发 6.5 的 dead-code restart。
+
+若启用 `local_optimum_escape`，训练器可在满足停滞条件时对低使用率 code 注入极低幅度扰动，或从高重构误差样本重新初始化低使用率 code。扰动必须满足以下约束:
+
+- 默认关闭；只在诊断或 collapse 风险明显时启用。
+- 只允许发生在训练过程中，不能事后修改已导出的 best checkpoint。
+- 每次扰动记录 epoch、code_id、扰动幅度、触发原因和扰动前后 usage。
+- 严格复现论文公式 (4) 的实验必须保持 `enabled=false`。
 
 ### 6.3 Decoder
 
@@ -1190,6 +1462,14 @@ $$
 - 第三项: commitment loss。
 - `beta0=0.25`。
 
+若启用时序对比学习增强，训练总损失扩展为:
+
+$$
+L_{total}=L_{rec}+L_{vq}+\beta_0L_{commit}+\lambda_{tc}L_{tc}
+$$
+
+其中 `L_tc` 只在 batch 中存在 `contrastive_pair_id` 时计算，默认 `lambda_tc=0.05`。严格复现论文公式 (4) 时必须设置 `data_augmentation.temporal_contrastive.enabled=false` 或 `contrastive_weight=0`。对比学习只约束 encoder 的 `z_e` 表示，不直接约束 `z_q` 或 decoder action logits，避免把微小时序偏移下可能不同的 DP 最优交易点强行压成同一个动作序列。
+
 ### 6.5 Codebook Collapse 防护
 
 Codebook collapse 指大部分样本长期落入少数 code，导致 `K=10` 个 archetype 退化成 1-2 个可用策略。Phase I 训练必须内置 collapse 监控和处理，不只在风险表中提示。
@@ -1213,6 +1493,12 @@ codebook_health:
   dead_code_patience: 5
   dead_code_restart: true
   restart_source: high_reconstruction_error_samples
+  local_optimum_escape:
+    enabled: false
+    perturbation_probability_per_epoch: 0.0
+    perturbation_std_ratio: 0.01
+    min_epochs_between_perturbations: 10
+    trigger_on_stagnant_usage: true
 ```
 
 usage regularization 是工程稳定项，用于降低 codebook collapse 风险。严格复现论文公式 (4) 时应设置 `usage_regularization_weight=0`；当训练中出现 collapse 风险时，可启用该辅助项。它不改变 VQ encoder-decoder 架构和最近邻量化公式，只是在训练目标上增加可配置正则。
@@ -1233,8 +1519,16 @@ $$
 
 1. 统计每个 code 连续未被使用的 epoch 数。
 2. 若某 code 超过 `dead_code_patience` 未被使用，从当前 epoch 中 reconstruction error 最高的一批样本抽取 encoder 输出。
-3. 用这些 `z_e` 均值或随机样本重置 dead code embedding。
+3. 用抽取到的 `z_e` 重置该 code，并同步重置其 EMA buffer，避免新 embedding 立即被旧动量拉回。
 4. 在 `phase1_report.json` 和 `checkpoint_manifest.json` 中记录 `dead_code_restarts`。
+
+局部最优逃逸策略:
+
+1. 监控 `code_usage_ratio`、`dominant_code_ratio`、`perplexity` 和 validation reconstruction loss 是否连续停滞。
+2. 若 `local_optimum_escape.enabled=true` 且满足停滞条件，可按极低概率对低使用率 code 添加小幅随机扰动，扰动标准差为当前 codebook 向量标准差的 `perturbation_std_ratio`。
+3. 扰动不能作用于 dominant code，避免破坏已经稳定的有效 archetype。
+4. 每次扰动必须进入 `codebook_perturbation_log`，并在 `phase1_report.json` 和 `checkpoint_manifest.json` 中记录扰动次数。
+5. 若扰动后 validation 指标下降，该 checkpoint 不得成为 best；最终导出的 `codebook.pt` 只能来自通过 guardrail 的 best checkpoint。
 
 checkpoint 约束:
 
@@ -1316,6 +1610,17 @@ selection_metric: phase1_composite_score
 
 一次 `{PAIR}/{BATCH_ID}` 训练只产生一个正式 Phase I 版本，即 `best_vq_model.pt` 及其导出的 `encoder.pt`、`decoder.pt`、`codebook.pt`。如果需要比较不同采样策略、seed 或超参数，应创建新的 `BATCH_ID`，例如 `batch_001`、`batch_002`，而不是在同一目录下混用多个正式版本。
 
+Codebook 局部最优的主要缓解方式不是在单次训练中反复调参，而是进行多批次对照。至少应比较:
+
+| 对照维度 | 推荐方式 | 记录位置 |
+| --- | --- | --- |
+| seed 稳定性 | 同配置不同 seed，分别使用独立 `BATCH_ID` | `checkpoint_manifest.json`、`phase1_report.json` |
+| codebook 初始化 | `kmeans_warmup + ema` 对比 `sample_encoder_outputs + ema` 或 `random_normal + gradient` | `phase1_config.yaml` |
+| 局部最优逃逸 | 默认关闭对比启用极低概率扰动的诊断批次 | `codebook_perturbation_log` |
+| 分层方式 | `hindsight_horizon` 对比 `prospective_past` | `sampling_leakage_diagnostics.json` |
+
+最终论文或实验汇总应跨 `BATCH_ID` 比较均值和方差。若单个批次表现极好但 seed 或前瞻性分层对照不稳定，只能作为个案结果，不能作为稳健结论。
+
 ## 7. 训练流程
 
 第一阶段流水线:
@@ -1325,6 +1630,7 @@ prepared train/val/test files
   -> file reader and schema validator
   -> sliding-window indexer
   -> stratified window sampler
+  -> optional train-only data augmentation
   -> single-trade DP demonstrations
   -> VQ encoder-decoder training
   -> codebook / decoder / labels export
@@ -1335,14 +1641,16 @@ prepared train/val/test files
 1. 读取外部准备好的 train/val/test 三个数据文件。
 2. 校验 schema，确定 `timestamp`、`close` 和状态特征列。
 3. 在 train 文件内用 stride=1 滑动窗口枚举候选 horizon，`h=72` 时约 45 万行可枚举约 44.99 万个候选窗口。
-4. 为每个候选窗口计算 `horizon_return`、`realized_volatility`、`draw_pattern` 等分层统计。
-5. 按 `stratified_uniform` 或 `stratified_proportional` 从候选窗口中最终采样 `num_demos=30000` 个 train horizon。
-6. 只对这 `30000` 个 train horizon 运行 Single-trade DP，得到 `actions` 和 `rewards`。
-7. 构造 demonstration dataset。
-8. 训练 VQ encoder-decoder `100` epochs。
-9. 选择 `phase1_composite_score` 最优且通过风险 guardrail 的 checkpoint。validation horizon 可从 val 文件按固定 stride 生成，或按同一分层策略采样。
-10. 使用 best checkpoint 为需要进入 Phase II 的 horizon 生成 `code_label`。
-11. 导出 Phase II/III 所需产物。
+4. 为每个候选窗口计算分层统计。默认实验可使用 horizon 内部的 `horizon_return`、`realized_volatility`、`draw_pattern`，但必须标注为 `stratification_mode=hindsight_horizon`；前瞻性诊断实验必须改用 horizon 起点之前的 past return、past volatility 和 past draw pattern。
+5. 按 `stratified_uniform` 或 `stratified_proportional` 从候选窗口中最终采样 `num_demos=30000` 个 train horizon，并在不同 `BATCH_ID` 下保存后视分层与前瞻性分层的对照实验。
+6. 若启用 train-only 数据增强，生成 shifted positive pairs 或 synthetic horizons，并对新增 horizon 重新运行 schema/质量检查。
+7. 对最终 train horizon 运行 Single-trade DP，得到 `actions` 和 `rewards`；shifted/synthetic horizon 不能复用原始 DP 标签。
+8. 构造 demonstration dataset 和可选 contrastive pair index。
+9. 训练 VQ encoder-decoder `100` epochs，并按配置写入 TensorBoard、latent snapshot 和 codebook displacement。
+10. 每个评估 epoch 生成 per-horizon replay records；训练结束或 best checkpoint 更新时自动生成失败案例 HTML 错题本。
+11. 选择 `phase1_composite_score` 最优且通过风险 guardrail 的 checkpoint。validation horizon 可从 val 文件按固定 stride 生成，或按同一分层策略采样。
+12. 使用 best checkpoint 为需要进入 Phase II 的 horizon 生成 `code_label`。
+13. 导出 Phase II/III 所需产物。
 
 ## 8. 输出产物
 
@@ -1363,6 +1671,8 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 | `window_index_val.parquet` | 保存验证集 horizon 索引 | 验证窗口位置、分层统计、`strata_label` | VQ 验证、Phase II validation label 生成 |
 | `window_index_test.parquet` | 保存测试集 horizon 索引 | 测试窗口位置、分层统计、`strata_label` | Phase II/III 离线评估对齐 |
 | `demos_train.parquet` | 保存最终 30000 个训练 Horizon 的 DP demonstration | `states` 引用或压缩数组、`prices`、`actions`、扣除手续费和滑点后的 `rewards`、DP net return、切换次数 | VQ encoder-decoder 训练 |
+| `contrastive_pairs_train.parquet` | 保存时序对比学习正样本对 | `pair_id`、original/shifted sample id、shift bars、pair source、是否通过质量检查 | 计算 temporal contrastive loss |
+| `synthetic_horizon_manifest.parquet` | 保存合成 horizon 来源和质量检查 | synthetic sample id、source A/B、splice index、blend window、质量检查结果、DP return | 审计合成样本和排查 synthetic overfit |
 | `horizon_labels_train.parquet` | 保存训练 horizon 的 archetype 标签 | `sample_id`、窗口位置、`code_label`、demo return、strata 信息 | Phase II selector 的 KL/demo regularization |
 | `horizon_labels_val.parquet` | 保存验证 horizon 的 archetype 标签 | `sample_id`、窗口位置、`code_label`、demo return、strata 信息 | Phase II 验证、checkpoint 选择 |
 | `horizon_labels_test.parquet` | 保存测试 horizon 的 archetype 标签 | `sample_id`、窗口位置、`code_label`、demo return、strata 信息 | 离线分析与可解释性评估 |
@@ -1373,6 +1683,11 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 | `archetype_behavior_diagnostics.json` | 保存 decoder 行为多样性诊断 | per-code action entropy、inter-code action diversity、decoder sensitivity to code | 判断不同 code 是否真的产生不同 action 序列 |
 | `horizon_boundary_diagnostics.json` | 保存 horizon 间仓位衔接诊断 | boundary turnover cost、boundary position consistency、边界换仓方向分布 | 估算 Phase II 独立 horizon 选择带来的边界成本 |
 | `code_stability_diagnostics.json` | 保存 epoch 间 code 分配稳定性 | best/last epoch code agreement、matched agreement、漂移 warning | 判断 horizon labels 是否稳定 |
+| `sampling_leakage_diagnostics.json` | 保存后视/前瞻分层对照诊断 | 当前 `stratification_mode`、对照 `BATCH_ID`、核心验证指标差异、hindsight bias warning | 判断 horizon 内统计分层是否导致验证指标系统性偏高 |
+| `tensorboard/` | 保存训练过程可视化事件 | loss/metrics、embedding projector、latent/codebook snapshot metadata | 观察 codebook 演化、坍缩、分离和漂移 |
+| `latent_snapshots/` | 保存各 epoch 中间表示快照 | 固定 probe 样本的 layer 输出、`z_e`、`z_q`、codebook embedding、code id、metadata | 离线复盘 latent 演化 |
+| `latent_projections/` | 保存 PCA/t-SNE 投影数据 | epoch、layer、projection method、2D/3D 坐标、code_id、收益标签 | 重画 latent 可视化和对比不同 batch |
+| `failure_cases/` | 保存失败案例错题本 | Top-K 极端 horizon 的 HTML、JSONL 和图表资产 | 定位亏损、regret、成本和切换错误原因 |
 | `encoder.pt` | 保存训练后的 encoder 权重 | LSTM encoder 与 latent projection 参数 | 离线重新编码 horizon、分析 code 分布 |
 | `decoder.pt` | 保存冻结 decoder 权重 | 根据 `states + codebook entry` 输出 base action logits 的参数 | Phase II/III 推理 base action sequence |
 | `codebook.pt` | 保存离散 archetype codebook | `K=10` 个 code embedding，维度 16 | Phase II selector 动作空间、Phase III archetype context |
@@ -1392,6 +1707,9 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 | `last_execution_row` | 最后一步 action 实际成交使用的盘口行 |
 | `last_markout_row` | 最后一步 reward 持仓收益结算使用的 mark price 行 |
 | `strata_label` | 分层采样标签 |
+| `stratification_mode` | 分层模式: `hindsight_horizon` 或 `prospective_past` |
+| `is_augmented` | 是否来自数据增强 |
+| `augmentation_type` | `none`、`temporal_shift` 或 `synthetic_splice` |
 | `code_label` | VQ encoder 分配的 archetype ID |
 | `demo_return` | DP demonstration horizon return |
 | `num_switches` | action 切换次数 |
@@ -1410,6 +1728,23 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
   "codebook_init_method": "kmeans_warmup",
   "codebook_update_method": "ema",
   "codebook_ema_decay": 0.99,
+  "codebook_local_optimum_escape_enabled": false,
+  "codebook_perturbation_count": 0,
+  "codebook_perturbation_log": [],
+  "tensorboard_log_dir": "tensorboard",
+  "latent_snapshot_epochs": [],
+  "latent_projection_methods": ["pca", "tsne"],
+  "codebook_displacement_by_epoch": {},
+  "failure_case_report_path": "failure_cases/failure_cases_val.html",
+  "failure_case_counts": {},
+  "temporal_contrastive_enabled": false,
+  "temporal_contrastive_pair_count": 0,
+  "contrastive_loss": 0.0,
+  "contrastive_weight": 0.0,
+  "synthetic_horizon_enabled": false,
+  "synthetic_horizon_count": 0,
+  "synthetic_ratio": 0.0,
+  "augmentation_health_warnings": [],
   "reward_normalization": "train_reward_standard",
   "reward_mean": 0.0,
   "reward_std": 0.0,
@@ -1451,6 +1786,12 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
   "num_train_rows": 450000,
   "reward_alignment": "paper_formula",
   "num_candidate_windows": 449928,
+  "stratification_mode": "hindsight_horizon",
+  "is_hindsight_stratification": true,
+  "prospective_diagnostic_required": true,
+  "diagnostic_pair_batch_id": "batch_002_prospective_strata",
+  "hindsight_bias_warning": "Horizon-internal strata are hindsight sampling controls and may inflate validation metrics; compare with prospective_past stratification before claiming predictive ability.",
+  "hindsight_vs_prospective_metric_delta": {},
   "sampling_strategy": "stratified_uniform",
   "strata_distribution": {},
   "cost_config": {
@@ -1519,6 +1860,9 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - 最终进入 `demos_train.parquet` 的训练 horizon 数量应等于 `num_demos=30000`。
 - `window_index_train.parquet` 必须保存全部候选窗口统计和最终采样标记。
 - 分层采样后，各 strata 的样本数应进入 `phase1_report.json`。
+- 若 `stratification_mode=hindsight_horizon`，`phase1_report.json` 必须记录 `is_hindsight_stratification=true` 和 `hindsight_bias_warning`，并在实验汇总中标注其验证指标可能受后视采样选择影响。
+- 若 `require_prospective_diagnostic=true`，必须提供一个独立 `BATCH_ID` 的 `prospective_past` 分层诊断实验，并在 `sampling_leakage_diagnostics.json` 中记录后视/前瞻分层的核心验证指标差异。
+- 前瞻性分层只能使用 horizon 起点之前的窗口统计；过去 24 小时波动率等 lookback 指标不得读取 `t` 之后的数据。
 - flat/低波动 strata 的最终样本比例不得超过 `flat_low_vol_max_ratio`。
 - 默认 `min_gap_between_samples` 应不低于 `h/2`；`h=72` 时默认值为 `36`。
 - 默认 `max_overlap_ratio` 应不高于 `0.5`；不再接受 `0.85` 作为默认健康阈值。
@@ -1527,7 +1871,19 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - 若 `split_boundary_gap < split_boundary_embargo`，必须在 `sampling_health_warnings` 中提醒 train/val/test 时间边界过近；默认 `warn_only=false` 时应阻止数据构建或裁掉边界窗口。
 - 固定 `seed` 后，重复运行得到相同的 `sample_id/window_start`。
 
-### 9.3 DP 验收
+### 9.3 数据增强验收
+
+- 所有数据增强默认关闭；开启时必须写入 `phase1_config.yaml`、`phase1_report.json` 和对应 manifest。
+- 数据增强只能作用于 train split；val/test 不允许生成 temporal shifted pair 或 synthetic horizon。
+- temporal shifted pair 必须完全落在 train 文件边界内，且 shifted horizon 必须重新切片并重新运行 DP。
+- 若 `temporal_contrastive.enabled=true`，必须生成 `contrastive_pairs_train.parquet`，并在 report 中记录 `temporal_contrastive_pair_count`、`contrastive_loss` 和 `contrastive_weight`。
+- synthetic horizon 必须重新运行 schema/质量检查和 Single-trade DP；严禁复用 source A/B 的动作或收益标签。
+- 若 `synthetic_horizon.enabled=true`，必须生成 `synthetic_horizon_manifest.parquet`，并记录 `synthetic_horizon_count`、`synthetic_ratio` 和每个合成样本来源。
+- `synthetic_ratio` 默认不得超过 0.1；若显式放宽，必须在 `augmentation_health_warnings` 中记录原因。
+- 合成样本不得出现负价、bid/ask 交叉、负深度、NaN/Inf 或异常跳变；不通过质量检查的样本必须丢弃。
+- failure case、per-code 诊断和 train metrics 必须能区分 real 与 augmented 样本，避免把合成样本上的表现误读为真实市场泛化。
+
+### 9.4 DP 验收
 
 - action 只包含 `{0,1,2}`。
 - strict single-trade 模式下，每个样本最多一次 action 切换。
@@ -1538,7 +1894,7 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - 若触发 no-trade 过滤或补采样，`filtered_no_trade_count` 和 `resampled_horizon_count` 必须写入报告。
 - 若 `no_trade_ratio > max_no_trade_ratio`，必须在 `sampling_health_warnings` 中提醒调整 `flat_low_vol_max_ratio` 或 `min_profit_gate`。
 
-### 9.4 VQ 验收
+### 9.5 VQ 验收
 
 - `phase1_composite_score` 达到配置阈值，且普通 `val_reconstruction_accuracy` 不能作为唯一通过条件。
 - `val_weighted_reconstruction_accuracy`、`val_non_flat_accuracy`、`switch_point_recall` 必须进入 report。
@@ -1562,7 +1918,19 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - validation student replay 必须按因果在线方式逐分钟生成动作，不能让 decoder 使用未来状态。
 - teacher 和 student 的 validation replay 必须使用同一个 `TradingEnv` 和 `CostModel` 扣除手续费、算法滑点和成交成本。
 
-### 9.5 Checkpoint 验证验收
+### 9.6 中间过程诊断验收
+
+- 若 `diagnostics.tensorboard.enabled=true`，必须生成 `tensorboard/` 事件文件，并包含 loss、核心 validation metrics、code usage、perplexity 和 embedding projector 数据。
+- latent 可视化必须使用固定 probe 样本；`latent_visualization_manifest.json` 必须记录 probe seed、样本数、split、capture layers、projection methods 和缺失 layer。
+- `latent_snapshots/` 必须至少在 first epoch、best epoch、last epoch 和 `log_every_epochs` 对应 epoch 保存 `z_e`、`z_q`、code_id 与 metadata。
+- `latent_projections/` 必须保存 PCA 投影；若启用 t-SNE，必须记录 perplexity、迭代次数和随机种子。
+- `codebook_displacement_by_epoch` 必须进入 `phase1_report.json`，用于判断 codebook 是否剧烈漂移或过早停滞。
+- 若 `diagnostics.failure_cases.enabled=true`，必须生成 `failure_cases/failure_cases_val.html` 和对应 JSONL。
+- failure case 报告至少包含 `worst_student_return` 和 `largest_regret_to_dp` 两类 Top-K 案例；每个案例必须有价格曲线、DP/student action、持仓、累计收益、成本和失败标签。
+- failure case 筛选基于 per-horizon replay records，不能只用聚合后的 epoch metrics 反推。
+- HTML 报告只用于诊断，不参与 checkpoint 自动选择；其 case ID 必须能回溯到 `window_index_val.parquet` 和 replay records。
+
+### 9.7 Checkpoint 验证验收
 
 - 每个 epoch 必须产出 train/val metrics。
 - `best_vq_model.pt` 必须对应 `checkpoint_manifest.json` 中 `is_best=true` 的 epoch。
@@ -1572,12 +1940,13 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - 若 checkpoint 的 `val_max_drawdown` 超过风险阈值，或 `val_sharpe_ratio` 低于风险阈值，不能直接成为 best，除非配置显式关闭 risk guardrail。
 - 若 checkpoint 的 `code_usage_ratio < 0.7`，即使重构准确率更高，也不能被选为 best。
 - checkpoint manifest 必须记录 `codebook_init_method` 和 `codebook_update_method`；若使用 EMA 更新，必须记录 `ema_decay`、dead-code restart 次数和 code usage。
+- checkpoint manifest 必须记录 `codebook_local_optimum_escape_enabled`、`codebook_perturbation_count` 和每次扰动的触发原因；严格复现实验中这些字段必须为关闭或 0。
 - 若 `inter_code_distance` 和 `silhouette_score` 正常但 `inter_code_action_diversity` 或 `decoder_sensitivity_to_code` 过低，checkpoint 不能自动视为通过，需要在 manifest 中记录 decoder 行为退化原因。
 - 若 `val_dp_teacher_profitable_ratio` 低于阈值，`val_return_capture_ratio` 不能作为主要 tie-breaker，应优先检查采样策略和 `min_profit_gate`。
 - `encoder.pt`、`decoder.pt`、`codebook.pt` 必须从 `best_vq_model.pt` 导出，而不是从 `last_vq_model.pt` 导出。
 - 恢复训练时必须能从 `last_vq_model.pt` 读取模型、optimizer、epoch 和历史 best 指标。
 
-### 9.6 产物验收
+### 9.8 产物验收
 
 - Phase II 可以只依赖 `decoder.pt`、`codebook.pt`、`horizon_labels_*.parquet` 启动训练。
 - 所有 checkpoint、配置和报告位于同一个 `artifacts/{PAIR}/{BATCH_ID}/phase1/` 目录。
@@ -1587,8 +1956,13 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 
 | 风险 | 表现 | 处理 |
 | --- | --- | --- |
+| 后视分层导致验证指标虚高 | `horizon_return`、`realized_volatility`、`draw_pattern` 使用 horizon 内统计量，模型在被事后筛选过的相似候选中验证 | 报告标注 `is_hindsight_stratification=true` 和 `hindsight_bias_warning`；增加 `prospective_past` 分层诊断批次，并通过 `sampling_leakage_diagnostics.json` 对比核心指标 |
 | codebook collapse | 大部分样本落到同一个 code | 已内置 `codebook_health` 监控、usage regularization、dead-code restart 和 best checkpoint 拒绝规则 |
 | codebook 初始化/更新不稳定 | 随机初始化导致 early dead code，或梯度更新导致 code 抖动 | 默认 `kmeans_warmup + ema`；严格复现论文公式时用 `random_normal + gradient`，并在 manifest 记录 |
+| codebook 卡在局部最优 | `kmeans_warmup + ema` 让早期聚类持续自我强化，少量新样本难以重新探索 | 用独立 `BATCH_ID` 做 seed、初始化和分层方式对照；必要时启用低概率扰动或 dead-code restart，并记录 `codebook_perturbation_log` |
+| 只看最终数字导致误判 | 100 epoch 后只看到低分或高分，无法知道是早期坍缩、后期漂移、decoder 忽略 code 还是少数极端 horizon 拖累 | 训练中写 TensorBoard latent/codebook 演化；训练后自动生成 failure case HTML 错题本 |
+| 时序对比学习过强 | Encoder 对微小偏移过度不敏感，真实切换点时机被抹平 | 默认 `contrastive_weight=0.05` 且只约束 `z_e`；监控 switch timing error 和 non-flat accuracy，必要时降低权重或关闭 |
+| 合成样本伪影 | 模型学到拼接边界、异常盘口或不真实状态特征，而不是真实转折模式 | 限制 `synthetic_ratio`、执行 orderbook/schema 质量检查、重新跑 DP，并在 real-only validation replay 上验收 |
 | DP 全 flat 过多 | `no_trade_ratio` 过高 | eval 输出 `sampling_health_warnings`，提醒调整 `flat_low_vol_max_ratio`、`min_profit_gate` 或 `max_no_trade_ratio` |
 | no-trade code 挤占容量 | 大量 no-trade horizon 集中分配到 1-2 个 code | 输出 `per_code_no_trade_ratio`、`no_trade_code_concentration`、`active_trade_code_count`，提醒调整 no-trade 配额 |
 | 滑动窗口高度重叠 | 相邻样本过于相似，梯度方差虚低，validation 指标虚高 | 默认 `min_gap_between_samples=h/2`、`max_overlap_ratio=0.5` 且 `warn_only=false`；超阈值时阻止数据构建或要求显式放宽并记录原因 |
