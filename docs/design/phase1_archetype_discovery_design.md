@@ -58,26 +58,26 @@ sample horizons -> Single-trade DP demonstration -> LSTM encoder -> VQ codebook 
 默认输入为三份已经切分好的数据文件:
 
 ```text
-data/{PAIR}/train.parquet
-data/{PAIR}/val.parquet
-data/{PAIR}/test.parquet
+data/{PAIR}/train.feather
+data/{PAIR}/val.feather
+data/{PAIR}/test.feather
 ```
 
 也可以通过 CLI 显式指定:
 
 ```text
---train-file data/{PAIR}/train.parquet
---val-file data/{PAIR}/val.parquet
---test-file data/{PAIR}/test.parquet
+--train-file data/{PAIR}/train.feather
+--val-file data/{PAIR}/val.feather
+--test-file data/{PAIR}/test.feather
 ```
 
-后续建议支持 csv/parquet 两类格式。每个文件至少需要:
+默认支持 Feather/Arrow IPC 格式，工程实现使用 `polars.read_ipc` / `DataFrame.write_ipc` 读写 `.feather` 文件；可选保留 csv 作为调试输入格式。每个文件至少需要:
 
 - 时间列: `timestamp` 或可等价排序的 index。
-- 价格列: `close`，用于 DP reward 计算。
-- 特征列: 除去元信息列后可直接作为状态 $s_t$ 的数值列。
+- 价格列: `close`，只用于 DP reward、分层统计、replay 和风险指标计算。
+- 特征列: 除去元信息列和 `close` 后可直接作为状态 $s_t$ 的数值列。
 
-如果输入文件包含以下盘口和成交字段，则可直接纳入状态:
+如果输入文件包含以下盘口和成交字段，则可作为 schema 识别和状态候选字段；其中 `close` 只作为价格列记录，不进入 `states`:
 
 - `close`
 - `ask1_price` 到 `ask5_price`
@@ -100,18 +100,19 @@ $$
 
 状态字段选择规则:
 
-- `close` 保留为价格列，同时也可以作为状态特征列。
+- `close` 保留为价格列，不进入模型输入状态特征列。
 - `timestamp`、`symbol`、`split`、`sample_id` 等元信息列不进入模型。
-- 其余数值列默认进入 `states`。
+- 其余数值列默认进入 `states`，但必须从 `feature_columns` 中显式排除 `close`。
+- `input_schema.json` 必须同时记录 `price_column="close"`、`feature_columns` 和 `excluded_columns`，并保证 `close not in feature_columns`。
 - 本阶段只做字段校验、类型转换和 NaN/Inf 检查，不做滚动因子生成和标准化拟合。
 
 建议保存:
 
 ```text
 artifacts/{PAIR}/{BATCH_ID}/phase1/input_schema.json
-artifacts/{PAIR}/{BATCH_ID}/phase1/window_index_train.parquet
-artifacts/{PAIR}/{BATCH_ID}/phase1/window_index_val.parquet
-artifacts/{PAIR}/{BATCH_ID}/phase1/window_index_test.parquet
+artifacts/{PAIR}/{BATCH_ID}/phase1/window_index_train.feather
+artifacts/{PAIR}/{BATCH_ID}/phase1/window_index_val.feather
+artifacts/{PAIR}/{BATCH_ID}/phase1/window_index_test.feather
 ```
 
 ### 3.3 Horizon 样本
@@ -120,8 +121,8 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/window_index_test.parquet
 
 | 字段 | shape | dtype | 说明 |
 | --- | --- | --- | --- |
-| `states` | `[h, feature_dim]` | `float32` | 从输入文件直接读取的状态特征 |
-| `prices` | `[h + 1]` 或 `[h + 2]` | `float32` | `paper_formula` 用 `[h+1]`；`next_row_execution` 用 `[h+2]` |
+| `states` | `[h, feature_dim]` | `float32` | 从 `feature_columns` 切出的模型输入状态，不包含 `close` |
+| `prices` | `[h + 1]` 或 `[h + 2]` | `float32` | 从 `close` 切出的价格序列；`paper_formula` 用 `[h+1]`；`next_row_execution` 用 `[h+2]` |
 | `execution_books` | `[h, levels, 4]` | `float32` | 每步实际成交行的 bid/ask 盘口，由 `reward_alignment` 决定来自当前行或下一行 |
 | `actions` | `[h]` | `int64` | DP demonstration action |
 | `rewards` | `[h]` | `float32` | 执行 demonstration action 的逐步收益 |
@@ -213,7 +214,7 @@ return_bin=up, vol_bin=high, pattern_bin=mixed
 - 若初次 DP 标注后的 `no_trade_ratio` 超过阈值，触发二次补采样: 从非 flat 或中高波动 strata 中补足被过滤的 horizon。
 - 设置 `min_gap_between_samples` 和 `max_overlap_ratio` 控制相邻采样窗口重叠度；默认在采样阶段强制执行，避免训练样本时间自相关过高。
 - 对 train/val/test 文件边界执行 `split_boundary_embargo` 检查，避免 validation horizon 与 train 末尾时间过近导致验证指标虚高。
-- 同一批次必须固定 `seed`，并把被采样的 `window_start` 保存到 `window_index_train.parquet`。
+- 同一批次必须固定 `seed`，并把被采样的 `window_start` 保存到 `window_index_train.feather`。
 - val/test 不参与 VQ 训练采样；需要标签时可按固定 stride 枚举，或使用同一分层策略生成评估窗口索引。
 
 采样健康检查配置:
@@ -308,9 +309,9 @@ src/utils/io.py
 python scripts/train_phase1.py \
   --pair AL \
   --train-batch-id batch_001 \
-  --train-file data/AL/train.parquet \
-  --val-file data/AL/val.parquet \
-  --test-file data/AL/test.parquet \
+  --train-file data/AL/train.feather \
+  --val-file data/AL/val.feather \
+  --test-file data/AL/test.feather \
   --horizon 72 \
   --window-stride 1 \
   --sampling-strategy stratified_uniform \
@@ -341,14 +342,14 @@ python scripts/train_phase1.py \
 
 | 模块 | 职责 | 主要输出 |
 | --- | --- | --- |
-| `market_reader.py` | 直接读取 train/val/test 三个数据文件，保持外部特征原样 | `DataFrame` |
-| `schema.py` | 校验输入 schema，识别时间列、价格列、盘口列、状态特征列 | `input_schema.json` |
-| `window_indexer.py` | 按 `reward_alignment` 枚举候选 horizon，计算 `last_execution_row/last_markout_row` | `window_index_*.parquet` |
+| `market_reader.py` | 使用 Polars 直接读取 train/val/test 三个 `.feather` 数据文件，保持外部特征原样 | `DataFrame` |
+| `schema.py` | 校验输入 schema，识别时间列、价格列、盘口列、状态特征列，并确保 `close` 不进入状态特征 | `input_schema.json` |
+| `window_indexer.py` | 按 `reward_alignment` 枚举候选 horizon，计算 `last_execution_row/last_markout_row` | `window_index_*.feather` |
 | `stratified_sampler.py` | 按 strata、no-trade 控制和 `min_gap_between_samples` 做去相关采样 | sampled window index |
 | `sampling_health.py` | 计算 `window_overlap_ratio`、`split_boundary_gap`、采样 warning/fail 条件 | sampling health report |
-| `horizon_builder.py` | 根据窗口索引切出 `states/prices/execution_books/meta` | horizon records |
+| `horizon_builder.py` | 根据窗口索引切出 `states/prices/execution_books/meta`；`states` 来自 `feature_columns`，`prices` 来自 `close` | horizon records |
 | `data_augmentation.py` | 生成 temporal contrastive pair 和 train-only synthetic horizon | augmented horizon records |
-| `demo_store.py` | 保存和加载 DP demonstrations、horizon labels、诊断字段 | `demos_train.parquet` / labels |
+| `demo_store.py` | 保存和加载 DP demonstrations、horizon labels、诊断字段 | `demos_train.feather` / labels |
 | `dataset.py` | 只负责 PyTorch `Dataset` / `DataLoader` 适配 | tensors for training |
 
 核心类建议:
@@ -499,7 +500,7 @@ class VQArchetypeModel:
 职责:
 
 - 编排数据构建、demo 生成、模型训练、评估、checkpoint 和产物导出。
-- 调用 `Phase1DemoGenerator` 生成或加载 `demos_train.parquet`。
+- 调用 `Phase1DemoGenerator` 生成或加载 `demos_train.feather`。
 - 训练 VQ encoder-decoder。
 - 每个 epoch 结束后调用 evaluator 在 validation horizon 上计算指标。
 - 按配置触发中间过程诊断: TensorBoard latent/codebook snapshot、PCA/t-SNE 投影和失败案例归档。
@@ -540,7 +541,7 @@ class VQArchetypeModel:
 | `code_stability.py` | epoch code stability、Hungarian matched stability |
 | `latent_visualization.py` | TensorBoard embedding、PCA/t-SNE latent snapshot、codebook movement 可视化数据 |
 | `failure_case_report.py` | 自动筛选极端 horizon，生成价格/动作/持仓/收益 HTML 错题本 |
-| `phase1_report.py` | `phase1_report.json`、诊断 JSON/parquet 的写入和 schema 校验 |
+| `phase1_report.py` | `phase1_report.json`、诊断 JSON/feather 的写入和 schema 校验 |
 
 边界约束:
 
@@ -866,8 +867,8 @@ class LatentVisualizationWriter:
 
 ```text
 artifacts/{PAIR}/{BATCH_ID}/phase1/tensorboard/
-artifacts/{PAIR}/{BATCH_ID}/phase1/latent_snapshots/epoch_{epoch}.parquet
-artifacts/{PAIR}/{BATCH_ID}/phase1/latent_projections/epoch_{epoch}_{layer}_{method}.parquet
+artifacts/{PAIR}/{BATCH_ID}/phase1/latent_snapshots/epoch_{epoch}.feather
+artifacts/{PAIR}/{BATCH_ID}/phase1/latent_projections/epoch_{epoch}_{layer}_{method}.feather
 artifacts/{PAIR}/{BATCH_ID}/phase1/latent_visualization_manifest.json
 ```
 
@@ -960,7 +961,7 @@ class Phase1CheckpointManager:
 
 职责:
 
-- 统一写入 `phase1_report.json`、`checkpoint_manifest.json` 之外的诊断 JSON/parquet。
+- 统一写入 `phase1_report.json`、`checkpoint_manifest.json` 之外的诊断 JSON/Feather。
 - 统一登记 TensorBoard log dir、latent snapshot/projection manifest 和 failure case HTML/JSONL 路径。
 - 校验 report schema，确保新增指标不会只存在于内存 metrics 中。
 - 汇总 data health、model health、replay health、codebook health、boundary health warning。
@@ -1148,7 +1149,7 @@ no_trade_control:
 
 No-trade archetype 容量监控:
 
-保留 no-trade horizon 有助于让模型学会“不交易”场景，但如果大量 no-trade 样本集中落到 1-2 个 code，这些 code 会退化成纯 no-trade archetype，剩余 code 需要覆盖全部交易模式，容量可能不足。因此 `archetype_diagnostics.parquet` 和 `phase1_report.json` 必须输出:
+保留 no-trade horizon 有助于让模型学会“不交易”场景，但如果大量 no-trade 样本集中落到 1-2 个 code，这些 code 会退化成纯 no-trade archetype，剩余 code 需要覆盖全部交易模式，容量可能不足。因此 `archetype_diagnostics.feather` 和 `phase1_report.json` 必须输出:
 
 - `per_code_no_trade_ratio`: 每个 code 内 `is_no_trade=true` 样本占比。
 - `no_trade_code_concentration`: no-trade 样本在 top-1/top-2 code 中的集中度。
@@ -1167,7 +1168,7 @@ no_trade_code_health:
 
 ### 5.4 数据增强
 
-数据增强只用于训练集，并且必须作为可关闭的工程增强记录在 `phase1_config.yaml`、`demos_train.parquet` metadata 和 `phase1_report.json` 中。严格复现论文主实验时应关闭所有增强；开启增强的实验必须使用独立 `BATCH_ID`，避免和无增强基线混在同一产物目录。
+数据增强只用于训练集，并且必须作为可关闭的工程增强记录在 `phase1_config.yaml`、`demos_train.feather` metadata 和 `phase1_report.json` 中。严格复现论文主实验时应关闭所有增强；开启增强的实验必须使用独立 `BATCH_ID`，避免和无增强基线混在同一产物目录。
 
 #### 5.4.1 时序对比学习增强
 
@@ -1244,7 +1245,7 @@ data_augmentation:
 - `synthetic_ratio` 默认不超过 10%，避免模型学到合成伪影。
 - 合成后的价格序列不得出现负价、异常跳变、bid/ask 交叉、深度为负或状态列 NaN/Inf。
 - 若状态特征无法从合成价格和盘口一致重算，应关闭该类合成，或只使用明确不依赖跨片段连续性的特征列。
-- 合成样本必须在 `demos_train.parquet` 中可追踪来源；failure case 和 per-code 诊断需要能区分 real/synthetic。
+- 合成样本必须在 `demos_train.feather` 中可追踪来源；failure case 和 per-code 诊断需要能区分 real/synthetic。
 - 若合成样本显著提高 train 指标但降低真实 validation replay，应在 `augmentation_health_warnings` 中提示 synthetic overfit。
 
 ## 6. VQ Encoder-Decoder 设计
@@ -1639,7 +1640,7 @@ prepared train/val/test files
 详细步骤:
 
 1. 读取外部准备好的 train/val/test 三个数据文件。
-2. 校验 schema，确定 `timestamp`、`close` 和状态特征列。
+2. 校验 schema，确定 `timestamp`、价格列 `close` 和状态特征列；`close` 只进入 `prices`，不进入 `states`。
 3. 在 train 文件内用 stride=1 滑动窗口枚举候选 horizon，`h=72` 时约 45 万行可枚举约 44.99 万个候选窗口。
 4. 为每个候选窗口计算分层统计。默认实验可使用 horizon 内部的 `horizon_return`、`realized_volatility`、`draw_pattern`，但必须标注为 `stratification_mode=hindsight_horizon`；前瞻性诊断实验必须改用 horizon 起点之前的 past return、past volatility 和 past draw pattern。
 5. 按 `stratified_uniform` 或 `stratified_proportional` 从候选窗口中最终采样 `num_demos=30000` 个 train horizon，并在不同 `BATCH_ID` 下保存后视分层与前瞻性分层的对照实验。
@@ -1665,18 +1666,18 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 | 文件 | 作用 | 主要内容 | 后续使用方 |
 | --- | --- | --- | --- |
 | `phase1_config.yaml` | 固化本次 Phase I 实验配置，保证可复现 | 输入文件路径、horizon 长度、采样策略、DP 参数、交易成本参数、VQ 参数、训练参数、seed | 复现实验、Phase II/III 读取上下文 |
-| `input_schema.json` | 记录三份输入文件的字段契约 | 时间列、价格列、状态特征列、排除列、字段 dtype、文件行数 | Dataset 构建、Phase II/III 状态列对齐 |
+| `input_schema.json` | 记录三份输入文件的字段契约 | 时间列、价格列 `close`、状态特征列、排除列、字段 dtype、文件行数，并保证 `close not in feature_columns` | Dataset 构建、Phase II/III 状态列对齐 |
 | `reward_normalizer.json` | 保存 encoder reward 输入归一化参数 | train reward mean/std 或 median/MAD、clip value、clip ratio | Phase I 复现、val/test 编码一致性 |
-| `window_index_train.parquet` | 保存训练集滑动窗口候选与最终采样结果 | 全部候选 `window_start/window_end/last_execution_row/last_markout_row`、分层统计、`strata_label`、`is_sampled` | DP demonstration 生成、采样审计 |
-| `window_index_val.parquet` | 保存验证集 horizon 索引 | 验证窗口位置、分层统计、`strata_label` | VQ 验证、Phase II validation label 生成 |
-| `window_index_test.parquet` | 保存测试集 horizon 索引 | 测试窗口位置、分层统计、`strata_label` | Phase II/III 离线评估对齐 |
-| `demos_train.parquet` | 保存最终 30000 个训练 Horizon 的 DP demonstration | `states` 引用或压缩数组、`prices`、`actions`、扣除手续费和滑点后的 `rewards`、DP net return、切换次数 | VQ encoder-decoder 训练 |
-| `contrastive_pairs_train.parquet` | 保存时序对比学习正样本对 | `pair_id`、original/shifted sample id、shift bars、pair source、是否通过质量检查 | 计算 temporal contrastive loss |
-| `synthetic_horizon_manifest.parquet` | 保存合成 horizon 来源和质量检查 | synthetic sample id、source A/B、splice index、blend window、质量检查结果、DP return | 审计合成样本和排查 synthetic overfit |
-| `horizon_labels_train.parquet` | 保存训练 horizon 的 archetype 标签 | `sample_id`、窗口位置、`code_label`、demo return、strata 信息 | Phase II selector 的 KL/demo regularization |
-| `horizon_labels_val.parquet` | 保存验证 horizon 的 archetype 标签 | `sample_id`、窗口位置、`code_label`、demo return、strata 信息 | Phase II 验证、checkpoint 选择 |
-| `horizon_labels_test.parquet` | 保存测试 horizon 的 archetype 标签 | `sample_id`、窗口位置、`code_label`、demo return、strata 信息 | 离线分析与可解释性评估 |
-| `archetype_diagnostics.parquet` | 保存 per-archetype 诊断指标 | `code_id`、样本数、平均收益、胜率、no-trade ratio、切换点分布、平均持仓方向 | 判断每个 archetype 是否有意义，识别 no-trade code 是否挤占容量 |
+| `window_index_train.feather` | 保存训练集滑动窗口候选与最终采样结果 | 全部候选 `window_start/window_end/last_execution_row/last_markout_row`、分层统计、`strata_label`、`is_sampled` | DP demonstration 生成、采样审计 |
+| `window_index_val.feather` | 保存验证集 horizon 索引 | 验证窗口位置、分层统计、`strata_label` | VQ 验证、Phase II validation label 生成 |
+| `window_index_test.feather` | 保存测试集 horizon 索引 | 测试窗口位置、分层统计、`strata_label` | Phase II/III 离线评估对齐 |
+| `demos_train.feather` | 保存最终 30000 个训练 Horizon 的 DP demonstration | 不含 `close` 的 `states` 引用或压缩数组、由 `close` 切出的 `prices`、`actions`、扣除手续费和滑点后的 `rewards`、DP net return、切换次数 | VQ encoder-decoder 训练 |
+| `contrastive_pairs_train.feather` | 保存时序对比学习正样本对 | `pair_id`、original/shifted sample id、shift bars、pair source、是否通过质量检查 | 计算 temporal contrastive loss |
+| `synthetic_horizon_manifest.feather` | 保存合成 horizon 来源和质量检查 | synthetic sample id、source A/B、splice index、blend window、质量检查结果、DP return | 审计合成样本和排查 synthetic overfit |
+| `horizon_labels_train.feather` | 保存训练 horizon 的 archetype 标签 | `sample_id`、窗口位置、`code_label`、demo return、strata 信息 | Phase II selector 的 KL/demo regularization |
+| `horizon_labels_val.feather` | 保存验证 horizon 的 archetype 标签 | `sample_id`、窗口位置、`code_label`、demo return、strata 信息 | Phase II 验证、checkpoint 选择 |
+| `horizon_labels_test.feather` | 保存测试 horizon 的 archetype 标签 | `sample_id`、窗口位置、`code_label`、demo return、strata 信息 | 离线分析与可解释性评估 |
+| `archetype_diagnostics.feather` | 保存 per-archetype 诊断指标 | `code_id`、样本数、平均收益、胜率、no-trade ratio、切换点分布、平均持仓方向 | 判断每个 archetype 是否有意义，识别 no-trade code 是否挤占容量 |
 | `action_diagnostics.json` | 保存动作分类和切换点诊断 | confusion matrix、per-class precision/recall、switch recall、direction accuracy、timing error 分布 | 诊断 decoder 是否学到单次交易行为 |
 | `risk_diagnostics.json` | 保存 validation replay 风险指标 | Sharpe、Sortino、MDD、Calmar、equity curve 摘要 | checkpoint 风险 guardrail 和人工审查 |
 | `archetype_separation.json` | 保存 archetype 可区分性指标 | inter-code distance、silhouette score、code distance matrix 摘要 | 判断 codebook 是否学出可区分策略 |
@@ -1697,7 +1698,7 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 | `checkpoint_manifest.json` | 记录 checkpoint 验证与选择过程 | 每个 checkpoint 的 epoch、路径、validation 指标、是否 best、被拒绝原因 | 审计 best 模型选择、复现实验 |
 | `phase1_report.json` | 保存训练与数据诊断指标 | 重构准确率、VQ loss、code usage、perplexity、风险指标、per-code 指标、切换点指标、采样分布、成本配置 | 验收、实验对比、问题排查 |
 
-`horizon_labels_*.parquet` 字段:
+`horizon_labels_*.feather` 字段:
 
 | 字段 | 说明 |
 | --- | --- |
@@ -1851,14 +1852,15 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - 必须能读取 train/val/test 三个文件。
 - 每个文件按时间排序后生成 horizon，horizon 不能跨文件边界。
 - 状态特征列无 NaN/Inf，且均可转换为 `float32`。
+- `close` 必须作为 `price_column` 记录，只用于 `prices`、DP reward、replay、分层统计和风险指标，不得出现在 `feature_columns` 或 `states` 中。
 - 本阶段不做特征工程、不在状态特征上拟合 scaler、不生成滚动因子；Phase I encoder 只允许基于 train demonstration rewards 拟合 `reward_normalizer`，并必须复用于 val/test。
 - `input_schema.json` 必须记录价格列、时间列、特征列和被排除的元信息列。
 
 ### 9.2 滑动窗口与采样验收
 
 - 训练集 1 分钟数据约 45 万行时，候选窗口数必须与 `reward_alignment` 一致: `paper_formula` 接近 `num_rows - h`，`next_row_execution` 接近 `num_rows - h - 1`。
-- 最终进入 `demos_train.parquet` 的训练 horizon 数量应等于 `num_demos=30000`。
-- `window_index_train.parquet` 必须保存全部候选窗口统计和最终采样标记。
+- 最终进入 `demos_train.feather` 的训练 horizon 数量应等于 `num_demos=30000`。
+- `window_index_train.feather` 必须保存全部候选窗口统计和最终采样标记。
 - 分层采样后，各 strata 的样本数应进入 `phase1_report.json`。
 - 若 `stratification_mode=hindsight_horizon`，`phase1_report.json` 必须记录 `is_hindsight_stratification=true` 和 `hindsight_bias_warning`，并在实验汇总中标注其验证指标可能受后视采样选择影响。
 - 若 `require_prospective_diagnostic=true`，必须提供一个独立 `BATCH_ID` 的 `prospective_past` 分层诊断实验，并在 `sampling_leakage_diagnostics.json` 中记录后视/前瞻分层的核心验证指标差异。
@@ -1876,9 +1878,9 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - 所有数据增强默认关闭；开启时必须写入 `phase1_config.yaml`、`phase1_report.json` 和对应 manifest。
 - 数据增强只能作用于 train split；val/test 不允许生成 temporal shifted pair 或 synthetic horizon。
 - temporal shifted pair 必须完全落在 train 文件边界内，且 shifted horizon 必须重新切片并重新运行 DP。
-- 若 `temporal_contrastive.enabled=true`，必须生成 `contrastive_pairs_train.parquet`，并在 report 中记录 `temporal_contrastive_pair_count`、`contrastive_loss` 和 `contrastive_weight`。
+- 若 `temporal_contrastive.enabled=true`，必须生成 `contrastive_pairs_train.feather`，并在 report 中记录 `temporal_contrastive_pair_count`、`contrastive_loss` 和 `contrastive_weight`。
 - synthetic horizon 必须重新运行 schema/质量检查和 Single-trade DP；严禁复用 source A/B 的动作或收益标签。
-- 若 `synthetic_horizon.enabled=true`，必须生成 `synthetic_horizon_manifest.parquet`，并记录 `synthetic_horizon_count`、`synthetic_ratio` 和每个合成样本来源。
+- 若 `synthetic_horizon.enabled=true`，必须生成 `synthetic_horizon_manifest.feather`，并记录 `synthetic_horizon_count`、`synthetic_ratio` 和每个合成样本来源。
 - `synthetic_ratio` 默认不得超过 0.1；若显式放宽，必须在 `augmentation_health_warnings` 中记录原因。
 - 合成样本不得出现负价、bid/ask 交叉、负深度、NaN/Inf 或异常跳变；不通过质量检查的样本必须丢弃。
 - failure case、per-code 诊断和 train metrics 必须能区分 real 与 augmented 样本，避免把合成样本上的表现误读为真实市场泛化。
@@ -1889,7 +1891,7 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - strict single-trade 模式下，每个样本最多一次 action 切换。
 - reward 计算必须按 `reward_alignment` 对齐: 默认 `paper_formula` 使用 `p_{t+1}^{mark}-p_t^{mark}`，可选 `next_row_execution` 使用后移一行的成交和结算。两种模式都必须使用成交行盘口逐档估算滑点，并可由 `prices/order_books/actions/cost_config` 复现。
 - 若使用 `next_row_execution`，`phase1_report.json` 和 `checkpoint_manifest.json` 必须标注该结果不直接与论文 Phase I reward 公式比较。
-- `phase1_config.yaml`、`demos_train.parquet`、DP planner 和 replay env 使用的 `env_config/cost_config` 必须一致。
+- `phase1_config.yaml`、`demos_train.feather`、DP planner 和 replay env 使用的 `env_config/cost_config` 必须一致。
 - `no_trade_ratio` 必须小于等于 `max_no_trade_ratio`，并被记录进报告。
 - 若触发 no-trade 过滤或补采样，`filtered_no_trade_count` 和 `resampled_horizon_count` 必须写入报告。
 - 若 `no_trade_ratio > max_no_trade_ratio`，必须在 `sampling_health_warnings` 中提醒调整 `flat_low_vol_max_ratio` 或 `min_profit_gate`。
@@ -1928,7 +1930,7 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 - 若 `diagnostics.failure_cases.enabled=true`，必须生成 `failure_cases/failure_cases_val.html` 和对应 JSONL。
 - failure case 报告至少包含 `worst_student_return` 和 `largest_regret_to_dp` 两类 Top-K 案例；每个案例必须有价格曲线、DP/student action、持仓、累计收益、成本和失败标签。
 - failure case 筛选基于 per-horizon replay records，不能只用聚合后的 epoch metrics 反推。
-- HTML 报告只用于诊断，不参与 checkpoint 自动选择；其 case ID 必须能回溯到 `window_index_val.parquet` 和 replay records。
+- HTML 报告只用于诊断，不参与 checkpoint 自动选择；其 case ID 必须能回溯到 `window_index_val.feather` 和 replay records。
 
 ### 9.7 Checkpoint 验证验收
 
@@ -1948,7 +1950,7 @@ artifacts/{PAIR}/{BATCH_ID}/phase1/
 
 ### 9.8 产物验收
 
-- Phase II 可以只依赖 `decoder.pt`、`codebook.pt`、`horizon_labels_*.parquet` 启动训练。
+- Phase II 可以只依赖 `decoder.pt`、`codebook.pt`、`horizon_labels_*.feather` 启动训练。
 - 所有 checkpoint、配置和报告位于同一个 `artifacts/{PAIR}/{BATCH_ID}/phase1/` 目录。
 - 固定 seed 后，重复运行能得到一致的 sample IDs 和可比指标。
 
@@ -1981,8 +1983,8 @@ Phase II 读取:
 
 - `codebook.pt`
 - `decoder.pt`
-- `horizon_labels_train.parquet`
-- `horizon_labels_val.parquet`
+- `horizon_labels_train.feather`
+- `horizon_labels_val.feather`
 - `input_schema.json`
 
 Phase II 使用 `code_label` 作为 KL/demo regularization 的 ground-truth archetype label:
