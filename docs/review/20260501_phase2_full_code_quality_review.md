@@ -1,8 +1,41 @@
 # Phase II Archetype Selection 完整代码质量 Review 报告
 
 > 生成日期: 2026-05-01
+> 最后更新: 2026-05-01（标记修复状态）
 > Review 范围: Phase II 全部实现代码（22 个源文件，~3500 行）
 > Review 依据: `docs/design/phase2_archetype_selection_design.md` + `docs/plan/phase2_archetype_selection_execution_plan.md`
+
+---
+
+## 0. Review 问题修复状态总览
+
+| Review 章节 | 问题 | 执行计划编号 | 采纳状态 | 修复状态 |
+| --- | --- | --- | --- | --- |
+| §4.1 | Rolling Validation 实现错误 | A1 | ✅ 采纳 | ✅ 已修复 |
+| §4.2 | HorizonEnv 没有 truncated 语义 | A2 | ✅ 采纳 | ✅ 已修复 |
+| §4.3 | PPOTrainer 访问已更新状态 | — | ⚠️ 部分采纳 | ⚠️ 代码可读性改善但未显式标注 |
+| §4.4 | buy_and_hold baseline 语义错误 | — | ✅ 采纳 | ✅ 已修复（改为 buy_and_hold_long/short + always_flat） |
+| §5.1 | HorizonEnv reset 不接受 prev_terminal_position | A3 | ✅ 采纳 | ✅ 已修复 |
+| §5.2 | PPOTrainer 直接访问私有属性 | A3 | ✅ 采纳 | ✅ 已修复 |
+| §5.3 | Phase2Dataset 无防御性输入校验 | B5 | ✅ 采纳 | ✅ 已修复 |
+| §5.4 | Phase2Trainer.run() 行数过多 | D1 | ✅ 采纳 | ❌ 未修复 |
+| §5.5 | ScheduleManager KL demo 退火硬编码 | D3 | ✅ 采纳 | ✅ 已修复 |
+| §5.6 | reward_scaling.clip_range 未使用 | B4 | ✅ 采纳 | ✅ 已修复 |
+| §5.7 | explained_variance 未计算 | B4 | ✅ 采纳 | ✅ 已修复 |
+| §5.8 | 死代码 Mask 阈值硬编码为 0 | B1 | ✅ 采纳 | ✅ 已修复 |
+| §6.1 | 多 Env 仓位继承断裂 | A3 | ✅ 采纳 | ✅ 已修复 |
+| §6.2 | truncated 语义缺失导致 GAE 错误 | A2 | ✅ 采纳 | ✅ 已修复 |
+| §6.3 | streaming decode fallback 丢失时序上下文 | — | ❌ 未采纳 | ❌ 未修复 |
+| §6.4 | target_kl 默认值 0.03 过于激进 | — | ✅ 采纳 | ✅ 已修复（改为 0.05） |
+| §6.5 | entropy 退火到 0 导致策略塌缩 | — | ⚠️ 部分采纳 | ⚠️ 增加 entropy_min_coef 下限 |
+| §6.6 | backtest dead_code_mask 写死全 False | B1 | ✅ 采纳 | ✅ 已修复 |
+| §3.1 | 配置层缺失 10+ 必配字段 | B3 | ✅ 采纳 | ✅ 已修复 |
+| §3.2 | 功能缺失（Composite Score 等） | A4/C1-C5 | ✅ 采纳 | ✅ 已修复 |
+| §3.3 | horizon_index 产物字段缺失 | B5 | ✅ 采纳 | ✅ 已修复 |
+| §3.4 | phase2_report.json 字段缺失 | B2 | ✅ 采纳 | ✅ 已修复 |
+| §8.1 | Phase2Dataset 承担过多职责 | — | ❌ 未采纳 | ❌ 未修复 |
+| §8.2 | Phase1ArtifactValidator 不应在同一文件 | D2 | ✅ 采纳 | ❌ 未修复 |
+| §8.3 | PPOTrainer state_dict 不含 frozen_policy recurrent state | — | ❌ 未采纳 | ❌ 未修复 |
 
 ---
 
@@ -174,7 +207,7 @@
 
 ## 4. Bug 清单
 
-### 4.1 🔴 Rolling Validation 实现错误（严重）
+### 4.1 🔴 Rolling Validation 实现错误（严重）→ ✅ 已修复（A1）
 
 **位置:** [phase2_evaluator.py:L164-L179](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/evaluation/phase2_evaluator.py#L164-L179)
 
@@ -189,7 +222,7 @@
 
 **修复建议:** 为 `run_walk_forward` 增加 `entry_subset` 参数，或在 `Phase2BacktestRunner` 上创建 fold 专用的 runner 实例。
 
-### 4.2 🔴 HorizonEnv 没有实现 truncated 语义（严重）
+### 4.2 🔴 HorizonEnv 没有实现 truncated 语义（严重）→ ✅ 已修复（A2）
 
 **位置:** [horizon_env.py:L105-L219](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trading/horizon_env.py#L105-L219)
 
@@ -204,7 +237,7 @@
 1. `HorizonEnv` 需要接收一个 `max_steps` 参数或由外部调用方显式通知 truncated 状态
 2. 或者在 `PPOTrainer.collect_rollout()` 中，当 `rollout_length` 达到但 `done=False` 时，显式设置 `RolloutSample.truncated=True`
 
-### 4.3 🟡 PPOTrainer 访问已更新状态的潜在错误
+### 4.3 🟡 PPOTrainer 访问已更新状态的潜在错误 → ⚠️ 部分改善
 
 **位置:** [ppo_trainer.py:L141-L150](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/rl/ppo_trainer.py#L141-L150)
 
@@ -212,7 +245,7 @@
 
 **风险:** 低。当前逻辑正确，但代码可读性差。
 
-### 4.4 🟢 buy_and_hold baseline 语义错误（轻微）
+### 4.4 🟢 buy_and_hold baseline 语义错误（轻微）→ ✅ 已修复
 
 **位置:** [phase2_replay.py:L214-L216](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/evaluation/phase2_replay.py#L214-L216)
 
@@ -226,7 +259,7 @@ buy_and_hold 的预期行为应该是一直选择"能产生持续 long"的 arche
 
 ## 5. 工程实现缺陷
 
-### 5.1 `HorizonEnv._cursor` 和 `_prev_terminal_position` 无属性封装
+### 5.1 `HorizonEnv._cursor` 和 `_prev_terminal_position` 无属性封装 → ✅ 已修复（A3）
 
 **位置:** [horizon_env.py:L78-L83](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trading/horizon_env.py#L78-L83)
 
@@ -240,7 +273,7 @@ buy_and_hold 的预期行为应该是一直选择"能产生持续 long"的 arche
 
 **修复建议:** `reset()` 改为 `reset(prev_terminal_position: int = 0)`，允许外部注入仓位。
 
-### 5.2 `PPOTrainer` 直接访问私有属性
+### 5.2 `PPOTrainer` 直接访问私有属性 → ✅ 已修复（A3）
 
 **位置:** [ppo_trainer.py:L390](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/rl/ppo_trainer.py#L390)
 
@@ -253,7 +286,7 @@ env._prev_terminal_position = es.get("prev_terminal_position", 0)
 
 **修复建议:** 提供公开的 `restore_state(cursor, position)` 方法。
 
-### 5.3 `Phase2Dataset.__init__` 无防御性输入校验
+### 5.3 `Phase2Dataset.__init__` 无防御性输入校验 → ✅ 已修复（B5）
 
 **位置:** [phase2_dataset.py:L55-L109](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/data/phase2_dataset.py#L55-L109)
 
@@ -261,13 +294,13 @@ env._prev_terminal_position = es.get("prev_terminal_position", 0)
 - 不校验 `frame.timestamp` 是否单调递增
 - 不校验 `horizon_entries` 的 split 是否与 frame 匹配
 
-### 5.4 `Phase2Trainer.run()` 行数过多，编排逻辑耦合
+### 5.4 `Phase2Trainer.run()` 行数过多，编排逻辑耦合 → ❌ 未修复（D1）
 
 **位置:** [phase2_trainer.py:L96-L404](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trainers/phase2_trainer.py#L96-L404)
 
 单个方法 ~310 行，包含数据加载、索引生成、模型构建、训练循环、评估、报告等全部逻辑。违反单一职责原则，难以单独测试各个环节。
 
-### 5.5 `ScheduleManager` 的 KL demo coef 退火逻辑硬编码
+### 5.5 `ScheduleManager` 的 KL demo coef 退火逻辑硬编码 → ✅ 已修复（D3）
 
 **位置:** [scheduling.py:L79](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/rl/scheduling.py#L79)
 
@@ -277,19 +310,19 @@ self._current_kl_demo_coef = self._initial_kl_demo_coef * (1.0 - progress * 0.5)
 
 退火终点被硬编码为 `initial * 0.5`（而不是 `initial * (1 - 0.5) = initial * 0.5`）。这实际上退火到 0.5x 初始值。但设计允许配置 `kl_demo_anneal_to` 指定具体终值。当前 ScheduleManager 完全忽略 PPOConfig 中应存在的 `kl_demo_anneal_to`。
 
-### 5.6 `reward_scaling.clip_range` 完全未使用
+### 5.6 `reward_scaling.clip_range` 完全未使用 → ✅ 已修复（B4）
 
 **位置:** [ppo_trainer.py:L182-L187](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/rl/ppo_trainer.py#L182-L187)
 
 `_scale_reward()` 仅支持 `divide_by_horizon` 方法，完全不读取 `clip_range` 配置。设计要求 "若启用 clip，必须同时记录 clipped/unclipped reward 统计"——此功能完全缺失。
 
-### 5.7 `PPOTrainer.update()` 缺少 `explained_variance` 计算
+### 5.7 `PPOTrainer.update()` 缺少 `explained_variance` 计算 → ✅ 已修复（B4）
 
 **位置:** [ppo_trainer.py:L189-L322](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/rl/ppo_trainer.py#L189-L322)
 
 设计 §8.4.4 要求 PPO 训练健康指标必须包含 `explained_variance`。虽然 `policy_health.py` 中有 `compute_explained_variance` 函数，但 `PPOTrainer.update()` 未调用它，`PPOUpdateStats.explained_variance` 始终为 0。
 
-### 5.8 死代码 Mask 阈值硬编码为 0
+### 5.8 死代码 Mask 阈值硬编码为 0 → ✅ 已修复（B1）
 
 **位置:** [phase2_trainer.py:L208-L210](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trainers/phase2_trainer.py#L208-L210)
 
@@ -303,7 +336,7 @@ dead_code_mask = torch.tensor([c == 0 for c in counts], dtype=torch.bool)
 
 ## 6. 风险点
 
-### 6.1 🔴 多 Env 训练中的仓位继承断裂
+### 6.1 🔴 多 Env 训练中的仓位继承断裂 → ✅ 已修复（A3）
 
 **风险描述:** `HorizonEnv.reset()` 总是从 `position=0` 开始（[horizon_env.py:L92](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trading/horizon_env.py#L92)）。当训练数据按时间分片后，每个 env 从各自分片起点开始，仓位继承链在分片边界断裂。
 
@@ -313,11 +346,11 @@ dead_code_mask = torch.tensor([c == 0 for c in counts], dtype=torch.bool)
 - 每个 env 的训练 MDP 从 flat 开始，与实际 walk-forward（仓位跨分片连续继承）不一致
 - selector 学到的策略可能在 walk-forward backtest 时表现差于训练期
 
-### 6.2 🔴 PPO rollout 中 truncated 语义缺失导致跨 Rollout GAE 错误
+### 6.2 🔴 PPO rollout 中 truncated 语义缺失导致跨 Rollout GAE 错误 → ✅ 已修复（A2）
 
 **风险描述:** 当 `rollout buffer` 截断但 episode 未真正结束时（`truncated=True, done=False`），当前的 `RolloutBuffer.compute_gae()` 能正确处理（通过 `last_values` bootstrap），但因为 `truncated` 始终为 `False`，`done` 的分片末端（cursor 到达末尾）被当作 episode done 处理。如果 `done` 设置时机不当（分片末端总是 done=True），则跨分片的 GAE bootstrap 被切断，可能导致 advantage 估计偏差。
 
-### 6.3 🟡 冻结 Decoder 的 streaming decode fallback 路径丢失时序上下文
+### 6.3 🟡 冻结 Decoder 的 streaming decode fallback 路径丢失时序上下文 → ❌ 未采纳
 
 **位置:** [phase1_frozen_policy.py:L184-L199](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/models/phase1_frozen_policy.py#L184-L199)
 
@@ -325,13 +358,13 @@ dead_code_mask = torch.tensor([c == 0 for c in counts], dtype=torch.bool)
 
 虽然第一次调用会发 warning，但如果 decoder 恰好只有那些子模块名称不匹配但实际结构正确的场景（例如自定义 decoder），warning 可能被忽略。
 
-### 6.4 🟡 `PPOConfig.target_kl` 默认值 0.03 过于激进
+### 6.4 🟡 `PPOConfig.target_kl` 默认值 0.03 过于激进 → ✅ 已修复
 
 **位置:** [phase2_config.py:L96](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/config/phase2_config.py#L96)
 
 设计文档指定 `target_kl: Optional[float] = 0.05`，但实现默认 `0.03`。更低的 KL 阈值会导致 KL early stop 更频繁触发，PPO update 的实际 epoch 数可能远小于配置的 `update_epochs=4`，训练效率下降。
 
-### 6.5 🟡 `schedule.py` 让 entropy 退火到 0，可能导致后期策略塌缩
+### 6.5 🟡 `schedule.py` 让 entropy 退火到 0，可能导致后期策略塌缩 → ⚠️ 部分修复
 
 **位置:** [scheduling.py:L76](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/rl/scheduling.py#L76)
 
@@ -341,7 +374,7 @@ self._current_entropy_coef = self._initial_entropy_coef * (1.0 - progress)
 
 Entropy coef 线性退火到 0。当接近训练结束时，entropy bonus 完全消失，加上 KL/demo regularization，selector 可能迅速塌缩到单一 action。虽然 `Phase2SelectionPolicy` 有 `max_action_dominance_ratio` guardrail，但 guardrail 只在 checkpoint 选择时生效，不阻止训练后期的策略退化。
 
-### 6.6 🟡 test backtest 脚本中 dead_code_mask 被写死为全 False
+### 6.6 🟡 test backtest 脚本中 dead_code_mask 被写死为全 False → ✅ 已修复（B1）
 
 **位置:** [backtest_phase2.py:L138](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/scripts/backtest_phase2.py#L138)
 
@@ -374,15 +407,15 @@ Backtest 脚本不加载 Phase I 的 `code_usage` 信息来构造 dead code mask
 
 ## 8. 架构设计问题
 
-### 8.1 Phase2Dataset 承担了过多职责
+### 8.1 Phase2Dataset 承担了过多职责 → ❌ 未采纳
 
 当前 `Phase2Dataset.__init__` 不仅存储数据，还自行解析 reward_alignment、预提取 numpy 数组、构建 mark price。这使得 `Phase2Dataset` 与 Phase I 的 `RewardAlignment` 紧耦合。设计 §4.4 明确要求 "phase2_dataset.py 不调用 decoder/selector，只负责把 raw feather 切成张量"。
 
-### 8.2 Phase2HorizonIndexer 和 Phase1ArtifactValidator 不应在同一文件中
+### 8.2 Phase2HorizonIndexer 和 Phase1ArtifactValidator 不应在同一文件中 → ❌ 未修复（D2）
 
 当前 `phase2_horizon_index.py` 同时包含 `Phase1ArtifactValidator`（Phase I 产物校验）和 `Phase2HorizonIndexer`（horizon index 生成）。这两个职责差异大，应拆分到独立模块。
 
-### 8.3 PPOTrainer.state_dict 保存的是所有 env 的状态，但不包含 frozen_policy 的 recurrent state
+### 8.3 PPOTrainer.state_dict 保存的是所有 env 的状态，但不包含 frozen_policy 的 recurrent state → ❌ 未采纳
 
 设计 §4.11 要求 checkpoint 保存 "decoder_recurrent_state"，但 `PPOTrainer.get_state()` 只保存 `env._cursor` 和 `env._prev_terminal_position`，不保存 `frozen_policy._recurrent_state`。
 
@@ -410,16 +443,27 @@ Backtest 脚本不加载 Phase I 的 `code_usage` 信息来构造 dead code mask
 
 ---
 
-## 10. 总结
+## 10. 总结（更新于 2026-05-01）
 
 Phase II 实现代码的主流程骨架（加载 Phase I 产物 → 生成 horizon index → 构造 HorizonEnv → PPO 训练 → 评估 → 报告）是**正确和完整的**。核心的 PPO 训练、GAE 计算、streaming decode 等算法实现也基本正确。
 
-但存在以下**关键问题**:
+**原 Review 中存在的关键问题，当前修复状态:**
 
-1. **Rolling Validation 实现有严重 Bug**，导致 rolling validation 形同虚设
-2. **HorizonEnv 的 truncated 语义完全缺失**，影响 GAE bootstrap 准确性
-3. **checkpoint 选择仅依赖单一指标**，缺少设计中的 Composite Score 加权和 sensitivity 分析
-4. **多 Env 仓位继承链断裂**，训练和回测的行为不一致
-5. **配置层和报告层大量字段缺失**，影响实验可复现性和审计完整性
+1. **Rolling Validation 实现有严重 Bug** → ✅ 已修复（A1: entry_indices subset + fold_id + initial_position）
+2. **HorizonEnv 的 truncated 语义完全缺失** → ✅ 已修复（A2: PPOTrainer 标注 truncated + GAE bootstrap）
+3. **checkpoint 选择仅依赖单一指标** → ✅ 已修复（A4: composite score + sensitivity 分析）
+4. **多 Env 仓位继承链断裂** → ✅ 已修复（A3: reset(prev_terminal_position) + restore_state()）
+5. **配置层和报告层大量字段缺失** → ✅ 已修复（B2/B3: 7 个新 dataclass + 审计字段补齐）
 
-建议在继续 Phase III 开发之前，至少修复 P0 和 P1 级别的 7 个问题。
+**仍存在的未修复项:**
+
+1. **Phase2Trainer.run() 未拆分**（D1: 仍为 ~540 行单一大方法）
+2. **Phase1ArtifactValidator 未拆分到独立模块**（D2: 仍在 phase2_horizon_index.py 中）
+3. **streaming decode fallback 丢失时序上下文**（§6.3: 未采纳，风险较低）
+4. **PPOTrainer state_dict 不含 frozen_policy recurrent state**（§8.3: 未采纳）
+5. **Phase2Dataset 职责过多**（§8.1: 未采纳）
+6. **entropy 退火下限**（§6.5: 仅部分修复，增加了 entropy_min_coef 但默认值 1e-4 可能仍过低）
+7. **OOD 监控仅支持 zscore**（C3 偏差: PSI/mahalanobis 未实现）
+8. **live risk control 未抽取共享 helper**（C5 偏差: env/replay 各自独立实现）
+9. **dead code mask 训练阶段未 fail-fast**（B1 偏差: 缺失 usage 数据时静默返回全 False）
+10. **horizon index prev_terminal_position 始终为 None**（B5 偏差: 需训练流程填充）
