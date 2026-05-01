@@ -311,6 +311,7 @@ class PPOTrainer:
 
                 self._optimizer.zero_grad()
                 loss_out.total.backward()
+                self._check_gradient_safety()
                 if self.config.ppo.max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(
                         self.actor_critic.selector.parameters(),
@@ -391,6 +392,31 @@ class PPOTrainer:
             },
             path,
         )
+
+    def _check_gradient_safety(self) -> None:
+        """检查 selector gradients 是否 finite 且未超过 safety 阈值。"""
+        if not self.config.numerical_safety.check_finite:
+            return
+        total_sq = 0.0
+        has_grad = False
+        for param in self.actor_critic.selector.parameters():
+            if param.grad is None:
+                continue
+            has_grad = True
+            grad = param.grad.detach()
+            if not torch.isfinite(grad).all():
+                self._export_debug_snapshot("non_finite_gradient")
+                raise NumericalSafetyError("检测到非 finite gradient")
+            total_sq += float(grad.norm(2).item() ** 2)
+        if not has_grad:
+            return
+        total_norm = total_sq ** 0.5
+        threshold = float(self.config.numerical_safety.max_gradient_norm)
+        if threshold > 0 and total_norm > threshold:
+            self._export_debug_snapshot("gradient_explosion")
+            raise NumericalSafetyError(
+                f"gradient norm {total_norm:.6f} exceeds safety threshold {threshold:.6f}"
+            )
 
     def get_state(self) -> Dict[str, Any]:
         """获取可序列化的训练状态（用于 checkpoint）。"""

@@ -10,6 +10,7 @@ CLI 参数至少包含:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from dataclasses import replace
@@ -160,6 +161,13 @@ def run_kl_demo_ablation(config: Phase2Config, values: Sequence[float]) -> int:
     output_path = output_dir / "phase2_ablation_kl_demo.json"
     with output_path.open("w", encoding="utf-8") as f:
         json.dump({"runs": summary}, f, ensure_ascii=False, indent=2)
+    csv_path = output_dir / "phase2_ablation_summary.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        fieldnames = ["kl_demo_coef", "status", "phase2_batch_id", "phase2_report", "error"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in summary:
+            writer.writerow({key: item.get(key, "") for key in fieldnames})
     print(f"[info] KL/demo ablation summary written to {output_path}")
     return 0 if all(item["status"] == "ok" for item in summary) else 1
 

@@ -178,7 +178,7 @@ class Phase2Dataset:
             return np.concatenate([features, pos_enc])
         return features
 
-    def get_horizon_inputs(self, idx: int) -> HorizonInputs:
+    def get_horizon_inputs(self, idx: int, execution_lag_offset: int = 0) -> HorizonInputs:
         """获取第 idx 个 horizon 的 HorizonInputs（prices + execution_books）。
 
         复用 Phase I 的 HorizonBuilder 切片协议。
@@ -187,13 +187,20 @@ class Phase2Dataset:
         start = entry.horizon_start
         h = self._horizon
         lookahead = self._alignment.required_lookahead_rows()
+        lag = max(int(execution_lag_offset), 0)
 
-        prices = self._mark[start: start + h + lookahead].tolist()
+        price_end = start + lag + h + lookahead
+        if price_end > self._num_rows:
+            raise IndexError(
+                f"horizon {entry.sample_id} execution_lag_offset={lag} causes "
+                f"price_end={price_end} beyond num_rows={self._num_rows}"
+            )
+        prices = self._mark[start + lag: price_end].tolist()
 
         books: List[ExecutionBook] = []
         for t in range(h):
             rows = self._alignment.rows(t)
-            row = start + rows.execution_row
+            row = start + lag + rows.execution_row
             if row >= self._num_rows:
                 raise IndexError(
                     f"horizon {entry.sample_id} execution_row={row} 越界; "

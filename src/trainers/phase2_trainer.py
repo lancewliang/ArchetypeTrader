@@ -825,7 +825,11 @@ class Phase2Trainer:
                 test_dataset,
                 _factory,
             )
-            return runner.run_walk_forward("test", deterministic=True)
+            return runner.run_walk_forward(
+                "test",
+                deterministic=True,
+                execution_lag_offset=scenario.execution_lag_offset,
+            )
 
         runner = Phase2ExecutionStressRunner(
             self.config.execution_stress,

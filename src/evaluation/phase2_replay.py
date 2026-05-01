@@ -89,6 +89,7 @@ class Phase2BacktestRunner:
         entry_indices: Optional[Sequence[int]] = None,
         initial_position: int = 0,
         fold_id: Optional[int] = None,
+        execution_lag_offset: int = 0,
     ) -> List[Phase2HorizonReplayRecord]:
         """执行 walk-forward replay。
 
@@ -144,7 +145,13 @@ class Phase2BacktestRunner:
 
             # 使用 frozen policy streaming decode
             horizon_states = self.dataset.get_horizon_states(actual_idx)
-            horizon_inputs = self.dataset.get_horizon_inputs(actual_idx)
+            try:
+                horizon_inputs = self.dataset.get_horizon_inputs(
+                    actual_idx,
+                    execution_lag_offset=execution_lag_offset,
+                )
+            except IndexError:
+                continue
             h = self.config.horizon
 
             self.frozen_policy.reset(code_id=chosen_code)
@@ -261,6 +268,8 @@ class Phase2BacktestRunner:
     def run_baselines(
         self,
         split: str,
+        *,
+        include_posthoc_demo_label: bool = False,
     ) -> Dict[str, List[Phase2HorizonReplayRecord]]:
         """运行所有 baseline（random / single_archetype_k / buy_and_hold）。
 
@@ -301,7 +310,7 @@ class Phase2BacktestRunner:
             entries, lambda _idx, _e: [1] * self.config.horizon, split,
             chosen_code=1, baseline_name="always_flat",
         )
-        if split != "test" and any(e.is_labeled for e in entries):
+        if (split != "test" or include_posthoc_demo_label) and any(e.is_labeled for e in entries):
             results["phase1_demo_label"] = self._run_fixed_strategy(
                 [e for e in entries if e.is_labeled],
                 lambda _idx, e: int(e.code_label),
