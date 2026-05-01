@@ -526,3 +526,48 @@ python scripts/train_phase1.py --pair "${PAIR}" --train-batch-id "${BATCH_ID}" "
 - `Phase1DemoStore.save_demos()` 不保存 `execution_books`，但设计的数据契约中 horizon 样本包含该字段。若后续希望从 demo cache 重跑 replay 或 failure case，会缺必要盘口数据。
 - `TrainingConfig.device`、`mixed_precision`、`early_stopping_patience` 当前未在 trainer 中使用，属于配置已暴露但行为未接线。
 - `composite_score_sensitivity()` 当前只对一组 metrics 重算分数，没有按不同权重重新选择 best epoch；与设计 §9.5 的“观察 best epoch 是否漂移”仍有差距。
+
+---
+
+## 2026-05-01 执行结果与采纳状态
+
+> 本节为追加执行记录，未修改上方原 review 内容。
+
+### Review 意见采纳状态
+
+| 标记 | ID/条目 | 采纳状态 |
+| --- | --- | --- |
+| 【✅】 | P1-001 | 已采纳。DP 末步估值与 action 复制约束已统一。 |
+| 【✅】 | P1-002 | 已采纳。reject_transition 统计已覆盖 DP 候选拒绝。 |
+| 【✅】 | P1-003 | 已采纳。prospective 对照 report 读取、delta 比较、sign-off 阻断已接入。 |
+| 【✅】 | P1-004 | 已采纳。采样 min gap 已全局保证。 |
+| 【✅】 | P1-005 | 已采纳。`next_row_execution` label 行号由真实边界字段传递。 |
+| 【✅】 | P1-006 | 已采纳。训练循环返回更新后的 selection history。 |
+| 【✅】 | P1-007 | 已采纳。无 best checkpoint 时禁止导出 Phase II artifacts。 |
+| 【✅】 | P1-008 | 已采纳。composite score 写入 epoch metrics/final report。 |
+| 【✅】 | P1-009 | 已采纳。sampling health 字段写入最终报告。 |
+| 【✅】 | P1-010 | 已采纳。分层统计 off-by-one 已修复；prospective `unknown` 桶过滤未作为本轮 bug 采纳。 |
+| 【✅】 | P1-011 | 已采纳。dead-code restart 已接入 trainer。 |
+| 【】 | P1-012 | 部分采纳，未标记为完成。核心 evaluator/report 指标已接入；latent snapshot/failure case 主流程触发仍未完整接线。 |
+| 【✅】 | P1-013 | 已采纳。weighted reconstruction key 已统一。 |
+| 【✅】 | P1-014 | 已采纳。torch fallback 收集失败已修复。 |
+| 【✅】 | P1-015 | 已采纳。schema 单测 fixture 已修复。 |
+| 【✅】 | P1-016 | 已采纳。`_schema_hash` 使用真实 schema hash。 |
+| 【✅】 | P1-017 | 已采纳。`run_pipeline.sh` 已补 Phase I 默认文件参数。 |
+| 【】 | NoTradeControlConfig 闭环 | 未采纳，仍需单独确认策略口径。 |
+| 【✅】 | demo cache 保存 `execution_books` | 已采纳。`Phase1DemoStore` 已序列化并恢复 execution books。 |
+| 【】 | `device` / `mixed_precision` / `early_stopping_patience` | 未采纳，仍作为配置接线增强项。 |
+| 【✅】 | composite score sensitivity 重新选择 best epoch | 已采纳。当前对所有 epoch metrics 重新打分并检测 best epoch drift。 |
+
+### 本次补充调整
+
+| 标记 | 文件 | 内容 |
+| --- | --- | --- |
+| 【✅】 | `tests/integration/test_phase1_pipeline_smoke.py` | smoke test 显式放宽 risk/behavior guardrail，避免与 P1-007 的“无 best 不导出”保护逻辑冲突；生产代码行为不变。 |
+
+### 验证结果
+
+| 标记 | 命令 | 结果 |
+| --- | --- | --- |
+| 【✅】 | `source /home/lanceliang/miniconda3/etc/profile.d/conda.sh && conda activate ArchetypeTrade && pytest -q` | `375 passed, 17 warnings`。warnings 为未注册 `pytest.mark.integration`。 |
+| 【✅】 | `source /home/lanceliang/miniconda3/etc/profile.d/conda.sh && conda activate ArchetypeTrade && bash -n run_pipeline.sh` | 语法检查通过。 |

@@ -30,6 +30,8 @@ from src.config.phase1_config import (  # noqa: E402
     NoTradeCodeHealthConfig,
     NoTradeControlConfig,
     Phase1Config,
+    BehaviorGuardrailConfig,
+    RiskGuardrailConfig,
     SamplingHealthConfig,
     SelectionPolicyConfig,
     StratificationConfig,
@@ -69,6 +71,12 @@ def _make_smoke_config(tmp_path: Path, train_file, val_file, test_file) -> Phase
     )
     selection = SelectionPolicyConfig(
         min_code_usage_ratio=0.0,
+        risk=RiskGuardrailConfig(max_drawdown=10.0, min_sharpe_ratio=-999.0),
+        behavior=BehaviorGuardrailConfig(
+            min_inter_code_action_diversity=0.0,
+            min_decoder_sensitivity_to_code=0.0,
+            min_epoch_code_stability=0.0,
+        ),
     )
     stratification = StratificationConfig(
         mode="hindsight_horizon",

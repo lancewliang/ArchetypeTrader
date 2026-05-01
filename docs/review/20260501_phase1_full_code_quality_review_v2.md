@@ -458,3 +458,56 @@ num_switches = sum(
    - DP 算法末步约束 (P1-001)
    - 采样和健康检查的结果未被消费 (P1-002, P1-009, P1-011)
    - 最终报告的指标完整性和准确性 (P1-003, P1-006, P1-008, P1-013)
+
+---
+
+## 2026-05-01 执行结果与采纳状态
+
+> 本节为追加执行记录，未修改上方原 review 内容。
+
+### v2 问题采纳状态
+
+| 标记 | ID/条目 | 采纳状态 |
+| --- | --- | --- |
+| 【✅】 | P1-001 | 已采纳。末步 DP 只允许保持当前仓位，forward 复制约束与估值一致。 |
+| 【✅】 | P1-002 | 已采纳。DP candidate reject 统计进入 demo generator 质量门禁。 |
+| 【✅】 | P1-003 | 已采纳。hindsight/prospective paired report 对照已接入 final report 与 leakage diagnostics。 |
+| 【✅】 | P1-004 | 已采纳。sampler 全局维护 min gap。 |
+| 【✅】 | P1-005 | 已采纳。label 行号从 indexer/builder 真实边界字段传递。 |
+| 【✅】 | P1-006 | 已采纳。selection history 从 `_train_loop()` 返回给 `run()`。 |
+| 【✅】 | P1-007 | 已采纳。没有 best checkpoint 时 trainer fatal，禁止导出 last/current artifacts。 |
+| 【✅】 | P1-008 | 已采纳。`phase1_composite_score` 进入 epoch metrics 和 final report。 |
+| 【✅】 | P1-009 | 已采纳。sampling health report 已进入 final summary。 |
+| 【✅】 | P1-010 | 已采纳。horizon/past return off-by-one 已修复；prospective `unknown` 桶过滤未作为本轮 bug 采纳。 |
+| 【✅】 | P1-011 | 已采纳。dead-code restart 已接入 trainer 主循环。 |
+| 【】 | P1-012 | 部分采纳，未标记为完成。boundary、epoch stability、confusion/per-class、per-code switch、teacher distribution 已进入 evaluator/report；latent snapshot/failure case 主流程触发仍未完整接线。 |
+| 【✅】 | P1-013 | 已采纳。weighted reconstruction key 已统一。 |
+| 【✅】 | P1-014 | 已采纳。torch fallback 的 no-op decorator 已覆盖模块级 no-grad 使用。 |
+| 【✅】 | P1-015 | 已采纳。schema 测试 fixture 已修复。 |
+| 【✅】 | P1-016 | 已采纳。`_schema_hash` 使用 schema hash。 |
+| 【✅】 | P1-017 | 已采纳。`run_pipeline.sh` 已补默认 Phase I 数据文件参数。 |
+| 【✅】 | P1-018 | 已采纳。`HorizonRecord` 已包含 `last_execution_row` / `last_markout_row`。 |
+| 【✅】 | P1-019 | 已采纳。final report 读取 best epoch metrics。 |
+| 【✅】 | P1-020 | 已采纳。`num_switches` 统计排除末步复制。 |
+
+### v2 其他观察采纳状态
+
+| 标记 | 条目 | 采纳状态 |
+| --- | --- | --- |
+| 【】 | `NoTradeControlConfig` 基本未被 trainer 使用 | 未采纳，仍需单独定义补采样/过滤/warning 口径。 |
+| 【✅】 | `Phase1DemoStore.save_demos()` 不保存 `execution_books` | 已采纳。当前 demo store 保存 JSON 序列化的 execution books，并在读取时恢复。 |
+| 【】 | `device` / `mixed_precision` / `early_stopping_patience` 未使用 | 未采纳，仍作为后续配置接线增强项。 |
+| 【✅】 | `composite_score_sensitivity` 只重算不重新选择 | 已采纳。当前 sensitivity 会跨全部 epoch metrics 重新选择 best epoch。 |
+
+### 本次补充调整
+
+| 标记 | 文件 | 内容 |
+| --- | --- | --- |
+| 【✅】 | `tests/integration/test_phase1_pipeline_smoke.py` | smoke test 显式放宽 risk/behavior guardrail，确保该测试验证产物链路；P1-007 的生产保护逻辑保持不变。 |
+
+### 验证结果
+
+| 标记 | 命令 | 结果 |
+| --- | --- | --- |
+| 【✅】 | `source /home/lanceliang/miniconda3/etc/profile.d/conda.sh && conda activate ArchetypeTrade && pytest -q` | `375 passed, 17 warnings`。warnings 为未注册 `pytest.mark.integration`。 |
+| 【✅】 | `source /home/lanceliang/miniconda3/etc/profile.d/conda.sh && conda activate ArchetypeTrade && bash -n run_pipeline.sh` | 语法检查通过。 |

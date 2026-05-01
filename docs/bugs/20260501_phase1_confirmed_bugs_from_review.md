@@ -395,3 +395,50 @@ artifact 无法表达真实 schema 变化，审计字段语义错误。
 | `Phase1DemoStore.save_demos()` 不保存 `execution_books` | 目前 review 只指出后续 replay 可能缺数据，尚未证明当前流程错误 |
 | `device` / `mixed_precision` / `early_stopping_patience` 未使用 | 属于配置接线缺口，需确认是否已承诺为当前阶段功能 |
 | `composite_score_sensitivity()` 不重新选择 best epoch | 更偏诊断设计语义未完整实现 |
+
+---
+
+## 2026-05-01 执行结果追加
+
+> 本节为追加执行记录，未修改上方原计划内容。
+
+### 明确 Bug 执行状态
+
+| 标记 | ID | 执行结果 |
+| --- | --- | --- |
+| 【✅】 | P1-001 | 已修复并验证。末步不可执行切换不再进入 DP 估值自由度，新增/保留两步上涨回归测试。 |
+| 【✅】 | P1-002 | 已修复并验证。DP precompute 候选拒绝计入 `DPResult`，demo generator 用候选拒绝统计 dataset reject rate。 |
+| 【✅】 | P1-003 | 已修复并验证。trainer 读取 prospective paired report，计算指标 delta，超阈值时写 `hindsight_bias_warning="exceeded"` 并阻止 sign-off。 |
+| 【✅】 | P1-004 | 已修复并验证。采样阶段使用全局 `chosen_starts` 保证 min gap。 |
+| 【✅】 | P1-005 | 已修复并验证。`WindowIndexEntry`/`SampledHorizon`/`HorizonRecord` 传递真实 `last_execution_row` 与 `last_markout_row`。 |
+| 【✅】 | P1-006 | 已修复并验证。`_train_loop()` 返回更新后的 `SelectionHistory`。 |
+| 【✅】 | P1-007 | 已修复并验证。无 best checkpoint 时 trainer 抛出 fatal，不导出 Phase II artifacts。 |
+| 【✅】 | P1-008 | 已修复并验证。`phase1_composite_score` 与 debug 写入 epoch metrics/final report。 |
+| 【✅】 | P1-009 | 已修复并验证。sampling health report 合并进入 final summary。 |
+| 【✅】 | P1-010 | 已修复并验证。horizon/past return 边界按设计公式修正；`unknown` 桶策略未纳入本 bug。 |
+| 【✅】 | P1-011 | 已修复并验证。trainer 主循环已调用 `restart_dead_codes()`，并写入 restart metrics/report。 |
+| 【✅】 | P1-013 | 已修复并验证。`weighted_reconstruction_accuracy` 与 `val_weighted_reconstruction_accuracy` 建立一致 alias。 |
+| 【✅】 | P1-014 | 已修复并验证。torch 缺失 fallback 不再因模块级 `@torch.no_grad()` 收集失败。 |
+| 【✅】 | P1-015 | 已修复并验证。schema 非正 close 测试不再在 fixture 构造阶段 ZeroDivision。 |
+| 【✅】 | P1-016 | 已修复并验证。`_schema_hash` 使用 schema 稳定序列化 hash，不再复用 config hash。 |
+| 【✅】 | P1-017 | 已修复并验证。`run_pipeline.sh` 为 Phase I 补默认 train/val/test 文件参数。 |
+| 【✅】 | P1-019 | 已修复并验证。final report 读取 best epoch 对应 metrics。 |
+
+### 暂不纳入条目的执行状态
+
+| 标记 | 条目 | 执行结果 |
+| --- | --- | --- |
+| 【】 | P1-012 | 部分采纳，未标记为完成。核心 evaluator/report 指标已接入：boundary、confusion/per-class、epoch stability、per-code switch、DP teacher distribution；latent snapshot/failure case 主流程触发仍未完整接线。 |
+| 【✅】 | P1-018 | 已作为 P1-005 的结构性修复采纳。 |
+| 【✅】 | P1-020 | 已采纳。`_export_horizon_labels` 的 `num_switches` 统计排除末步复制区间。 |
+| 【】 | NoTradeControlConfig 未使用 | 未采纳，仍作为功能闭环待确认项。 |
+| 【✅】 | `Phase1DemoStore.save_demos()` 不保存 `execution_books` | 已采纳。demo cache 当前序列化并恢复 `execution_books`。 |
+| 【】 | `device` / `mixed_precision` / `early_stopping_patience` 未使用 | 未采纳，仍作为配置接线/后续增强项。 |
+| 【✅】 | `composite_score_sensitivity()` 不重新选择 best epoch | 已采纳。当前使用 `composite_score_sensitivity_across_epochs()` 对所有 epoch 重新选择 best。 |
+
+### 验证结果
+
+| 标记 | 命令 | 结果 |
+| --- | --- | --- |
+| 【✅】 | `source /home/lanceliang/miniconda3/etc/profile.d/conda.sh && conda activate ArchetypeTrade && pytest -q` | `375 passed, 17 warnings`。warnings 为未注册 `pytest.mark.integration`。 |
+| 【✅】 | `source /home/lanceliang/miniconda3/etc/profile.d/conda.sh && conda activate ArchetypeTrade && bash -n run_pipeline.sh` | 语法检查通过。 |

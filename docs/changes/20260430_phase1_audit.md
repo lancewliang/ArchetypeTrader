@@ -329,3 +329,43 @@ src/config/phase1_config.py             # 清理 from_dict 内部 _build dead co
 4. 加一个回归测试 `test_dp_backward_includes_last_step_reward`，固定一段
    单调上涨末段的 horizon，验证 DP 必须切到 long（修复前会因 `V[h-1]=0`
    错过最佳切换点）。
+
+---
+
+## 10. 2026-05-01 执行结果追加
+
+> 本节为追加执行记录，未修改上方原计划与原审查内容。
+
+### 10.1 执行状态
+
+| 标记 | 条目 | 执行结果 |
+| --- | --- | --- |
+| 【✅】 | 2.1 DP 反向递推与末步约束 | 已落地。`SingleTradeDPPlanner` 在 `t=h-1` 只允许保持仓位，并保留末步收益对 `V[h-2]` 的贡献；回归测试 `test_last_step_value_cannot_depend_on_unexecutable_switch` 已覆盖。 |
+| 【✅】 | 2.2 `Phase1Loss.num_codes` | 已落地。loss 支持显式 `num_codes`，trainer 传入 `config.model.num_codes`。 |
+| 【✅】 | 2.3 reward normalization 传递 | 已落地。dataset/evaluator/warmup/export labels 均使用同一 normalizer，`rec.rewards` 保持 actual values。 |
+| 【✅】 | 2.4 horizon boundary 第一段末仓位 | 已落地。boundary replay 先 replay 第一个 horizon 取得真实末仓位。 |
+| 【✅】 | 3.1 `demo_return` 口径 | 已落地。label 导出的 `demo_return` 使用原始 reward 求和。 |
+| 【✅】 | 3.2 `no_trade_ratio` | 已落地。最终报告使用 train DP actions 真实统计值。 |
+| 【✅】 | 3.3 全局 seed | 已落地。`Phase1Trainer.run()` 入口调用 `_seed_everything()`。 |
+| 【✅】 | 3.4 `env.step` 越界错误 | 已落地。done 后继续 `step()` 会抛出明确 `RuntimeError`。 |
+| 【✅】 | 4.1 `Phase1Loss._usage_loss` 死代码 | 已清理。 |
+| 【✅】 | 4.2 `selection_policy.evaluate` 冷却期占位 | 已清理，并通过 metrics 注入 cooldown epoch。 |
+| 【✅】 | 4.3 `Phase1Config.from_dict` 内部 `_build` 死代码 | 已清理，当前使用显式 nested type map。 |
+
+### 10.2 本次执行中的额外调整
+
+| 标记 | 条目 | 执行结果 |
+| --- | --- | --- |
+| 【✅】 | Phase I smoke test 与 P1-007 保护逻辑冲突 | 已调整 `tests/integration/test_phase1_pipeline_smoke.py` 的 smoke-only selection guardrail，使该测试继续验证端到端产物链路；生产代码仍保持“无 best checkpoint 时禁止导出 Phase II artifacts”。 |
+| 【✅】 | `quantizer.restart_dead_codes` 已知遗留 | 当前源码已接入 trainer 主循环，epoch metrics/report 写入 restart 事件。 |
+| 【】 | prospective lookback 不足的 `unknown` 桶 | 未在本次执行中采纳，仍作为策略/验收口径待确认项。 |
+| 【】 | `contrastive_pairs_train.feather` | 未在本次执行中采纳；默认 disabled 路径不影响当前主流程。 |
+| 【】 | `local_optimum_escape` 扰动 | 未在本次执行中采纳；配置仍保持 disabled。 |
+
+### 10.3 验证结果
+
+| 标记 | 命令 | 结果 |
+| --- | --- | --- |
+| 【✅】 | `source /home/lanceliang/miniconda3/etc/profile.d/conda.sh && conda activate ArchetypeTrade && pytest -q tests/integration/test_phase1_pipeline_smoke.py` | `4 passed` |
+| 【✅】 | `source /home/lanceliang/miniconda3/etc/profile.d/conda.sh && conda activate ArchetypeTrade && pytest -q` | `375 passed, 17 warnings`。warnings 为未注册 `pytest.mark.integration`。 |
+| 【✅】 | `source /home/lanceliang/miniconda3/etc/profile.d/conda.sh && conda activate ArchetypeTrade && bash -n run_pipeline.sh` | 语法检查通过。 |
