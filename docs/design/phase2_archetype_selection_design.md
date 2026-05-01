@@ -8,8 +8,8 @@
 
 第二阶段只做四件事:
 
-1. 加载 Phase I 的 `decoder.pt`、`codebook.pt`、`horizon_labels_*.feather` 和 `input_schema.json`。
-2. 在 train/val/test 上按 walk-forward 调度生成 horizon-level rollout，构造 horizon-level MDP。
+1. 加载 Phase I 的 `decoder.pt`、`codebook.pt`、`horizon_labels_train.feather`、`horizon_labels_val.feather` 和 `input_schema.json`；`horizon_labels_test.feather` 只允许在最终冻结后的 posthoc baseline 中读取。
+2. 在 train/val 上按固定、非重叠、时间正序调度生成 horizon-level rollout，构造 horizon-level MDP；test 只在 checkpoint 冻结后做一次最终 walk-forward backtest。
 3. 用 PPO 风格 discrete Actor-Critic 训练 selector，目标包含 horizon 累计 reward、KL/demo regularization 与 action entropy。
 4. 在 validation 上选择最优 selector checkpoint，在 test 上做 walk-forward backtest，导出 `phase2_report.json` 与 selector 产物。
 
@@ -25,13 +25,13 @@
 | 论文要求 | 工程设计 |
 | --- | --- |
 | 把基础 MDP 抬升为 horizon-level MDP `M_sel = ⟨S_sel, A_sel, R_sel, γ⟩` | `src/trading/horizon_env.py` 的 `HorizonEnv`，外层每 step 为一个 horizon，内部以 Phase I `TradingEnv` 推进 `h` 步 |
-| state `s^sel = s_t`，捕捉 horizon 第一根 bar | `Phase2HorizonAdapter` 从 train/val/test feather 切出 horizon 起点的 state vector |
+| state `s^sel = s_t`，捕捉 horizon 第一根 bar | 严格论文复现只取 horizon 起点 market state；实盘连续仓位模式额外拼接当前已知的 `prev_terminal_position` |
 | action `a^sel ∈ {0,...,K-1}` | `ArchetypeSelector` 输出 `K` 类离散 logits |
 | 通过冻结 decoder 解码 `a^base_{t:t+h-1}` | `Phase1FrozenPolicy` 包装 `decoder.pt` + `codebook.pt`，按 timestep 因果推理 |
 | `r_t^sel = Σ_{τ=t}^{t+h-1} r_τ^step` | `HorizonEnv.step()` 内部调用 `TradingEnv.replay()` 累加 `step_reward` 后返回 |
 | 目标 `J = E[Σ γ^t (r_t^sel - α KL(â_t^sel ‖ π_φ^sel(a_t^sel ‖ s_t^sel)))]` | `Phase2Loss` 包含 PPO clipped surrogate + value loss + KL/demo loss + entropy bonus |
 | `α = 1` | `selection_kl_coefficient = 1.0` 默认值；可通过 schedule 退火 |
-| ground-truth archetype label `â_t^sel` 来自 Phase I VQ encoder | `horizon_labels_*.feather.code_label`；Phase II 不重新跑 encoder |
+| ground-truth archetype label `â_t^sel` 来自 Phase I VQ encoder | train/val 使用既有 `horizon_labels_*.feather.code_label`；Phase II 不重新跑 encoder，test label 仅 posthoc |
 | selector 训练 3M steps | `total_timesteps = 3_000_000` 默认，按 horizon-step 计 |
 | 保留 best validation checkpoint | `Phase2SelectionPolicy` 与 `Phase2CheckpointManager`，沿用 Phase I 选择规范 |
 | 推理时禁用所有 DP 模块 | `Phase2Inferencer` 与 `Phase2BacktestRunner` 不引入 `src/planners/`，只引用 selector + decoder + codebook + env |
@@ -72,12 +72,13 @@ Phase II 启动前必须确认以下 Phase I 产物存在且通过 sign-off:
 artifacts/{PAIR}/{PHASE1_BATCH_ID}/phase1/
   decoder.pt
   codebook.pt
-  encoder.pt                         # 仅用于 Phase II 内部对未标注 horizon 重算 code_label，不参与 selector 推理
+  encoder.pt                         # Phase II 训练/验证/测试默认不加载；仅 Phase III 或独立 posthoc 分析使用
   horizon_labels_train.feather
   horizon_labels_val.feather
-  horizon_labels_test.feather
+  horizon_labels_test.feather          # 可选；仅 posthoc test baseline 读取，train_phase2 默认不加载
   input_schema.json
   reward_normalizer.json
+  feature_provenance.json              # 正式 no-leakage sign-off 必需；记录每个 feature 的可用时间与计算窗口
   phase1_config.yaml
   phase1_report.json
   checkpoint_manifest.json
@@ -91,6 +92,33 @@ artifacts/{PAIR}/{PHASE1_BATCH_ID}/phase1/
 - `decoder.pt` 加载后必须冻结所有参数，且自检 `bidirectional=False`、`hidden_dim/code_dim` 与 `phase1_config.yaml.model` 一致。
 - `codebook.pt` 加载后必须冻结，并校验 `num_codes` 与 `code_dim`。
 - `input_schema.json` 必须保留 `feature_columns / price_column / excluded_columns`；Phase II 的状态特征列必须严格等于 Phase I `feature_columns`，不得新增或删除任何列。
+- `feature_provenance.json` 必须声明每个 `feature_column` 的 `available_at_lag <= 0`、滚动窗口只使用 `t` 及历史行、且不存在 `future_return / centered_* / label / target` 等目标泄漏字段。缺失该文件时只允许实验运行，`phase2_report.json.no_leakage_signoff=false`。
+
+`feature_provenance.json` 最小 schema:
+
+```json
+{
+  "feature_columns": {
+    "example_feature": {
+      "source_columns": ["close"],
+      "lookback_start_bars": -60,
+      "lookback_end_bars": 0,
+      "publish_delay_bars": 0,
+      "fit_scope": "train_only",
+      "uses_future_rows": false,
+      "normalization_scope": "train_only"
+    }
+  },
+  "lag_convention": "negative_or_zero_means_known_at_decision_time"
+}
+```
+
+验收语义:
+
+- `lookback_end_bars <= 0` 且 `uses_future_rows=false`。
+- `publish_delay_bars <= 0` 表示该 feature 在 `s_t` 决策时已经可见；若实际数据源有发布延迟，必须把 feature 对齐到可见时间后再进入 `feature_columns`。
+- 任意 scaler、rank、winsorize、PCA、行业/全市场截面标准化若需要拟合统计量，`fit_scope` / `normalization_scope` 必须为 `train_only`，val/test 只 transform。
+- 缺少 provenance 的 feature、字段名命中 `future|target|label|centered|lead` 黑名单、或 `fit_scope=all_splits` 时，正式 sign-off 必须失败。
 
 ### 3.2 输入数据
 
@@ -117,14 +145,20 @@ data/{PAIR}/test.feather
 
 ### 3.3 Horizon 调度
 
-Phase II 的"一步 RL"对应 Phase I 的"一个 horizon"。横向调度规则必须固定且可复现:
+Phase II 的"一步 RL"对应 Phase I 的"一个 horizon"。横向调度规则必须固定且可复现。默认训练/验证/测试都使用非重叠 horizon，因为跨 horizon 仓位继承会让 `stride < h` 的重叠窗口变成同一真实时间段被重复结算:
 
 ```yaml
 horizon_schedule:
-  mode: stride                    # stride | non_overlap | phase1_index
-  stride: 36                      # 默认 h/2，与 Phase I min_gap_between_samples 一致
+  mode: non_overlap               # non_overlap | stride | phase1_index
+  stride: 72                      # mode=stride 时使用；正式训练要求 stride >= h
   non_overlap_stride_minutes: 72  # mode=non_overlap 时使用
   use_phase1_window_index: false  # 若 true，复用 Phase I window_index_*.feather 的 sampled 行
+  position_continuity: true       # 默认继承上一 horizon 末仓位
+  dense_overlap_ablation: false   # true 时才允许 stride < h；必须 reset position 且不参与正式 sign-off
+  data_gap_check:
+    enabled: true
+    max_allowed_gap_minutes: 5
+    drop_gap_horizons: true
   walk_forward:
     enabled: true                 # 仅 test backtest 强制启用
     chunk_minutes: null           # null = 一次性走完 test
@@ -136,9 +170,9 @@ horizon_schedule:
 
 | `mode` | 用途 | 边界处理 |
 | --- | --- | --- |
-| `stride` | 训练/验证默认；horizon 起点按固定 `stride` 等距枚举 | 末尾 `last_markout_row > num_rows - 1` 的窗口必须裁掉 |
-| `non_overlap` | walk-forward 最严格回测；horizon 起点按 `h` 等距 | 同上 |
-| `phase1_index` | 与 Phase I sampled horizons 完全对齐，便于 KL/demo label 100% 对应 | 不允许新增 horizon |
+| `non_overlap` | 正式训练、验证和 test walk-forward 默认；horizon 起点按 `h` 等距 | 末尾 `last_markout_row > num_rows - 1` 的窗口必须裁掉 |
+| `stride` | 只用于 dense ablation 或不继承仓位的独立 horizon 实验 | 若 `stride < h`，必须 `dense_overlap_ablation=true`，强制 `position_continuity=false`、`done=True`、每个 horizon 从 flat reset，不可 sign-off |
+| `phase1_index` | 与 Phase I sampled horizons 完全对齐，便于 KL/demo label 100% 对应 | 若样本重叠，只能按独立 horizon 训练；不允许继承仓位或做跨重叠窗口 GAE |
 
 无论哪种模式，horizon 调度生成产物 `phase2_horizon_index_{split}.feather` 必须包含:
 
@@ -149,8 +183,10 @@ horizon_schedule:
 | `end_index` | horizon 终点行号（`start + h - 1`） |
 | `last_execution_row` | 由 `RewardAlignment` 决定 |
 | `last_markout_row` | 由 `RewardAlignment` 决定 |
+| `has_data_gap` | horizon 覆盖区间内是否存在 timestamp 间隔超阈值 |
+| `max_timestamp_gap_minutes` | horizon 内最大相邻 timestamp 间隔 |
 | `phase1_sample_id` | 若该 horizon 与 Phase I sample 对应，则填入 Phase I 的 `sample_id`；否则 `null` |
-| `code_label` | 来自 `horizon_labels_*.feather`，若该 horizon 未在 Phase I 标注则为 `null` |
+| `code_label` | train/val 来自对应 `horizon_labels_*.feather`；test 默认必须为 `null`，除非 posthoc baseline 明确读取 |
 | `is_labeled` | 是否拥有 KL/demo 监督信号 |
 | `prev_terminal_position` | 训练 rollout 中由前一 horizon 末仓位填充；初始 horizon 为 0 |
 | `split` | train / val / test |
@@ -158,7 +194,9 @@ horizon_schedule:
 边界约束:
 
 - `last_markout_row` 不得越过对应 split 文件的实际最大行号。markout 越界的 horizon 必须裁掉，禁止 NaN/前向填充（与 Phase I §9.2 一致）。
-- 若 `mode=stride` 且 `stride < h`，相邻 horizon 部分重叠，但 RL training step 之间的 advantage 计算必须按时间正序、不能 reshuffle，否则跨 horizon 仓位继承会被错位。
+- horizon 覆盖范围内任意相邻 timestamp 间隔若大于 `data_gap_check.max_allowed_gap_minutes`，必须标记 `has_data_gap=true`；正式训练/验证/test walk-forward 默认裁掉该 horizon，禁止用前向填充或插值补成连续数据。
+- `phase2_report.json.data_gap_filter` 必须记录每个 split 的候选 horizon 数、gap horizon 数、裁掉比例和最大 gap。
+- 正式 Phase II 禁止 `stride < h` 与 `position_continuity=true` 同时出现；启动时必须直接失败。否则同一真实时间段会被多个 selector 决策重复执行，训练 MDP 与真实 walk-forward 不一致。
 - val/test 的 horizon 不参与训练采样，必须在训练前固定 seed 生成并写入产物。
 - `walk_forward.enabled=true` 时，test horizons 必须按时间严格非重叠串行执行，且每段 horizon 的 `prev_terminal_position` 必须接收前一段的真实末仓位。
 
@@ -167,18 +205,18 @@ horizon_schedule:
 KL/demo regularization 的 `â_t^sel` 来自 Phase I `horizon_labels_*.feather.code_label`:
 
 - 训练 horizon: 必须使用 Phase I 已经分配好的 `code_label`，不得在 Phase II 内重新跑 encoder。
-- val horizon: 同上。
-- test horizon: 默认不参与 KL/demo 计算（test 只评估 selector 在线表现）；若需要在 test 上做"模仿基线"对照，可显式启用 `evaluate_kl_baseline_on_test=true` 并在 evaluator 内调用 `encoder.pt`，但不进入 selector 训练梯度。
+- val horizon: 同上，仅用于 KL/demo regularization 的验证诊断；不得作为 checkpoint hard guardrail。
+- test horizon: `train_phase2.py` 默认不得读取 `horizon_labels_test.feather`，也不得在 test 上计算 KL/demo 后再影响 checkpoint、阈值或配置。若需要 test "模仿基线"对照，只能在 best checkpoint 冻结后由独立 posthoc evaluator 显式读取既有 `horizon_labels_test.feather`；禁止在 Phase II 内对 test 重跑 encoder。
 
 未标注的 horizon（`is_labeled=false`）在训练 batch 中应通过 mask 把 KL term 置零，仍可参与 PPO 的 reward 与 advantage 学习；不允许把没有 label 的 horizon 直接丢弃，否则 walk-forward 训练会出现时间空洞。
 
 ### 3.5 状态字段
 
-`s^sel` 严格遵循论文: 等于 horizon 第一根 bar 的 state vector。工程实现:
+严格论文复现时，`s^sel` 等于 horizon 第一根 bar 的 state vector。工程实盘默认还必须把上一 horizon 的真实末仓位纳入状态，因为 Phase II reward 会扣除继承仓位导致的边界换仓成本；若 reward 依赖 `prev_terminal_position` 而 selector/critic 看不到该值，训练会退化成 POMDP。
 
-- `state_dim` 等于 Phase I `feature_columns` 长度，不重做特征工程，不在 Phase II 拟合任何 scaler。
+- market feature 部分严格等于 Phase I `feature_columns`，不重做特征工程，不在 Phase II 拟合任何 scaler。
 - 状态经由 `Phase1RewardNormalizer` 之外的通道直接喂入 selector；reward normalizer 仅用于 Phase I encoder/decoder 输入，不能拿来变换 Phase II 状态。
-- 严格论文复现禁止扩展 `s^sel`。若启用工程增强（如把 horizon 起点之前 `L` 根 bar 的特征 pooling 进 selector），必须:
+- 严格论文复现禁止扩展 `s^sel`，并必须同时关闭跨 horizon 仓位继承或让每个 horizon 从 flat reset，避免隐藏账户状态。若启用工程增强（如把 horizon 起点之前 `L` 根 bar 的特征 pooling 进 selector），必须:
   - `L` 严格只用历史 bar，禁止读 `t+` 之后的任何行；
   - 在配置和 `phase2_report.json` 中标注 `state_extension=past_lookback(L)`；
   - 严格复现实验中关闭。
@@ -190,11 +228,11 @@ state_extension:
   past_lookback_minutes: 0             # >0 时把过去 L 根 bar 的 mean/std 拼接到 s^sel
   archetype_usage_history_window: 0    # 把过去 W 个 horizon 的 selector action 编码进 s^sel
   account_state:
-    include_position: false            # 把 prev_terminal_position 编码进 s^sel
+    include_position: true             # 工程默认开启；把 prev_terminal_position 编码进 s^sel
     include_recent_pnl: false          # 把过去 W 个 horizon 的 r^sel 编码进 s^sel
 ```
 
-`account_state.include_position` 默认关闭以严格对齐论文；启用时必须在 `phase2_config.yaml` 标注 `paper_strict_reproduction=false`。
+`account_state.include_position=false` 只允许在 `paper_strict_reproduction=true` 或 `position_continuity=false` 的独立 horizon 实验中使用，并必须在 `phase2_report.json` 标注该结果不是实盘连续仓位评估。
 
 ## 4. 目录与模块设计
 
@@ -268,6 +306,8 @@ python scripts/train_phase2.py \
 
 - 校验 Phase I sign-off 状态（`phase1_report.json` 的 collapse / drift / hindsight warning）。
 - 解析配置并写入 `phase2_config.yaml`。
+- 校验 pipeline 集成参数: 不接受旧的 `--train-batch-id` 作为 Phase II batch 入口；必须显式区分 `--phase1-batch-id` 与 `--phase2-batch-id`。
+- 训练流程不得透传 `--with-dp` 或任何会在 Phase II 评估中动态调用 DP 的参数。
 - 调用 `Phase2Trainer.run()`。
 
 ### 4.2 `scripts/backtest_phase2.py`
@@ -281,10 +321,16 @@ python scripts/train_phase2.py \
 ```python
 @dataclass(frozen=True)
 class HorizonScheduleConfig:
-    mode: Literal["stride", "non_overlap", "phase1_index"] = "stride"
-    stride: int = 36
+    mode: Literal["non_overlap", "stride", "phase1_index"] = "non_overlap"
+    stride: int = 72
     non_overlap_stride_minutes: int = 72
     use_phase1_window_index: bool = False
+    position_continuity: bool = True
+    dense_overlap_ablation: bool = False
+    chunk_reset_position: Literal["inherit", "flat"] = "inherit"
+    data_gap_check_enabled: bool = True
+    max_allowed_gap_minutes: int = 5
+    drop_gap_horizons: bool = True
     walk_forward_enabled: bool = True
     walk_forward_seed: int = 1234
 
@@ -293,7 +339,7 @@ class HorizonScheduleConfig:
 class StateExtensionConfig:
     past_lookback_minutes: int = 0
     archetype_usage_history_window: int = 0
-    include_position: bool = False
+    include_position: bool = True
     include_recent_pnl: bool = False
 
 
@@ -307,6 +353,16 @@ class SelectorNetworkConfig:
     action_mask_dead_codes: bool = True
     dead_code_usage_threshold: float = 0.01
     archetype_embedding_dim: int = 16
+    input_norm: Literal["layer_norm", "running_mean_std"] = "layer_norm"
+    position_encoding: Literal["one_hot_3", "scaled_integer"] = "one_hot_3"
+
+
+@dataclass(frozen=True)
+class RewardScalingConfig:
+    mode: Literal["none", "divide_by_horizon", "constant"] = "divide_by_horizon"
+    constant_scale: float = 1.0
+    clip_range: Optional[float] = None
+    report_percentiles: tuple[float, ...] = (0.01, 0.05, 0.5, 0.95, 0.99)
 
 
 @dataclass(frozen=True)
@@ -346,7 +402,7 @@ class Phase2RiskGuardrailConfig:
 class Phase2BehaviorGuardrailConfig:
     max_action_dominance_ratio: float = 0.6
     min_active_archetype_ratio: float = 0.5
-    max_kl_to_demo: float = 1.0
+    warn_kl_to_demo: float = 1.0        # diagnostic only; never rejects best
 
 
 @dataclass(frozen=True)
@@ -355,10 +411,9 @@ class Phase2SelectionPolicyConfig:
     selection_mode: Literal["max", "min"] = "max"
     metric_weights: Dict[str, float] = field(
         default_factory=lambda: {
-            "val_net_return": 0.30,
-            "val_sharpe_ratio": 0.20,
-            "val_return_capture_ratio_vs_dp": 0.15,
-            "val_calmar_ratio": 0.15,
+            "val_net_return": 0.35,
+            "val_sharpe_ratio": 0.25,
+            "val_calmar_ratio": 0.20,
             "val_active_archetype_ratio": 0.10,
             "val_action_entropy": 0.10,
         }
@@ -390,6 +445,7 @@ class Phase2Config:
     horizon_schedule: HorizonScheduleConfig = field(default_factory=HorizonScheduleConfig)
     state_extension: StateExtensionConfig = field(default_factory=StateExtensionConfig)
     selector_network: SelectorNetworkConfig = field(default_factory=SelectorNetworkConfig)
+    reward_scaling: RewardScalingConfig = field(default_factory=RewardScalingConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
     selection_policy: Phase2SelectionPolicyConfig = field(
         default_factory=Phase2SelectionPolicyConfig
@@ -402,12 +458,15 @@ class Phase2Config:
 `paper_strict_reproduction=True` 时调用 `apply_paper_strict_overrides`:
 
 - 关闭所有 `state_extension`；
+- 若关闭 `include_position`，必须同时设置 `horizon_schedule.position_continuity=false` 或强制每个 horizon 从 flat reset；
 - 关闭 `action_mask_dead_codes`；
 - `entropy_coef=0`；
 - `kl_demo_label_smoothing=0`；
 - `advantage_normalization=False`；
 - `reward_normalization=False`；
+- `selector_network.input_norm="layer_norm"`；
 - 强制 `paper_strict_reproduction=True` 写入 `phase2_report.json`。
+- `paper_strict_reproduction=True` 的结果不得与实盘连续仓位 walk-forward 指标混在同一张主表中比较。
 
 `config_hash()` 必须包含 Phase I `phase1_config.config_hash()` 与 `phase1_checkpoint_hash`，以保证 Phase II 产物可追溯到具体的 Phase I best checkpoint。
 
@@ -416,13 +475,14 @@ class Phase2Config:
 | 模块 | 职责 |
 | --- | --- |
 | `phase2_horizon_index.py` | 按 `HorizonScheduleConfig` 与 `RewardAlignment` 枚举/对齐 horizon 起点，写入 `phase2_horizon_index_{split}.feather`；不读取 Phase I window_index 之外的字段。 |
-| `phase2_label_loader.py` | 加载 `horizon_labels_{split}.feather`，按 `sample_id` join 进 `phase2_horizon_index`；为未标注 horizon 填 `code_label=null, is_labeled=False`。 |
+| `phase2_label_loader.py` | 训练阶段只加载 `horizon_labels_train.feather` / `horizon_labels_val.feather`，按 `sample_id` join 进 `phase2_horizon_index`；为未标注 horizon 填 `code_label=null, is_labeled=False`。test label 只能由 posthoc evaluator 读取。 |
 | `phase2_dataset.py` | PyTorch Dataset/IterableDataset；按 `start_index/end_index` 切出 `[h, feature_dim]` 状态张量与 `[h, levels, 4]` execution book，供 `HorizonEnv` 与 `Phase1FrozenPolicy` 推理。复用 Phase I `HorizonBuilder` 的切片逻辑（通过函数级 reuse 而非复制粘贴）。 |
 
 边界约束:
 
 - `phase2_horizon_index.py` 不再做分层采样；分层采样只属于 Phase I demonstration curation。Phase II 训练样本由 walk-forward 调度直接给出。
 - `phase2_label_loader.py` 不写文件，只产出 in-memory join 结果。
+- `phase2_label_loader.py` 在 `split="test"` 且非 posthoc baseline 模式时必须抛错，防止 test oracle label 进入训练或 checkpoint 选择路径。
 - `phase2_dataset.py` 不调用 decoder/selector，只负责把 raw feather 切成张量；模型推理在 `HorizonEnv` 与 `PPOTrainer` 中完成。
 
 ### 4.5 `src/models/archetype_selector.py`
@@ -461,7 +521,8 @@ class Phase1FrozenPolicy:
 
     用法
     ----
-    >>> base_actions, decode_logits = policy.decode(states_seq, code_id)
+    >>> action_t, logits_t = policy.decode_step(state_t, code_id, recurrent_state)
+    >>> base_actions, decode_logits = policy.decode(states_seq, code_id)  # diagnostics only
 
     实现注意
     --------
@@ -478,6 +539,7 @@ class Phase1FrozenPolicy:
 - 不实现 selector，不实现 RL 算法。
 - 不读 horizon_labels；KL/demo 不在本类计算。
 - 接口幂等: 同一 `(states_seq, code_id)` 永远返回相同的动作序列。
+- 正式 walk-forward replay 必须优先使用 `decode_step()` streaming 接口: 每步只把当前可见 `state_t` 送入 decoder，并显式传递 decoder recurrent state。`decode(states_seq, code_id)` 仅用于批量诊断和因果性单测。
 
 ### 4.7 `src/rl/*` 子包
 
@@ -491,7 +553,7 @@ src/rl/scheduling.py
 
 | 模块 | 职责 |
 | --- | --- |
-| `rollout_buffer.py` | 存储 `obs / action / log_prob / value / reward / done / kl_label / is_labeled`；提供 GAE advantage、return、minibatch 采样。 |
+| `rollout_buffer.py` | 存储 `obs / action / log_prob / value / reward / done / truncated / kl_label / is_labeled`；提供 GAE advantage、return、minibatch 采样。 |
 | `actor_critic.py` | 把 `ArchetypeSelector` 封装为 PPO 标准接口（`act / evaluate_actions / get_value`），与 `RolloutBuffer` 解耦。 |
 | `ppo_loss.py` | 计算 PPO clipped surrogate / value loss / entropy bonus / KL-demo loss；提供 KL early-stop。 |
 | `ppo_trainer.py` | 编排 rollout 采集与 update；不负责 horizon-level env 创建（由 `phase2_trainer` 注入 `env_factory`）。 |
@@ -511,11 +573,11 @@ src/rl/scheduling.py
 class HorizonEnv:
     """Horizon-level RL env.
 
-    每次 step:
+    每次 horizon step:
       action a^sel ∈ {0,...,K-1}
       -> codebook[a^sel] 输入 frozen decoder
-      -> decoder 因果生成 a^base_{0:h-1}
-      -> Phase I TradingEnv.replay(a^base) 累加 step rewards
+      -> decoder streaming 因果生成 a^base_{0:h-1}
+      -> Phase I TradingEnv.step/replay 累加 step rewards
       -> 返回 (next_obs, r^sel, done, info)
 
     obs:
@@ -533,7 +595,7 @@ class HorizonEnv:
 
 - 内部维护一个 `TradingEnv` 实例和 `Phase1FrozenPolicy`，不在 `HorizonEnv` 里重写成本/行号映射。
 - `info` 至少返回 `step_rewards / cost_paid / num_switches / boundary_turnover_cost / chosen_code / horizon_index`。
-- 多并行 env: `num_envs` 个 `HorizonEnv` 实例对应 `num_envs` 个独立时间游标，按训练数据顺序滑窗，不能 reshuffle。
+- 多并行 env: `num_envs` 个 `HorizonEnv` 实例对应 `num_envs` 个互不重叠的时间分片和独立时间游标，按训练数据顺序前进，不能 reshuffle；分片边界必须 `done=True` 并按配置 reset 仓位。
 
 ### 4.9 `src/trading/horizon_factory.py`
 
@@ -562,7 +624,7 @@ def make_horizon_env(
 - 实例化 `ArchetypeSelector` 与 `PPOTrainer`。
 - rollout / update 循环；按 PPO update 步触发 validation evaluator。
 - 调用 `Phase2SelectionPolicy.evaluate(metrics)` 决定 best checkpoint。
-- 训练结束后调用 `Phase2BacktestRunner` 在 test 上做一次 walk-forward backtest，导出 `phase2_report.json` 与 selector 产物。
+- best checkpoint 冻结后调用 `Phase2BacktestRunner` 在 train/val/test 上导出 per-horizon records，并在 test 上做一次最终 walk-forward backtest。
 
 边界:
 
@@ -584,7 +646,8 @@ def make_horizon_env(
 
 - `phase2_composite_score` 加权计算；
 - 风险 guardrail（`max_drawdown / min_sharpe / max_turnover_ratio`）；
-- 行为 guardrail（`max_action_dominance_ratio / min_active_archetype_ratio / max_kl_to_demo`）；
+- 行为 guardrail（`max_action_dominance_ratio / min_active_archetype_ratio`）；
+- KL/demo diagnostic（`val_kl_to_demo / warn_kl_to_demo`），只写 warning，不参与 best/reject；
 - KL early-stop 与 dead-code mask 兼容性检查；
 - 拒绝原因写入 manifest。
 
@@ -592,9 +655,9 @@ def make_horizon_env(
 
 职责:
 
-- 在 train/val horizon 上 freeze selector，跑确定性 rollout（取 argmax 或随机 stochastic）评估指标。
+- 在 train/val horizon 上 freeze selector；best/sign-off 使用 argmax rollout，stochastic rollout 只用于 seed pack 诊断。
 - 调度 `phase2_replay.py` 做 walk-forward backtest。
-- 计算 selection-specific 指标（selector entropy、archetype 使用分布、KL to demo、turnover）。
+- 计算 selection-specific 指标（selector entropy、archetype 使用分布、KL to demo、turnover）。KL/demo 仅在 train/val 标注 horizon 上计算，不能读取 test label。
 - 计算真实交易场景指标（净收益、Sharpe、Sortino、MDD、Calmar、turnover ratio、cost paid）。
 - 提供 fixed probe rollout 给 diagnostics 使用。
 
@@ -623,7 +686,7 @@ class Phase2BacktestRunner:
     1. 从 test 文件按 non_overlap stride 枚举 horizon。
     2. 串行执行: 每个 horizon
        reset(prev_terminal_position) -> selector(s^sel) -> code_id
-       -> Phase1FrozenPolicy.decode(states_seq, code_id) -> base_actions
+       -> Phase1FrozenPolicy.decode_step(...) streaming 生成 base_actions
        -> TradingEnv.replay(base_actions) -> step_rewards / cost / final_position
     3. 累加 equity curve / position curve / cost curve。
     4. 输出真实交易指标与 per-horizon record。
@@ -631,7 +694,8 @@ class Phase2BacktestRunner:
     禁止
     ----
     - 调用 DP；
-    - 调用 encoder.pt 决定 code_id（仅可在 KL baseline 对照模式下调用，且不进入 selector 决策）；
+    - 调用 encoder.pt 决定 code_id；
+    - 在 test 上读取 `horizon_labels_test.feather` 后再改变 checkpoint、配置、阈值或 guardrail；
     - 在 horizon 内修改 base_actions（Phase III 的工作）。
     """
 ```
@@ -644,7 +708,7 @@ class Phase2BacktestRunner:
 - selector 行为: action 分布、entropy、KL to demo、dead-code mask 命中、code switch frequency between horizons。
 - horizon-level 收益: train/val/test 的 per-horizon r^sel 分布、累计净收益。
 - 真实交易指标: net_return / annualized_return / sharpe / sortino / max_drawdown / calmar / turnover_ratio / cost_paid / num_horizons / num_trades。
-- 与 baseline 对照: vs DP teacher / vs random selector / vs single-archetype baselines（每个 code 单独 lock 后 walk-forward） / vs buy-and-hold。
+- 与 baseline 对照: vs random selector / vs single-archetype baselines（每个 code 单独 lock 后 walk-forward） / vs buy-and-hold；DP teacher 与 demo-label baseline 只能作为 posthoc hindsight 审计字段。
 - 跨 horizon 边界: boundary_turnover_cost / boundary_position_consistency。
 - Phase I 链路: phase1_batch_id / phase1_checkpoint_hash / phase1_config_hash / hindsight_warning_inherited。
 - guardrail / sign-off: pass/fail 与原因。
@@ -653,19 +717,25 @@ class Phase2BacktestRunner:
 
 ### 5.1 状态空间
 
+论文严格形式:
+
 $$
 s^{sel}_t = s_t
 $$
 
-其中 `s_t` 是 horizon 第一根 bar 的 state vector，与 Phase I encoder 输入第 0 步同源同 schema。
-
-可选扩展（默认关闭）:
+工程实盘默认形式:
 
 ```text
-s^sel_extended = [s_t, past_lookback_pool(s_{t-L:t-1}), one_hot(prev_a^sel), prev_terminal_position, recent_pnl_window]
+s^sel_live = [s_t, prev_terminal_position]
 ```
 
-任何扩展都必须在 `phase2_config.yaml.state_extension` 中显式配置，并在 `phase2_report.json` 中标注。严格论文复现禁止扩展。
+其中 `s_t` 是 horizon 第一根 bar 的 market state vector，与 Phase I encoder 输入第 0 步同源同 schema；`prev_terminal_position` 是上一 horizon 真实执行后的账户状态。可选增强形式:
+
+```text
+s^sel_extended = [s_t, prev_terminal_position, past_lookback_pool(s_{t-L:t-1}), one_hot(prev_a^sel), recent_pnl_window]
+```
+
+除 `prev_terminal_position` 之外，任何扩展都必须在 `phase2_config.yaml.state_extension` 中显式配置，并在 `phase2_report.json` 中标注。严格论文复现禁止扩展，并必须使用独立 flat horizon 或在报告中标注 POMDP 风险。
 
 ### 5.2 动作空间
 
@@ -688,7 +758,7 @@ Action mask（工程增强）:
 t = horizon_index k 的起点行号
 a^sel = π_φ^sel(s^sel)
 codebook[a^sel] -> Phase1FrozenPolicy
-  -> base_actions a^base_{t:t+h-1}
+  -> streaming base_actions a^base_{t:t+h-1}
 TradingEnv.reset(initial_position=prev_terminal_position)
 TradingEnv.replay(a^base)
   -> step_rewards[t:t+h-1]
@@ -699,9 +769,11 @@ prev_terminal_position_{k+1} = final_position
 
 回合（episode）切分:
 
-- 默认每个 horizon 是一个独立 transition；`done=True` 当且仅当当前 horizon 是当前训练 chunk 末段或 walk-forward 末端。
-- 跨 horizon 的 advantage / return 由 GAE 在时间序列上计算（不强制 done=True）。
+- 正式训练默认使用非重叠 horizon 序列；同一 env 内 `done=True` 当且仅当当前 horizon 是该 env 时间分片末段或 walk-forward 末端。
+- 跨 horizon 的 advantage / return 只允许在非重叠、时间正序、仓位连续的序列上由 GAE 计算（不强制 done=True）。
+- 若使用 `stride < h` 或 `phase1_index` 中存在重叠窗口，必须把每个 horizon 视为独立 episode: `done=True`、`prev_terminal_position=0`、不继承仓位、不做跨 horizon GAE，并在 report 标注 `dense_overlap_ablation=true`。
 - `prev_terminal_position` 在 reset 之间持续传递；若启用 multi-env 训练，每个 env 各自维护独立的 `prev_terminal_position`，不能跨 env 共享或乱序。
+- `rollout_length` 只是 PPO buffer 截断长度，不是 episode 边界；rollout 收满时必须用最后一个 obs 的 critic value bootstrap，不能因为 buffer 满而 reset `prev_terminal_position`。
 
 ### 5.4 奖励对齐
 
@@ -715,6 +787,7 @@ Phase I §11 已明确 selector 必须支持 `initial_position != flat`。Phase 
 
 - `HorizonEnv.reset(prev_terminal_position)` 必须把上一段 horizon 的末仓位接入 `TradingEnv.reset(initial_position=...)`。
 - 第一步 target_position（来自 decoder）与 inherited 不一致时，`LobDepthCostModel` 自动扣除换仓成本，selector 该 horizon 的 reward 必然反映边界成本。
+- 当 `position_continuity=true` 时，`prev_terminal_position` 必须进入 selector/critic state；否则启动失败，除非显式 `paper_strict_reproduction=true` 且每个 horizon 从 flat reset。
 - 训练数据按时间正序串行；不允许 reshuffle horizon 顺序，否则 `prev_terminal_position` 会被错误填充。
 - multi-env 之间互不共享 `prev_terminal_position`；每个 env 独立维护时间游标。
 - walk-forward backtest 必须 single-env 串行执行，确保仓位继承严格按真实时间。
@@ -737,6 +810,22 @@ $$
 
 其中 `â_t^sel` 是 Phase I VQ encoder 给该 horizon 分配的 archetype id。该值是单一类别标签，不是分布。
 
+#### 5.7.1 KL/demo 信号性质声明
+
+`â_t^sel` 是 **hindsight regularization label**，不是线上可观测状态:
+
+- `code_label` 由 Phase I VQ encoder 生成，encoder 输入包含完整 horizon 的 `(s_demo, a_demo, r_demo)`。
+- `a_demo / r_demo` 来自 Phase I DP demonstration；DP planner 通过 backward iteration 使用 horizon 内未来价格来构造 teacher trajectory。
+- 因此 `â_t^sel` 编码了 horizon 内部的未来信息。
+- 这不属于 Phase II 推理泄漏: selector 在 rollout、validation、test 和线上推理时只能看到 `s^sel_t` 与当前账户状态，不能读取 `code_label`、DP 或 encoder 输出。
+- 但它属于 supervised learning 里的 hindsight label。Phase II 的泛化能力必须主要由在线 reward / cost 信号和 validation walk-forward 证明，不能把 KL/demo 贴合程度解释为预测能力。
+
+设计约束:
+
+- KL/demo 项只允许作为训练期 regularizer 和诊断指标。
+- `val_kl_to_demo` 不得进入 `phase2_composite_score`、hard guardrail、best checkpoint 选择或 sign-off。
+- report 必须写入 `kl_demo_signal_type="hindsight_regularization"`、`kl_label_coverage_train`、`kl_label_coverage_val` 与 `val_kl_to_demo`。
+
 工程等价:
 
 $$
@@ -752,9 +841,27 @@ $$
 
 ### 5.8 Episode 终止
 
-- 默认按 chunk 终止: 每 `rollout_length` 个 horizon 视为一个 mini-episode，切换 chunk 时 `done=True`。
+- 默认按真实时间分片终止: 只有到达该 env 的时间分片末端、split 末端或显式独立 horizon ablation 时 `done=True`。
+- 每 `rollout_length` 个 horizon 只是 PPO rollout truncation: `truncated=True`、`done=False`，计算 GAE 时用 `last_value` bootstrap，且下一轮 rollout 继续沿用同一 env 的 `prev_terminal_position`。
 - walk-forward backtest 中: episode 不强制终止，只在 test 末段 `done=True`，确保跨 horizon 仓位继承贯穿整段 test。
-- 训练时若启用 chunk 终止，必须在 chunk 边界把 `prev_terminal_position` 重置为 0（可配置 `chunk_reset_position=0`），并在 `phase2_report.json` 中记录由此引入的边界成本上限估计。
+- 默认 `chunk_reset_position="inherit"`，即 rollout chunk / buffer 截断后继续继承上一 chunk 末仓位，与 walk-forward 一致。
+- 若某个实验显式启用 `chunk_reset_position="flat"`，必须标注 `paper_strict_reproduction=true` 或 `position_continuity=false`，并不得作为实盘连续仓位 sign-off；report 必须输出 `chunk_reset_distribution_shift`，量化 reset 为 flat 的 horizon 占比、reset 前真实仓位分布和因此少扣/多扣的边界成本估计。
+
+### 5.9 多 Env 时间分片
+
+`num_envs > 1` 时，每个 `HorizonEnv` 必须只处理一个互不重叠的连续时间分片:
+
+1. 先在 train horizon index 上按 timestamp 升序生成非重叠 horizon 序列。
+2. 设有效 horizon 数为 `M`，按连续区间均分为 `num_envs` 段；每段长度差最多 1 个 horizon。
+3. 每段边界必须落在 horizon 边界上，不允许把同一个 horizon 拆给两个 env。
+4. 每个 env 独立维护 `cursor / prev_terminal_position / recurrent_state / local_running_stats`。
+5. env 分片末端返回 `done=True`；PPO GAE 不得跨 env 或跨分片 bootstrap。
+
+分片健康检查:
+
+- `phase2_env_shards.feather` 必须记录 `env_id / start_sample_id / end_sample_id / start_timestamp / end_timestamp / num_horizons / start_position_policy`。
+- report 必须输出每个 env 的 horizon 数、时间跨度、reward mean/std、action distribution，用于检查分布是否严重不均衡。
+- 若任一 env 的 `num_horizons < rollout_length` 或 reward 分布相对全局偏离超过配置阈值，写入 `risk_health_warnings`。
 
 ## 6. Selector 网络与策略设计
 
@@ -767,7 +874,43 @@ state_dim
   -> trunk_output (hidden_dim)
 ```
 
-`input_norm` 的选择必须固定: 默认 `LayerNorm`，避免 PPO rollout 和 evaluation 中的 running stats 漂移；启用 `RunningMeanStd` 时必须同步 freeze stats 后再做 backtest。
+`input_norm` 的选择必须固定: 默认 `LayerNorm`，避免 PPO rollout 和 evaluation 中的 running stats 漂移；启用 `running_mean_std` 时必须按下述协议同步 freeze stats 后再做 backtest。
+
+#### 6.1.1 输入预处理
+
+Phase II 禁止在 train/val/test 上额外拟合任何 scaler、standardizer 或全局 normalizer。selector 输入预处理只允许使用当前样本内的确定性编码和网络内部 normalization:
+
+| 输入块 | 处理方式 | 说明 |
+| --- | --- | --- |
+| `market_features = s_t` | 原值输入 selector trunk；第一层使用 `LayerNorm(elementwise_affine=True)` | `feature_columns` 与 Phase I 完全一致。LayerNorm 是样本内归一化，不拟合跨时间统计量。 |
+| `prev_terminal_position` | 默认 `one_hot_3=[short, flat, long]` | 编码映射为 `short=[1,0,0]`、`flat=[0,1,0]`、`long=[0,0,1]`；若 asset 有多档仓位，必须改为 `scaled_integer=position/max_position` 并单独标注。 |
+| `past_lookback_pool.mean/std` | 只用 `t-L:t-1` 当前样本内窗口计算；拼接后进入同一个 LayerNorm trunk | 不允许对 lookback 特征再做 train split scaler。 |
+| `archetype_usage_history` | 过去 W 个已执行 selector action 的 one-hot count 或 exponentially decayed frequency | 仅使用过去已完成 horizon；归一化为 `[0,1]` 频率。 |
+| `recent_pnl_window` | 过去 W 个已完成 horizon 的 raw/scaled PnL summary；默认关闭 | 若启用，scale 只能用固定常数或当前窗口内 robust statistic，不得拟合全局 scaler。 |
+
+`state_dim` 计算必须写入 `phase2_config.yaml` 和 report:
+
+```text
+state_dim = len(feature_columns)
+          + position_encoding_dim
+          + optional_past_lookback_dim
+          + optional_archetype_usage_dim
+          + optional_recent_pnl_dim
+```
+
+验收:
+
+- `position_continuity=true` 时，`position_encoding_dim > 0`。
+- `position_encoding=one_hot_3` 只允许三状态仓位；多档仓位必须显式切换为 `scaled_integer` 或更完整的 bucket encoding。
+- 任何输入预处理若需要跨样本统计量，必须移入 `feature_provenance.json` 并满足 train-only fit；Phase II selector 层不得自行 fit。
+
+`RunningMeanStd` 协议（仅 ablation，正式 sign-off 默认禁止）:
+
+- `RunningMeanStd` 只能在 `paper_strict_reproduction=false` 的独立 BATCH_ID 中启用。
+- 训练 rollout 中必须按 env 内时间正序在线更新: 对 horizon `t` 做归一化时，统计量只能来自同一 env 已完成的历史 observation，不得包含当前 horizon 之后的数据。
+- 多 env 时每个 env 先按本地时间游标更新局部统计，再在 PPO update 结束后合并可交换统计量；禁止预先扫描 train split 拟合全局 stats。
+- validation/test/backtest 前必须 freeze stats，并在 `phase2_report.json.input_norm_stats` 记录 freeze timestep、count、mean/std hash。
+- 若实现无法保证以上时序协议，启动时必须拒绝 `input_norm="running_mean_std"`。
 
 ### 6.2 Actor head
 
@@ -779,7 +922,7 @@ trunk_output -> Linear(actor_head_hidden) -> GELU -> Linear(K)
 输出 `log_pi`，`pi = exp(log_pi)`。采样:
 
 - 训练 rollout: stochastic（`Categorical(probs).sample()`），保证 PPO importance sampling 有效。
-- 评估 rollout: 默认 stochastic，与训练一致；可选 `evaluation_action_mode=argmax` 用于诊断 deterministic 表现。
+- 评估 rollout: best/sign-off 主路径必须使用 `argmax`，避免 checkpoint 选择被采样噪声主导；stochastic 只作为诊断，必须用固定 seed pack 输出均值、标准差和最差分位。
 
 ### 6.3 Critic head
 
@@ -859,11 +1002,13 @@ advantage normalization 在每个 minibatch 内执行: `A = (A - mean) / (std + 
 | 字段 | dtype | 说明 |
 | --- | --- | --- |
 | `obs` | float32[N, T, state_dim] | horizon 起点状态 |
+| `env_id` | int64[N, T] | 并行环境 ID；GAE 必须按 env 分组 |
 | `action` | int64[N, T] | selector 选择的 archetype id |
 | `log_prob` | float32[N, T] | 旧策略 log_prob |
 | `value` | float32[N, T] | critic 估值 |
 | `reward` | float32[N, T] | r^sel |
-| `done` | bool[N, T] | chunk 边界 |
+| `done` | bool[N, T] | 真实 episode 终止（时间分片末端、split 末端或独立 horizon ablation） |
+| `truncated` | bool[N, T] | rollout buffer 截断；用于 bootstrap，不表示真实 episode 结束 |
 | `kl_label` | int64[N, T] | â_t^sel；未标注样本任意值 |
 | `is_labeled` | bool[N, T] | KL/demo mask |
 | `dead_code_mask` | bool[N, T, K] | 训练期 mask 快照 |
@@ -872,6 +1017,15 @@ advantage normalization 在每个 minibatch 内执行: `A = (A - mean) / (std + 
 | `info_chosen_code` | int64[N, T] | 与 action 等价；冗余便于审计 |
 
 `N=num_envs, T=rollout_length`。
+
+`done=False, truncated=True` 时，GAE 必须使用下一 obs 的 value bootstrap；只有 `done=True` 时才切断 bootstrap。
+
+多 env GAE 协议:
+
+- GAE 必须按 `env_id` 分组独立计算，不允许把不同 env 的 transition 拼成一条时间序列。
+- 每个 env 的 rollout buffer 维度保持 `[T]` 时间顺序；计算完该 env 的 advantages / returns 后才允许 flatten 合并成 minibatch。
+- env 时间分片边界必须 `done=True`；跨 env 边界天然视为 episode boundary。
+- 单元测试必须构造两个 env reward/value 方向相反的 fixture，证明跨 env 混算会失败、按 env 分组才通过。
 
 ### 7.4 Update 步骤
 
@@ -888,7 +1042,7 @@ for update in range(num_updates):
             policy_loss = -mean(min(surr1, surr2))
             value_loss = 0.5 * mean((value - returns)^2)
             entropy_loss = -mean(entropy)
-            kl_demo_loss = -mean(log_pi_label * is_labeled)
+            kl_demo_loss = sum((-log_pi_label) * is_labeled) / max(sum(is_labeled), 1)
             loss = policy_loss + value_loss * c_v + entropy_loss * c_e + kl_demo_loss * alpha
             backprop, clip grad, step
             if approx_kl > target_kl: break
@@ -904,7 +1058,45 @@ for update in range(num_updates):
 
 退火参数必须写入 `phase2_report.json.schedule`，便于复现。
 
-### 7.6 与 Phase III 的预留
+`ppo.reward_normalization` 协议:
+
+- 默认 `False`，正式 sign-off 禁止启用。
+- 若作为 ablation 启用，reward running mean/std 必须按 env 内时间正序在线更新；计算 horizon `t` 的 normalized reward 时，只能使用该 env 已完成的历史 reward 统计。
+- validation/test 不允许更新 reward normalizer，只能使用训练结束 freeze 的 stats。
+- report 必须写入 `reward_normalization_enabled`、`reward_norm_freeze_timestep`、`reward_norm_count` 和 stats hash。
+
+### 7.6 Horizon Reward Scaling / Clipping
+
+`r^sel = Σ_{τ=t}^{t+h-1} r^step_τ` 是 horizon 级累计 reward，量级通常显著大于单步 reward。为降低 PPO 数值不稳定风险，Phase II 在送入 rollout buffer 前应用固定、可复现的 reward scaling:
+
+```text
+raw_horizon_reward = sum(step_rewards)
+scaled_reward = scale(raw_horizon_reward)
+```
+
+默认配置:
+
+```yaml
+reward_scaling:
+  mode: divide_by_horizon       # none | divide_by_horizon | constant
+  constant_scale: 1.0
+  clip_range: null              # 例如 10.0；正式主实验默认不 clip
+```
+
+语义:
+
+- `divide_by_horizon`: `scaled_reward = raw_horizon_reward / h`，默认启用，使 reward 量级接近 step reward 平均值。
+- `constant`: `scaled_reward = raw_horizon_reward * constant_scale`，只作为 ablation。
+- `clip_range != null` 时，`scaled_reward` 被裁到 `[-clip_range, clip_range]`；正式 sign-off 若启用 clip，必须在 report 中标注并同时报告 unclipped reward 指标。
+- portfolio metrics、equity curve、net_return、Sharpe、MDD 永远使用 raw step reward / raw PnL 计算；reward scaling 只影响 PPO training signal。
+
+report 必须记录:
+
+- `reward_scaling.mode / constant_scale / clip_range`。
+- train rollout 的 `raw_horizon_reward` 与 `scaled_reward` 分布: mean / std / min / max / p01 / p05 / p50 / p95 / p99。
+- 若启用 clipping，记录 `reward_clip_ratio` 与被 clip 的 top-K horizon sample ids。
+
+### 7.7 与 Phase III 的预留
 
 PPO trainer 必须保留 `step_action_callback` 钩子，未来 Phase III refinement 可以在 selector 选完 archetype 之后、decoder 执行前插入 step-level adapter。Phase II 当前实现里该 callback 默认不挂载，但接口必须存在。
 
@@ -914,29 +1106,29 @@ PPO trainer 必须保留 `step_action_callback` 钩子，未来 Phase III refine
 
 | 时机 | 数据 | 用途 |
 | --- | --- | --- |
-| 每 `validate_every_updates` 个 PPO update | val horizons | 计算快速指标，参与 best 选择 |
-| best checkpoint 候选触发时 | val horizons | 跑完整 walk-forward replay，验证候选是否通过 guardrail |
-| 训练结束后 | test horizons | 跑一次 walk-forward backtest 作为最终结果 |
+| 每 `validate_every_updates` 个 PPO update | val horizons | 用 argmax 计算快速指标，参与 best 选择 |
+| best checkpoint 候选触发时 | val horizons | 用 argmax 跑完整 walk-forward replay，验证候选是否通过 guardrail |
+| best checkpoint 冻结后 | test horizons | 用 argmax 跑一次主 backtest，并额外输出 stochastic seed pack 诊断；不得再改变 checkpoint、配置或阈值 |
 
 ### 8.2 Walk-forward 协议
 
 - **顺序**: 严格按 `timestamp` 升序枚举 horizon。
-- **stride**: 默认 `non_overlap`（stride = h），保证每个 minute 只参与一次 r^step；可选 `non_overlap_stride_minutes` 与 walk-forward 起点偏移 `walk_forward_seed`。
+- **stride**: 默认 `non_overlap`（stride = h），保证每个 minute 只参与一次 r^step；walk-forward 起点偏移默认 0。任何偏移/seed 对比只能在 val 上做，test 不允许调参。
 - **仓位继承**: 串行，每个 horizon `reset(prev_terminal_position)`。
-- **selector 推理**: 训练期 stochastic；最终 backtest 默认 stochastic + 固定 seed，再额外跑一次 argmax 作为对照（写入 `evaluation_action_mode=stochastic / argmax`）。
-- **DP 禁用**: 整个 walk-forward 过程中不允许调用 DP；`code_label` 仅作为事后 KL baseline 对照。
+- **selector 推理**: best/sign-off 与最终 test 主结果使用 argmax；stochastic 诊断使用预注册 seed pack（默认 10 个 seed），写入 `stochastic_mean/std/p05/p95`，不参与 best。
+- **DP 禁用**: 整个 train/val/test walk-forward 过程中不允许调用 DP；`code_label` 在 test 上仅可由 posthoc baseline 读取，且不能影响 sign-off。
 
 ### 8.3 Baseline 对照
 
 | Baseline | 描述 | 用途 |
 | --- | --- | --- |
-| `random_selector` | 在 mask 后 K 个 code 中均匀采样 | 检验 selector 是否优于乱选 |
+| `random_selector` | 在 mask 后 K 个 code 中均匀采样，固定 seed pack 评估均值/置信区间 | 检验 selector 是否优于乱选 |
 | `single_archetype_k` | 每个 code 单独锁定后 walk-forward | 暴露每个 archetype 的"裸"能力 |
-| `phase1_demo_label` | 用 `code_label` 当 selector，看模仿基线 | 对照 KL anchor 的上限 |
-| `dp_teacher_offline` | DP 离线最优；仅用于 hindsight 对照 | 上限参考；不参与 sign-off |
+| `phase1_demo_label` | 用 `code_label` 当 selector，看模仿基线 | posthoc hindsight 对照；不参与 best / guardrail / sign-off |
+| `dp_teacher_offline` | DP 离线最优；仅用于 hindsight 对照 | 上限参考；不参与 best / guardrail / sign-off |
 | `buy_and_hold_long / short` | 全仓 long/short 不交易 | 市场基准 |
 
-`baseline_metrics` 必须出现在 `phase2_report.json`，便于直接比较 net_return / Sharpe / MDD。
+`baseline_metrics_val` 可参与 validation 审计与 sign-off；`baseline_metrics_test` 只进入最终报告。任何含 DP 或 demo-label 的 baseline 都必须标注 `hindsight=true`。与 random selector 比较时，selector argmax 必须优于 random seed pack 的均值，并报告相对 p95 的差距作为稳健性诊断。
 
 ### 8.4 关键指标
 
@@ -950,8 +1142,8 @@ PPO trainer 必须保留 `step_action_callback` 钩子，未来 Phase III refine
 | `val_sortino_ratio / test_sortino_ratio` | 年化 Sortino |
 | `val_max_drawdown / test_max_drawdown` | equity curve 最大回撤 |
 | `val_calmar_ratio / test_calmar_ratio` | 年化收益 / 最大回撤 |
-| `val_return_capture_ratio_vs_dp` | `selector_net_return / dp_teacher_net_return`，仅用于审计 |
-| `val_regret_to_dp` | DP teacher 与 selector 的差距 |
+| `val_return_capture_ratio_vs_dp` | `selector_net_return / dp_teacher_net_return`，仅用于 posthoc 审计，不进入 composite score |
+| `val_regret_to_dp` | DP teacher 与 selector 的差距，仅用于 posthoc 审计 |
 
 #### 8.4.2 成本与换手
 
@@ -973,6 +1165,7 @@ PPO trainer 必须保留 `step_action_callback` 钩子，未来 Phase III refine
 | `val_action_dominance_ratio` | 最热 archetype 的占比 |
 | `val_active_archetype_ratio` | 被选频率 ≥ `min_use_threshold` 的 archetype 占比 |
 | `val_kl_to_demo` | 在标注 horizon 上的 KL/demo cross-entropy |
+| `kl_label_coverage_train / kl_label_coverage_val` | 有效 KL/demo label 覆盖率；用于解释 KL loss 量级 |
 | `val_archetype_switch_rate` | 相邻 horizon `a^sel` 不同的比例 |
 | `dead_code_mask_hit_rate` | mask 过滤掉的 logit 比例 |
 
@@ -988,11 +1181,12 @@ PPO trainer 必须保留 `step_action_callback` 钩子，未来 Phase III refine
 
 ### 8.5 Composite score 与 sensitivity
 
-`phase2_composite_score` 默认权重见 §4.3。主实验完成后必须做权重 sensitivity 检验:
+`phase2_composite_score` 默认权重见 §4.3，只允许使用 validation 在线可执行指标，禁止使用 DP teacher、demo-label baseline、test metrics 或任何 hindsight oracle 字段。主实验完成后必须做权重 sensitivity 检验:
 
 - 以 §4.3 默认 perturbations 列表跑权重 ±10%；
 - 写入 `composite_score_sensitivity_phase2.json`；
 - 若不同权重下 best checkpoint 显著漂移，`phase2_report.json.composite_weight_sensitivity_warning=true`。
+- sensitivity 只基于 validation checkpoint manifest 重新计算，不重新训练、不读取 test。
 
 ### 8.6 Per-asset 与 cross-asset 实验
 
@@ -1008,14 +1202,16 @@ PPO trainer 必须保留 `step_action_callback` 钩子，未来 Phase III refine
 phase1 artifacts
   -> Phase1ProductValidator 校验 sign-off
   -> phase2_horizon_index_{split}.feather 生成
-  -> Phase2LabelLoader join code_label
+  -> Phase2LabelLoader join train/val code_label
   -> HorizonEnv * num_envs 创建 (frozen Phase1FrozenPolicy)
   -> ArchetypeSelector + PPOTrainer 初始化
   -> rollout / GAE / PPO update 循环
        每 K updates: Phase2Evaluator 在 val 上跑快速 rollout
        best 候选: Phase2BacktestRunner 在 val 上 walk-forward
        SelectionPolicy.evaluate -> verdict
-  -> 训练结束: Phase2BacktestRunner 在 test 上 walk-forward
+  -> composite score sensitivity 基于 val manifest 复算
+  -> best checkpoint 冻结: Phase2BacktestRunner 在 train/val/test 上各输出 per-horizon records
+  -> Phase2BacktestRunner 在 test 上 walk-forward 一次
   -> Phase2ReportWriter 写 phase2_report.json + 产物
 ```
 
@@ -1024,7 +1220,7 @@ phase1 artifacts
 1. 校验 Phase I 产物完整性与 sign-off 状态。
 2. 加载 train/val/test 数据并校验 schema 与 Phase I `input_schema.json` 一致。
 3. 生成 `phase2_horizon_index_{split}.feather`，按 `HorizonScheduleConfig` 与 `RewardAlignment` 严格枚举 horizon；越界 horizon 必须裁掉。
-4. join Phase I `horizon_labels_*.feather`，标注 `code_label / is_labeled`。
+4. join Phase I `horizon_labels_train.feather` 与 `horizon_labels_val.feather`，标注 `code_label / is_labeled`；训练入口不得读取 `horizon_labels_test.feather`。
 5. 加载 `decoder.pt / codebook.pt` 至 `Phase1FrozenPolicy`，自检结构与 hash。
 6. 构造 `num_envs` 个 `HorizonEnv` 实例，每个 env 拥有独立时间游标与 `prev_terminal_position`。
 7. 实例化 `ArchetypeSelector` 与 `PPOTrainer`；实例化 `Phase2Evaluator`、`Phase2CheckpointManager`、`Phase2SelectionPolicy`。
@@ -1034,8 +1230,8 @@ phase1 artifacts
    - update selector `update_epochs * minibatches`，统计 PPO 健康指标。
    - 每 `validate_every_updates` 在 val 上跑快速评估指标。
    - best 候选触发时跑完整 walk-forward，并交给 `Phase2SelectionPolicy.evaluate`。
-9. 训练结束，最终在 test 上跑 walk-forward backtest（stochastic + argmax 两种模式）。
-10. 跑 `composite_score_sensitivity` 权重扰动实验。
+9. 训练结束后，先基于 validation manifest 跑 `composite_score_sensitivity` 权重扰动实验并冻结 best checkpoint。
+10. 冻结后最终在 test 上跑一次 walk-forward backtest（argmax 主结果 + stochastic seed pack 诊断）；test 结果只能写报告，不能回流到模型选择。
 11. 输出 `phase2_report.json`、`phase2_checkpoint_manifest.json`、selector 产物与 diagnostics。
 
 ## 10. 输出产物
@@ -1049,15 +1245,18 @@ artifacts/{PAIR}/{PHASE2_BATCH_ID}/phase2/
 | `phase2_config.yaml` | 固化本次 Phase II 实验配置 | horizon schedule、PPO、selection policy、Phase I batch id 与 hash |
 | `phase2_horizon_index_train.feather` | 训练 horizon 索引 | sample_id / start_index / end_index / phase1_sample_id / code_label / is_labeled / split |
 | `phase2_horizon_index_val.feather` | 验证 horizon 索引 | 同上 |
-| `phase2_horizon_index_test.feather` | 测试 horizon 索引 | 同上 |
+| `phase2_horizon_index_test.feather` | 测试 horizon 索引 | sample_id / start_index / end_index / split；默认不含 `code_label` |
+| `phase2_env_shards.feather` | 多 env 时间分片记录 | env_id / 时间边界 / horizon 数 / 起止 sample_id |
 | `best_selector.pt` | best checkpoint（selector 权重 + critic 权重） | actor + critic state_dict |
 | `last_selector.pt` | 最后 update 的 selector state | 用于断点恢复 |
 | `checkpoints/step_*.pt` | 周期 checkpoint | 调试用 |
 | `phase2_checkpoint_manifest.json` | checkpoint 验证与选择记录 | timestep、metrics、verdict、Phase I batch id |
 | `phase2_rollout_stats.feather` | 每 update 的 PPO 健康统计 | approx_kl / clip_fraction / explained_variance / lr |
+| `phase2_per_horizon_records_train.feather` | train 上 best selector 的 walk-forward 明细 | sample_id / chosen_code / r^sel / cost_paid / boundary_cost / final_position |
 | `phase2_per_horizon_records_val.feather` | val walk-forward 单 horizon 明细 | sample_id / chosen_code / r^sel / cost_paid / boundary_cost / final_position |
 | `phase2_per_horizon_records_test.feather` | test walk-forward 单 horizon 明细 | 同上 |
-| `phase2_baselines_test.json` | test 上各 baseline 的关键指标 | random_selector / single_archetype_k / dp_teacher / buy_and_hold |
+| `phase2_baselines_val.json` | val 上各 baseline 的关键指标 | random_selector / single_archetype_k / buy_and_hold；DP/demo-label 仅 posthoc |
+| `phase2_baselines_test.json` | test 上各 baseline 的关键指标 | random_selector / single_archetype_k / buy_and_hold；DP/demo-label 仅 posthoc |
 | `phase2_failure_cases_val.html` | val 错题本 | worst_return / largest_regret / largest_cost / unstable_archetype_switch |
 | `phase2_failure_cases_test.html` | test 错题本 | 同上 |
 | `selector_visualization/` | selector 决策可视化 | per-horizon action distribution、archetype 时间序列、KL 曲线 |
@@ -1072,14 +1271,56 @@ artifacts/{PAIR}/{PHASE2_BATCH_ID}/phase2/
   "phase1_batch_id": "batch_001",
   "phase1_checkpoint_hash": "",
   "phase1_config_hash": "",
+  "feature_provenance_hash": "",
   "config_hash": "",
   "paper_strict_reproduction": false,
+  "no_leakage_signoff": true,
+  "test_used_for_selection": false,
   "allow_phase1_hindsight_warning": false,
   "hindsight_warning_inherited": "",
   "horizon_schedule": {
-    "mode": "stride",
-    "stride": 36,
+    "mode": "non_overlap",
+    "stride": 72,
+    "position_continuity": true,
+    "dense_overlap_ablation": false,
+    "chunk_reset_position": "inherit",
+    "data_gap_check_enabled": true,
+    "max_allowed_gap_minutes": 5,
+    "gap_horizons_dropped": true,
     "walk_forward_enabled": true
+  },
+  "data_gap_filter": {
+    "train_gap_horizon_count": 0,
+    "val_gap_horizon_count": 0,
+    "test_gap_horizon_count": 0,
+    "max_timestamp_gap_minutes": 0
+  },
+  "input_norm": {
+    "mode": "layer_norm",
+    "position_encoding": "one_hot_3",
+    "state_dim_breakdown": {},
+    "running_mean_std_enabled": false,
+    "stats_frozen": true,
+    "stats_hash": ""
+  },
+  "env_shards": {
+    "num_envs": 8,
+    "min_horizons_per_env": 0,
+    "max_horizons_per_env": 0,
+    "reward_distribution_warning": false
+  },
+  "reward_scaling": {
+    "mode": "divide_by_horizon",
+    "constant_scale": 1.0,
+    "clip_range": null,
+    "raw_horizon_reward_stats": {},
+    "scaled_reward_stats": {},
+    "reward_clip_ratio": 0.0
+  },
+  "reward_normalization": {
+    "enabled": false,
+    "stats_frozen": true,
+    "stats_hash": ""
   },
   "cost_config_inherited": {},
   "ppo_total_timesteps": 3000000,
@@ -1101,10 +1342,14 @@ artifacts/{PAIR}/{PHASE2_BATCH_ID}/phase2/
     "test_active_archetype_ratio": 0.0,
     "val_archetype_switch_rate": 0.0,
     "test_archetype_switch_rate": 0.0,
+    "kl_demo_signal_type": "hindsight_regularization",
     "val_kl_to_demo": 0.0,
+    "kl_label_coverage_train": 0.0,
+    "kl_label_coverage_val": 0.0,
     "dead_code_mask_hit_rate": 0.0
   },
   "val_metrics": {
+    "evaluation_action_mode": "argmax",
     "net_return": 0.0,
     "annualized_return": 0.0,
     "sharpe_ratio": 0.0,
@@ -1118,8 +1363,19 @@ artifacts/{PAIR}/{PHASE2_BATCH_ID}/phase2/
     "reject_transition_rate": 0.0
   },
   "test_metrics": {
-    "stochastic": {},
-    "argmax": {}
+    "argmax": {},
+    "stochastic_seed_pack": {
+      "mean": {},
+      "std": {},
+      "p05": {},
+      "p95": {}
+    }
+  },
+  "baselines_val": {
+    "random_selector": {},
+    "single_archetype": {},
+    "buy_and_hold_long": {},
+    "buy_and_hold_short": {}
   },
   "baselines_test": {
     "random_selector": {},
@@ -1129,18 +1385,29 @@ artifacts/{PAIR}/{PHASE2_BATCH_ID}/phase2/
     "buy_and_hold_long": {},
     "buy_and_hold_short": {}
   },
-  "phase2_composite_score": 0.0,
-  "best_checkpoint_timestep": 0,
-  "best_checkpoint_path": "best_selector.pt",
-  "selection_metric": "phase2_composite_score",
+	  "phase2_composite_score": 0.0,
+	  "best_checkpoint_timestep": 0,
+	  "best_checkpoint_path": "best_selector.pt",
+	  "selection_metric": "phase2_composite_score",
   "guardrails_pass": false,
+  "val_guardrails_pass": false,
+  "test_guardrails_pass_report_only": false,
+  "chunk_reset_distribution_shift": {},
   "guardrails_reasons": [],
   "composite_weight_sensitivity_warning": false,
   "behavior_health_warnings": [],
   "risk_health_warnings": [],
-  "boundary_health_warnings": []
-}
+	  "boundary_health_warnings": []
+	}
+	```
+
+`guardrails_pass` 语义固定为:
+
+```text
+guardrails_pass = val_guardrails_pass && no_leakage_signoff && !composite_weight_sensitivity_warning
 ```
+
+`test_guardrails_pass_report_only` 只说明冻结 checkpoint 在 test 上是否也满足同一风险阈值，不得反向改变 `guardrails_pass`、`best_checkpoint_timestep` 或任一训练配置。
 
 ## 11. 单元测试与集成测试
 
@@ -1185,22 +1452,40 @@ tests/unit/evaluation/
 | 测试 | 文件 | 关键不变量 |
 | --- | --- | --- |
 | `test_horizon_index_should_drop_markout_overflow` | `test_phase2_horizon_index.py` | 末尾 `last_markout_row > num_rows - 1` 的 horizon 必须被裁掉 |
+| `test_horizon_index_should_drop_data_gap_horizon` | 同上 | horizon 内 timestamp gap 超阈值时必须标记并裁掉 |
 | `test_horizon_index_aligns_with_phase1_when_mode_phase1_index` | 同上 | `phase1_index` 模式下的 sample 集合等于 Phase I sampled 集合 |
+| `test_horizon_index_rejects_overlap_with_position_continuity` | 同上 | `stride < h` 且 `position_continuity=true` 时启动失败 |
 | `test_label_loader_marks_unlabeled_horizons` | `test_phase2_label_loader.py` | 没有 `code_label` 的 horizon `is_labeled=False`，KL term 应被 mask |
+| `test_label_loader_rejects_test_labels_outside_posthoc` | 同上 | 训练/验证流程请求 `split=test` label 时必须抛错 |
 | `test_phase1_frozen_policy_outputs_are_causal` | `test_phase1_frozen_policy.py` | 修改 `s_{τ+1:}` 不改变 `base_actions[:τ+1]` |
+| `test_phase1_frozen_policy_decode_step_matches_prefix_decode` | 同上 | streaming `decode_step()` 与批量 causal prefix 输出一致 |
 | `test_phase1_frozen_policy_parameters_never_update` | 同上 | 任意 forward + backward 后 decoder/codebook 参数不变 |
 | `test_archetype_selector_action_mask_blocks_dead_codes` | `test_archetype_selector.py` | dead-code mask 对应 logit 等于 `-inf`，sample 永不返回 dead code |
 | `test_archetype_selector_log_softmax_consistency` | 同上 | `log_pi.exp().sum(dim=-1) == 1.0` |
+| `test_archetype_selector_input_preprocess_position_one_hot` | 同上 | `prev_terminal_position` 默认编码为 short/flat/long one-hot |
+| `test_archetype_selector_rejects_phase2_scaler_fit` | 同上 | selector 输入预处理不得拟合 train/val/test scaler |
 | `test_rollout_buffer_gae_matches_reference` | `test_rollout_buffer.py` | GAE 输出与手算（小 fixture）一致 |
+| `test_rollout_buffer_bootstraps_when_truncated_not_done` | 同上 | `truncated=True, done=False` 时必须用 `last_value` bootstrap 且不 reset position |
+| `test_rollout_buffer_gae_is_grouped_by_env_id` | 同上 | 不同 env 的 transition 不得互相 bootstrap 或串接 advantage |
+| `test_multi_env_shards_are_contiguous_and_disjoint` | `test_scheduling.py` | env 分片必须连续、互不重叠且落在 horizon 边界 |
+| `test_reward_scaling_divide_by_horizon` | `test_ppo_trainer.py` | 默认 scaled reward 等于 raw horizon reward / h |
+| `test_reward_scaling_reports_raw_and_scaled_stats` | 同上 | report 同时包含 raw/scaled reward 分布统计 |
 | `test_ppo_loss_clip_outside_window` | `test_ppo_loss.py` | `ratio > 1+ε` 与 `< 1-ε` 都触发 clip |
 | `test_ppo_loss_kl_demo_masked_for_unlabeled` | 同上 | `is_labeled=False` 的 KL term=0 |
+| `test_ppo_loss_kl_demo_normalizes_by_labeled_count` | 同上 | KL loss 分母为 labeled count，而非整个 minibatch |
 | `test_ppo_loss_kl_early_stop_triggers` | 同上 | `approx_kl > target_kl` 时返回 early-stop signal |
+| `test_running_mean_std_updates_time_ordered` | `test_actor_critic.py` | RunningMeanStd 归一化 horizon `t` 时不能使用 `t+1` 后 observation |
+| `test_reward_normalization_rejected_for_signoff` | `test_ppo_trainer.py` | 正式 sign-off 配置启用 reward normalization 时启动失败 |
 | `test_horizon_env_reward_equals_trading_env_replay` | `test_horizon_env.py` | `r^sel` 等于内部 `TradingEnv.replay` 累加值，无重写 |
 | `test_horizon_env_inherits_prev_terminal_position` | 同上 | reset 注入非零 `prev_terminal_position` 后第一步 cost 必须出现在 reward |
+| `test_horizon_env_requires_position_in_state_when_continuous` | 同上 | `position_continuity=true` 但 `include_position=false` 时非 strict 配置必须失败 |
 | `test_horizon_env_walk_forward_serial` | 同上 | walk-forward 模式下 horizon 顺序严格按 timestamp，禁止 reshuffle |
 | `test_phase2_selection_policy_blocks_high_drawdown` | `test_phase2_selection_policy.py` | `val_max_drawdown > risk.max_drawdown` 的 checkpoint 必被拒绝 |
 | `test_phase2_selection_policy_blocks_action_dominance` | 同上 | `action_dominance_ratio > behavior.max_action_dominance_ratio` 必拒绝 |
+| `test_phase2_selection_policy_ignores_dp_and_test_metrics` | 同上 | DP/demo-label/test 指标变化不得改变 best verdict |
+| `test_phase2_selection_policy_treats_kl_to_demo_as_warning` | 同上 | `val_kl_to_demo` 超阈只写 warning，不改变 best/reject |
 | `test_phase2_replay_walk_forward_uses_no_dp` | `test_phase2_replay.py` | walk-forward 全程不调用 `SingleTradeDPPlanner` |
+| `test_phase2_replay_uses_streaming_decode` | 同上 | walk-forward replay 每步只传入当前可见 state |
 | `test_phase2_replay_position_consistency_metric` | 同上 | 边界仓位一致比例计算正确 |
 | `test_phase2_metrics_sharpe_annualization_factor` | `test_phase2_metrics_portfolio.py` | annualization_factor 与 Phase I 一致 (525600) |
 | `test_phase2_report_writer_atomic` | `test_phase2_report.py` | 原子写: 中途异常不留下半成品 json |
@@ -1219,20 +1504,35 @@ tests/integration/
   test_phase2_phase1_artifact_validation.py
   test_phase2_dead_code_mask_end_to_end.py
   test_phase2_action_collapse_guardrail.py
+  test_phase2_no_test_feedback_loop.py
+  test_phase2_feature_provenance_guardrail.py
+  test_phase2_argmax_is_primary_selection_mode.py
+  test_phase2_hindsight_kl_demo_is_diagnostic_only.py
+  test_phase2_no_running_stats_future_leakage.py
+  test_phase2_data_gap_filter_end_to_end.py
+  test_phase2_reward_scaling_does_not_affect_portfolio_metrics.py
 ```
 
 ### 11.4 关键集成测试场景
 
 | 测试 | 关键不变量 |
 | --- | --- |
-| `test_phase2_pipeline_smoke` | 在 small fixture 上跑一轮 PPO update + 一次 walk-forward；要求产生 `phase2_report.json` 与 selector 产物，且 `guardrails_pass` 字段存在 |
+| `test_phase2_pipeline_smoke` | 在 small fixture 上跑一轮 PPO update + 一次 walk-forward；要求产生 `phase2_report.json` 与 selector 产物，且 `val_guardrails_pass` / `test_used_for_selection` 字段存在 |
 | `test_phase2_walk_forward_position_continuity` | 构造两段 horizon，第一段末仓位为 long；第二段第一步 target 为 short；reward 必须包含从 long 到 short 的盘口逐档换仓成本 |
 | `test_phase2_kl_demo_anchors_to_phase1_label` | 用 fixture `code_label` 全部为 3，PPO 收敛后 selector 的 action distribution 在 KL term 主导（`α=10`）下应集中到 code 3 |
-| `test_phase2_no_future_information_in_state` | 修改 horizon 内未来行的特征，selector 第 0 步 logits 必须不变；修改未来行盘口，r^sel 受影响但 selector 决策不变（因为 selector 只看 `s_t`） |
+| `test_phase2_no_future_information_in_state` | 修改 horizon 内未来行的特征，selector 第 0 步 logits 必须不变；修改 `prev_terminal_position` 时 logits 允许变化，因为账户状态是当前已知信息 |
 | `test_phase2_reproducibility` | 固定 seed + 固定 Phase I batch id 时，重复运行得到相同的 `best_checkpoint_path` 与 `phase2_composite_score` |
 | `test_phase2_phase1_artifact_validation` | 篡改 `phase1_report.json.fatal_collapse=true` 时 trainer 必须以非零退出码失败 |
 | `test_phase2_dead_code_mask_end_to_end` | fixture 中 code 7 在 Phase I usage=0；Phase II rollout/test 中 selector 永不输出 7；但 `code_label=7` 的样本 KL term 被 mask 而非崩溃 |
 | `test_phase2_action_collapse_guardrail` | 构造 selector 始终选 code 0 的 fixture；selection policy 必须以 `action_dominance` 拒绝 best 选举 |
+| `test_phase2_no_test_feedback_loop` | 构造 test 指标极好/极差两种 fixture；best checkpoint、composite score 和 guardrail verdict 必须完全由 val 决定 |
+| `test_phase2_feature_provenance_guardrail` | feature provenance 中出现 future/centered/target 字段时，正式 sign-off 必须失败 |
+| `test_phase2_argmax_is_primary_selection_mode` | stochastic seed pack 大幅波动时，best checkpoint 仍由 argmax validation metrics 决定 |
+| `test_phase2_hindsight_kl_demo_is_diagnostic_only` | 构造两个 val_kl_to_demo 相反但在线指标相同的 checkpoint；best verdict 必须不变，只产生 warning |
+| `test_phase2_no_running_stats_future_leakage` | 修改未来 observation/reward 后，当前时刻 RunningMeanStd / reward normalization 输出必须不变 |
+| `test_phase2_data_gap_filter_end_to_end` | 构造含数据间隙的 market fixture；跨 gap horizon 被裁掉，report 记录 gap 数量 |
+| `test_phase2_reward_scaling_does_not_affect_portfolio_metrics` | 改变 reward scaling 后 PPO training reward 改变，但 raw backtest net_return / Sharpe 计算口径不变 |
+| `test_phase2_argmax_is_primary_selection_mode` | stochastic seed pack 大幅波动时，best checkpoint 仍由 argmax validation metrics 决定 |
 
 ### 11.5 fixture 设计
 
@@ -1261,22 +1561,31 @@ fixture 必须 deterministic、轻量（< 5 MB），并保留 schema/config hash
 
 - `phase2_horizon_index_*.feather` 必须能被加载，且字段完备。
 - 所有 horizon 的 `last_markout_row <= num_rows - 1`。
+- horizon 内存在 timestamp gap 超阈值时必须裁掉，`data_gap_filter` 统计必须写入 report。
+- 正式训练/验证/test walk-forward 的 horizon 必须非重叠；`stride < h` 只能在 `dense_overlap_ablation=true` 且 `position_continuity=false` 时运行。
 - `is_labeled=False` 的 horizon 不进入 KL/demo 训练梯度。
+- 训练入口不得读取 test label；`phase2_horizon_index_test.feather` 默认不得包含 `code_label`。
 - `feature_columns` 与 Phase I `input_schema.json` 完全一致。
+- `feature_provenance.json` 必须存在且通过可用时间检查；缺失或存在 future/centered/target 字段时 `no_leakage_signoff=false`。
+- `feature_provenance.json` 中所有拟合类处理必须为 `fit_scope=train_only` / `normalization_scope=train_only`；val/test 不得参与 scaler 或截面统计拟合。
 - `cost_config` 与 Phase I `cost_config` 完全一致；不一致时启动失败。
+- `input_norm=running_mean_std` 或 `reward_normalization=true` 时，正式 sign-off 必须失败，除非本次 run 明确标注为 ablation。
+- Phase II 不得拟合任何 selector 输入 scaler；`state_dim_breakdown`、`position_encoding` 与 `feature_columns` 数量必须一致。
 
 ### 12.2 Phase I 产物链路验收
 
 - `phase1_report.json.fatal_collapse=false` 与 `code_assignment_drift_warning=false`。
 - `phase1_report.json.hindsight_bias_warning != "exceeded"` 或 `--allow-phase1-hindsight-warning` 显式开启。
 - `decoder.pt`、`codebook.pt` 加载后 hash 与 `phase1_checkpoint_manifest.json.is_best=true` 行一致。
-- `phase2_report.json` 必须记录 `phase1_batch_id / phase1_checkpoint_hash / phase1_config_hash`。
+- `phase2_report.json` 必须记录 `phase1_batch_id / phase1_checkpoint_hash / phase1_config_hash / feature_provenance_hash`。
 
 ### 12.3 Selector 行为验收
 
 - `val_action_dominance_ratio < behavior.max_action_dominance_ratio`，否则不可成为 best。
 - `val_active_archetype_ratio >= behavior.min_active_archetype_ratio`，否则触发 warning。
-- `val_kl_to_demo < behavior.max_kl_to_demo`，否则提示 KL 退火不足或 selector 与 demonstration 显著背离。
+- `val_kl_to_demo` 只能作为 diagnostic；超过 `behavior.warn_kl_to_demo` 时写入 warning，不得拒绝 checkpoint 或参与 composite score。
+- `kl_label_coverage_train / kl_label_coverage_val` 必须进入 report，用于解释 KL loss 的有效样本覆盖。
+- 当 `position_continuity=true` 时，`prev_terminal_position` 必须进入 selector/critic state。
 - dead-code mask 启用时，selector test action 中 dead code 数量必须为 0。
 
 ### 12.4 PPO 训练健康验收
@@ -1285,28 +1594,36 @@ fixture 必须 deterministic、轻量（< 5 MB），并保留 schema/config hash
 - `explained_variance > 0` 在训练后期；若持续 ≤ 0，写入 `risk_health_warnings`。
 - `clip_fraction` 落在 `[0.05, 0.4]`；超出时提示 lr / advantage scale 调整。
 - `policy_grad_norm` 与 `value_grad_norm` 不爆炸，`grad_clip_norm=0.5` 默认开启。
+- rollout buffer 截断不得被写成真实 episode done；`truncated=True` 时必须 bootstrap value 且继续继承 `prev_terminal_position`。
+- GAE 必须按 `env_id` 分组计算；跨 env 边界不得 bootstrap。
+- `chunk_reset_position` 默认必须为 `inherit`；若为 `flat`，不得作为连续仓位 sign-off，且必须输出 `chunk_reset_distribution_shift`。
+- `phase2_env_shards.feather` 必须存在；env 分片必须连续、互不重叠、覆盖全部训练 horizon，且边界落在 horizon 边界。
+- `reward_scaling.mode` 默认必须为 `divide_by_horizon`；report 必须包含 raw/scaled horizon reward 分布，portfolio metrics 必须使用 raw PnL。
 
 ### 12.5 真实交易场景验收
 
+- Val walk-forward 是 best / sign-off 的唯一评估来源；test walk-forward 是冻结后一次性最终报告，`test_used_for_selection=false` 必须写入 report。
 - Test walk-forward 必须串行执行，单 env、不 reshuffle。
-- `test_metrics.stochastic` 与 `test_metrics.argmax` 必须同时输出。
-- `baselines_test` 必须包含 `random_selector / single_archetype / phase1_demo_label / buy_and_hold_long / buy_and_hold_short`。
-- selector net_return 必须严格大于 `random_selector.net_return`；否则 `phase2_report.json.guardrails_pass=false`。
-- `test_max_drawdown <= risk.max_drawdown`、`test_sharpe_ratio >= risk.min_sharpe_ratio`、`test_turnover_ratio <= risk.max_turnover_ratio`，否则 best checkpoint 不可 sign-off。
+- `val_metrics` 固定为 argmax 指标，是 best/sign-off 主指标；`test_metrics.argmax` 是最终主报告；stochastic 只以 seed pack 诊断形式输出。
+- `baselines_val` 必须包含 `random_selector / single_archetype / buy_and_hold_long / buy_and_hold_short`，用于 validation 审计；`baselines_test` 同字段只作为最终报告。
+- selector `val_metrics.net_return`（argmax）必须严格大于 `random_selector.val_net_return.mean`；否则 `phase2_report.json.val_guardrails_pass=false`。
+- `val_max_drawdown <= risk.max_drawdown`、`val_sharpe_ratio >= risk.min_sharpe_ratio`、`val_turnover_ratio <= risk.max_turnover_ratio`，否则 best checkpoint 不可 sign-off。
+- test 指标若不达阈值，只能记录 `test_guardrails_pass_report_only=false` 或阻止部署该冻结 run，不得触发重新选 checkpoint 或调参；若需要继续迭代，必须重新定义 validation/test 协议。
 - `boundary_turnover_cost / boundary_position_consistency` 必须出现在 report；与 Phase I 边界诊断对齐。
 - `reject_transition_rate` 必须低于 Phase I `cost_config.reject_transition_health.max_dataset_reject_rate`，否则提示数据/盘口异常。
 
 ### 12.6 Composite score 与 sensitivity 验收
 
-- `phase2_composite_score` 必须由 §4.3 默认权重组合计算，且通过所有 guardrails 才能成为 best。
+- `phase2_composite_score` 必须由 §4.3 默认权重组合计算，且只使用 validation 在线可执行指标；DP teacher、demo-label baseline 和 test metrics 不得参与。
+- `phase2_composite_score` 必须基于 argmax validation metrics；stochastic seed pack 不参与 best，只作为稳定性诊断。
 - `composite_score_sensitivity_phase2.json` 必须存在并覆盖默认 perturbations。
 - 不同权重下 best timestep 漂移 ≥ 1 个 update 时打 `composite_weight_sensitivity_warning=true`。
 
 ### 12.7 产物验收
 
-- Phase III 可以仅依赖 `best_selector.pt`、Phase I `decoder.pt / codebook.pt` 与 Phase II `phase2_horizon_index_*.feather` 启动。
+- Phase III 可以仅依赖 `best_selector.pt`、Phase I `decoder.pt / codebook.pt`、Phase II `phase2_horizon_index_*.feather` 与 `phase2_per_horizon_records_train.feather` 启动训练。
 - 全部产物位于 `artifacts/{PAIR}/{PHASE2_BATCH_ID}/phase2/` 目录。
-- 固定 seed + 固定 Phase I batch id 时，复跑得到一致的 `best_checkpoint_path`、`phase2_composite_score`、`test_metrics.stochastic.net_return`（在数值容差内）。
+- 固定 seed + 固定 Phase I batch id 时，复跑得到一致的 `best_checkpoint_path`、`phase2_composite_score`、`test_metrics.argmax.net_return` 与 `test_metrics.stochastic_seed_pack.mean.net_return`（在数值容差内），且 test 结果不得改变 best checkpoint。
 
 ## 13. 风险与处理
 
@@ -1314,21 +1631,33 @@ fixture 必须 deterministic、轻量（< 5 MB），并保留 schema/config hash
 | --- | --- | --- |
 | Phase I codebook 塌缩或 decoder 忽略 code 进入 Phase II | 不同 archetype 解码出几乎相同动作，selector 学不到收益差 | 启动前校验 `phase1_report.json` 的 collapse / behavior diversity warning；不通过时拒绝启动 |
 | Phase I hindsight 分层带来虚高 selector 表现 | 训练 horizon 都来自 horizon-internal strata，selector 在偏置数据上学得"轻松" | 默认拒绝 `hindsight_bias_warning=exceeded` 的 Phase I batch；显式 `--allow-phase1-hindsight-warning` 才可继续，并写入风险确认 |
+| Selector 输入量纲混杂 | market feature、仓位、lookback/pnl 扩展量级不同，MLP 早期训练不稳定 | Phase II 禁止拟合 scaler；market feature 进 LayerNorm trunk，仓位 one-hot，扩展特征只用样本内或固定常数归一化 |
+| 重叠 horizon 与仓位继承同时启用 | 同一真实时间段被重复结算，前一 archetype 还未结束时又选下一 archetype | 正式默认 `non_overlap`；`stride < h` 时必须关闭 `position_continuity`、每 horizon flat reset，并标注 dense ablation |
+| 继承仓位未进入 selector state | 同一 `s_t` 和 action 因隐藏仓位不同得到不同 reward，critic 学成 POMDP | 工程默认 `include_position=true`；`position_continuity=true && include_position=false` 时启动失败 |
 | KL/demo 单 label 形式让 KL term 早期主导，扼杀探索 | Selector 紧紧贴着 demonstration，无法探索更优策略 | 支持 `kl_demo_anneal`；KL coef 默认从 1.0 退火到目标值；`val_kl_to_demo` 与 `entropy` 双面监控 |
+| KL/demo diagnostic 被误用为 hard guardrail | validation best 被 hindsight label 间接筛选，削弱在线评估独立性 | `val_kl_to_demo` 只写 warning，不进入 composite score、不拒绝 checkpoint；单测锁定该语义 |
+| rollout 截断被当作 episode 结束 | 每 `rollout_length` 重置仓位，训练成本低估且与 walk-forward 不一致 | 区分 `truncated` 与 `done`；truncated 时 bootstrap value 并继承 `prev_terminal_position` |
 | 跨 horizon 仓位继承被遗忘 | selector 假设每段 horizon 都从 flat 起点；上线时由于继承 long/short，第一步反复换仓导致成本爆炸 | `HorizonEnv.reset` 强制接受 `prev_terminal_position`；集成测试 `test_phase2_walk_forward_position_continuity` 覆盖 |
-| PPO 高方差 horizon-level reward 导致训练崩溃 | r^sel 量级波动大，advantage 噪声主导，clip_fraction 飙升 | 默认 `advantage_normalization=True`、`grad_clip_norm=0.5`、`target_kl=0.05` early stop；提供 reward normalization 选项作为 ablation |
+| PPO 高方差 horizon-level reward 导致训练崩溃 | r^sel 量级波动大，advantage 噪声主导，clip_fraction 飙升 | 默认 `reward_scaling.mode=divide_by_horizon`、`advantage_normalization=True`、`grad_clip_norm=0.5`、`target_kl=0.05` early stop；raw/scaled reward 分布进入 report |
 | Selector action collapse | 训练后期所有 horizon 都选同一 archetype | `entropy_coef >= 0.01` 默认；`max_action_dominance_ratio=0.6` guardrail 拒绝 best；report 写入 `behavior_health_warnings` |
+| stochastic evaluation 噪声影响 best | 单个随机 seed 下收益好坏改变 checkpoint verdict | best/sign-off 主路径固定为 argmax；stochastic 只用预注册 seed pack 报均值/方差 |
 | Dead code mask 与 demo label 冲突 | Phase I 有 dead code，但部分 horizon `code_label` 指向该 code | mask 的 KL term 置 0 而非崩溃；report 记录冲突数量 |
 | 状态扩展引入未来信息 | 工程师把 `phase1_horizon_labels` 误拼进 `s^sel` 或读了 horizon 内未来行 | 集成测试 `test_phase2_no_future_information_in_state` 覆盖；任何扩展必须在 `phase2_config.yaml.state_extension` 中显式启用 |
+| 原始 feature 已含未来信息 | 外部数据中存在 centered rolling、future return、target-like 字段，Phase II 只按 schema 读取时无法识别 | 正式 sign-off 要求 `feature_provenance.json`；字段名黑名单和可用时间检查不通过时 `no_leakage_signoff=false` |
+| 数据间隙跨 horizon | 维护期或缺失数据导致 horizon 内时间不连续，reward/状态含异常跳变 | horizon indexer 检测 timestamp gap，默认裁掉跨 gap horizon，并在 report 输出 gap 统计 |
 | Walk-forward 顺序错误 | reshuffle 后 prev_terminal_position 错位，边界换仓成本计算错误 | walk-forward 强制 single-env 串行；多 env 训练时每个 env 独立时间游标 |
+| 多 env 分片不均或串接错误 | 某些 env 只看到单一市场区间，或 GAE 跨 env bootstrap | 训练 horizon 按时间连续均分，`phase2_env_shards.feather` 记录分片；GAE 按 `env_id` 分组 |
+| 批量 decoder API 被误用为未来函数 | 实现把完整 horizon 状态一次性送入非因果模型，未来 state 影响早期 action | 正式 replay 使用 `decode_step()` streaming；批量 `decode()` 只允许诊断，并用因果单测锁住 |
 | Reward / cost 配置不一致 | Phase II 切换 `reward_alignment` 或降低 commission 提升表面收益 | 启动时 `cost_alignment_check=True` 校验；不一致直接报错 |
 | 验证指标过拟合 best 选择 | 单一 composite score 选出在 val 上脆弱的 checkpoint | composite weight sensitivity 强制开启；`composite_weight_sensitivity_warning` 触发时不可 sign-off |
+| test 反馈回路 | 看过 test 后调 checkpoint、阈值、walk-forward offset 或超参 | test 只在 best 冻结后运行一次；report 写 `test_used_for_selection=false`；继续迭代必须重新注册评估协议 |
+| DP/demo oracle 进入 checkpoint 选择 | `val_return_capture_ratio_vs_dp` 或 demo-label baseline 让 hindsight 信息影响 best | composite score 和 guardrail 禁止使用 DP/demo-label/test 字段；这些字段仅 posthoc 审计 |
 | 真实账户的盘口拒绝率高 | walk-forward 中 `reject_transition_rate` 偏高，selector 难以按预期成交 | 把 reject 率纳入 risk guardrail；超阈值时回到数据采样与 Phase I 数据质量排查 |
 | 多 asset 共享 selector 提升表面指标但伤害单 asset 收益 | 共享 selector 用更多数据"刷分"，但每个 asset 单独 walk-forward 表现更差 | 共享模式必须用独立 BATCH_ID，并在 report 中按 asset 拆分指标，每个 asset 单独通过 guardrail |
 | 训练步数不足 | 3M 在某些 asset 上不够；selector 还在动 | `total_timesteps` 配置化；`approx_kl` / `explained_variance` 曲线作为收敛参考；可启用 patience-based early stop（默认关闭以对齐论文） |
 | Schedule 不稳定 | linear lr / kl coef 退火过快 | schedule 写入 report；提供 `lr_schedule=constant` 与 `kl_demo_coef` 不退火两种 baseline |
-| 事后 KL baseline 与训练 KL 不一致 | evaluator 用 encoder.pt 重算 label 与训练 label 不同 | 评估用 label 默认全部来自 `horizon_labels_*.feather`；如启用 encoder.pt 重算，必须用独立 BATCH_ID 并在 report 中区分 |
-| Phase III 接口被破坏 | Phase II 改动 `Phase1FrozenPolicy` 的接口，Phase III 无法直接复用 | `Phase1FrozenPolicy.decode` 接口纳入设计文档锁定签名；变更必须经 Phase III 设计审阅 |
+| 事后 KL baseline 与训练 KL 不一致 | posthoc evaluator 读取的 label 与训练 label 来源不一致 | 评估用 label 只能来自既有 `horizon_labels_*.feather`；Phase II 禁止对 test 重跑 encoder |
+| Phase III 接口被破坏 | Phase II 改动 `Phase1FrozenPolicy` 的接口，Phase III 无法直接复用 | `Phase1FrozenPolicy.decode_step` / `decode` 接口纳入设计文档锁定签名；变更必须经 Phase III 设计审阅 |
 
 ## 14. 与 Phase III 的接口
 
@@ -1349,8 +1678,16 @@ Phase III 训练时必须满足:
 
 ```python
 class Phase1FrozenPolicy:
+    def decode_step(
+        self,
+        state_t: Tensor,
+        code_id: int,
+        recurrent_state: Optional[tuple[Tensor, Tensor]] = None,
+    ) -> tuple[Tensor, Tensor, tuple[Tensor, Tensor]]:
+        """returns (base_action_t, decode_logits_t [3], next_recurrent_state)"""
+
     def decode(self, states_seq: Tensor, code_id: int) -> tuple[Tensor, Tensor]:
-        """returns (base_actions [h], decode_logits [h, 3])"""
+        """diagnostics only; returns (base_actions [h], decode_logits [h, 3])"""
 
 class HorizonEnv:
     def reset(self, *, prev_terminal_position: int = 0) -> dict: ...
