@@ -41,6 +41,8 @@ class Phase1ArtifactValidationResult:
     warnings: List[str] = field(default_factory=list)
     phase1_config: Optional[Dict[str, Any]] = None
     phase1_report: Optional[Dict[str, Any]] = None
+    resolved_reward_alignment: str = "paper_formula"
+    cost_config: Dict[str, Any] = field(default_factory=dict)
 
 
 class Phase1ArtifactValidator:
@@ -116,12 +118,35 @@ class Phase1ArtifactValidator:
                 )
             warnings.append("hindsight_bias_warning=exceeded，已显式允许")
 
+        dp_cfg = phase1_config.get("dp", {}) if isinstance(phase1_config, dict) else {}
+        cost_cfg = dp_cfg.get("cost_config", {}) if isinstance(dp_cfg, dict) else {}
+        if not isinstance(cost_cfg, dict):
+            cost_cfg = {}
+        resolved_reward_alignment = cost_cfg.get("reward_alignment", "paper_formula")
+
+        if self.config.cost_alignment_check.enabled:
+            mismatches: List[str] = []
+            p1_max_position = dp_cfg.get("max_position") if isinstance(dp_cfg, dict) else None
+            if p1_max_position is not None and int(p1_max_position) != int(self.config.max_position):
+                mismatches.append(
+                    f"max_position phase1={p1_max_position} phase2={self.config.max_position}"
+                )
+            if resolved_reward_alignment not in {"paper_formula", "next_row_execution"}:
+                mismatches.append(f"reward_alignment 非法: {resolved_reward_alignment!r}")
+            if mismatches:
+                message = "Phase I/II cost alignment mismatch: " + "; ".join(mismatches)
+                if self.config.cost_alignment_check.fail_on_mismatch:
+                    raise Phase1ArtifactValidationError(message)
+                warnings.append(message)
+
         return Phase1ArtifactValidationResult(
             valid=True,
             errors=errors,
             warnings=warnings,
             phase1_config=phase1_config,
             phase1_report=phase1_report,
+            resolved_reward_alignment=resolved_reward_alignment,
+            cost_config=cost_cfg,
         )
 
 
@@ -155,10 +180,14 @@ class Phase2HorizonIndexer:
     输出 phase2_horizon_index_{train,val,test}.feather。
     """
 
-    def __init__(self, config: Phase2Config) -> None:
+    def __init__(
+        self,
+        config: Phase2Config,
+        reward_alignment: Optional[str] = None,
+    ) -> None:
         self.config = config
         self._alignment = RewardAlignment(
-            self._get_reward_alignment()
+            reward_alignment or self._get_reward_alignment()
         )
 
     def _get_reward_alignment(self) -> str:
@@ -238,11 +267,7 @@ class Phase2HorizonIndexer:
                     if sid is not None:
                         phase1_sample_lookup[int(si)] = str(sid)
 
-        gap_threshold = (
-            self.config.horizon_schedule.max_allowed_gap_minutes
-            if self.config.horizon_schedule.data_gap_check_enabled
-            else self.config.horizon_schedule.gap_threshold_bars
-        )
+        expected_bar_minutes = self._infer_expected_bar_minutes(ts_values)
 
         for idx, start in enumerate(starts):
             end = start + horizon - 1
@@ -256,17 +281,24 @@ class Phase2HorizonIndexer:
             if has_ts and len(ts_values) > end:
                 for t in range(start, min(end, len(ts_values) - 1)):
                     try:
-                        diff = ts_values[t + 1] - ts_values[t]
-                        if hasattr(diff, "total_seconds"):
-                            gap_minutes = diff.total_seconds() / 60.0
-                        else:
-                            gap_minutes = float(diff)
+                        gap_minutes = self._timestamp_diff_minutes(
+                            ts_values[t], ts_values[t + 1]
+                        )
                         max_gap_minutes = max(max_gap_minutes, float(gap_minutes))
-                        if gap_minutes > gap_threshold:
-                            is_gap = True
-                            gap_bars = max(gap_bars, int(gap_minutes))
+                        missing_bars = max(
+                            int(round(gap_minutes / expected_bar_minutes)) - 1,
+                            0,
+                        )
+                        gap_bars = max(gap_bars, missing_bars)
                     except (TypeError, ValueError):
                         pass
+                if self.config.horizon_schedule.data_gap_check_enabled:
+                    is_gap = (
+                        max_gap_minutes
+                        > self.config.horizon_schedule.max_allowed_gap_minutes
+                    )
+                else:
+                    is_gap = gap_bars > self.config.horizon_schedule.gap_threshold_bars
 
             # label
             code_label: Optional[int] = None
@@ -300,6 +332,30 @@ class Phase2HorizonIndexer:
             entries = [e for e in entries if not e.is_gap]
 
         return entries
+
+    @staticmethod
+    def _timestamp_diff_minutes(start: Any, end: Any) -> float:
+        """返回两个 timestamp 之间的分钟差。"""
+        diff = end - start
+        if hasattr(diff, "total_seconds"):
+            return float(diff.total_seconds() / 60.0)
+        return float(diff)
+
+    @classmethod
+    def _infer_expected_bar_minutes(cls, ts_values: List[Any]) -> float:
+        """用正向 timestamp 差估计 bar 间隔，缺省为 1 分钟。"""
+        diffs: List[float] = []
+        for i in range(min(len(ts_values) - 1, 128)):
+            try:
+                diff = cls._timestamp_diff_minutes(ts_values[i], ts_values[i + 1])
+            except (TypeError, ValueError):
+                continue
+            if diff > 0:
+                diffs.append(diff)
+        if not diffs:
+            return 1.0
+        diffs.sort()
+        return max(float(diffs[len(diffs) // 2]), 1e-8)
 
     def write_index(
         self,

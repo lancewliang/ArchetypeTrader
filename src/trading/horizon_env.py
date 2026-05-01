@@ -127,6 +127,14 @@ class HorizonEnv:
             reset_risk_state=False,
         )
 
+    def current_label_info(self) -> Tuple[Optional[int], bool]:
+        """返回当前 cursor 对应 horizon 的 KL label 信息。"""
+        if self._done or self._cursor >= len(self.horizon_indices):
+            return None, False
+        current_horizon_idx = self.horizon_indices[self._cursor]
+        entry = self.dataset.horizon_entries[current_horizon_idx]
+        return entry.code_label, bool(entry.is_labeled)
+
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, HorizonStepInfo]:
         """执行一个完整 horizon。
 

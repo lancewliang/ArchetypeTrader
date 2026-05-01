@@ -32,6 +32,11 @@ from src.data.phase2_horizon_index import (
 from src.data.phase2_label_loader import Phase2LabelLoader
 from src.data.schema import InputSchemaValidator
 from src.evaluation.phase2_evaluator import Phase2Evaluator
+from src.evaluation.phase2_distribution_shift import Phase2DistributionShiftMonitor
+from src.evaluation.phase2_execution_stress import (
+    ExecutionStressScenario,
+    Phase2ExecutionStressRunner,
+)
 from src.evaluation.phase2_replay import Phase2BacktestRunner
 from src.evaluation.phase2_report import Phase2ReportPaths, Phase2ReportWriter
 from src.evaluation.phase2_metrics import (
@@ -112,6 +117,8 @@ class Phase2Trainer:
         """
         import torch
 
+        self._validate_unsupported_features()
+
         artifacts_dir = self.config.artifacts_dir()
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,7 +141,11 @@ class Phase2Trainer:
         input_schema = read_json(self.config.phase1_dir() / "input_schema.json")
 
         # 4. 生成 horizon index
-        indexer = Phase2HorizonIndexer(self.config)
+        reward_alignment_name = val_result.resolved_reward_alignment
+        indexer = Phase2HorizonIndexer(
+            self.config,
+            reward_alignment=reward_alignment_name,
+        )
         horizon = self.config.horizon
 
         # 加载 Phase I labels (仅 train/val)
@@ -166,11 +177,19 @@ class Phase2Trainer:
             )
 
         # 6. 构造 datasets
-        all_entries = train_entries + val_entries + test_entries
         # 使用 train frame 构造 train dataset
-        train_dataset = Phase2Dataset(frames["train"], train_entries, input_schema, self.config)
-        val_dataset = Phase2Dataset(frames["val"], val_entries, input_schema, self.config)
-        test_dataset = Phase2Dataset(frames["test"], test_entries, input_schema, self.config)
+        train_dataset = Phase2Dataset(
+            frames["train"], train_entries, input_schema, self.config,
+            reward_alignment=reward_alignment_name,
+        )
+        val_dataset = Phase2Dataset(
+            frames["val"], val_entries, input_schema, self.config,
+            reward_alignment=reward_alignment_name,
+        )
+        test_dataset = Phase2Dataset(
+            frames["test"], test_entries, input_schema, self.config,
+            reward_alignment=reward_alignment_name,
+        )
 
         # 7. 加载 Phase1FrozenPolicy
         frozen_policy = Phase1FrozenPolicy.load(
@@ -182,12 +201,15 @@ class Phase2Trainer:
         # 8. 构造 trading env factory
         p1_config = val_result.phase1_config or {}
         dp_cfg = p1_config.get("dp", {})
-        cost_cfg = dp_cfg.get("cost_config", {})
+        cost_cfg = val_result.cost_config or dp_cfg.get("cost_config", {})
         cost_model = LobDepthCostModel(
             commission_rate=cost_cfg.get("commission_rate", 0.0002),
             book_levels=cost_cfg.get("book_levels", 5),
+            insufficient_depth_policy=cost_cfg.get(
+                "insufficient_depth_policy", "reject_transition"
+            ),
         )
-        alignment = RewardAlignment(cost_cfg.get("reward_alignment", "paper_formula"))
+        alignment = RewardAlignment(reward_alignment_name)
 
         def trading_env_factory():
             return TradingEnv(
@@ -237,7 +259,10 @@ class Phase2Trainer:
         # Checkpoint + selection policy
         ckpt_mgr = Phase2CheckpointManager(artifacts_dir)
         policy = Phase2SelectionPolicy(self.config.selection_policy)
-        history = Phase2SelectionHistory()
+        history = self._history_from_manifest(ckpt_mgr, policy)
+
+        resume_audit = self._maybe_resume(ppo_trainer, ckpt_mgr)
+        start_update = int(resume_audit.get("restored_update_count", 0))
 
         # Evaluator
         val_runner = Phase2BacktestRunner(
@@ -250,7 +275,15 @@ class Phase2Trainer:
 
         # 11. 训练循环
         eval_every = max(num_updates // 20, 1)
-        for update_idx in range(num_updates):
+        early_stop_triggered = False
+        early_stop_update_idx: Optional[int] = None
+        early_stop_best: Optional[float] = None
+        early_stop_wait = 0
+        rolling_guardrail_pass = True
+        rolling_guardrail_reasons: List[str] = []
+        last_candidate_rolling_result = None
+
+        for update_idx in range(start_update, num_updates):
             stats = ppo_trainer.collect_and_update()
             self._rollout_stats.append({
                 "update_idx": update_idx,
@@ -268,11 +301,18 @@ class Phase2Trainer:
                 "rollout_done_count": stats.rollout_done_count,
                 "rollout_truncated_count": stats.rollout_truncated_count,
                 "rollout_bootstrap_count": stats.rollout_bootstrap_count,
+                "kl_demo_dominance_ratio": stats.kl_demo_dominance_ratio,
             })
 
             # 保存 last
             state = ppo_trainer.get_state()
             ckpt_mgr.save_last(state, update_idx)
+            if (
+                self.config.checkpoint_every_updates
+                and self.config.checkpoint_every_updates > 0
+                and (update_idx + 1) % self.config.checkpoint_every_updates == 0
+            ):
+                ckpt_mgr.save_periodic(state, update_idx)
 
             # 定期评估
             if (update_idx + 1) % eval_every == 0 or update_idx == num_updates - 1:
@@ -284,6 +324,7 @@ class Phase2Trainer:
                     "approx_kl": stats.approx_kl,
                     "clip_fraction": stats.clip_fraction,
                     "explained_variance": stats.explained_variance,
+                    "kl_demo_dominance_ratio": stats.kl_demo_dominance_ratio,
                 }
                 eval_result = evaluator.evaluate_val_fast(update_idx, ppo_stats_dict)
                 eval_metrics = eval_result.metrics
@@ -297,6 +338,20 @@ class Phase2Trainer:
                 eval_metrics["phase2_composite_score_debug"] = score_debug
 
                 verdict = policy.evaluate(eval_metrics, history)
+                rolling_payload = None
+                if verdict.decision == "promote_to_best" and self.config.rolling_validation.enabled:
+                    candidate_rolling = evaluator.evaluate_rolling_validation()
+                    last_candidate_rolling_result = candidate_rolling
+                    rolling_payload = self._rolling_result_payload(candidate_rolling)
+                    verdict = policy.evaluate(eval_metrics, history, rolling_payload)
+                    rolling_guardrail_pass = verdict.decision != "reject"
+                    rolling_guardrail_reasons = [
+                        r for r in verdict.reasons if r.startswith("rolling_")
+                    ]
+                    eval_metrics["rolling_guardrail_pass"] = rolling_guardrail_pass
+                    eval_metrics["rolling_guardrail_reasons_count"] = len(
+                        rolling_guardrail_reasons
+                    )
                 ckpt_mgr.commit_verdict(state, verdict, update_idx, eval_metrics)
                 history = policy.update_history(history, eval_metrics, verdict)
 
@@ -315,6 +370,24 @@ class Phase2Trainer:
                     for r in eval_result.per_horizon_records
                 ]
                 ckpt_mgr.save_replay_log(replay_dicts)
+
+                if self.config.early_stopping.enabled:
+                    metric_name = self.config.early_stopping.metric
+                    current = float(eval_metrics.get(metric_name, 0.0))
+                    improved = self._is_metric_improved(
+                        current,
+                        early_stop_best,
+                        self.config.early_stopping.min_delta,
+                    )
+                    if improved:
+                        early_stop_best = current
+                        early_stop_wait = 0
+                    else:
+                        early_stop_wait += 1
+                    if early_stop_wait >= self.config.early_stopping.patience:
+                        early_stop_triggered = True
+                        early_stop_update_idx = update_idx
+                        break
 
         # 12. 最终评估与报告
         report_paths = Phase2ReportPaths.from_artifacts_dir(artifacts_dir)
@@ -354,7 +427,7 @@ class Phase2Trainer:
         phr_test = writer.write_per_horizon_records(test_rec_dicts, "test")
 
         # Rolling validation
-        rolling_result = evaluator.evaluate_rolling_validation()
+        rolling_result = last_candidate_rolling_result or evaluator.evaluate_rolling_validation()
         rolling_records = [
             Phase2Evaluator._record_to_dict(r)
             for fold_records in rolling_result.per_fold_records
@@ -367,6 +440,7 @@ class Phase2Trainer:
                 "worst_fold_quantile": rolling_result.worst_fold_quantile,
                 "fold_volatility": rolling_result.fold_volatility,
                 "fold_sizes": rolling_result.fold_sizes,
+                "fold_initial_positions": rolling_result.fold_initial_positions,
                 "fold_initial_position_policy": rolling_result.fold_initial_position_policy,
             },
             rolling_records,
@@ -420,6 +494,31 @@ class Phase2Trainer:
 
         # Label coverage
         train_coverage = label_loader.compute_coverage_stats(train_entries, "train")
+        distribution_summary = self._distribution_shift_summary(
+            train_dataset, val_dataset, test_dataset
+        )
+        execution_stress_summary = self._execution_stress_summary(
+            actor_critic,
+            frozen_policy,
+            test_dataset,
+            cost_cfg,
+            alignment,
+            num_codes,
+            dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
+        )
+        kl_dominance_values = [
+            float(r.get("kl_demo_dominance_ratio", 0.0))
+            for r in self._rollout_stats
+        ]
+        kl_dominance_summary = {
+            "last": kl_dominance_values[-1] if kl_dominance_values else 0.0,
+            "mean": (
+                sum(kl_dominance_values) / len(kl_dominance_values)
+                if kl_dominance_values
+                else 0.0
+            ),
+            "max": max(kl_dominance_values) if kl_dominance_values else 0.0,
+        }
 
         report_summary: Dict[str, Any] = {
             "config_hash": self.config.config_hash(),
@@ -434,8 +533,8 @@ class Phase2Trainer:
             "equity_curve_summary": val_metrics.get("equity_curve_summary", {}),
             "behavior_health_warnings": [],
             "risk_health_warnings": [],
-            "ood_warning_count": 0,
-            "distribution_shift_warning_count": 0,
+            "ood_warning_count": distribution_summary["warning_count"],
+            "distribution_shift_warning_count": distribution_summary["warning_count"],
             "val_metrics": {k: v for k, v in val_metrics.items() if isinstance(v, (int, float, str, bool))},
             "test_metrics": {k: v for k, v in test_metrics.items() if isinstance(v, (int, float, str, bool))},
             "horizon_schedule": {
@@ -466,6 +565,14 @@ class Phase2Trainer:
                 "clip_range": self.config.reward_scaling.clip_range,
                 "last_reward_clipped_ratio": self._rollout_stats[-1].get("reward_clipped_ratio", 0.0) if self._rollout_stats else 0.0,
             },
+            "reward_normalization": {
+                "enabled": self.config.reward_normalization.enabled or self.config.ppo.reward_normalization,
+                "implemented": False,
+                "reward_normalization_rejected_for_signoff": (
+                    self.config.reward_normalization.enabled
+                    or self.config.ppo.reward_normalization
+                ),
+            },
             "cost_config_inherited": cost_cfg,
             "baselines_val": bl_val_summary,
             "baselines_test": bl_test_summary,
@@ -475,14 +582,42 @@ class Phase2Trainer:
                 "fold_volatility": rolling_result.fold_volatility,
                 "num_folds": len(rolling_result.fold_metrics),
                 "fold_sizes": rolling_result.fold_sizes,
+                "fold_initial_positions": rolling_result.fold_initial_positions,
+                "fold_initial_position_policy": rolling_result.fold_initial_position_policy,
             } if rolling_result.fold_metrics else {},
-            "execution_stress_summary": {"enabled": False, "implemented": False},
+            "rolling_guardrail_pass": rolling_guardrail_pass,
+            "rolling_guardrail_reasons": rolling_guardrail_reasons,
+            "execution_stress_summary": execution_stress_summary,
+            "distribution_shift_summary": distribution_summary,
             "resume_ready": {
                 "enabled": self.config.resume.enabled,
                 "last_selector_exists": ckpt_mgr.last_path.exists(),
+                **resume_audit,
             },
-            "guardrails_pass": True,
-            "val_guardrails_pass": True,
+            "early_stopping": {
+                "enabled": self.config.early_stopping.enabled,
+                "triggered": early_stop_triggered,
+                "metric": self.config.early_stopping.metric,
+                "update_idx": early_stop_update_idx,
+                "hypothetical_early_stop_timestep": (
+                    early_stop_update_idx
+                    * self.config.num_envs
+                    * self.config.rollout_length
+                    if early_stop_update_idx is not None
+                    else None
+                ),
+            },
+            "kl_demo_dominance_ratio": kl_dominance_summary,
+            "entropy_schedule": {
+                "entropy_min_coef": self.config.ppo.entropy_min_coef,
+                "last_entropy_coef": (
+                    schedule_mgr.current_state().entropy_coef
+                    if schedule_mgr is not None
+                    else self.config.ppo.entropy_coef
+                ),
+            },
+            "guardrails_pass": rolling_guardrail_pass,
+            "val_guardrails_pass": rolling_guardrail_pass,
             "test_guardrails_pass_report_only": True,
             "dead_code_mask": dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
             "num_updates": num_updates,
@@ -508,6 +643,207 @@ class Phase2Trainer:
             phase2_report=report_path,
             replay_log=ckpt_mgr.replay_log_path,
         )
+
+    def _validate_unsupported_features(self) -> None:
+        """对尚未实现但有配置入口的功能 fail-fast。"""
+        if self.config.reward_normalization.enabled or self.config.ppo.reward_normalization:
+            raise Phase2FatalError(
+                "Phase II reward_normalization 尚未实现 running_mean_std；"
+                "请关闭 reward_normalization 并使用 reward_scaling。"
+            )
+
+    def _history_from_manifest(
+        self,
+        ckpt_mgr: Phase2CheckpointManager,
+        policy: Phase2SelectionPolicy,
+    ) -> Phase2SelectionHistory:
+        """从 checkpoint manifest 恢复 best selection history。"""
+        history = Phase2SelectionHistory()
+        metric_name = self.config.selection_policy.selection_metric
+        fallback_metric = self.config.selection_policy.primary_metric
+        for entry in ckpt_mgr._entries:
+            if not entry.is_best:
+                continue
+            metrics = entry.metrics or {}
+            if metric_name in metrics:
+                value = metrics[metric_name]
+            else:
+                value = metrics.get(fallback_metric)
+            if value is None:
+                continue
+            history.best_metric = float(value)
+            history.best_update_idx = int(entry.update_idx)
+        return history
+
+    def _maybe_resume(
+        self,
+        ppo_trainer: PPOTrainer,
+        ckpt_mgr: Phase2CheckpointManager,
+    ) -> Dict[str, Any]:
+        """按 config.resume_from 恢复训练状态并返回审计信息。"""
+        audit: Dict[str, Any] = {
+            "source_checkpoint": self.config.resume_from,
+            "restored_update_count": 0,
+            "missing_fields": [],
+            "optimizer_state_restored": False,
+            "env_state_restored": False,
+            "rng_state_restored": False,
+        }
+        if not self.config.resume_from:
+            return audit
+
+        path = Path(self.config.resume_from)
+        state = ckpt_mgr.load(path)
+        required = ["model_state", "schedule_state"]
+        if self.config.resume.require_optimizer_state:
+            required.append("optimizer_state")
+        if self.config.resume.require_env_state:
+            required.append("env_states")
+        missing = [key for key in required if key not in state]
+        audit["missing_fields"] = missing
+        if missing:
+            raise Phase2FatalError(
+                f"resume checkpoint 缺失关键字段: {missing}"
+            )
+
+        ppo_trainer.load_state(state)
+        audit["restored_update_count"] = int(state.get("update_count", 0))
+        audit["optimizer_state_restored"] = "optimizer_state" in state
+        audit["env_state_restored"] = "env_states" in state
+        audit["rng_state_restored"] = "rng_state" in state
+        return audit
+
+    def _rolling_result_payload(self, rolling_result) -> Dict[str, Any]:
+        """转换 rolling validation 结果为 selection policy 可读 payload。"""
+        return {
+            "enabled": self.config.rolling_validation.enabled,
+            "fold_mean": rolling_result.fold_mean,
+            "worst_fold_quantile": rolling_result.worst_fold_quantile,
+            "fold_volatility": rolling_result.fold_volatility,
+            "fold_sizes": rolling_result.fold_sizes,
+            "max_fold_volatility": self.config.rolling_validation.max_fold_volatility,
+            "min_worst_fold_score": self.config.rolling_validation.min_worst_fold_score,
+        }
+
+    def _is_metric_improved(
+        self,
+        current: float,
+        best: Optional[float],
+        min_delta: float,
+    ) -> bool:
+        """按 selection primary_mode 判断 early-stopping metric 是否改善。"""
+        if best is None:
+            return True
+        if self.config.selection_policy.primary_mode == "min":
+            return current < best - float(min_delta)
+        return current > best + float(min_delta)
+
+    def _distribution_shift_summary(
+        self,
+        train_dataset: Phase2Dataset,
+        val_dataset: Phase2Dataset,
+        test_dataset: Phase2Dataset,
+    ) -> Dict[str, Any]:
+        """fit train selector-state stats，并对 val/test 做 OOD score。"""
+        if len(train_dataset) == 0:
+            return {
+                "enabled": True,
+                "warning_count": 0,
+                "max_score_val": 0.0,
+                "max_score_test": 0.0,
+                "dims": [],
+                "fallback_action": self.config.distribution_shift.fallback_action,
+            }
+        feature_dim = train_dataset.state_spec().feature_dim
+        dims = (
+            list(range(feature_dim))
+            if self.config.distribution_shift.use_market_features_only
+            else list(range(train_dataset.state_spec().total_dim))
+        )
+        monitor = Phase2DistributionShiftMonitor(
+            self.config.distribution_shift,
+            dims=dims,
+        )
+        monitor.fit(
+            train_dataset.get_selector_state(i, 0)
+            for i in range(len(train_dataset))
+        )
+
+        def _scores(dataset: Phase2Dataset) -> List[float]:
+            vals = []
+            for i in range(len(dataset)):
+                vals.append(monitor.score(dataset.get_selector_state(i, 0)).score)
+            return vals
+
+        val_scores = _scores(val_dataset)
+        test_scores = _scores(test_dataset)
+        threshold = self.config.distribution_shift.threshold
+        warning_count = sum(1 for s in val_scores + test_scores if s > threshold)
+        return {
+            "enabled": True,
+            "warning_count": warning_count,
+            "max_score_val": max(val_scores) if val_scores else 0.0,
+            "max_score_test": max(test_scores) if test_scores else 0.0,
+            "dims": dims,
+            "fallback_action": self.config.distribution_shift.fallback_action,
+        }
+
+    def _execution_stress_summary(
+        self,
+        actor_critic: ActorCritic,
+        frozen_policy: Phase1FrozenPolicy,
+        test_dataset: Phase2Dataset,
+        cost_cfg: Dict[str, Any],
+        alignment: RewardAlignment,
+        num_codes: int,
+        dead_code_mask: List[bool],
+    ) -> Dict[str, Any]:
+        """运行 report-only execution stress scenarios。"""
+        base_commission = cost_cfg.get("commission_rate", 0.0002)
+        book_levels = cost_cfg.get("book_levels", 5)
+        insufficient_depth_policy = cost_cfg.get(
+            "insufficient_depth_policy", "reject_transition"
+        )
+
+        def _run_records(scenario: ExecutionStressScenario):
+            def _factory():
+                return TradingEnv(
+                    cost_model=LobDepthCostModel(
+                        commission_rate=base_commission * scenario.commission_multiplier,
+                        book_levels=book_levels,
+                        insufficient_depth_policy=insufficient_depth_policy,
+                        slippage_multiplier=scenario.slippage_multiplier,
+                    ),
+                    reward_alignment=alignment,
+                    max_position=self.config.max_position,
+                )
+
+            runner = Phase2BacktestRunner(
+                self.config,
+                actor_critic,
+                frozen_policy,
+                test_dataset,
+                _factory,
+            )
+            return runner.run_walk_forward("test", deterministic=True)
+
+        runner = Phase2ExecutionStressRunner(
+            self.config.execution_stress,
+            _run_records,
+            num_codes,
+            dead_code_mask,
+        )
+        result = runner.run()
+        worst = None
+        if result.scenarios:
+            worst = min(result.scenarios, key=lambda s: s.get("net_return", 0.0))
+        return {
+            "enabled": True,
+            "implemented": True,
+            "scenarios": result.scenarios,
+            "selector_latency": result.selector_latency,
+            "worst_scenario": worst,
+        }
 
     def _seed_everything(self) -> None:
         """统一设置全局 seed（镜像 Phase1Trainer._seed_everything）。"""

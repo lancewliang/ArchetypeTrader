@@ -75,3 +75,11 @@ class TestPhase2CheckpointManager:
         best_entries = [e for e in ckpt_mgr._entries if e.is_best]
         assert len(best_entries) == 1
         assert best_entries[0].update_idx == 1
+
+    def test_periodic_checkpoint_records_manifest(self, ckpt_mgr, dummy_state):
+        """periodic checkpoint 写入 checkpoints/ 并记录 manifest。"""
+        path = ckpt_mgr.save_periodic(dummy_state, update_idx=7)
+        assert path.exists()
+        assert path.parent.name == "checkpoints"
+        assert ckpt_mgr._entries[-1].verdict == "periodic"
+        assert ckpt_mgr._entries[-1].update_idx == 7

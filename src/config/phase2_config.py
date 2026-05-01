@@ -106,6 +106,7 @@ class PPOConfig:
     value_clip_range: Optional[float] = None
     value_loss_coef: float = 0.5
     entropy_coef: float = 0.01
+    entropy_min_coef: float = 1e-4
     entropy_warmup_coef: Optional[float] = None
     entropy_warmup_fraction: float = 0.0
     kl_demo_coef: float = 1.0  # 论文 α=1
@@ -153,6 +154,9 @@ class Phase2SelectionPolicyConfig:
     max_turnover_ratio: float = 5.0
     max_action_dominance_ratio: float = 0.8
     min_active_archetype_ratio: float = 0.3
+    max_fold_volatility: Optional[float] = None
+    min_rolling_worst_fold_score: Optional[float] = None
+    require_rolling_result_for_promotion: bool = False
 
 
 # ---------- Reward Scaling ----------
@@ -285,6 +289,7 @@ class RollingValidationConfig:
     fold_seed: int = 42
     worst_fold_quantile: float = 0.25
     max_fold_volatility: float = 0.5
+    min_worst_fold_score: Optional[float] = None
 
 
 # ---------- Online Action Throttle ----------
@@ -338,6 +343,9 @@ class Phase2Config:
     rollout_length: int = 128
     seed: int = 42
     device: str = "cuda"
+    fast_eval_max_horizons: Optional[int] = 256
+    fast_eval_stride: Optional[int] = None
+    checkpoint_every_updates: Optional[int] = None
     allow_phase1_hindsight_warning: bool = False
     paper_strict_reproduction: bool = False
     resume_from: Optional[str] = None

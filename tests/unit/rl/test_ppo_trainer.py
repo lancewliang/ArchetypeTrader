@@ -9,6 +9,9 @@
 """
 import pytest
 
+from src.config.phase2_config import Phase2Config, PPOConfig, RewardNormalizationConfig
+from src.rl.ppo_trainer import PPOTrainer
+
 
 class TestPPOTrainer:
 
@@ -31,3 +34,13 @@ class TestPPOTrainer:
     def test_numerical_safety_fail_fast(self):
         """非 finite tensor 触发 NumericalSafetyError。"""
         pass
+
+    def test_reward_normalization_rejected_for_signoff(self):
+        """Phase II reward_normalization 启用时 fail-fast。"""
+        config = Phase2Config(
+            reward_normalization=RewardNormalizationConfig(enabled=True),
+            ppo=PPOConfig(reward_normalization=False),
+        )
+        trainer = PPOTrainer(config, actor_critic=None, envs=[], schedule_manager=None)
+        with pytest.raises(ValueError, match="reward_normalization"):
+            trainer.setup()

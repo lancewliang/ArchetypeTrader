@@ -90,3 +90,37 @@ class TestPhase2SelectionPolicy:
         metrics = {"val_net_return": 1.0, "sharpe_ratio": 0.5}
         verdict = p.evaluate(metrics, history)
         assert verdict.decision == "reject"
+
+    def test_rolling_volatility_guardrail_rejects(self, history):
+        """rolling fold volatility 超阈拒绝 best。"""
+        config = Phase2SelectionPolicyConfig(max_fold_volatility=0.1)
+        p = Phase2SelectionPolicy(config)
+        metrics = {
+            "phase2_composite_score": 1.0,
+            "max_drawdown": 0.1,
+            "sharpe_ratio": 1.0,
+        }
+        rolling = {
+            "fold_volatility": {"phase2_composite_score": 0.2},
+            "worst_fold_quantile": {"phase2_composite_score": 0.8},
+        }
+        verdict = p.evaluate(metrics, history, rolling)
+        assert verdict.decision == "reject"
+        assert any("rolling_fold_volatility" in r for r in verdict.reasons)
+
+    def test_rolling_worst_fold_guardrail_rejects(self, history):
+        """rolling worst fold 低于阈值拒绝 best。"""
+        config = Phase2SelectionPolicyConfig(min_rolling_worst_fold_score=0.0)
+        p = Phase2SelectionPolicy(config)
+        metrics = {
+            "phase2_composite_score": 1.0,
+            "max_drawdown": 0.1,
+            "sharpe_ratio": 1.0,
+        }
+        rolling = {
+            "fold_volatility": {"phase2_composite_score": 0.0},
+            "worst_fold_quantile": {"phase2_composite_score": -0.1},
+        }
+        verdict = p.evaluate(metrics, history, rolling)
+        assert verdict.decision == "reject"
+        assert any("rolling_worst_fold" in r for r in verdict.reasons)

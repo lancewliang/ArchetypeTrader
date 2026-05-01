@@ -84,9 +84,11 @@ class LobDepthCostModel:
         commission_rate: float,
         book_levels: int = 5,
         insufficient_depth_policy: str = "reject_transition",
+        slippage_multiplier: float = 1.0,
     ) -> None:
         self.commission_rate = commission_rate
         self.book_levels = book_levels
+        self.slippage_multiplier = float(slippage_multiplier)
         if insufficient_depth_policy not in ("reject_transition",):
             raise ValueError(
                 f"目前只支持 reject_transition; got {insufficient_depth_policy!r}"
@@ -181,7 +183,7 @@ class LobDepthCostModel:
         # fee = δ * |Δ| * mark_price（按论文）。
         fee = self.commission_rate * need * mark
         # slippage = |Δ| * |fill - mark|（fill 与 mark 越远滑点越大）。
-        slippage = need * abs(fill_price - mark)
+        slippage = need * abs(fill_price - mark) * self.slippage_multiplier
         cost = fee + slippage
         return ExecutionResult(
             prev_position=prev_position,

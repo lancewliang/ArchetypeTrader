@@ -82,6 +82,10 @@ class ScheduleManager:
             self._current_entropy_coef = float(warmup_coef)
         else:
             self._current_entropy_coef = self._initial_entropy_coef * (1.0 - progress)
+        self._current_entropy_coef = max(
+            self._current_entropy_coef,
+            float(self.config.ppo.entropy_min_coef),
+        )
 
         # KL demo coef: configurable linear anneal.
         anneal_to = self.config.ppo.kl_demo_anneal_to

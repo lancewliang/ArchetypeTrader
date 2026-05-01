@@ -70,3 +70,18 @@ class TestScheduleManager:
         new_schedule = ScheduleManager(config, opt, total_updates=100)
         new_schedule.load_state(state)
         assert new_schedule._current_update == 42
+
+    def test_entropy_min_coef_floor(self):
+        """entropy coef 退火不低于下界。"""
+        config = Phase2Config(
+            ppo=PPOConfig(
+                lr=1e-3,
+                entropy_coef=0.01,
+                entropy_min_coef=0.002,
+            )
+        )
+        model = torch.nn.Linear(4, 2)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        schedule = ScheduleManager(config, optimizer, total_updates=100)
+        schedule.step(100)
+        assert schedule.current_state().entropy_coef == pytest.approx(0.002)

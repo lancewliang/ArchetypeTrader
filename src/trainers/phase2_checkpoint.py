@@ -60,6 +60,7 @@ class Phase2CheckpointManager:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.last_path = self.artifacts_dir / "last_selector.pt"
         self.best_path = self.artifacts_dir / "best_selector.pt"
+        self.periodic_dir = self.artifacts_dir / "checkpoints"
         self.manifest_path = self.artifacts_dir / "phase2_checkpoint_manifest.json"
         self.replay_log_path = (
             self.artifacts_dir / "replay_log_last_complete_checkpoint.feather"
@@ -90,6 +91,25 @@ class Phase2CheckpointManager:
     def save_last(self, state: Dict[str, Any], update_idx: int) -> Path:
         """原子写 last_selector.pt。"""
         return self._save_torch_state(state, self.last_path)
+
+    def save_periodic(self, state: Dict[str, Any], update_idx: int) -> Path:
+        """保存周期 checkpoint，不改变 last/best 语义。"""
+        self.periodic_dir.mkdir(parents=True, exist_ok=True)
+        path = self._save_torch_state(
+            state,
+            self.periodic_dir / f"step_{int(update_idx):08d}.pt",
+        )
+        self._entries.append(Phase2CheckpointEntry(
+            update_idx=update_idx,
+            path=str(path),
+            file_hash=_file_sha256(path),
+            verdict="periodic",
+            reasons=[],
+            metrics={},
+            is_best=False,
+        ))
+        self._flush_manifest()
+        return path
 
     def commit_verdict(
         self,
@@ -160,4 +180,7 @@ class Phase2CheckpointManager:
     def load(self, path: Path) -> Dict[str, Any]:
         """加载 checkpoint。"""
         import torch
-        return torch.load(path, map_location="cpu")
+        try:
+            return torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:
+            return torch.load(path, map_location="cpu")

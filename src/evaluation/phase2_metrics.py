@@ -201,6 +201,7 @@ def phase2_composite_metrics(
         "ppo_value_loss": ppo_stats.get("value_loss", 0.0),
         "ppo_entropy_loss": ppo_stats.get("entropy_loss", 0.0),
         "ppo_kl_demo_loss": ppo_stats.get("kl_demo_loss", 0.0),
+        "ppo_kl_demo_dominance_ratio": ppo_stats.get("kl_demo_dominance_ratio", 0.0),
         "ppo_approx_kl": ppo_stats.get("approx_kl", 0.0),
         "ppo_clip_fraction": ppo_stats.get("clip_fraction", 0.0),
     }

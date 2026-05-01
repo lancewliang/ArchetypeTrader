@@ -58,14 +58,17 @@ class Phase2Dataset:
         horizon_entries: List[Phase2HorizonEntry],
         input_schema: Dict[str, Any],
         config: Phase2Config,
+        reward_alignment: Optional[str] = None,
     ) -> None:
         self.horizon_entries = horizon_entries
         self.config = config
         self._feature_columns: List[str] = input_schema.get("feature_columns", [])
         self._price_column: str = input_schema.get("price_column", "close")
         self._horizon = config.horizon
-        # reward_alignment 从 Phase I config 获取，缓存避免重复读文件
-        self._alignment = RewardAlignment(self._resolve_reward_alignment())
+        # reward_alignment 由 trainer/validator 解析后传入；保留 fallback 兼容单测。
+        self._alignment = RewardAlignment(
+            reward_alignment or self._resolve_reward_alignment()
+        )
 
         # 预提取 numpy 数组以避免逐行 polars 查询
         import polars as pl
@@ -192,7 +195,10 @@ class Phase2Dataset:
             rows = self._alignment.rows(t)
             row = start + rows.execution_row
             if row >= self._num_rows:
-                row = self._num_rows - 1
+                raise IndexError(
+                    f"horizon {entry.sample_id} execution_row={row} 越界; "
+                    f"num_rows={self._num_rows}"
+                )
             book = ExecutionBook(
                 ask_prices=tuple(float(self._ask_p[k][row]) for k in range(5)),
                 ask_sizes=tuple(float(self._ask_s[k][row]) for k in range(5)),

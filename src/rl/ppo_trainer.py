@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import random as _random
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,7 +28,10 @@ from src.rl.ppo_loss import PPOLoss, PPOLossOutput
 from src.rl.rollout_buffer import RolloutBuffer, RolloutSample
 from src.rl.scheduling import ScheduleManager
 from src.trading.horizon_env import HorizonEnv
-from src.evaluation.metrics.policy_health import compute_explained_variance
+from src.evaluation.metrics.policy_health import (
+    compute_explained_variance,
+    compute_kl_demo_dominance_ratio,
+)
 
 
 class NumericalSafetyError(RuntimeError):
@@ -53,6 +57,7 @@ class PPOUpdateStats:
     rollout_done_count: float = 0.0
     rollout_truncated_count: float = 0.0
     rollout_bootstrap_count: float = 0.0
+    kl_demo_dominance_ratio: float = 0.0
 
 
 class PPOTrainer:
@@ -93,6 +98,11 @@ class PPOTrainer:
         optimizer : 外部传入的 optimizer（与 ScheduleManager 共享同一实例）。
                     若为 None，则内部创建。
         """
+        if self.config.reward_normalization.enabled or self.config.ppo.reward_normalization:
+            raise ValueError(
+                "Phase II reward_normalization 尚未实现 running_mean_std；"
+                "请关闭该配置并使用 reward_scaling。"
+            )
         self._buffer = RolloutBuffer(
             num_envs=self.config.num_envs,
             rollout_length=self.config.rollout_length,
@@ -147,13 +157,8 @@ class PPOTrainer:
             for env_idx, env in enumerate(self.envs):
                 action = actions[env_idx]
 
-                # 在 step 之前记录当前 horizon 的 label 信息
-                # （step 之后 cursor 会前进，done 时会 reset）
-                current_horizon_idx = env.horizon_indices[env.cursor] if env.cursor < len(env.horizon_indices) else None
-                entry = env.dataset.horizon_entries[current_horizon_idx] if current_horizon_idx is not None else None
-
-                kl_label = entry.code_label if entry else None
-                is_labeled = entry.is_labeled if entry else False
+                # 在 step 之前记录当前 horizon 的 label 信息。
+                kl_label, is_labeled = env.current_label_info()
 
                 next_obs, reward, done, env_truncated, info = env.step(action)
                 truncated = bool(env_truncated or (step == self.config.rollout_length - 1 and not done))
@@ -337,6 +342,10 @@ class PPOTrainer:
             stats.kl_demo_loss = total_kl_demo_loss / num_batches
             stats.approx_kl = total_approx_kl / num_batches
             stats.clip_fraction = total_clip_frac / num_batches
+            stats.kl_demo_dominance_ratio = compute_kl_demo_dominance_ratio(
+                stats.kl_demo_loss,
+                stats.policy_loss,
+            )
 
         stats.early_stopped = early_stopped
         stats.early_stop_epoch = early_stop_epoch
@@ -389,6 +398,16 @@ class PPOTrainer:
             "update_count": self._update_count,
             "model_state": self.actor_critic.selector.state_dict(),
             "schedule_state": self.schedule_manager.get_state(),
+            "rng_state": {
+                "python": _random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+                "torch_cuda": (
+                    torch.cuda.get_rng_state_all()
+                    if torch.cuda.is_available()
+                    else []
+                ),
+            },
         }
         if self._optimizer is not None:
             state["optimizer_state"] = self._optimizer.state_dict()
@@ -412,6 +431,16 @@ class PPOTrainer:
             self._optimizer.load_state_dict(state["optimizer_state"])
         if "schedule_state" in state:
             self.schedule_manager.load_state(state["schedule_state"])
+        if "rng_state" in state:
+            rng = state["rng_state"]
+            if "python" in rng:
+                _random.setstate(rng["python"])
+            if "numpy" in rng:
+                np.random.set_state(rng["numpy"])
+            if "torch" in rng:
+                torch.set_rng_state(rng["torch"])
+            if torch.cuda.is_available() and rng.get("torch_cuda"):
+                torch.cuda.set_rng_state_all(rng["torch_cuda"])
         if "env_states" in state:
             for env_idx, (env, es) in enumerate(zip(self.envs, state["env_states"])):
                 obs = env.restore_state(

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+import math
 
 from src.config.phase2_config import Phase2Config
 from src.evaluation.phase2_metrics import phase2_composite_metrics
@@ -37,6 +38,7 @@ class RollingValidationResult:
     per_fold_records: List[List[Phase2HorizonReplayRecord]] = field(default_factory=list)
     fold_sizes: List[int] = field(default_factory=list)
     fold_initial_position_policy: str = "flat"
+    fold_initial_positions: List[int] = field(default_factory=list)
 
 
 class Phase2Evaluator:
@@ -68,8 +70,9 @@ class Phase2Evaluator:
         ppo_stats: Optional[Dict[str, float]] = None,
     ) -> Phase2EvalResult:
         """Val 快速评估（子集）。"""
+        entry_indices = self._fast_eval_entry_indices("val")
         records = self.backtest_runner.run_walk_forward(
-            split="val", deterministic=True
+            split="val", deterministic=True, entry_indices=entry_indices
         )
         horizon_dicts = [self._record_to_dict(r) for r in records]
         metrics = phase2_composite_metrics(
@@ -170,6 +173,8 @@ class Phase2Evaluator:
         fold_metrics_list: List[Dict[str, Any]] = []
         per_fold_records: List[List[Phase2HorizonReplayRecord]] = []
         fold_sizes: List[int] = []
+        fold_initial_positions: List[int] = []
+        initial_position = 0
 
         for fold_idx in range(num_folds):
             # 每个 fold 使用 val 的一个子集
@@ -179,16 +184,19 @@ class Phase2Evaluator:
             if not fold_pairs:
                 continue
             fold_indices = [idx for idx, _entry in fold_pairs]
+            fold_initial_positions.append(initial_position)
             records = self.backtest_runner.run_walk_forward(
                 split="val",
                 deterministic=True,
                 entry_indices=fold_indices,
-                initial_position=0,
+                initial_position=initial_position,
                 fold_id=fold_idx,
             )
             fold_records = records
             per_fold_records.append(fold_records)
             fold_sizes.append(len(fold_records))
+            if fold_records and self.config.horizon_schedule.position_continuity:
+                initial_position = fold_records[-1].final_position
 
             horizon_dicts = [self._record_to_dict(r) for r in fold_records]
             metrics = phase2_composite_metrics(
@@ -212,7 +220,12 @@ class Phase2Evaluator:
             fold_volatility=fold_vol,
             per_fold_records=per_fold_records,
             fold_sizes=fold_sizes,
-            fold_initial_position_policy="flat",
+            fold_initial_position_policy=(
+                "inherit_previous_fold"
+                if self.config.horizon_schedule.position_continuity
+                else "flat"
+            ),
+            fold_initial_positions=fold_initial_positions,
         )
 
     @staticmethod
@@ -231,6 +244,7 @@ class Phase2Evaluator:
             "risk_trigger_step": r.risk_trigger_step,
             "risk_reason": r.risk_reason,
             "fold_id": r.fold_id,
+            "fold_initial_position": r.fold_initial_position,
             "timestamp_start": r.timestamp_start,
             "step_returns": r.step_returns,
             "selector_confidence": r.selector_confidence,
@@ -267,3 +281,20 @@ class Phase2Evaluator:
                 var = sum((v - mean) ** 2 for v in values) / max(len(values) - 1, 1)
                 result[key] = math.sqrt(max(var, 0.0))
         return result
+
+    def _fast_eval_entry_indices(self, split: str) -> Optional[List[int]]:
+        """返回 fast eval 使用的 dataset-global entry indices。"""
+        max_horizons = self.config.fast_eval_max_horizons
+        if max_horizons is None or max_horizons <= 0:
+            return None
+        pairs = [
+            (idx, e)
+            for idx, e in enumerate(self.backtest_runner.dataset.horizon_entries)
+            if e.split == split
+        ]
+        if len(pairs) <= max_horizons:
+            return None
+        stride = self.config.fast_eval_stride
+        if stride is None or stride <= 0:
+            stride = max(int(math.ceil(len(pairs) / max_horizons)), 1)
+        return [idx for idx, _entry in pairs[::stride]][:max_horizons]

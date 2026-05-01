@@ -48,6 +48,7 @@ class Phase2HorizonReplayRecord:
     risk_trigger_step: Optional[int] = None
     risk_reason: Optional[str] = None
     fold_id: Optional[int] = None
+    fold_initial_position: Optional[int] = None
     timestamp_start: Optional[str] = None
     step_returns: List[float] = field(default_factory=list)
     selector_confidence: Optional[float] = None
@@ -203,6 +204,7 @@ class Phase2BacktestRunner:
                 risk_trigger_step=risk_trigger_step,
                 risk_reason=risk_reason,
                 fold_id=fold_id,
+                fold_initial_position=int(initial_position) if fold_id is not None else None,
                 timestamp_start=getattr(entry, "timestamp_start", None),
                 step_returns=list(rewards),
                 selector_confidence=confidence,
@@ -287,10 +289,26 @@ class Phase2BacktestRunner:
                 entries, lambda _idx, _e, _k=k: _k, split
             )
 
-        # Buy and hold (always flat = action 1 in TradingEnv)
-        results["buy_and_hold"] = self._run_fixed_strategy(
-            entries, lambda _idx, _e: 1, split  # flat
+        results["buy_and_hold_long"] = self._run_action_strategy(
+            entries, lambda _idx, _e: [2] * self.config.horizon, split,
+            chosen_code=2, baseline_name="buy_and_hold_long",
         )
+        results["buy_and_hold_short"] = self._run_action_strategy(
+            entries, lambda _idx, _e: [0] * self.config.horizon, split,
+            chosen_code=0, baseline_name="buy_and_hold_short",
+        )
+        results["always_flat"] = self._run_action_strategy(
+            entries, lambda _idx, _e: [1] * self.config.horizon, split,
+            chosen_code=1, baseline_name="always_flat",
+        )
+        if split != "test" and any(e.is_labeled for e in entries):
+            results["phase1_demo_label"] = self._run_fixed_strategy(
+                [e for e in entries if e.is_labeled],
+                lambda _idx, e: int(e.code_label),
+                split,
+                baseline_name="phase1_demo_label",
+                hindsight=True,
+            )
 
         return results
 
@@ -299,6 +317,8 @@ class Phase2BacktestRunner:
         entries,
         strategy_fn,
         split: str,
+        baseline_name: Optional[str] = None,
+        hindsight: bool = False,
     ) -> List[Phase2HorizonReplayRecord]:
         """运行固定策略 baseline。"""
         # 预建 entry → dataset index 映射
@@ -339,6 +359,50 @@ class Phase2BacktestRunner:
                 reward_scaled=horizon_reward / max(h, 1),
                 boundary_cost=(infos[0].fee + infos[0].slippage) if infos else 0.0,
                 cost_paid=cost_paid,
+                risk_reason=baseline_name,
+                step_returns=list(rewards),
+                original_code=chosen_code if hindsight else None,
+            ))
+
+        return records
+
+    def _run_action_strategy(
+        self,
+        entries,
+        action_strategy_fn,
+        split: str,
+        chosen_code: int,
+        baseline_name: str,
+    ) -> List[Phase2HorizonReplayRecord]:
+        """运行直接给交易 action 序列的 baseline。"""
+        _entry_to_idx = {id(e): i for i, e in enumerate(self.dataset.horizon_entries)}
+        records: List[Phase2HorizonReplayRecord] = []
+        prev_pos = 0
+        trading_env = self.trading_env_factory()
+
+        for idx_in_list, entry in enumerate(entries):
+            actual_idx = _entry_to_idx[id(entry)]
+            horizon_inputs = self.dataset.get_horizon_inputs(actual_idx)
+            base_actions = list(action_strategy_fn(idx_in_list, entry))
+            init_pos = prev_pos if self.config.horizon_schedule.position_continuity else 0
+            trading_env.reset(horizon_inputs, initial_position=init_pos)
+            rewards, infos = trading_env.replay(base_actions)
+
+            horizon_reward = sum(rewards)
+            cost_paid = sum(info.fee + info.slippage for info in infos)
+            final_position = infos[-1].filled_position if infos else init_pos
+            prev_pos = final_position
+
+            records.append(Phase2HorizonReplayRecord(
+                sample_id=entry.sample_id,
+                env_id=0,
+                chosen_code=chosen_code,
+                final_position=final_position,
+                reward_raw=horizon_reward,
+                reward_scaled=horizon_reward / max(self.config.horizon, 1),
+                boundary_cost=(infos[0].fee + infos[0].slippage) if infos else 0.0,
+                cost_paid=cost_paid,
+                risk_reason=baseline_name,
                 step_returns=list(rewards),
             ))
 

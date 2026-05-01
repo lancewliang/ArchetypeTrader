@@ -106,6 +106,14 @@ class Phase2SelectionPolicy:
                 verdict.decision = "reject"
                 verdict.reasons.append(reason)
 
+        rolling_blocked, rolling_reasons = self._rolling_guardrail_reasons(
+            metric_name,
+            rolling_result,
+        )
+        if rolling_blocked:
+            verdict.decision = "reject"
+            verdict.reasons.extend(rolling_reasons)
+
         # 如果未被拒绝，检查是否优于历史 best
         if verdict.decision != "reject":
             if self.config.primary_mode == "max":
@@ -122,6 +130,55 @@ class Phase2SelectionPolicy:
                 verdict.decision = "promote_to_best"
 
         return verdict
+
+    def _rolling_guardrail_reasons(
+        self,
+        metric_name: str,
+        rolling_result: Optional[Dict[str, float]],
+    ) -> Tuple[bool, List[str]]:
+        """rolling validation sign-off 附加硬约束。"""
+        if rolling_result is None:
+            if self.config.require_rolling_result_for_promotion:
+                return True, ["rolling_result_missing"]
+            return False, []
+        if not rolling_result.get("enabled", True):
+            return False, []
+
+        reasons: List[str] = []
+        fold_volatility = rolling_result.get("fold_volatility", {})
+        worst_fold = rolling_result.get("worst_fold_quantile", {})
+        if not isinstance(fold_volatility, dict):
+            fold_volatility = {}
+        if not isinstance(worst_fold, dict):
+            worst_fold = {}
+
+        max_volatility = rolling_result.get(
+            "max_fold_volatility",
+            self.config.max_fold_volatility,
+        )
+        if max_volatility is not None:
+            vol = fold_volatility.get(metric_name)
+            if vol is None and metric_name == "phase2_composite_score":
+                vol = fold_volatility.get("phase2_composite_score")
+            if vol is not None and float(vol) > float(max_volatility):
+                reasons.append(
+                    f"rolling_fold_volatility:{metric_name}={float(vol):.3f} > {float(max_volatility):.3f}"
+                )
+
+        min_worst = rolling_result.get(
+            "min_worst_fold_score",
+            self.config.min_rolling_worst_fold_score,
+        )
+        if min_worst is not None:
+            worst = worst_fold.get(metric_name)
+            if worst is None and metric_name == "phase2_composite_score":
+                worst = worst_fold.get("phase2_composite_score")
+            if worst is not None and float(worst) < float(min_worst):
+                reasons.append(
+                    f"rolling_worst_fold:{metric_name}={float(worst):.3f} < {float(min_worst):.3f}"
+                )
+
+        return bool(reasons), reasons
 
     def should_block_due_to_drawdown(
         self, metrics: Dict[str, float]

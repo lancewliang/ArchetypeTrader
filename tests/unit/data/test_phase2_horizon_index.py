@@ -10,6 +10,7 @@
 """
 import pytest
 import numpy as np
+from dataclasses import replace
 
 try:
     import polars as pl
@@ -135,3 +136,40 @@ class TestPhase2HorizonIndexer:
         df = pl.read_ipc(path)
         assert "sample_id" in df.columns
         assert "horizon_start" in df.columns
+
+    def test_cost_alignment_mismatch_rejects(self, tmp_path):
+        """Phase I/II max_position 不一致时 fail-fast。"""
+        config = _make_config(tmp_path, horizon=8)
+        import yaml
+        p1_cfg = config.phase1_dir() / "phase1_config.yaml"
+        p1_cfg.write_text(yaml.safe_dump({
+            "dp": {
+                "max_position": 2,
+                "cost_config": {"reward_alignment": "paper_formula"},
+            }
+        }))
+        with pytest.raises(Phase1ArtifactValidationError):
+            Phase1ArtifactValidator(config).validate()
+
+    def test_gap_bars_uses_bar_units_when_gap_check_disabled(self, tmp_path):
+        """gap_bars 记录 bar 数，不把分钟阈值和 bar 阈值混用。"""
+        config = _make_config(tmp_path, horizon=4, exclude_gap=False)
+        config = replace(
+            config,
+            horizon_schedule=replace(
+                config.horizon_schedule,
+                data_gap_check_enabled=False,
+                gap_threshold_bars=2,
+                exclude_gap_horizons=False,
+            ),
+        )
+        frame = _make_frame(32)
+        timestamps = [i * 5 for i in range(32)]
+        timestamps[3] = 30  # 10 -> 30 means 20 minutes, with 5-minute bars.
+        for i in range(4, 32):
+            timestamps[i] = timestamps[i - 1] + 5
+        frame = frame.with_columns(pl.Series("timestamp", timestamps))
+        entries = Phase2HorizonIndexer(config).build_index(frame, "train", 4)
+        assert entries[0].max_timestamp_gap_minutes == pytest.approx(20.0)
+        assert entries[0].gap_bars == 3
+        assert entries[0].is_gap is True
