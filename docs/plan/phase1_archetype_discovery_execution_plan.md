@@ -85,22 +85,22 @@ PY
 
 | Step | 范围 | 代码 | 单元测试 | 集成/验收 | 代码审查 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Step 1 | 配置与基础 IO | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 2 | 数据读取与 schema 校验 | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 3 | 滑窗、分层采样与采样健康检查（含 prospective 对照入口） | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 4 | 成本模型、reward alignment 与交易环境（统一 `src/trading/`） | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 5 | horizon 构造与 demonstration store | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 6 | Single-trade DP planner（含末步处理 + reject_transition 统计） | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 7 | VQ 模型组件（默认 robust reward normalization） | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 8 | Phase I 指标与 replay 评估（`evaluation/metrics/` + `evaluation/diagnostics/` 子包） | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 9 | checkpoint、selection policy、报告与训练器 | [ ] | [ ] | [ ] | [ ] | TODO |  |
-| Step 10 | 集成入口（含 prospective 对照 BATCH_ID + composite weight sensitivity） | [ ] | [ ] | [ ] | [ ] | TODO |  |
+| Step 1 | 配置与基础 IO | [x] | [x] | [x] | [x] | DONE | `src/config/phase1_config.py`、`src/utils/feather_io.py`、`scripts/train_phase1.py` 已落地；`train_phase1.py --help` 验收通过。 |
+| Step 2 | 数据读取与 schema 校验 | [x] | [x] | [x] | [x] | DONE | `MarketFileReader` / `InputSchemaValidator` 已落地；schema 验收覆盖 `close` 价格列隔离与输入特征排除。 |
+| Step 3 | 滑窗、分层采样与采样健康检查（含 prospective 对照入口） | [x] | [x] | [x] | [x] | DONE | window index、stratified sampler、sampling health 已落地；prospective 诊断入口和 leakage diagnostics 已纳入集成验收。 |
+| Step 4 | 成本模型、reward alignment 与交易环境（统一 `src/trading/`） | [x] | [x] | [x] | [x] | DONE | `src/trading/` 统一实现成本、行号对齐和环境 replay；`paper_formula` / `next_row_execution` 均有测试覆盖。 |
+| Step 5 | horizon 构造与 demonstration store | [x] | [x] | [x] | [x] | DONE | `HorizonBuilder`、`Phase1DemoStore`、`Phase1DemoDataset` 已落地；labels 和 `close` 不进 `states` 的约束已验收。 |
+| Step 6 | Single-trade DP planner（含末步处理 + reject_transition 统计） | [x] | [x] | [x] | [x] | DONE | DP 末步处理、候选拒绝统计和 demo generator 质量门禁已修复并回归验证。 |
+| Step 7 | VQ 模型组件（默认 robust reward normalization） | [x] | [x] | [x] | [x] | DONE | reward normalizer、VQ、loss、因果 decoder、dead-code restart 相关组件已落地并通过模型层测试。 |
+| Step 8 | Phase I 指标与 replay 评估（`evaluation/metrics/` + `evaluation/diagnostics/` 子包） | [x] | [x] | [x] | [x] | DONE | action/risk/archetype/behavior/stability 指标、replay、evaluator、diagnostics 已落地；报告关键指标回归通过。 |
+| Step 9 | checkpoint、selection policy、报告与训练器 | [x] | [x] | [x] | [x] | DONE | checkpoint、selection policy、report writer、trainer 已落地；best checkpoint、composite score、sampling health、restart 等 review bug 已修复。 |
+| Step 10 | 集成入口（含 prospective 对照 BATCH_ID + composite weight sensitivity） | [x] | [x] | [x] | [x] | DONE | CLI、`run_pipeline.sh`、prospective 对照 sign-off、composite sensitivity 和 Phase I smoke 集成验收已通过。 |
 
 Step 完成记录:
 
 | 日期 | Step | 完成内容 | 验证命令 | 结果 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |
+| 2026-05-01 | Step 1-10 | 重新核对 Phase I 源码、单测、集成测试、`20260501_phase1_confirmed_bugs_from_review.md` 与 v2 代码审查记录；10 个 Step 更新为 `DONE`。 | `/home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python scripts/train_phase1.py --help`；`/home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python -m pytest -q`；`bash -n run_pipeline.sh` | 通过；全量测试 `375 passed, 17 warnings`，脚本语法检查通过。 | 当前 shell 默认 base Python 缺少 `torch`，直接运行 `pytest -q` 会在 Phase II/RL 测试收集阶段失败；本次验收以 `ArchetypeTrade` 环境为准。 |
 
 ### Step 1: 配置与基础 IO
 
