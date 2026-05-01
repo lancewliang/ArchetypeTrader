@@ -99,20 +99,20 @@ Step 1 ──► Step 2 ──► Step 3 ──► Step 4 ──► Step 5 ─�
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Step 1 | 配置、CLI 与基础产物 IO | [x] | [x] | [x] | [x] | DONE | `src/config/phase2_config.py`、`scripts/train_phase2.py`、`scripts/backtest_phase2.py` 已落地；两个 CLI 的 `--help` 验收通过。 |
 | Step 2 | Phase I 产物校验、数据契约与 horizon index | [x] | [x] | [x] | [x] | DONE | `Phase1ArtifactValidator`、`Phase2HorizonIndexer`、`Phase2Dataset`、`Phase2LabelLoader` 已落地；数据层单测为真实断言并通过。 |
-| Step 3 | Frozen decoder、HorizonEnv、multi-env shard 与 replay 语义 | [x] | [ ] | [ ] | [x] | IN_PROGRESS | 代码主干已落地；`test_phase1_frozen_policy.py`、`test_horizon_env.py`、`test_horizon_factory.py` 与 streaming decode 集成测试仍为 `pass` 占位，尚不能视为单元/集成验收完成。 |
-| Step 4 | Selector 网络、actor-critic、action mask 与输入规范 | [x] | [ ] | [ ] | [x] | IN_PROGRESS | selector / actor-critic 主路径有真实单测；unmasked diagnostic rollout 与 `probe_pick_rate` 未见实现和断言，输入规范验收未收口。 |
-| Step 5 | Rollout buffer、GAE、PPO loss 与 schedule | [x] | [ ] | [ ] | [x] | IN_PROGRESS | rollout buffer、PPO loss、schedule 有真实单测；`test_ppo_trainer.py` 关键用例和 GAE 集成测试仍为占位，GAE/PPO 端到端验收未完成。 |
-| Step 6 | Evaluator、baseline、checkpoint、selection policy | [x] | [ ] | [ ] | [x] | IN_PROGRESS | checkpoint / selection policy 部分有真实单测；`phase2_replay`、`phase2_evaluator` 测试仍为占位，`phase2_ablation_summary.csv` 未见产出，test split `phase1_demo_label` posthoc baseline 仍是残余项。 |
-| Step 7 | Report、diagnostics、visualization 与 risk/health audit | [x] | [ ] | [ ] | [x] | IN_PROGRESS | report writer 有真实单测；selector visualization 与 Phase II failure case report 单测仍为 `pass` 占位，诊断产物验收未完成。 |
-| Step 8 | Live safety / OOD / latency / stress protocol | [x] | [ ] | [ ] | [x] | IN_PROGRESS | OOD / stress / throttle / numerical safety 模块已落地；execution lag scenario 已写入 report 但尚未改变 replay 行号，live risk / throttle / numerical safety 多个测试仍为占位。 |
-| Step 9 | Phase2Trainer 与 train/backtest 集成入口 | [x] | [ ] | [ ] | [x] | IN_PROGRESS | trainer、resume、train/backtest 入口主干已落地；`test_phase2_trainer.py` 和真实 smoke pipeline 仍为占位，尚未完成可执行集成验收。 |
-| Step 10 | 完整 smoke pipeline、resume、sign-off 验收 | [x] | [ ] | [ ] | [x] | IN_PROGRESS | `run_pipeline.sh` 语法检查通过；Phase II pipeline / resume / backtest / no-test-label-leakage / streaming decode 集成测试均仍为 `pass` 占位，sign-off 验收未完成。 |
+| Step 3 | Frozen decoder、HorizonEnv、multi-env shard 与 replay 语义 | [x] | [x] | [x] | [x] | DONE | frozen policy、HorizonEnv、HorizonFactory 与 streaming decode 集成测试均已改为真实断言并通过。 |
+| Step 4 | Selector 网络、actor-critic、action mask 与输入规范 | [x] | [x] | [x] | [x] | DONE | selector / actor-critic / dead-code mask / 状态维度测试通过；训练报告写入 unmasked diagnostic probe 与 `probe_pick_rate`。 |
+| Step 5 | Rollout buffer、GAE、PPO loss 与 schedule | [x] | [x] | [x] | [x] | DONE | rollout buffer、GAE no-cross-env、PPO loss、trainer、schedule、RunningMeanStd ablation 测试通过；gradient safety fail-fast 已覆盖。 |
+| Step 6 | Evaluator、baseline、checkpoint、selection policy | [x] | [x] | [x] | [x] | DONE | replay/evaluator/metrics/checkpoint/selection policy/rolling validation 测试通过；`phase2_ablation_summary.csv` 已产出；test split demo label 仅显式 posthoc。 |
+| Step 7 | Report、diagnostics、visualization 与 risk/health audit | [x] | [x] | [x] | [x] | DONE | report、rolling validation、selector visualization、failure case diagnostics 产物均有真实断言。 |
+| Step 8 | Live safety / OOD / latency / stress protocol | [x] | [x] | [x] | [x] | DONE | live risk、OOD、execution stress、online throttle、numerical safety 测试通过；execution lag 已实际改变 replay 输入。 |
+| Step 9 | Phase2Trainer 与 train/backtest 集成入口 | [x] | [x] | [x] | [x] | DONE | trainer orchestrator、train/backtest CLI、resume、ablation、report 与关键产物 smoke 验收通过。 |
+| Step 10 | 完整 smoke pipeline、resume、sign-off 验收 | [x] | [x] | [x] | [x] | DONE | Phase II pipeline / resume / backtest / no-test-label-leakage / streaming decode 集成测试通过；全量 sign-off 验收完成。 |
 
 Step 完成记录:
 
 | 日期 | Step | 完成内容 | 验证命令 | 结果 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| 2026-05-01 | Step 1-10 | 重新核对 Phase II 源码、单测、集成测试、两轮代码审查与 review 变更执行计划；按真实验收状态更新看板。 | `/home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python scripts/train_phase2.py --help`；`/home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python scripts/backtest_phase2.py --help`；`/home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python -m pytest -q`；`bash -n run_pipeline.sh` | CLI 和脚本语法检查通过；全量测试 `375 passed, 17 warnings`。 | Phase II 专项测试为 `183 passed, 17 warnings`，但多项 Phase II 单元/集成测试仍是 `pass` 占位，不能作为最终验收依据；Step 3-10 继续保持 `IN_PROGRESS`。 |
+| 2026-05-01 | Step 3-10 | 补齐 Phase II 占位单元/集成测试并完成验收；修复 execution lag replay、test split posthoc demo label、gradient safety、KL/demo ablation CSV 与 unmasked diagnostic probe 收口项。 | `/home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python scripts/train_phase2.py --help`；`/home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python scripts/backtest_phase2.py --help`；`/home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python -m pytest <Phase II 专项文件集合> -q`；`/home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python -m pytest -q`；`rg -n "pass$|TODO: 实现|# TODO" tests/unit tests/integration`；`bash -n run_pipeline.sh` | CLI、placeholder 扫描、脚本语法检查通过；Phase II 专项 `190 passed`；全量测试 `382 passed`。 | 已注册 `integration` pytest marker，验收 warning 清零；Step 3-10 全部更新为 `DONE`。 |
 
 ### Step 1: 配置、CLI 与基础产物 IO
 

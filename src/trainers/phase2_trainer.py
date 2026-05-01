@@ -244,6 +244,17 @@ class Phase2Trainer:
             config=self.config.selector_network,
         ).to(self.config.device)
 
+        dead_code_mask_list = (
+            dead_code_mask.tolist()
+            if dead_code_mask is not None
+            else [False] * num_codes
+        )
+        unmasked_probe = self._unmasked_diagnostic_probe(
+            selector,
+            train_dataset,
+            dead_code_mask_list,
+        )
+
         actor_critic = ActorCritic(selector, dead_code_mask=dead_code_mask)
 
         optimizer = torch.optim.Adam(selector.parameters(), lr=self.config.ppo.lr)
@@ -270,7 +281,7 @@ class Phase2Trainer:
         )
         evaluator = Phase2Evaluator(
             self.config, val_runner, num_codes,
-            dead_code_mask.tolist() if dead_code_mask is not None else None,
+            dead_code_mask_list if dead_code_mask is not None else None,
         )
 
         # 11. 训练循环
@@ -402,7 +413,7 @@ class Phase2Trainer:
         )
         test_evaluator = Phase2Evaluator(
             self.config, test_runner, num_codes,
-            dead_code_mask.tolist() if dead_code_mask is not None else None,
+            dead_code_mask_list if dead_code_mask is not None else None,
         )
 
         # 加载 best
@@ -449,12 +460,12 @@ class Phase2Trainer:
         # Build report
         val_metrics = phase2_composite_metrics(
             val_rec_dicts, {}, num_codes,
-            dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
+            dead_code_mask_list,
             metric_weights=self.config.selection_policy.metric_weights,
         )
         test_metrics = phase2_composite_metrics(
             test_rec_dicts, {}, num_codes,
-            dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
+            dead_code_mask_list,
             metric_weights=self.config.selection_policy.metric_weights,
         )
 
@@ -465,7 +476,7 @@ class Phase2Trainer:
             name: {k: v for k, v in phase2_composite_metrics(
                 [Phase2Evaluator._record_to_dict(r) for r in recs],
                 {}, num_codes,
-                dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
+                dead_code_mask_list,
                 metric_weights=self.config.selection_policy.metric_weights,
             ).items() if isinstance(v, (int, float, str, bool))}
             for name, recs in val_baselines.items()
@@ -474,7 +485,7 @@ class Phase2Trainer:
             name: {k: v for k, v in phase2_composite_metrics(
                 [Phase2Evaluator._record_to_dict(r) for r in recs],
                 {}, num_codes,
-                dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
+                dead_code_mask_list,
                 metric_weights=self.config.selection_policy.metric_weights,
             ).items() if isinstance(v, (int, float, str, bool))}
             for name, recs in test_baselines.items()
@@ -504,7 +515,7 @@ class Phase2Trainer:
             cost_cfg,
             alignment,
             num_codes,
-            dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
+            dead_code_mask_list,
         )
         kl_dominance_values = [
             float(r.get("kl_demo_dominance_ratio", 0.0))
@@ -619,7 +630,9 @@ class Phase2Trainer:
             "guardrails_pass": rolling_guardrail_pass,
             "val_guardrails_pass": rolling_guardrail_pass,
             "test_guardrails_pass_report_only": True,
-            "dead_code_mask": dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
+            "dead_code_mask": dead_code_mask_list,
+            "unmasked_diagnostic_probe": unmasked_probe,
+            "probe_pick_rate": unmasked_probe["probe_pick_rate"],
             "num_updates": num_updates,
             "total_timesteps": self.config.total_timesteps,
         }
@@ -651,6 +664,52 @@ class Phase2Trainer:
                 "Phase II reward_normalization 尚未实现 running_mean_std；"
                 "请关闭 reward_normalization 并使用 reward_scaling。"
             )
+
+    def _unmasked_diagnostic_probe(
+        self,
+        selector: ArchetypeSelector,
+        dataset: Phase2Dataset,
+        dead_code_mask: List[bool],
+        max_samples: int = 64,
+    ) -> Dict[str, Any]:
+        """Record initial selector picks with dead-code masking disabled."""
+        sample_count = min(len(dataset.horizon_entries), max(int(max_samples), 0))
+        dead_code_count = sum(1 for flag in dead_code_mask if flag)
+        if sample_count == 0 or dead_code_count == 0:
+            return {
+                "enabled": dead_code_count > 0,
+                "sample_count": sample_count,
+                "dead_code_count": dead_code_count,
+                "probe_pick_count": 0,
+                "probe_pick_rate": 0.0,
+                "picked_codes": [],
+            }
+
+        import torch
+
+        was_training = selector.training
+        selector.eval()
+        obs = np.array(
+            [dataset.get_selector_state(i, 0) for i in range(sample_count)],
+            dtype=np.float32,
+        )
+        obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.config.device)
+        with torch.no_grad():
+            logits, _ = selector(obs_tensor)
+            actions = logits.argmax(dim=-1).cpu().tolist()
+        if was_training:
+            selector.train()
+
+        dead_codes = {idx for idx, flag in enumerate(dead_code_mask) if flag}
+        probe_pick_count = sum(1 for action in actions if int(action) in dead_codes)
+        return {
+            "enabled": True,
+            "sample_count": sample_count,
+            "dead_code_count": dead_code_count,
+            "probe_pick_count": probe_pick_count,
+            "probe_pick_rate": probe_pick_count / sample_count,
+            "picked_codes": [int(action) for action in actions],
+        }
 
     def _history_from_manifest(
         self,
