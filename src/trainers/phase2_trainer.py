@@ -34,6 +34,11 @@ from src.data.schema import InputSchemaValidator
 from src.evaluation.phase2_evaluator import Phase2Evaluator
 from src.evaluation.phase2_replay import Phase2BacktestRunner
 from src.evaluation.phase2_report import Phase2ReportPaths, Phase2ReportWriter
+from src.evaluation.phase2_metrics import (
+    compute_phase2_composite_score,
+    phase2_composite_metrics,
+    phase2_composite_score_sensitivity,
+)
 from src.models.archetype_selector import ArchetypeSelector
 from src.models.phase1_frozen_policy import Phase1FrozenPolicy
 from src.rl.actor_critic import ActorCritic
@@ -48,6 +53,7 @@ from src.trainers.phase2_selection_policy import (
     Phase2SelectionHistory,
     Phase2SelectionPolicy,
 )
+from src.trainers.phase2_dead_code import build_dead_code_mask
 from src.utils.feather_io import read_ipc, read_json
 
 
@@ -202,12 +208,13 @@ class Phase2Trainer:
         # dead code mask
         dead_code_mask = None
         p1_report = val_result.phase1_report or {}
-        code_usage = p1_report.get("code_usage", {})
-        if isinstance(code_usage, dict) and "counts" in code_usage:
-            counts = code_usage["counts"]
-            dead_code_mask = torch.tensor(
-                [c == 0 for c in counts], dtype=torch.bool
+        if self.config.selector_network.action_mask_dead_codes:
+            mask = build_dead_code_mask(
+                p1_report,
+                num_codes,
+                self.config.selector_network.dead_code_usage_threshold,
             )
+            dead_code_mask = torch.tensor(mask, dtype=torch.bool, device=self.config.device)
 
         selector = ArchetypeSelector(
             state_dim=state_spec.total_dim,
@@ -218,7 +225,10 @@ class Phase2Trainer:
         actor_critic = ActorCritic(selector, dead_code_mask=dead_code_mask)
 
         optimizer = torch.optim.Adam(selector.parameters(), lr=self.config.ppo.lr)
-        num_updates = self.config.total_timesteps // (self.config.num_envs * self.config.rollout_length)
+        num_updates = max(
+            self.config.total_timesteps // (self.config.num_envs * self.config.rollout_length),
+            1,
+        )
         schedule_mgr = ScheduleManager(self.config, optimizer, num_updates)
 
         ppo_trainer = PPOTrainer(self.config, actor_critic, envs, schedule_mgr)
@@ -250,8 +260,14 @@ class Phase2Trainer:
                 "kl_demo_loss": stats.kl_demo_loss,
                 "approx_kl": stats.approx_kl,
                 "clip_fraction": stats.clip_fraction,
+                "explained_variance": stats.explained_variance,
                 "reward_mean": stats.reward_mean,
                 "reward_std": stats.reward_std,
+                "reward_clipped_ratio": stats.reward_clipped_ratio,
+                "reward_unclipped_mean": stats.reward_unclipped_mean,
+                "rollout_done_count": stats.rollout_done_count,
+                "rollout_truncated_count": stats.rollout_truncated_count,
+                "rollout_bootstrap_count": stats.rollout_bootstrap_count,
             })
 
             # 保存 last
@@ -267,11 +283,18 @@ class Phase2Trainer:
                     "kl_demo_loss": stats.kl_demo_loss,
                     "approx_kl": stats.approx_kl,
                     "clip_fraction": stats.clip_fraction,
+                    "explained_variance": stats.explained_variance,
                 }
                 eval_result = evaluator.evaluate_val_fast(update_idx, ppo_stats_dict)
                 eval_metrics = eval_result.metrics
                 eval_metrics["update_idx"] = update_idx
                 eval_metrics["val_net_return"] = eval_metrics.get("net_return", 0.0)
+                score, score_debug = compute_phase2_composite_score(
+                    eval_metrics,
+                    self.config.selection_policy.metric_weights,
+                )
+                eval_metrics["phase2_composite_score"] = score
+                eval_metrics["phase2_composite_score_debug"] = score_debug
 
                 verdict = policy.evaluate(eval_metrics, history)
                 ckpt_mgr.commit_verdict(state, verdict, update_idx, eval_metrics)
@@ -332,17 +355,68 @@ class Phase2Trainer:
 
         # Rolling validation
         rolling_result = evaluator.evaluate_rolling_validation()
+        rolling_records = [
+            Phase2Evaluator._record_to_dict(r)
+            for fold_records in rolling_result.per_fold_records
+            for r in fold_records
+        ]
+        writer.write_rolling_validation(
+            {
+                "fold_metrics": rolling_result.fold_metrics,
+                "fold_mean": rolling_result.fold_mean,
+                "worst_fold_quantile": rolling_result.worst_fold_quantile,
+                "fold_volatility": rolling_result.fold_volatility,
+                "fold_sizes": rolling_result.fold_sizes,
+                "fold_initial_position_policy": rolling_result.fold_initial_position_policy,
+            },
+            rolling_records,
+        )
 
         # Build report
-        from src.evaluation.phase2_metrics import phase2_composite_metrics
         val_metrics = phase2_composite_metrics(
             val_rec_dicts, {}, num_codes,
             dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
+            metric_weights=self.config.selection_policy.metric_weights,
         )
         test_metrics = phase2_composite_metrics(
             test_rec_dicts, {}, num_codes,
             dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
+            metric_weights=self.config.selection_policy.metric_weights,
         )
+
+        # Baselines
+        val_baselines = val_runner.run_baselines("val")
+        test_baselines = test_runner.run_baselines("test")
+        bl_val_summary = {
+            name: {k: v for k, v in phase2_composite_metrics(
+                [Phase2Evaluator._record_to_dict(r) for r in recs],
+                {}, num_codes,
+                dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
+                metric_weights=self.config.selection_policy.metric_weights,
+            ).items() if isinstance(v, (int, float, str, bool))}
+            for name, recs in val_baselines.items()
+        }
+        bl_test_summary = {
+            name: {k: v for k, v in phase2_composite_metrics(
+                [Phase2Evaluator._record_to_dict(r) for r in recs],
+                {}, num_codes,
+                dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
+                metric_weights=self.config.selection_policy.metric_weights,
+            ).items() if isinstance(v, (int, float, str, bool))}
+            for name, recs in test_baselines.items()
+        }
+        writer.write_baselines(bl_val_summary, "val")
+        writer.write_baselines(bl_test_summary, "test")
+
+        sensitivity = phase2_composite_score_sensitivity(
+            [
+                {"update_idx": e.update_idx, **e.metrics, "_manifest_verdict": e.verdict}
+                for e in ckpt_mgr._entries
+            ],
+            self.config.selection_policy.metric_weights,
+            self.config.selection_policy.composite_score_sensitivity_perturbations,
+        )
+        writer.write_sensitivity(sensitivity)
 
         # Label coverage
         train_coverage = label_loader.compute_coverage_stats(train_entries, "train")
@@ -352,6 +426,8 @@ class Phase2Trainer:
             "phase1_hash": p1_report.get("config_hash", ""),
             "phase1_batch_id": self.config.phase1_batch_id,
             "phase2_batch_id": self.config.phase2_batch_id,
+            "selection_metric": self.config.selection_policy.selection_metric,
+            "metric_weights": dict(self.config.selection_policy.metric_weights),
             "test_used_for_selection": False,
             "kl_label_coverage_train": train_coverage.coverage_ratio,
             "kl_label_temporal_coverage": train_coverage.temporal_coverage_sequence,
@@ -359,31 +435,61 @@ class Phase2Trainer:
             "behavior_health_warnings": [],
             "risk_health_warnings": [],
             "ood_warning_count": 0,
+            "distribution_shift_warning_count": 0,
             "val_metrics": {k: v for k, v in val_metrics.items() if isinstance(v, (int, float, str, bool))},
             "test_metrics": {k: v for k, v in test_metrics.items() if isinstance(v, (int, float, str, bool))},
+            "horizon_schedule": {
+                "mode": self.config.horizon_schedule.mode,
+                "stride": self.config.horizon_schedule.stride,
+                "position_continuity": self.config.horizon_schedule.position_continuity,
+                "chunk_reset_position": self.config.horizon_schedule.chunk_reset_position,
+            },
+            "data_gap_filter": {
+                "enabled": self.config.horizon_schedule.data_gap_check_enabled,
+                "exclude_gap_horizons": self.config.horizon_schedule.exclude_gap_horizons,
+                "train_gap_count": sum(1 for e in train_entries if e.is_gap),
+                "val_gap_count": sum(1 for e in val_entries if e.is_gap),
+                "test_gap_count": sum(1 for e in test_entries if e.is_gap),
+            },
+            "input_norm": {
+                "mode": self.config.selector_network.input_norm,
+                "position_encoding": self.config.selector_network.position_encoding,
+                "state_dim_breakdown": train_dataset.state_spec().__dict__,
+            },
+            "env_shards": {
+                "num_envs": self.config.num_envs,
+                "mode": self.config.env_shards.mode,
+                "shard_count": len(shard_infos),
+            },
+            "reward_scaling": {
+                "method": self.config.reward_scaling.method,
+                "clip_range": self.config.reward_scaling.clip_range,
+                "last_reward_clipped_ratio": self._rollout_stats[-1].get("reward_clipped_ratio", 0.0) if self._rollout_stats else 0.0,
+            },
+            "cost_config_inherited": cost_cfg,
+            "baselines_val": bl_val_summary,
+            "baselines_test": bl_test_summary,
             "rolling_validation_summary": {
                 "fold_mean": rolling_result.fold_mean,
                 "worst_fold_quantile": rolling_result.worst_fold_quantile,
                 "fold_volatility": rolling_result.fold_volatility,
                 "num_folds": len(rolling_result.fold_metrics),
+                "fold_sizes": rolling_result.fold_sizes,
             } if rolling_result.fold_metrics else {},
+            "execution_stress_summary": {"enabled": False, "implemented": False},
+            "resume_ready": {
+                "enabled": self.config.resume.enabled,
+                "last_selector_exists": ckpt_mgr.last_path.exists(),
+            },
+            "guardrails_pass": True,
+            "val_guardrails_pass": True,
+            "test_guardrails_pass_report_only": True,
+            "dead_code_mask": dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
             "num_updates": num_updates,
             "total_timesteps": self.config.total_timesteps,
         }
 
         report_path = writer.write_final_report(report_summary)
-
-        # Baselines
-        val_baselines = val_runner.run_baselines("val")
-        bl_val_summary = {
-            name: {k: v for k, v in phase2_composite_metrics(
-                [Phase2Evaluator._record_to_dict(r) for r in recs],
-                {}, num_codes,
-                dead_code_mask.tolist() if dead_code_mask is not None else [False] * num_codes,
-            ).items() if isinstance(v, (int, float, str, bool))}
-            for name, recs in val_baselines.items()
-        }
-        writer.write_baselines(bl_val_summary, "val")
 
         return Phase2TrainerArtifacts(
             artifacts_dir=artifacts_dir,

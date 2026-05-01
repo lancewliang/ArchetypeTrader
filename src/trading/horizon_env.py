@@ -81,26 +81,51 @@ class HorizonEnv:
         self._cumulative_loss: float = 0.0
         self._consecutive_losses: int = 0
 
-    def reset(self) -> np.ndarray:
+    def reset(
+        self,
+        prev_terminal_position: int = 0,
+        cursor: int = 0,
+        reset_risk_state: bool = True,
+    ) -> np.ndarray:
         """重置环境，返回第一个 horizon 的 s^sel。
 
         Returns
         -------
         obs : selector 状态向量。
         """
-        self._cursor = 0
-        self._prev_terminal_position = 0
+        self._cursor = max(min(int(cursor), len(self.horizon_indices)), 0)
+        self._prev_terminal_position = int(prev_terminal_position)
         self._done = False
-        self._cumulative_loss = 0.0
-        self._consecutive_losses = 0
+        if reset_risk_state:
+            self._cumulative_loss = 0.0
+            self._consecutive_losses = 0
 
-        if not self.horizon_indices:
+        if not self.horizon_indices or self._cursor >= len(self.horizon_indices):
             self._done = True
             return np.zeros(1, dtype=np.float32)
 
         idx = self.horizon_indices[self._cursor]
         obs = self.dataset.get_selector_state(idx, self._prev_terminal_position)
         return obs
+
+    def restore_state(
+        self,
+        cursor: int,
+        prev_terminal_position: int,
+        cumulative_loss: float = 0.0,
+        consecutive_losses: int = 0,
+    ) -> np.ndarray:
+        """恢复公开环境状态并返回当前 obs。
+
+        该接口供 checkpoint resume 使用，避免外部直接写私有属性。
+        """
+        self._cumulative_loss = float(cumulative_loss)
+        self._consecutive_losses = int(consecutive_losses)
+        return self.reset(
+            prev_terminal_position=prev_terminal_position,
+            cursor=cursor,
+            reset_risk_state=False,
+        )
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, HorizonStepInfo]:
         """执行一个完整 horizon。
@@ -159,6 +184,13 @@ class HorizonEnv:
 
         # 3. TradingEnv replay
         prev_pos = self._prev_terminal_position
+        gap_mode_applied = None
+        entry = self.dataset.horizon_entries[idx]
+        gap_bars = int(getattr(entry, "gap_bars", 0) or 0)
+        if gap_bars > 0:
+            gap_mode_applied = self._handle_gap(gap_bars)
+            if gap_mode_applied in {"force_flatten", "warmup_only"}:
+                prev_pos = 0
         if not self.config.horizon_schedule.position_continuity:
             prev_pos = 0
 
@@ -214,6 +246,8 @@ class HorizonEnv:
             cost_paid=cost_paid,
             risk_triggered=risk_triggered,
             risk_trigger_step=risk_trigger_step,
+            gap_bars=gap_bars,
+            gap_mode_applied=gap_mode_applied,
         )
 
         return next_obs, horizon_reward, done, truncated, step_info
@@ -272,3 +306,13 @@ class HorizonEnv:
     def cursor(self) -> int:
         """当前 horizon index 在 horizon_indices 中的位置。"""
         return self._cursor
+
+    @property
+    def cumulative_loss(self) -> float:
+        """累计亏损风控状态。"""
+        return self._cumulative_loss
+
+    @property
+    def consecutive_losses(self) -> int:
+        """连续亏损次数风控状态。"""
+        return self._consecutive_losses

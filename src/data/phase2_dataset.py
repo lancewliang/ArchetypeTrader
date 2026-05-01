@@ -70,6 +70,7 @@ class Phase2Dataset:
         # 预提取 numpy 数组以避免逐行 polars 查询
         import polars as pl
         if isinstance(frame, pl.DataFrame):
+            self._validate_inputs(frame)
             self._feature_matrix = frame.select(self._feature_columns).to_numpy().astype("float32")
             self._close = frame[self._price_column].to_numpy().astype("float32")
             self._num_rows = frame.height
@@ -107,6 +108,38 @@ class Phase2Dataset:
                 self._mark = self._close.copy()
         else:
             raise TypeError("frame 必须是 polars.DataFrame")
+
+    def _validate_inputs(self, frame) -> None:
+        """构造阶段做防御性校验，避免训练中途暴露难定位错误。"""
+        missing_features = [c for c in self._feature_columns if c not in frame.columns]
+        if missing_features:
+            raise ValueError(f"input_schema feature_columns 在 frame 中缺失: {missing_features}")
+        if self._price_column not in frame.columns:
+            raise ValueError(f"price_column={self._price_column!r} 在 frame 中缺失")
+
+        if "timestamp" in frame.columns and frame.height > 1:
+            ts_values = frame["timestamp"].to_list()
+            for i in range(1, len(ts_values)):
+                if ts_values[i] < ts_values[i - 1]:
+                    raise ValueError("frame.timestamp 必须单调非递减")
+
+        if self.horizon_entries:
+            splits = {e.split for e in self.horizon_entries}
+            if len(splits) != 1:
+                raise ValueError(f"horizon_entries split 不一致: {sorted(splits)}")
+            if "split" in frame.columns:
+                frame_splits = set(str(v) for v in frame["split"].unique().to_list())
+                if frame_splits and not splits.issubset(frame_splits):
+                    raise ValueError(
+                        f"horizon_entries split={sorted(splits)} 与 frame split={sorted(frame_splits)} 不匹配"
+                    )
+            for e in self.horizon_entries:
+                if e.horizon_start < 0 or e.horizon_end < e.horizon_start:
+                    raise ValueError(f"非法 horizon 边界: {e}")
+                if e.horizon_end >= frame.height:
+                    raise ValueError(
+                        f"horizon_end={e.horizon_end} 超过 frame 行数 {frame.height}"
+                    )
 
     def _resolve_reward_alignment(self) -> str:
         """从 Phase I config 获取 reward_alignment，带文件存在性检查。"""

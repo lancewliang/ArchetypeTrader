@@ -60,6 +60,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from src.models.archetype_selector import ArchetypeSelector
     from src.models.phase1_frozen_policy import Phase1FrozenPolicy
     from src.rl.actor_critic import ActorCritic
+    from src.trainers.phase2_dead_code import build_dead_code_mask
     from src.trading.cost_model import LobDepthCostModel
     from src.trading.env import TradingEnv
     from src.trading.reward_alignment import RewardAlignment
@@ -84,6 +85,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # 加载 Phase I 产物
     input_schema = read_json(p1_dir / "input_schema.json")
+    phase1_report = read_json(p1_dir / "phase1_report.json") if (p1_dir / "phase1_report.json").exists() else {}
     frozen_policy = Phase1FrozenPolicy.load(
         p1_dir / "decoder.pt", p1_dir / "codebook.pt", device="cpu"
     )
@@ -108,7 +110,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     selector.load_state_dict(ckpt["model_state"])
     selector.eval()
-    actor_critic = ActorCritic(selector)
+    dead_code_mask = build_dead_code_mask(
+        phase1_report,
+        frozen_policy.num_codes,
+        config.selector_network.dead_code_usage_threshold,
+    )
+    actor_critic = ActorCritic(
+        selector,
+        dead_code_mask=torch.tensor(dead_code_mask, dtype=torch.bool),
+    )
 
     # Trading env factory
     p1_config = {}
@@ -125,7 +135,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     alignment = RewardAlignment(cost_cfg.get("reward_alignment", "paper_formula"))
 
     def env_factory():
-        return TradingEnv(cost_model=cost_model, reward_alignment=alignment)
+        return TradingEnv(
+            cost_model=cost_model,
+            reward_alignment=alignment,
+            max_position=config.max_position,
+        )
 
     # 执行 backtest
     runner = Phase2BacktestRunner(config, actor_critic, frozen_policy, test_dataset, env_factory)
@@ -135,7 +149,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from src.evaluation.phase2_metrics import phase2_composite_metrics
     rec_dicts = [Phase2Evaluator._record_to_dict(r) for r in records]
     metrics = phase2_composite_metrics(
-        rec_dicts, {}, frozen_policy.num_codes, [False] * frozen_policy.num_codes
+        rec_dicts, {}, frozen_policy.num_codes, dead_code_mask
     )
 
     report_paths = Phase2ReportPaths.from_artifacts_dir(artifacts_dir)

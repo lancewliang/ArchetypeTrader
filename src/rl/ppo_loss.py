@@ -55,12 +55,16 @@ class PPOLoss:
         entropy_coef: float = 0.01,
         kl_demo_coef: float = 0.1,
         num_codes: int = 10,
+        value_clip_range: Optional[float] = None,
+        kl_demo_label_smoothing: float = 0.0,
     ) -> None:
         self.clip_ratio = clip_ratio
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
         self.kl_demo_coef = kl_demo_coef
         self.num_codes = num_codes
+        self.value_clip_range = value_clip_range
+        self.kl_demo_label_smoothing = kl_demo_label_smoothing
 
     def compute(
         self,
@@ -70,6 +74,7 @@ class PPOLoss:
         value: torch.Tensor,
         return_: torch.Tensor,
         entropy: torch.Tensor,
+        old_value: Optional[torch.Tensor] = None,
         kl_label: Optional[torch.Tensor] = None,
         is_labeled: Optional[torch.Tensor] = None,
         dead_code_mask: Optional[torch.Tensor] = None,
@@ -103,7 +108,17 @@ class PPOLoss:
         policy_loss = -torch.min(surr1, surr2).mean()
 
         # 2. Value loss
-        value_loss = F.mse_loss(value, return_)
+        if self.value_clip_range is not None and old_value is not None:
+            value_clipped = old_value + torch.clamp(
+                value - old_value,
+                -float(self.value_clip_range),
+                float(self.value_clip_range),
+            )
+            value_loss_unclipped = (value - return_).pow(2)
+            value_loss_clipped = (value_clipped - return_).pow(2)
+            value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
+        else:
+            value_loss = F.mse_loss(value, return_)
 
         # 3. Entropy bonus
         entropy_loss = -entropy.mean()
@@ -128,7 +143,11 @@ class PPOLoss:
             if labeled_mask.any():
                 labeled_logits = logits[labeled_mask]
                 labeled_targets = kl_label[labeled_mask]
-                kl_demo_loss = F.cross_entropy(labeled_logits, labeled_targets)
+                kl_demo_loss = F.cross_entropy(
+                    labeled_logits,
+                    labeled_targets,
+                    label_smoothing=float(self.kl_demo_label_smoothing),
+                )
 
         # 5. Approx KL
         with torch.no_grad():

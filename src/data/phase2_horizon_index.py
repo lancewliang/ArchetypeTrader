@@ -134,8 +134,14 @@ class Phase2HorizonEntry:
     split: str
     is_gap: bool = False
     gap_bars: int = 0
+    max_timestamp_gap_minutes: float = 0.0
+    last_execution_row: Optional[int] = None
+    last_markout_row: Optional[int] = None
+    phase1_sample_id: Optional[str] = None
     code_label: Optional[int] = None
     is_labeled: bool = False
+    prev_terminal_position: Optional[int] = None
+    timestamp_start: Optional[str] = None
 
 
 class Phase2HorizonIndexer:
@@ -217,6 +223,7 @@ class Phase2HorizonIndexer:
 
         # 构建 label lookup
         label_lookup: Dict[int, int] = {}
+        phase1_sample_lookup: Dict[int, str] = {}
         if phase1_labels is not None and split != "test":
             if "start_index" in phase1_labels.columns and "code_label" in phase1_labels.columns:
                 starts_col = phase1_labels["start_index"].to_list()
@@ -224,16 +231,28 @@ class Phase2HorizonIndexer:
                 for si, cl in zip(starts_col, labels_col):
                     if cl is not None:
                         label_lookup[si] = int(cl)
+            if "start_index" in phase1_labels.columns and "sample_id" in phase1_labels.columns:
+                starts_col = phase1_labels["start_index"].to_list()
+                sample_col = phase1_labels["sample_id"].to_list()
+                for si, sid in zip(starts_col, sample_col):
+                    if sid is not None:
+                        phase1_sample_lookup[int(si)] = str(sid)
 
-        gap_threshold = self.config.horizon_schedule.gap_threshold_bars
+        gap_threshold = (
+            self.config.horizon_schedule.max_allowed_gap_minutes
+            if self.config.horizon_schedule.data_gap_check_enabled
+            else self.config.horizon_schedule.gap_threshold_bars
+        )
 
         for idx, start in enumerate(starts):
             end = start + horizon - 1
             sample_id = f"p2_{split}_{idx:06d}"
+            timestamp_start = str(ts_values[start]) if has_ts and start < len(ts_values) else None
 
             # gap 检测
             is_gap = False
             gap_bars = 0
+            max_gap_minutes = 0.0
             if has_ts and len(ts_values) > end:
                 for t in range(start, min(end, len(ts_values) - 1)):
                     try:
@@ -242,6 +261,7 @@ class Phase2HorizonIndexer:
                             gap_minutes = diff.total_seconds() / 60.0
                         else:
                             gap_minutes = float(diff)
+                        max_gap_minutes = max(max_gap_minutes, float(gap_minutes))
                         if gap_minutes > gap_threshold:
                             is_gap = True
                             gap_bars = max(gap_bars, int(gap_minutes))
@@ -255,6 +275,9 @@ class Phase2HorizonIndexer:
                 code_label = label_lookup[start]
                 is_labeled = True
 
+            last_execution_row = start + horizon - 1
+            last_markout_row = start + horizon - 1 + lookahead
+
             entries.append(Phase2HorizonEntry(
                 sample_id=sample_id,
                 horizon_start=start,
@@ -262,8 +285,14 @@ class Phase2HorizonIndexer:
                 split=split,
                 is_gap=is_gap,
                 gap_bars=gap_bars,
+                max_timestamp_gap_minutes=max_gap_minutes,
+                last_execution_row=last_execution_row,
+                last_markout_row=last_markout_row,
+                phase1_sample_id=phase1_sample_lookup.get(start),
                 code_label=code_label,
                 is_labeled=is_labeled,
+                prev_terminal_position=None,
+                timestamp_start=timestamp_start,
             ))
 
         # 按配置裁掉 gap horizons
@@ -280,12 +309,21 @@ class Phase2HorizonIndexer:
         """将 horizon index 写入 feather 文件。"""
         data = {
             "sample_id": [e.sample_id for e in entries],
+            "start_index": [e.horizon_start for e in entries],
+            "end_index": [e.horizon_end for e in entries],
             "horizon_start": [e.horizon_start for e in entries],
             "horizon_end": [e.horizon_end for e in entries],
+            "last_execution_row": [e.last_execution_row for e in entries],
+            "last_markout_row": [e.last_markout_row for e in entries],
+            "phase1_sample_id": [e.phase1_sample_id for e in entries],
             "split": [e.split for e in entries],
+            "has_data_gap": [e.is_gap for e in entries],
             "is_gap": [e.is_gap for e in entries],
             "gap_bars": [e.gap_bars for e in entries],
+            "max_timestamp_gap_minutes": [e.max_timestamp_gap_minutes for e in entries],
             "is_labeled": [e.is_labeled for e in entries],
+            "prev_terminal_position": [e.prev_terminal_position for e in entries],
+            "timestamp_start": [e.timestamp_start for e in entries],
         }
         # test 索引默认不含 code_label
         split_set = set(e.split for e in entries)

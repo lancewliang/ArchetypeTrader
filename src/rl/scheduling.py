@@ -63,8 +63,11 @@ class ScheduleManager:
         self._current_update = update_idx
         progress = min(update_idx / self.total_updates, 1.0)
 
-        # Learning rate: linear decay
-        self._current_lr = self._initial_lr * (1.0 - progress)
+        # Learning rate
+        if self.config.ppo.lr_schedule == "linear":
+            self._current_lr = self._initial_lr * (1.0 - progress)
+        else:
+            self._current_lr = self._initial_lr
         self._current_lr = max(self._current_lr, 1e-7)
 
         # 更新 optimizer lr
@@ -72,11 +75,24 @@ class ScheduleManager:
             for pg in self.optimizer.param_groups:
                 pg["lr"] = self._current_lr
 
-        # Entropy coef: linear decay
-        self._current_entropy_coef = self._initial_entropy_coef * (1.0 - progress)
+        # Entropy coef: optional warmup, then linear decay.
+        warmup_fraction = max(float(self.config.ppo.entropy_warmup_fraction), 0.0)
+        warmup_coef = self.config.ppo.entropy_warmup_coef
+        if warmup_coef is not None and warmup_fraction > 0 and progress < warmup_fraction:
+            self._current_entropy_coef = float(warmup_coef)
+        else:
+            self._current_entropy_coef = self._initial_entropy_coef * (1.0 - progress)
 
-        # KL demo coef: linear decay (可选 anneal_to)
-        self._current_kl_demo_coef = self._initial_kl_demo_coef * (1.0 - progress * 0.5)
+        # KL demo coef: configurable linear anneal.
+        anneal_to = self.config.ppo.kl_demo_anneal_to
+        anneal_fraction = max(float(self.config.ppo.kl_demo_anneal_fraction), 1e-8)
+        if anneal_to is None:
+            anneal_to = self._initial_kl_demo_coef * 0.5
+        anneal_progress = min(progress / anneal_fraction, 1.0)
+        self._current_kl_demo_coef = (
+            self._initial_kl_demo_coef
+            + (float(anneal_to) - self._initial_kl_demo_coef) * anneal_progress
+        )
 
     def current_state(self) -> ScheduleState:
         """返回当前 schedule 状态。"""

@@ -43,7 +43,9 @@ def compute_sharpe(
     var = sum((r - mean) ** 2 for r in step_returns) / (len(step_returns) - 1)
     std = math.sqrt(max(var, 0.0))
     if std < _EPS:
-        return 0.0
+        if abs(mean) < _EPS:
+            return 0.0
+        return math.copysign(abs(mean) / _EPS * math.sqrt(annualization_factor), mean)
     return mean / std * math.sqrt(annualization_factor)
 
 

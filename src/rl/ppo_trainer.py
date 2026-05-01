@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -27,6 +27,7 @@ from src.rl.ppo_loss import PPOLoss, PPOLossOutput
 from src.rl.rollout_buffer import RolloutBuffer, RolloutSample
 from src.rl.scheduling import ScheduleManager
 from src.trading.horizon_env import HorizonEnv
+from src.evaluation.metrics.policy_health import compute_explained_variance
 
 
 class NumericalSafetyError(RuntimeError):
@@ -49,6 +50,9 @@ class PPOUpdateStats:
     reward_std: float = 0.0
     reward_clipped_ratio: float = 0.0
     reward_unclipped_mean: float = 0.0
+    rollout_done_count: float = 0.0
+    rollout_truncated_count: float = 0.0
+    rollout_bootstrap_count: float = 0.0
 
 
 class PPOTrainer:
@@ -102,6 +106,8 @@ class PPOTrainer:
             entropy_coef=sched_state.entropy_coef,
             kl_demo_coef=sched_state.kl_demo_coef,
             num_codes=self.actor_critic.selector.num_codes,
+            value_clip_range=self.config.ppo.value_clip_range,
+            kl_demo_label_smoothing=self.config.ppo.kl_demo_label_smoothing,
         )
         if optimizer is not None:
             self._optimizer = optimizer
@@ -149,11 +155,12 @@ class PPOTrainer:
                 kl_label = entry.code_label if entry else None
                 is_labeled = entry.is_labeled if entry else False
 
-                next_obs, reward, done, truncated, info = env.step(action)
+                next_obs, reward, done, env_truncated, info = env.step(action)
+                truncated = bool(env_truncated or (step == self.config.rollout_length - 1 and not done))
 
                 # reward scaling
                 reward_raw = reward
-                reward_scaled = self._scale_reward(reward)
+                reward_scaled, reward_was_clipped = self._scale_reward(reward)
 
                 samples.append(RolloutSample(
                     obs=self._current_obs[env_idx],
@@ -165,6 +172,7 @@ class PPOTrainer:
                     reward_raw=reward_raw,
                     done=done,
                     truncated=truncated,
+                    reward_was_clipped=reward_was_clipped,
                     kl_label=kl_label,
                     is_labeled=is_labeled,
                     info_cost_paid=info.cost_paid if info else 0.0,
@@ -179,12 +187,18 @@ class PPOTrainer:
 
             self._buffer.add(samples)
 
-    def _scale_reward(self, reward: float) -> float:
+    def _scale_reward(self, reward: float) -> Tuple[float, bool]:
         """应用 reward scaling。"""
         method = self.config.reward_scaling.method
         if method == "divide_by_horizon":
-            return reward / max(self.config.horizon, 1)
-        return reward
+            scaled = reward / max(self.config.horizon, 1)
+        else:
+            scaled = reward
+        clip_range = self.config.reward_scaling.clip_range
+        if clip_range is None:
+            return float(scaled), False
+        clipped = float(np.clip(scaled, -float(clip_range), float(clip_range)))
+        return clipped, bool(clipped != scaled)
 
     def update(self) -> PPOUpdateStats:
         """执行一次 PPO update。
@@ -223,7 +237,16 @@ class PPOTrainer:
         buffer_stats = self._buffer.get_stats()
         stats.reward_mean = buffer_stats.get("reward_mean", 0.0)
         stats.reward_std = buffer_stats.get("reward_std", 0.0)
-        stats.reward_unclipped_mean = buffer_stats.get("reward_raw_mean", 0.0)
+        stats.reward_clipped_ratio = buffer_stats.get("reward_clipped_ratio", 0.0)
+        stats.reward_unclipped_mean = buffer_stats.get("reward_unclipped_mean", 0.0)
+        stats.rollout_done_count = buffer_stats.get("rollout_done_count", 0.0)
+        stats.rollout_truncated_count = buffer_stats.get("rollout_truncated_count", 0.0)
+        stats.rollout_bootstrap_count = buffer_stats.get("rollout_bootstrap_count", 0.0)
+
+        vr = self._buffer.flat_values_returns()
+        stats.explained_variance = compute_explained_variance(
+            vr["values"], vr["returns"]
+        )
 
         total_policy_loss = 0.0
         total_value_loss = 0.0
@@ -244,6 +267,7 @@ class PPOTrainer:
                 obs = mb["obs"]
                 action = mb["action"]
                 old_log_prob = mb["old_log_prob"]
+                old_value = mb["old_value"]
                 advantage = mb["advantage"]
                 return_ = mb["return_"]
                 kl_label = mb["kl_label"]
@@ -265,6 +289,7 @@ class PPOTrainer:
                     value=eval_out.value,
                     return_=return_,
                     entropy=eval_out.entropy,
+                    old_value=old_value,
                     kl_label=kl_label,
                     is_labeled=is_labeled,
                     dead_code_mask=(
@@ -373,6 +398,8 @@ class PPOTrainer:
             env_states.append({
                 "cursor": env.cursor,
                 "prev_terminal_position": env.prev_terminal_position,
+                "cumulative_loss": env.cumulative_loss,
+                "consecutive_losses": env.consecutive_losses,
             })
         state["env_states"] = env_states
         return state
@@ -386,6 +413,12 @@ class PPOTrainer:
         if "schedule_state" in state:
             self.schedule_manager.load_state(state["schedule_state"])
         if "env_states" in state:
-            for env, es in zip(self.envs, state["env_states"]):
-                env._cursor = es.get("cursor", 0)
-                env._prev_terminal_position = es.get("prev_terminal_position", 0)
+            for env_idx, (env, es) in enumerate(zip(self.envs, state["env_states"])):
+                obs = env.restore_state(
+                    cursor=es.get("cursor", 0),
+                    prev_terminal_position=es.get("prev_terminal_position", 0),
+                    cumulative_loss=es.get("cumulative_loss", 0.0),
+                    consecutive_losses=es.get("consecutive_losses", 0),
+                )
+                if env_idx < len(self._current_obs):
+                    self._current_obs[env_idx] = obs

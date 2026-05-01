@@ -62,7 +62,8 @@ class ActorCritic:
     def _mask_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """应用 dead code mask。"""
         if self.dead_code_mask is not None:
-            return ArchetypeSelector.apply_dead_code_mask(logits, self.dead_code_mask)
+            mask = self.dead_code_mask.to(device=logits.device)
+            return ArchetypeSelector.apply_dead_code_mask(logits, mask)
         return logits
 
     def act(

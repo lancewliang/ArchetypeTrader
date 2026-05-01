@@ -10,7 +10,9 @@ CLI 参数至少包含:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -50,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="覆盖 PPO 配置中的 kl_demo_coef")
     p.add_argument("--kl-demo-anneal-to", type=float, default=None,
                     help="kl_demo_coef 退火终值")
+    p.add_argument("--run-kl-demo-ablation", action="store_true",
+                    help="运行 KL/demo alpha 消融矩阵")
+    p.add_argument("--kl-demo-ablation-values", nargs="*", type=float,
+                    default=[0.0, 0.1, 0.5, 1.0],
+                    help="KL/demo 消融 alpha 列表")
     # 控制开关
     p.add_argument("--allow-phase1-hindsight-warning", action="store_true",
                     help="允许 Phase I hindsight_bias_warning=exceeded")
@@ -67,6 +74,8 @@ def build_config(args: argparse.Namespace) -> Phase2Config:
     }
     if args.kl_demo_coef is not None:
         ppo_kwargs["kl_demo_coef"] = args.kl_demo_coef
+    if args.kl_demo_anneal_to is not None:
+        ppo_kwargs["kl_demo_anneal_to"] = args.kl_demo_anneal_to
 
     ppo = PPOConfig(**ppo_kwargs)
 
@@ -93,6 +102,8 @@ def build_config(args: argparse.Namespace) -> Phase2Config:
             phase1_batch_id=args.phase1_batch_id,
         ),
     )
+    if config.paper_strict_reproduction:
+        config = config.apply_paper_strict_overrides()
     return config
 
 
@@ -101,6 +112,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     config = build_config(args)
+
+    if args.run_kl_demo_ablation:
+        return run_kl_demo_ablation(config, args.kl_demo_ablation_values)
+
     trainer = Phase2Trainer(config)
     try:
         trainer.run()
@@ -108,6 +123,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[fatal] Phase II 训练终止: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def run_kl_demo_ablation(config: Phase2Config, values: Sequence[float]) -> int:
+    """运行 KL/demo alpha 消融矩阵并写 summary。
+
+    每个 alpha 使用独立 phase2 batch suffix，避免覆盖主训练产物。
+    """
+    summary = []
+    for alpha in values:
+        tag = str(alpha).replace(".", "p")
+        ablation_config = replace(
+            config,
+            phase2_batch_id=f"{config.phase2_batch_id}_kl{tag}",
+            ppo=replace(config.ppo, kl_demo_coef=float(alpha)),
+        )
+        trainer = Phase2Trainer(ablation_config)
+        try:
+            artifacts = trainer.run()
+        except Phase2FatalError as exc:
+            summary.append({
+                "kl_demo_coef": float(alpha),
+                "status": "failed",
+                "error": str(exc),
+            })
+            continue
+        summary.append({
+            "kl_demo_coef": float(alpha),
+            "status": "ok",
+            "phase2_batch_id": ablation_config.phase2_batch_id,
+            "phase2_report": str(artifacts.phase2_report),
+        })
+
+    output_dir = config.artifacts_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "phase2_ablation_kl_demo.json"
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump({"runs": summary}, f, ensure_ascii=False, indent=2)
+    print(f"[info] KL/demo ablation summary written to {output_path}")
+    return 0 if all(item["status"] == "ok" for item in summary) else 1
 
 
 if __name__ == "__main__":

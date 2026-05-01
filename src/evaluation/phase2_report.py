@@ -33,6 +33,24 @@ REQUIRED_PHASE2_REPORT_KEYS = (
     "ood_warning_count",
 )
 
+PHASE2_AUDIT_REPORT_KEYS = (
+    "horizon_schedule",
+    "data_gap_filter",
+    "input_norm",
+    "env_shards",
+    "reward_scaling",
+    "cost_config_inherited",
+    "baselines_val",
+    "baselines_test",
+    "rolling_validation_summary",
+    "execution_stress_summary",
+    "distribution_shift_warning_count",
+    "resume_ready",
+    "guardrails_pass",
+    "val_guardrails_pass",
+    "test_guardrails_pass_report_only",
+)
+
 
 class Phase2ReportSchemaError(ValueError):
     """phase2_report.json 缺失必填字段。"""
@@ -97,10 +115,23 @@ class Phase2ReportWriter:
         return atomic_write_json(sensitivity, self.paths.sensitivity)
 
     def write_rolling_validation(
-        self, result: Dict[str, Any]
+        self,
+        result: Dict[str, Any],
+        records: Optional[List[Dict[str, Any]]] = None,
     ) -> Path:
-        """写 phase2_rolling_validation.json。"""
-        return atomic_write_json(result, self.paths.rolling_validation)
+        """写 phase2_rolling_validation.json，并可选写 per-fold records。"""
+        path = atomic_write_json(result, self.paths.rolling_validation)
+        if records is not None:
+            if records:
+                flat_records = [
+                    {k: v for k, v in r.items() if not isinstance(v, (list, dict))}
+                    for r in records
+                ]
+                df = pl.DataFrame(flat_records)
+            else:
+                df = pl.DataFrame({"sample_id": [], "fold_id": []})
+            write_ipc(df, self.paths.rolling_validation_records)
+        return path
 
     def write_rollout_stats(self, stats_records: List[Dict[str, Any]]) -> Path:
         """写 phase2_rollout_stats.feather。"""

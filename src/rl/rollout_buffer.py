@@ -35,6 +35,7 @@ class RolloutSample:
     reward_raw: float
     done: bool
     truncated: bool
+    reward_was_clipped: bool = False
     kl_label: Optional[int] = None
     is_labeled: bool = False
     dead_code_mask: Optional[Any] = None
@@ -75,6 +76,7 @@ class RolloutBuffer:
         self._values: List[List[float]] = []
         self._rewards: List[List[float]] = []
         self._rewards_raw: List[List[float]] = []
+        self._reward_was_clipped: List[List[bool]] = []
         self._dones: List[List[bool]] = []
         self._truncateds: List[List[bool]] = []
         self._kl_labels: List[List[Optional[int]]] = []
@@ -100,6 +102,7 @@ class RolloutBuffer:
         self._values.append([s.value for s in samples])
         self._rewards.append([s.reward for s in samples])
         self._rewards_raw.append([s.reward_raw for s in samples])
+        self._reward_was_clipped.append([s.reward_was_clipped for s in samples])
         self._dones.append([s.done for s in samples])
         self._truncateds.append([s.truncated for s in samples])
         self._kl_labels.append([s.kl_label for s in samples])
@@ -240,6 +243,7 @@ class RolloutBuffer:
         self._values.clear()
         self._rewards.clear()
         self._rewards_raw.clear()
+        self._reward_was_clipped.clear()
         self._dones.clear()
         self._truncateds.clear()
         self._kl_labels.clear()
@@ -255,6 +259,9 @@ class RolloutBuffer:
         """返回 buffer 统计（reward mean/std、clipped ratio 等）。"""
         all_rewards = [r for step in self._rewards for r in step]
         all_raw = [r for step in self._rewards_raw for r in step]
+        all_clipped = [c for step in self._reward_was_clipped for c in step]
+        all_dones = [d for step in self._dones for d in step]
+        all_truncated = [t for step in self._truncateds for t in step]
         if not all_rewards:
             return {"reward_mean": 0.0, "reward_std": 0.0, "reward_raw_mean": 0.0}
         return {
@@ -262,4 +269,21 @@ class RolloutBuffer:
             "reward_std": float(np.std(all_rewards)),
             "reward_raw_mean": float(np.mean(all_raw)),
             "reward_raw_std": float(np.std(all_raw)),
+            "reward_clipped_ratio": float(np.mean(all_clipped)) if all_clipped else 0.0,
+            "reward_unclipped_mean": float(np.mean(all_raw)),
+            "reward_unclipped_std": float(np.std(all_raw)),
+            "rollout_done_count": float(sum(1 for d in all_dones if d)),
+            "rollout_truncated_count": float(sum(1 for t in all_truncated if t)),
+            "rollout_bootstrap_count": float(sum(1 for t, d in zip(all_truncated, all_dones) if t and not d)),
         }
+
+    def flat_values_returns(self) -> Dict[str, List[float]]:
+        """返回 GAE 后 flatten 的 values/returns，供 PPO 健康指标使用。"""
+        assert self._returns is not None, "必须先调用 compute_gae()"
+        values: List[float] = []
+        returns: List[float] = []
+        for t in range(self._step_count):
+            for e in range(self.num_envs):
+                values.append(float(self._values[t][e]))
+                returns.append(float(self._returns[t, e]))
+        return {"values": values, "returns": returns}

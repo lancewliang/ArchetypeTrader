@@ -35,6 +35,8 @@ class RollingValidationResult:
     worst_fold_quantile: Dict[str, float] = field(default_factory=dict)
     fold_volatility: Dict[str, float] = field(default_factory=dict)
     per_fold_records: List[List[Phase2HorizonReplayRecord]] = field(default_factory=list)
+    fold_sizes: List[int] = field(default_factory=list)
+    fold_initial_position_policy: str = "flat"
 
 
 class Phase2Evaluator:
@@ -75,6 +77,7 @@ class Phase2Evaluator:
             ppo_stats or {},
             self.num_codes,
             self.dead_code_mask,
+            metric_weights=self.config.selection_policy.metric_weights,
         )
         metrics["update_idx"] = update_idx
 
@@ -119,6 +122,7 @@ class Phase2Evaluator:
             ppo_stats or {},
             self.num_codes,
             self.dead_code_mask,
+            metric_weights=self.config.selection_policy.metric_weights,
         )
 
         # 运行 baselines
@@ -127,7 +131,11 @@ class Phase2Evaluator:
         for name, bl_records in baseline_records.items():
             bl_dicts = [self._record_to_dict(r) for r in bl_records]
             bl_metrics = phase2_composite_metrics(
-                bl_dicts, {}, self.num_codes, self.dead_code_mask
+                bl_dicts,
+                {},
+                self.num_codes,
+                self.dead_code_mask,
+                metric_weights=self.config.selection_policy.metric_weights,
             )
             baseline_results[name] = bl_metrics
 
@@ -150,32 +158,45 @@ class Phase2Evaluator:
             return RollingValidationResult()
 
         num_folds = self.config.rolling_validation.num_folds
-        val_entries = [
-            e for e in self.backtest_runner.dataset.horizon_entries
+        val_pairs = [
+            (idx, e)
+            for idx, e in enumerate(self.backtest_runner.dataset.horizon_entries)
             if e.split == "val"
         ]
-        if not val_entries or num_folds < 1:
+        if not val_pairs or num_folds < 1:
             return RollingValidationResult()
 
-        fold_size = max(len(val_entries) // num_folds, 1)
+        fold_size = max((len(val_pairs) + num_folds - 1) // num_folds, 1)
         fold_metrics_list: List[Dict[str, Any]] = []
         per_fold_records: List[List[Phase2HorizonReplayRecord]] = []
+        fold_sizes: List[int] = []
 
         for fold_idx in range(num_folds):
             # 每个 fold 使用 val 的一个子集
             start = fold_idx * fold_size
-            end = min((fold_idx + 1) * fold_size, len(val_entries))
-            # 运行 walk-forward on this fold subset
+            end = min((fold_idx + 1) * fold_size, len(val_pairs))
+            fold_pairs = val_pairs[start:end]
+            if not fold_pairs:
+                continue
+            fold_indices = [idx for idx, _entry in fold_pairs]
             records = self.backtest_runner.run_walk_forward(
-                split="val", deterministic=True
+                split="val",
+                deterministic=True,
+                entry_indices=fold_indices,
+                initial_position=0,
+                fold_id=fold_idx,
             )
-            # 只取对应 fold 的 records
-            fold_records = records[start:end] if len(records) > start else []
+            fold_records = records
             per_fold_records.append(fold_records)
+            fold_sizes.append(len(fold_records))
 
             horizon_dicts = [self._record_to_dict(r) for r in fold_records]
             metrics = phase2_composite_metrics(
-                horizon_dicts, {}, self.num_codes, self.dead_code_mask
+                horizon_dicts,
+                {},
+                self.num_codes,
+                self.dead_code_mask,
+                metric_weights=self.config.selection_policy.metric_weights,
             )
             fold_metrics_list.append(metrics)
 
@@ -190,6 +211,8 @@ class Phase2Evaluator:
             worst_fold_quantile=worst_fold,
             fold_volatility=fold_vol,
             per_fold_records=per_fold_records,
+            fold_sizes=fold_sizes,
+            fold_initial_position_policy="flat",
         )
 
     @staticmethod
@@ -205,7 +228,15 @@ class Phase2Evaluator:
             "boundary_cost": r.boundary_cost,
             "cost_paid": r.cost_paid,
             "risk_triggered": r.risk_triggered,
+            "risk_trigger_step": r.risk_trigger_step,
+            "risk_reason": r.risk_reason,
+            "fold_id": r.fold_id,
+            "timestamp_start": r.timestamp_start,
             "step_returns": r.step_returns,
+            "selector_confidence": r.selector_confidence,
+            "throttle_triggered": r.throttle_triggered,
+            "original_code": r.original_code,
+            "throttled_code": r.throttled_code,
         }
 
     @staticmethod

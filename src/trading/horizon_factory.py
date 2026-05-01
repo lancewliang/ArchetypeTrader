@@ -73,22 +73,25 @@ class HorizonFactory:
         if total_horizons == 0:
             return [], []
 
-        # 均匀切分
-        shard_size = max(total_horizons // num_envs, 1)
         envs: List[HorizonEnv] = []
         shard_infos: List[EnvShardInfo] = []
 
         for env_id in range(num_envs):
-            start_idx = env_id * shard_size
-            if env_id == num_envs - 1:
-                end_idx = total_horizons
+            if self.config.env_shards.mode == "round_robin":
+                horizon_indices = list(range(env_id, total_horizons, num_envs))
+                if not horizon_indices:
+                    continue
+                start_idx = horizon_indices[0]
+                end_idx = horizon_indices[-1] + 1
             else:
+                # contiguous / rollover 当前都使用连续时间分片；rollover 保留为后续扩展。
+                shard_size = max((total_horizons + num_envs - 1) // num_envs, 1)
+                start_idx = env_id * shard_size
                 end_idx = min((env_id + 1) * shard_size, total_horizons)
 
-            if start_idx >= total_horizons:
-                break
-
-            horizon_indices = list(range(start_idx, end_idx))
+                if start_idx >= total_horizons:
+                    break
+                horizon_indices = list(range(start_idx, end_idx))
             trading_env = self.trading_env_factory()
 
             env = HorizonEnv(
@@ -101,11 +104,15 @@ class HorizonFactory:
             )
             envs.append(env)
 
+            first_entry = self.dataset.horizon_entries[horizon_indices[0]]
+            last_entry = self.dataset.horizon_entries[horizon_indices[-1]]
             shard_infos.append(EnvShardInfo(
                 env_id=env_id,
                 start_horizon_idx=start_idx,
-                end_horizon_idx=end_idx - 1,
+                end_horizon_idx=horizon_indices[-1],
                 num_horizons=len(horizon_indices),
+                timestamp_start=getattr(first_entry, "timestamp_start", None),
+                timestamp_end=getattr(last_entry, "timestamp_start", None),
             ))
 
         return envs, shard_infos

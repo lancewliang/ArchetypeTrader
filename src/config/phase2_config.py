@@ -59,10 +59,19 @@ class HorizonScheduleConfig:
     """
     mode: Literal["non_overlap", "stride", "phase1_index"] = "non_overlap"
     stride: int = 1
+    walk_forward_enabled: bool = True
+    walk_forward_seed: int = 42
     gap_threshold_bars: int = 5
+    data_gap_check_enabled: bool = True
+    max_allowed_gap_minutes: int = 5
+    drop_gap_horizons: bool = True
+    gap_position_carry_threshold_minutes: int = 5
+    gap_large_reset_mode: Literal["carry", "force_flatten", "warmup_only"] = "force_flatten"
     gap_mode: Literal["carry", "force_flatten", "warmup_only"] = "carry"
     exclude_gap_horizons: bool = True
     position_continuity: bool = True
+    chunk_reset_position: Literal["inherit", "flat"] = "flat"
+    reward_alignment_lookahead_check: bool = True
 
 
 # ---------- Selector 网络 ----------
@@ -79,6 +88,10 @@ class SelectorNetworkConfig:
     use_layer_norm: bool = True
     position_continuity: bool = True
     dead_code_mask_source: str = "phase1_global_usage"
+    action_mask_dead_codes: bool = True
+    dead_code_usage_threshold: float = 0.01
+    input_norm: Literal["layer_norm", "running_mean_std", "none"] = "layer_norm"
+    position_encoding: Literal["one_hot_3", "scaled_integer", "bucketed_position"] = "scaled_integer"
 
 
 # ---------- PPO ----------
@@ -90,16 +103,25 @@ class PPOConfig:
     自研实现，不依赖 Stable-Baselines3。
     """
     clip_ratio: float = 0.2
+    value_clip_range: Optional[float] = None
     value_loss_coef: float = 0.5
     entropy_coef: float = 0.01
+    entropy_warmup_coef: Optional[float] = None
+    entropy_warmup_fraction: float = 0.0
     kl_demo_coef: float = 1.0  # 论文 α=1
-    target_kl: Optional[float] = 0.03
+    kl_demo_label_smoothing: float = 0.0
+    kl_demo_anneal_to: Optional[float] = None
+    kl_demo_anneal_fraction: float = 1.0
+    target_kl: Optional[float] = 0.05
     max_grad_norm: float = 0.5
     update_epochs: int = 4
+    batch_size: Optional[int] = None
     minibatch_size: int = 256
     gamma: float = 0.99
     gae_lambda: float = 0.95
     advantage_normalization: bool = True
+    reward_normalization: bool = False
+    lr_schedule: Literal["constant", "linear"] = "linear"
     lr: float = 3e-4
 
 
@@ -112,8 +134,20 @@ class Phase2SelectionPolicyConfig:
     guardrails 包含 max_drawdown / min_sharpe / max_turnover_ratio 等。
     val_kl_to_demo / phase1_demo_label_selector_val_net_return 仅作 diagnostic。
     """
+    selection_metric: str = "phase2_composite_score"
     primary_metric: str = "val_net_return"
     primary_mode: Literal["max", "min"] = "max"
+    metric_weights: Dict[str, float] = field(default_factory=lambda: {
+        "net_return": 1.0,
+        "sharpe_ratio": 0.5,
+        "max_drawdown": -0.5,
+        "turnover": -0.1,
+        "action_dominance_ratio": -0.2,
+        "active_archetype_ratio": 0.2,
+    })
+    composite_score_sensitivity_perturbations: List[float] = field(
+        default_factory=lambda: [-0.2, 0.2]
+    )
     max_drawdown: float = 0.3
     min_sharpe: float = 0.0
     max_turnover_ratio: float = 5.0
@@ -132,6 +166,64 @@ class RewardScalingConfig:
     """
     method: Literal["divide_by_horizon", "raw"] = "divide_by_horizon"
     clip_range: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class RewardNormalizationConfig:
+    """Reward normalization 配置。
+
+    Phase II 默认不启用 normalization；若启用，训练集统计必须冻结后再用于
+    val/test，避免评估泄漏。
+    """
+    enabled: bool = False
+    method: Literal["running_mean_std"] = "running_mean_std"
+    freeze_after_fit: bool = True
+
+
+@dataclass(frozen=True)
+class CostAlignmentCheckConfig:
+    """Phase I / Phase II 成本配置一致性校验。"""
+    enabled: bool = True
+    fail_on_mismatch: bool = True
+
+
+@dataclass(frozen=True)
+class EarlyStoppingConfig:
+    """早停配置。"""
+    enabled: bool = False
+    patience: int = 10
+    min_delta: float = 0.0
+    metric: str = "phase2_composite_score"
+
+
+@dataclass(frozen=True)
+class ResumeConfig:
+    """Resume 审计配置。"""
+    enabled: bool = True
+    require_optimizer_state: bool = True
+    require_env_state: bool = True
+
+
+@dataclass(frozen=True)
+class DeploymentLadderConfig:
+    """部署阶梯审计配置。"""
+    shadow_enabled: bool = False
+    paper_enabled: bool = False
+    canary_enabled: bool = False
+
+
+@dataclass(frozen=True)
+class EnvShardsConfig:
+    """多 env 分片配置。"""
+    mode: Literal["contiguous", "round_robin", "rollover"] = "contiguous"
+    chunk_reset_position: Literal["inherit", "flat"] = "flat"
+
+
+@dataclass(frozen=True)
+class StateDimBreakdownConfig:
+    """selector state 维度审计配置。"""
+    enabled: bool = True
+    include_feature_columns: bool = True
 
 
 # ---------- Live Risk Controls ----------
@@ -264,6 +356,21 @@ class Phase2Config:
         default_factory=Phase2SelectionPolicyConfig
     )
     reward_scaling: RewardScalingConfig = field(default_factory=RewardScalingConfig)
+    reward_normalization: RewardNormalizationConfig = field(
+        default_factory=RewardNormalizationConfig
+    )
+    cost_alignment_check: CostAlignmentCheckConfig = field(
+        default_factory=CostAlignmentCheckConfig
+    )
+    early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
+    resume: ResumeConfig = field(default_factory=ResumeConfig)
+    deployment_ladder: DeploymentLadderConfig = field(
+        default_factory=DeploymentLadderConfig
+    )
+    env_shards: EnvShardsConfig = field(default_factory=EnvShardsConfig)
+    state_dim_breakdown: StateDimBreakdownConfig = field(
+        default_factory=StateDimBreakdownConfig
+    )
     live_risk_controls: LiveRiskControlsConfig = field(
         default_factory=LiveRiskControlsConfig
     )
@@ -300,6 +407,13 @@ class Phase2Config:
             "ppo": PPOConfig,
             "selection_policy": Phase2SelectionPolicyConfig,
             "reward_scaling": RewardScalingConfig,
+            "reward_normalization": RewardNormalizationConfig,
+            "cost_alignment_check": CostAlignmentCheckConfig,
+            "early_stopping": EarlyStoppingConfig,
+            "resume": ResumeConfig,
+            "deployment_ladder": DeploymentLadderConfig,
+            "env_shards": EnvShardsConfig,
+            "state_dim_breakdown": StateDimBreakdownConfig,
             "live_risk_controls": LiveRiskControlsConfig,
             "distribution_shift": DistributionShiftConfig,
             "execution_stress": ExecutionStressConfig,
@@ -310,7 +424,39 @@ class Phase2Config:
         for name, klass in nested_fields.items():
             if name in data and isinstance(data[name], dict):
                 data[name] = klass(**data[name])
-        return cls(**data)
+        config = cls(**data)
+        if config.paper_strict_reproduction:
+            config = config.apply_paper_strict_overrides()
+        return config
+
+    def apply_paper_strict_overrides(self) -> "Phase2Config":
+        """应用论文严格复现覆盖项，返回新的 config。
+
+        该方法保持 dataclass frozen 语义，不原地修改。覆盖项仅选择会影响
+        Phase II 论文主路径的开关，工程审计/安全字段继续保留。
+        """
+        return replace(
+            self,
+            ppo=replace(
+                self.ppo,
+                kl_demo_coef=1.0,
+                entropy_warmup_coef=None,
+                entropy_warmup_fraction=0.0,
+                reward_normalization=False,
+                lr_schedule="linear",
+            ),
+            selector_network=replace(
+                self.selector_network,
+                use_layer_norm=True,
+                input_norm="layer_norm",
+                position_encoding="scaled_integer",
+            ),
+            horizon_schedule=replace(
+                self.horizon_schedule,
+                walk_forward_enabled=True,
+                position_continuity=True,
+            ),
+        )
 
     def write_yaml(self, path: Path) -> Path:
         """原子写 ``phase2_config.yaml``（镜像 Phase1Config.write_yaml）。"""

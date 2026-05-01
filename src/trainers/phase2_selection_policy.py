@@ -28,6 +28,8 @@ class Phase2SelectionVerdict:
     decision: Phase2SelectionDecision
     reasons: List[str] = field(default_factory=list)
     primary_metric_value: float = 0.0
+    selection_metric_name: str = ""
+    composite_score: Optional[float] = None
 
 
 @dataclass
@@ -69,11 +71,26 @@ class Phase2SelectionPolicy:
         -------
         Phase2SelectionVerdict : 选择决策。
         """
-        primary_value = metrics.get(self.config.primary_metric, 0.0)
+        metric_name = self.config.selection_metric
+        if metric_name in metrics:
+            primary_value = float(metrics.get(metric_name, 0.0))
+        else:
+            metric_name = self.config.primary_metric
+            primary_value = float(metrics.get(metric_name, 0.0))
         verdict = Phase2SelectionVerdict(
             decision="keep",
             primary_metric_value=primary_value,
+            selection_metric_name=metric_name,
+            composite_score=(
+                float(metrics["phase2_composite_score"])
+                if "phase2_composite_score" in metrics
+                else None
+            ),
         )
+        if metric_name != self.config.selection_metric:
+            verdict.reasons.append(
+                f"selection_metric_missing:{self.config.selection_metric};fallback:{metric_name}"
+            )
 
         # 检查所有 guardrails
         checks = [
