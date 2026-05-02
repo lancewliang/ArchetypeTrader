@@ -453,25 +453,12 @@ run_pipeline.sh
 - 支持小数据 smoke run（含 prospective 诊断对照）:
 
 ```bash
-# 主实验（hindsight 默认）
-python scripts/train_phase1.py \
-  --pair AL \
-  --train-batch-id smoke_phase1 \
-  --train-file tests/fixtures/phase1/market_train.feather \
-  --val-file tests/fixtures/phase1/market_val.feather \
-  --test-file tests/fixtures/phase1/market_test.feather \
-  --horizon 8 \
-  --num-demos 12 \
-  --num-archetypes 4 \
-  --epochs 2 \
-  --batch-size 4 \
-  --seed 42 \
-  --stratification-mode hindsight_horizon \
-  --diagnostic-pair-batch-id smoke_phase1_prospective
+# 先生成本地 smoke fixture。
+python tests/fixtures/phase1/build_fixtures.py --out tests/fixtures/phase1
 
 # 配套 prospective 对照
 python scripts/train_phase1.py \
-  --pair AL \
+  --pair TEST \
   --train-batch-id smoke_phase1_prospective \
   --train-file tests/fixtures/phase1/market_train.feather \
   --val-file tests/fixtures/phase1/market_val.feather \
@@ -482,7 +469,29 @@ python scripts/train_phase1.py \
   --epochs 2 \
   --batch-size 4 \
   --seed 42 \
-  --stratification-mode prospective_past
+  --device cpu \
+  --stratification-mode prospective_past \
+  --prospective-lookback-minutes 60 \
+  --local-smoke-relaxed-guardrails
+
+# 主实验（hindsight 默认）
+python scripts/train_phase1.py \
+  --pair TEST \
+  --train-batch-id smoke_phase1 \
+  --train-file tests/fixtures/phase1/market_train.feather \
+  --val-file tests/fixtures/phase1/market_val.feather \
+  --test-file tests/fixtures/phase1/market_test.feather \
+  --horizon 8 \
+  --num-demos 12 \
+  --num-archetypes 4 \
+  --epochs 2 \
+  --batch-size 4 \
+  --seed 42 \
+  --device cpu \
+  --stratification-mode hindsight_horizon \
+  --diagnostic-pair-batch-id smoke_phase1_prospective \
+  --prospective-lookback-minutes 60 \
+  --local-smoke-relaxed-guardrails
 ```
 
 验收:
@@ -698,6 +707,25 @@ tests/fixtures/phase1/market_test.feather
 命令:
 
 ```bash
+python tests/fixtures/phase1/build_fixtures.py --out tests/fixtures/phase1
+
+python scripts/train_phase1.py \
+  --pair TEST \
+  --train-batch-id integration_smoke_prospective \
+  --train-file tests/fixtures/phase1/market_train.feather \
+  --val-file tests/fixtures/phase1/market_val.feather \
+  --test-file tests/fixtures/phase1/market_test.feather \
+  --horizon 8 \
+  --num-demos 12 \
+  --num-archetypes 4 \
+  --epochs 2 \
+  --batch-size 4 \
+  --seed 7 \
+  --device cpu \
+  --stratification-mode prospective_past \
+  --prospective-lookback-minutes 60 \
+  --local-smoke-relaxed-guardrails
+
 python scripts/train_phase1.py \
   --pair TEST \
   --train-batch-id integration_smoke \
@@ -705,12 +733,16 @@ python scripts/train_phase1.py \
   --val-file tests/fixtures/phase1/market_val.feather \
   --test-file tests/fixtures/phase1/market_test.feather \
   --horizon 8 \
-  --window-stride 1 \
   --num-demos 12 \
   --num-archetypes 4 \
   --epochs 2 \
   --batch-size 4 \
-  --seed 7
+  --seed 7 \
+  --device cpu \
+  --stratification-mode hindsight_horizon \
+  --diagnostic-pair-batch-id integration_smoke_prospective \
+  --prospective-lookback-minutes 60 \
+  --local-smoke-relaxed-guardrails
 ```
 
 断言:
@@ -932,6 +964,25 @@ pytest tests --cov=src --cov=scripts --cov-report=term-missing
 运行 Phase I smoke 训练:
 
 ```bash
+python tests/fixtures/phase1/build_fixtures.py --out tests/fixtures/phase1
+
+python scripts/train_phase1.py \
+  --pair TEST \
+  --train-batch-id smoke_phase1_prospective \
+  --train-file tests/fixtures/phase1/market_train.feather \
+  --val-file tests/fixtures/phase1/market_val.feather \
+  --test-file tests/fixtures/phase1/market_test.feather \
+  --horizon 8 \
+  --num-demos 12 \
+  --num-archetypes 4 \
+  --epochs 2 \
+  --batch-size 4 \
+  --seed 42 \
+  --device cpu \
+  --stratification-mode prospective_past \
+  --prospective-lookback-minutes 60 \
+  --local-smoke-relaxed-guardrails
+
 python scripts/train_phase1.py \
   --pair TEST \
   --train-batch-id smoke_phase1 \
@@ -943,7 +994,12 @@ python scripts/train_phase1.py \
   --num-archetypes 4 \
   --epochs 2 \
   --batch-size 4 \
-  --seed 42
+  --seed 42 \
+  --device cpu \
+  --stratification-mode hindsight_horizon \
+  --diagnostic-pair-batch-id smoke_phase1_prospective \
+  --prospective-lookback-minutes 60 \
+  --local-smoke-relaxed-guardrails
 ```
 
 运行真实数据 Phase I:
@@ -956,9 +1012,9 @@ python scripts/train_phase1.py \
   --val-file data/AL/val.feather \
   --test-file data/AL/test.feather \
   --horizon 72 \
-  --window-stride 1 \
   --sampling-strategy stratified_uniform \
   --stratification-mode hindsight_horizon \
+  --diagnostic-pair-batch-id batch_002_prospective_strata \
   --num-demos 30000 \
   --num-archetypes 10 \
   --epochs 100 \
@@ -975,7 +1031,6 @@ python scripts/train_phase1.py \
   --val-file data/AL/val.feather \
   --test-file data/AL/test.feather \
   --horizon 72 \
-  --window-stride 1 \
   --sampling-strategy stratified_uniform \
   --stratification-mode prospective_past \
   --prospective-lookback-minutes 1440 \

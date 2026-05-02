@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config.phase1_config import (  # noqa: E402
+    BehaviorGuardrailConfig,
     CodebookConfig,
     CodebookHealthConfig,
     CostConfig,
@@ -26,6 +27,7 @@ from src.config.phase1_config import (  # noqa: E402
     NoTradeCodeHealthConfig,
     NoTradeControlConfig,
     Phase1Config,
+    RiskGuardrailConfig,
     SamplingHealthConfig,
     SelectionPolicyConfig,
     StratificationConfig,
@@ -63,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-missing-prospective-diagnostic", action="store_true")
     p.add_argument("--risk-acknowledged-by", default=None)
     p.add_argument("--expected-sign-off-followup-batch-id", default=None)
+    p.add_argument("--prospective-lookback-minutes", type=int, default=1440)
     # reward 对齐 / 模型
     p.add_argument(
         "--reward-alignment",
@@ -79,6 +82,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda")
+    p.add_argument(
+        "--local-smoke-relaxed-guardrails",
+        action="store_true",
+        help="仅用于本地小样本 smoke: 放宽采样/selection guardrail，生产实验不要使用。",
+    )
     p.add_argument(
         "--paper-strict-reproduction",
         action="store_true",
@@ -102,7 +110,15 @@ def build_config(args: argparse.Namespace) -> Phase1Config:
     cost = CostConfig(reward_alignment=args.reward_alignment)
     dp = DPConfig(horizon=args.horizon, cost_config=cost, max_position=args.max_position)
     encoder_input = EncoderInputConfig()
-    codebook = CodebookConfig(health=CodebookHealthConfig())
+    if args.local_smoke_relaxed_guardrails:
+        codebook_health = CodebookHealthConfig(
+            usage_regularization_weight=0.0,
+            dead_code_restart=False,
+            consecutive_collapse_epoch_limit=999,
+        )
+    else:
+        codebook_health = CodebookHealthConfig()
+    codebook = CodebookConfig(health=codebook_health)
     model = ModelConfig(
         hidden_dim=args.hidden_dim,
         code_dim=args.code_dim,
@@ -110,6 +126,7 @@ def build_config(args: argparse.Namespace) -> Phase1Config:
         encoder_input=encoder_input,
         codebook=codebook,
     )
+    default_training = TrainingConfig()
     training = TrainingConfig(
         batch_size=args.batch_size,
         lr=args.lr,
@@ -117,11 +134,52 @@ def build_config(args: argparse.Namespace) -> Phase1Config:
         seed=args.seed,
         device=args.device,
         paper_strict_reproduction=args.paper_strict_reproduction,
+        save_every=(
+            1 if args.local_smoke_relaxed_guardrails else default_training.save_every
+        ),
+        full_validation_every_epochs=(
+            1
+            if args.local_smoke_relaxed_guardrails
+            else default_training.full_validation_every_epochs
+        ),
+        fast_val_probe_size=(
+            8
+            if args.local_smoke_relaxed_guardrails
+            else default_training.fast_val_probe_size
+        ),
     )
     strat = StratificationConfig(
         mode=args.stratification_mode,
+        prospective_lookback_minutes=args.prospective_lookback_minutes,
         diagnostic_pair_batch_id=args.diagnostic_pair_batch_id,
     )
+    sampling_health = SamplingHealthConfig()
+    selection_policy = SelectionPolicyConfig()
+    diagnostics = DiagnosticsConfig()
+    if args.local_smoke_relaxed_guardrails:
+        sampling_health = SamplingHealthConfig(
+            max_no_trade_ratio=1.0,
+            flat_low_vol_max_ratio=1.0,
+            min_gap_between_samples=1,
+            max_overlap_ratio=1.0,
+            split_boundary_embargo=0,
+            next_row_split_boundary_embargo=0,
+            warn_only=True,
+        )
+        selection_policy = SelectionPolicyConfig(
+            min_code_usage_ratio=0.0,
+            risk=RiskGuardrailConfig(max_drawdown=10.0, min_sharpe_ratio=-999.0),
+            behavior=BehaviorGuardrailConfig(
+                min_inter_code_action_diversity=0.0,
+                min_decoder_sensitivity_to_code=0.0,
+                min_epoch_code_stability=0.0,
+            ),
+        )
+        diagnostics = DiagnosticsConfig(
+            failure_cases_enabled=False,
+            latent_visualization_enabled=False,
+        )
+
     config = Phase1Config(
         pair=args.pair,
         train_batch_id=args.train_batch_id,
@@ -135,18 +193,19 @@ def build_config(args: argparse.Namespace) -> Phase1Config:
         num_demos=args.num_demos,
         sampling_strategy=args.sampling_strategy,
         stratification=strat,
-        sampling_health=SamplingHealthConfig(),
+        sampling_health=sampling_health,
         no_trade_control=NoTradeControlConfig(),
         no_trade_code_health=NoTradeCodeHealthConfig(),
         data_augmentation=DataAugmentationConfig(),
         dp=dp,
         model=model,
         training=training,
-        selection_policy=SelectionPolicyConfig(),
-        diagnostics=DiagnosticsConfig(),
+        selection_policy=selection_policy,
+        diagnostics=diagnostics,
         allow_missing_prospective_diagnostic=args.allow_missing_prospective_diagnostic,
         risk_acknowledged_by=args.risk_acknowledged_by,
         expected_sign_off_followup_batch_id=args.expected_sign_off_followup_batch_id,
+        local_smoke_relaxed_guardrails=args.local_smoke_relaxed_guardrails,
     )
     return apply_paper_strict_overrides(config)
 

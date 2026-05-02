@@ -212,7 +212,9 @@ python scripts/train_phase1.py \
   --test-file data/AL/df_test.feather \
   --factor-profile short \
   --factor-list-file src/factors/AL/short.txt \
-  --max-position 10
+  --max-position 10 \
+  --stratification-mode hindsight_horizon \
+  --diagnostic-pair-batch-id al_short_20260502_prospective
 ```
 
 可选兼容增强:

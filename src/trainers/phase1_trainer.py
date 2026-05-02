@@ -326,13 +326,18 @@ class Phase1Trainer:
         report_summary["hindsight_vs_prospective_metric_delta"] = leakage_payload.get(
             "hindsight_vs_prospective_metric_delta", {}
         )
+        report_summary["local_smoke_relaxed_guardrails"] = (
+            self.config.local_smoke_relaxed_guardrails
+        )
         report_summary["best_checkpoint_signoff"] = (
             leakage_payload["hindsight_bias_warning"]
             in {"ok", "not_required", "not_applicable"}
+            and not self.config.local_smoke_relaxed_guardrails
         )
-        report_summary["signoff_blocked_reason"] = leakage_payload.get(
-            "signoff_blocked_reason", ""
-        )
+        signoff_blocked_reason = leakage_payload.get("signoff_blocked_reason", "")
+        if self.config.local_smoke_relaxed_guardrails and not signoff_blocked_reason:
+            signoff_blocked_reason = "local_smoke_relaxed_guardrails"
+        report_summary["signoff_blocked_reason"] = signoff_blocked_reason
         writer.write_final_report(report_summary)
         if self._best_epoch_diagnostics:
             diagnostics_payload = dict(self._best_epoch_diagnostics)
@@ -466,12 +471,7 @@ class Phase1Trainer:
         )
         entries = indexer.enumerate(frame, stratification_mode=self.config.stratification.mode)
         # val/test split 不参与 train 采样；按固定 stride 抽出固定个 horizon。
-        if split == "train":
-            num_samples = self.config.num_demos
-        else:
-            # 取 1/4 train demos 作为评估上限，避免 val/test 太大拖慢评估。
-            num_samples = max(64, self.config.num_demos // 16)
-            num_samples = min(num_samples, len(entries))
+        num_samples = self._num_samples_for_split(split, len(entries))
 
         sampler = StratifiedWindowSampler(
             strategy=self.config.sampling_strategy,
@@ -519,6 +519,12 @@ class Phase1Trainer:
         builder = HorizonBuilder(self.config.horizon, schema, self.config.dp.cost_config.reward_alignment)
         horizons = builder.build(frame, sampled, pair=self.config.pair, split=split)
         return horizons, path
+
+    def _num_samples_for_split(self, split: str, num_entries: int) -> int:
+        if split == "train":
+            return min(self.config.num_demos, num_entries)
+        # 取 1/16 train demos 作为评估规模，并以 64 作为上限，避免 val/test 太大拖慢评估。
+        return min(num_entries, min(64, max(1, self.config.num_demos // 16)))
 
     def _generate_demos(self, horizons):
         """跑 DP，得到带 actions/rewards 的 horizon + reject 统计。

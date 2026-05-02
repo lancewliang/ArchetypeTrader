@@ -332,8 +332,9 @@ python scripts/train_phase1.py \
   --val-file data/AL/val.feather \
   --test-file data/AL/test.feather \
   --horizon 72 \
-  --window-stride 1 \
   --sampling-strategy stratified_uniform \
+  --stratification-mode hindsight_horizon \
+  --diagnostic-pair-batch-id batch_001_prospective \
   --num-demos 30000 \
   --num-archetypes 10 \
   --epochs 100 \

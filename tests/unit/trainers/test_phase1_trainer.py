@@ -108,6 +108,14 @@ def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):
     assert payload["hindsight_vs_prospective_metric_delta"]["val_return_capture_ratio"]["exceeded"]
 
 
+def test_num_samples_for_validation_is_capped_and_scales_down_for_smoke():
+    trainer = Phase1Trainer(_config(num_demos=12))
+    assert trainer._num_samples_for_split("val", 720) == 1
+
+    trainer = Phase1Trainer(_config(num_demos=30_000))
+    assert trainer._num_samples_for_split("test", 10_000) == 64
+
+
 def test_phase1_trainer_uses_factor_list_schema(tmp_path):
     import polars as pl
 
@@ -192,3 +200,58 @@ def test_train_phase1_cli_sets_dp_max_position_10():
     assert config.factor_profile == "short"
     assert config.factor_list_file == "src/factors/AL/short.txt"
     assert config.dp.max_position == 10
+
+
+def test_train_phase1_cli_sets_prospective_lookback_minutes():
+    from scripts.train_phase1 import build_config, build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--pair",
+            "TEST",
+            "--train-batch-id",
+            "batch",
+            "--train-file",
+            "train.feather",
+            "--val-file",
+            "val.feather",
+            "--test-file",
+            "test.feather",
+            "--stratification-mode",
+            "prospective_past",
+            "--prospective-lookback-minutes",
+            "60",
+        ]
+    )
+    config = build_config(args)
+    assert config.stratification.mode == "prospective_past"
+    assert config.stratification.prospective_lookback_minutes == 60
+
+
+def test_train_phase1_cli_local_smoke_relaxes_guardrails():
+    from scripts.train_phase1 import build_config, build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--pair",
+            "TEST",
+            "--train-batch-id",
+            "smoke",
+            "--train-file",
+            "train.feather",
+            "--val-file",
+            "val.feather",
+            "--test-file",
+            "test.feather",
+            "--local-smoke-relaxed-guardrails",
+        ]
+    )
+    config = build_config(args)
+    assert config.sampling_health.warn_only is True
+    assert config.sampling_health.min_gap_between_samples == 1
+    assert config.selection_policy.min_code_usage_ratio == 0.0
+    assert config.selection_policy.behavior.min_inter_code_action_diversity == 0.0
+    assert config.training.full_validation_every_epochs == 1
+    assert config.local_smoke_relaxed_guardrails is True

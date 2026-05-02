@@ -350,6 +350,7 @@ class Phase1Config:
     allow_missing_prospective_diagnostic: bool = False
     risk_acknowledged_by: Optional[str] = None
     expected_sign_off_followup_batch_id: Optional[str] = None
+    local_smoke_relaxed_guardrails: bool = False
 
     # ---- 序列化与 hash ----
 
@@ -469,6 +470,656 @@ _NESTED_TYPE_MAP: Dict[tuple, type] = {
     ("SelectionPolicyConfig", "behavior"): BehaviorGuardrailConfig,
     ("SelectionPolicyConfig", "teacher"): TeacherQualityGuardrailConfig,
 }
+
+
+def _config_doc(why: str, tuning_effect: str) -> Dict[str, str]:
+    """构造字段说明；用于生成配置文档和 IDE 检索。"""
+    return {"why": why, "tuning_effect": tuning_effect}
+
+
+# ---------- 配置字段说明 ----------
+
+PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
+    # 顶层配置
+    "pair": _config_doc(
+        "标识本次训练对应的交易品种，用于定位输入数据和产物目录。",
+        "换品种时必须调整；同一 batch 内不应混用不同品种，否则数据、报告和缓存会不可追溯。",
+    ),
+    "train_batch_id": _config_doc(
+        "标识一次 Phase I 实验批次，用于隔离产物、报告和缓存。",
+        "改大或改名会写入新目录，适合 ablation；复跑同一实验应保持不变以便校验 hash。",
+    ),
+    "train_file": _config_doc(
+        "训练 split 的行情与特征输入文件，是 DP demo 和 VQ 训练的数据来源。",
+        "换文件会改变 schema、样本分布和 config hash；只应指向已切好的 train 数据。",
+    ),
+    "val_file": _config_doc(
+        "验证 split 输入文件，用于 checkpoint 选择和泛化诊断。",
+        "应与 train 时间隔离；换文件会改变 best checkpoint 和 guardrail 结果。",
+    ),
+    "test_file": _config_doc(
+        "测试 split 输入文件，用于最终离线标签和报告审计。",
+        "不参与训练和选择；换文件只应用于新的评估批次，避免污染可比性。",
+    ),
+    "artifact_root": _config_doc(
+        "配置 Phase I 产物根目录，集中保存配置、schema、demo、模型和报告。",
+        "调整后会改变输出位置；不改变模型行为，但会影响后续 Phase II 查找产物。",
+    ),
+    "factor_profile": _config_doc(
+        "选择内置因子字段集合，保证输入 schema 与实验设定可审计。",
+        "short 更轻更稳；更大的 profile 增加状态维度和表达力，也增加过拟合与算力压力。",
+    ),
+    "factor_list_file": _config_doc(
+        "允许用外部因子清单覆盖或补充内置 profile。",
+        "设为空使用 profile；指定文件可精确控制特征，但需要确保 train/val/test 都包含这些列。",
+    ),
+    "horizon": _config_doc(
+        "定义每个 demonstration 的固定时间长度，也是 DP 和 decoder 的序列长度。",
+        "增大可覆盖更长交易机会但计算更重、重叠风险更高；减小会偏向短周期模式。",
+    ),
+    "num_demos": _config_doc(
+        "控制进入 DP 标注和 VQ 训练的训练 horizon 数量。",
+        "增大可提升覆盖面但更耗时；减小适合 smoke test，但 codebook 和指标稳定性会下降。",
+    ),
+    "sampling_strategy": _config_doc(
+        "决定不同 strata 的采样配额分配方式，影响 demo 分布。",
+        "uniform 强化小 strata 覆盖；proportional 更接近原始分布但可能被大类主导。",
+    ),
+    "stratification": _config_doc(
+        "集中控制后视/前瞻分层和 hindsight bias 诊断。",
+        "调整子项会改变样本选择边界和报告签收条件，是比较实验必须固定的核心配置组。",
+    ),
+    "sampling_health": _config_doc(
+        "集中控制样本重叠、边界隔离和采样质量阈值。",
+        "阈值越严泛化审计越可靠但可能采不满；越松更容易跑通但验证指标风险更高。",
+    ),
+    "no_trade_control": _config_doc(
+        "控制 DP 全程 flat 样本是否保留以及如何补采样。",
+        "限制更严可减少无交易样本占比；过严可能丢掉真实低机会市场状态。",
+    ),
+    "no_trade_code_health": _config_doc(
+        "监控 no-trade 样本是否挤占少数 archetype 容量。",
+        "阈值越严越能发现 codebook 被 flat 模式占据；过严可能误伤正常防御型 archetype。",
+    ),
+    "data_augmentation": _config_doc(
+        "集中控制训练集增强，默认关闭以保持论文主实验干净。",
+        "开启可增加鲁棒性和样本量，但会改变训练分布，必须使用独立 batch 做 ablation。",
+    ),
+    "dp": _config_doc(
+        "集中控制 single-trade DP teacher 的 horizon、折扣、仓位和成本语义。",
+        "改动会直接改变 demonstration actions/rewards；旧 DP 缓存必须失效重算。",
+    ),
+    "model": _config_doc(
+        "配置 VQ encoder-decoder 的容量、codebook 和输入适配。",
+        "增大容量提高表达力但更容易过拟合或 collapse；减小更稳但可能欠拟合。",
+    ),
+    "training": _config_doc(
+        "配置优化过程、设备、复现 seed 和 checkpoint 频率。",
+        "影响收敛速度、稳定性和可复现性；实验对比时应尽量固定。",
+    ),
+    "selection_policy": _config_doc(
+        "配置 best checkpoint 选择指标和 guardrail。",
+        "改权重会改变被提升的 checkpoint；改阈值会改变哪些模型允许签收。",
+    ),
+    "diagnostics": _config_doc(
+        "配置 TensorBoard、latent 可视化和失败样本输出。",
+        "开启更多诊断便于审计但增加耗时和产物体积；关闭只适合快速本地验证。",
+    ),
+    "allow_missing_prospective_diagnostic": _config_doc(
+        "紧急情况下允许缺少前瞻分层对照实验继续运行。",
+        "设为 true 会降低签收可信度，必须配合风险确认字段；正式实验应保持 false。",
+    ),
+    "risk_acknowledged_by": _config_doc(
+        "记录谁确认接受缺少前瞻诊断或其他采样风险。",
+        "仅在豁免路径填写；为空时表示没有人工风险豁免。",
+    ),
+    "expected_sign_off_followup_batch_id": _config_doc(
+        "记录后续补跑的签收批次，避免临时豁免变成永久结论。",
+        "填写后可在报告中追踪 follow-up；为空表示无计划或不需要补跑。",
+    ),
+    "local_smoke_relaxed_guardrails": _config_doc(
+        "允许本地 smoke test 放宽 guardrail，避免小 fixture 被正式阈值拦住。",
+        "仅用于本地/CI 轻量验证；正式训练应保持 false，防止低质量模型被签收。",
+    ),
+
+    # 分层采样
+    "stratification.mode": _config_doc(
+        "选择用 horizon 内统计还是过去窗口统计做分层，隔离 hindsight bias。",
+        "hindsight_horizon 覆盖更均衡但带后视选择风险；prospective_past 更接近线上可观测条件。",
+    ),
+    "stratification.prospective_lookback_minutes": _config_doc(
+        "定义前瞻诊断分层使用的过去观察窗口长度。",
+        "增大更平滑但反应慢；减小更灵敏但 strata 噪声更大。",
+    ),
+    "stratification.require_prospective_diagnostic": _config_doc(
+        "强制主实验必须配套前瞻分层诊断，防止只报告后视采样收益。",
+        "true 提高签收门槛；false 只适合研究中间态或明确豁免场景。",
+    ),
+    "stratification.diagnostic_pair_batch_id": _config_doc(
+        "指向配套前瞻诊断批次，用于读取报告并比较核心指标。",
+        "填写后可自动做 hindsight/prospective 差异检查；为空时主实验可能无法签收。",
+    ),
+    "stratification.report_hindsight_bias_warning": _config_doc(
+        "控制是否在报告中显式写出后视分层风险。",
+        "保持 true 便于审计；关闭会减少报告噪声但不建议用于正式实验。",
+    ),
+    "stratification.hindsight_vs_prospective_max_delta": _config_doc(
+        "定义后视实验相对前瞻诊断的核心指标差异上限。",
+        "阈值越小越保守；阈值越大更容易通过但隐藏后视采样收益的风险更高。",
+    ),
+
+    # 采样健康
+    "sampling_health.max_no_trade_ratio": _config_doc(
+        "限制最终样本中 DP 全程 flat 的比例，避免训练集被无交易样本主导。",
+        "降低会强化交易样本占比；提高能保留更多真实低机会窗口。",
+    ),
+    "sampling_health.flat_low_vol_max_ratio": _config_doc(
+        "限制 flat 且低波动 strata 的采样占比。",
+        "降低可减少重复低信息样本；提高可更贴近低波动市场的原始分布。",
+    ),
+    "sampling_health.min_gap_between_samples": _config_doc(
+        "约束相邻采样窗口的最小起点间隔，降低时间自相关和重叠泄漏。",
+        "增大会提升去相关质量但更难采满；减小会增加样本量但重叠风险上升。",
+    ),
+    "sampling_health.max_overlap_ratio": _config_doc(
+        "设置已采样窗口允许的最大平均重叠比例。",
+        "降低更保守；提高能提升采样可行性但验证指标可能偏乐观。",
+    ),
+    "sampling_health.split_boundary_embargo": _config_doc(
+        "为 paper_formula 模式设置 train/val/test 边界隔离行数，覆盖 markout 行。",
+        "增大减少边界泄漏但损失样本；减小增加可用窗口但泄漏风险更高。",
+    ),
+    "sampling_health.next_row_split_boundary_embargo": _config_doc(
+        "为 next_row_execution 模式设置边界隔离行数，覆盖额外执行/结算行。",
+        "通常应等于 horizon+2；调小可能遗漏后移 markout，调大更保守但少样本。",
+    ),
+    "sampling_health.warn_only": _config_doc(
+        "控制采样健康超阈值时是失败退出还是只写 warning。",
+        "false 适合正式训练；true 适合探索问题，但产物不宜作为签收版本。",
+    ),
+    "sampling_health.allow_overlap_relaxation": _config_doc(
+        "允许采不满时自动放松 min_gap_between_samples。",
+        "true 更容易采满稀有 strata 但必须报告实际放松值；正式实验默认 false 更可审计。",
+    ),
+
+    # No-trade 控制
+    "no_trade_control.keep_no_trade": _config_doc(
+        "决定是否保留 DP 判断全程不交易最优的样本。",
+        "true 保留真实市场空窗期；false 强化交易模式但可能让模型过度交易。",
+    ),
+    "no_trade_control.max_no_trade_ratio": _config_doc(
+        "控制 no-trade 样本在训练 demo 中的最大比例。",
+        "降低会增加补采样和交易样本权重；提高能保留更多防御状态。",
+    ),
+    "no_trade_control.min_profit_gate": _config_doc(
+        "定义交易样本进入训练集的最小收益门槛。",
+        "提高可过滤微弱机会和噪声交易；过高会让 demo 只覆盖极端行情。",
+    ),
+    "no_trade_control.cap_flat_low_vol_strata": _config_doc(
+        "控制是否对 flat/低波动 strata 单独限额。",
+        "true 减少低信息样本；false 更忠实原始分布但可能推高 no-trade 占比。",
+    ),
+    "no_trade_control.flat_low_vol_max_ratio": _config_doc(
+        "定义 flat/低波动 strata 的最大保留比例。",
+        "降低会增加更有动作变化的样本；提高可保留更多低波动状态。",
+    ),
+    "no_trade_control.resample_when_exceeded": _config_doc(
+        "当 no-trade 或 flat-low-vol 超阈值时是否触发补采样。",
+        "true 自动补足有效样本；false 更快但可能留下失衡训练集。",
+    ),
+
+    # No-trade codebook 健康
+    "no_trade_code_health.max_per_code_no_trade_ratio": _config_doc(
+        "限制单个 code 内 no-trade 样本比例，防止某个 archetype 退化为全 flat。",
+        "降低更严格地区分交易/非交易 code；提高可接受更防御的 archetype。",
+    ),
+    "no_trade_code_health.max_top2_no_trade_concentration": _config_doc(
+        "限制 no-trade 样本集中到前两个 code 的程度。",
+        "降低能暴露 no-trade 挤占容量；提高则允许少数 code 专门表达空仓状态。",
+    ),
+    "no_trade_code_health.min_active_trade_code_count": _config_doc(
+        "要求至少多少个 code 承载非 no-trade 交易样本。",
+        "提高会促进 archetype 多样性；降低适合小数据或确实交易机会稀少的品种。",
+    ),
+
+    # 数据增强
+    "data_augmentation.temporal_contrastive": _config_doc(
+        "配置时序偏移对比学习，帮助 encoder 对轻微时间错位保持稳健。",
+        "开启会增加辅助 loss 和训练成本；关闭保持论文主实验更干净。",
+    ),
+    "data_augmentation.temporal_contrastive.enabled": _config_doc(
+        "控制是否生成 temporal contrastive pair 并加入对比损失。",
+        "true 可能提升 latent 稳定性；false 避免改变论文公式和训练目标。",
+    ),
+    "data_augmentation.temporal_contrastive.shift_bars": _config_doc(
+        "定义构造对比 pair 的前后平移 bar 数。",
+        "平移越大增强越强但语义可能变；平移越小更安全但收益有限。",
+    ),
+    "data_augmentation.temporal_contrastive.pair_ratio": _config_doc(
+        "控制训练样本中生成对比 pair 的比例。",
+        "提高会增强对比信号但挤占主重构训练；降低则影响更轻。",
+    ),
+    "data_augmentation.temporal_contrastive.max_pairs": _config_doc(
+        "限制最多生成的对比 pair 数量，控制内存和训练时间。",
+        "增大覆盖更多样本但更耗资源；减小适合快速实验。",
+    ),
+    "data_augmentation.temporal_contrastive.require_same_strata": _config_doc(
+        "要求对比 pair 保持同一 strata，减少语义错配。",
+        "true 更保守但可生成 pair 更少；false 覆盖更广但噪声可能增加。",
+    ),
+    "data_augmentation.temporal_contrastive.rerun_dp_for_shifted": _config_doc(
+        "控制平移后的 horizon 是否重新跑 DP，而不是复用原动作。",
+        "true 更准确但更慢；false 更快但可能让动作标签和窗口错位。",
+    ),
+    "data_augmentation.temporal_contrastive.contrastive_weight": _config_doc(
+        "设置对比学习 loss 在总损失中的权重。",
+        "增大会更强约束 latent 稳定性；过大可能牺牲动作重构。",
+    ),
+    "data_augmentation.temporal_contrastive.temperature": _config_doc(
+        "控制对比学习 softmax 温度，影响正负样本分离强度。",
+        "降低会让分离更尖锐但训练不稳；提高更平滑但约束变弱。",
+    ),
+    "data_augmentation.synthetic_horizon": _config_doc(
+        "配置合成 horizon 扩充，只允许用于 train split。",
+        "开启可扩充稀有模式；关闭避免合成分布影响正式基线。",
+    ),
+    "data_augmentation.synthetic_horizon.enabled": _config_doc(
+        "控制是否生成 synthetic horizon。",
+        "true 增加训练样本和覆盖；false 保持真实数据分布。",
+    ),
+    "data_augmentation.synthetic_horizon.synthetic_ratio": _config_doc(
+        "设置合成样本相对真实样本的比例。",
+        "增大增强更强但分布偏移更大；减小影响更可控。",
+    ),
+    "data_augmentation.synthetic_horizon.max_synthetic_horizons": _config_doc(
+        "限制合成 horizon 总数，避免增强无限膨胀。",
+        "增大覆盖更多组合但更耗时；减小适合诊断或小显存环境。",
+    ),
+    "data_augmentation.synthetic_horizon.source_selection": _config_doc(
+        "定义合成样本来源窗口的选择策略。",
+        "contrasting_strata 强化差异模式；换策略会改变合成样本语义和分布。",
+    ),
+    "data_augmentation.synthetic_horizon.blend_window": _config_doc(
+        "控制合成窗口拼接或混合的过渡长度。",
+        "增大过渡更平滑但可能抹掉突变；减小保留突变但更容易不自然。",
+    ),
+    "data_augmentation.synthetic_horizon.min_source_distance": _config_doc(
+        "要求合成来源窗口之间至少相隔多少 bar，降低近邻重复。",
+        "增大去相关更强但候选更少；减小更容易生成但相似度更高。",
+    ),
+    "data_augmentation.synthetic_horizon.require_orderbook_consistency": _config_doc(
+        "要求合成后的盘口字段保持成交语义一致。",
+        "true 更安全但可合成样本更少；false 风险较高，可能制造无法成交的样本。",
+    ),
+    "data_augmentation.synthetic_horizon.rerun_dp": _config_doc(
+        "控制合成 horizon 是否重新跑 DP 获取动作和 reward。",
+        "true 保证标签匹配合成价格/盘口；false 更快但标签可信度低。",
+    ),
+    "data_augmentation.synthetic_horizon.exclude_from_validation": _config_doc(
+        "确保合成样本不会进入 validation/test 指标。",
+        "正式实验应保持 true；false 会污染泛化评估，通常只用于调试。",
+    ),
+
+    # DP / 成本
+    "dp.horizon": _config_doc(
+        "DP teacher 使用的序列长度，应与顶层 horizon 保持一致。",
+        "增减会改变 DP 状态空间和动作标签；不一致会导致训练样本 shape 错误。",
+    ),
+    "dp.gamma": _config_doc(
+        "DP 累积收益折扣因子，控制远期 reward 权重。",
+        "低于 1 会偏向更早收益；等于 1 与论文单 horizon 累积收益更一致。",
+    ),
+    "dp.max_position": _config_doc(
+        "定义 action 映射后的最大持仓规模。",
+        "增大会放大收益、成本和盘口深度约束；减小更保守。",
+    ),
+    "dp.cost_config": _config_doc(
+        "配置 DP、replay 和评估共用的成本与 reward 对齐语义。",
+        "任何改动都会改变 rewards 和可成交性，必须让旧缓存失效。",
+    ),
+    "dp.cost_config.reward_alignment": _config_doc(
+        "定义动作成交行和 markout 行的时间对齐方式。",
+        "paper_formula 便于论文复现；next_row_execution 更保守但不能直接和论文指标比较。",
+    ),
+    "dp.cost_config.commission_rate": _config_doc(
+        "设置换仓手续费率，反映交易成本。",
+        "提高会减少 DP 交易频率和收益；降低会让策略更愿意切换仓位。",
+    ),
+    "dp.cost_config.slippage_model": _config_doc(
+        "选择滑点模型，当前默认按盘口深度估算真实成交成本。",
+        "lob_depth 更贴近成交约束；若未来增加模型，切换会改变 teacher/replay 可比性。",
+    ),
+    "dp.cost_config.book_levels": _config_doc(
+        "指定盘口深度滑点使用的档位数。",
+        "增大可容纳更大仓位但需要更多字段；减小更保守且更容易 reject transition。",
+    ),
+    "dp.cost_config.mark_price": _config_doc(
+        "定义 reward 结算使用的 mark price 类型。",
+        "mid_price 减少买卖价噪声；切换口径会改变收益尺度和评估可比性。",
+    ),
+    "dp.cost_config.execution_lag": _config_doc(
+        "表达观察到成交之间的延迟，paper_formula 下固定为 0。",
+        "next_row_execution 可设为 1 表示下一行成交；错误调整会造成 reward 行号错位。",
+    ),
+    "dp.cost_config.insufficient_depth_policy": _config_doc(
+        "定义盘口深度不足时如何处理换仓转移。",
+        "reject_transition 更真实但可能提高 no-trade；放松策略会增加成交假设风险。",
+    ),
+    "dp.cost_config.reject_transition_health": _config_doc(
+        "监控盘口深度不足导致的 DP 转移拒绝率。",
+        "阈值越严越早暴露数据/流动性问题；越松更容易训练但 demo 质量可能下降。",
+    ),
+    "dp.cost_config.reject_transition_health.max_horizon_reject_rate": _config_doc(
+        "限制单个 horizon 内被拒绝转移的最高比例。",
+        "降低会更快定位异常窗口；提高会容忍局部流动性不足。",
+    ),
+    "dp.cost_config.reject_transition_health.max_dataset_reject_rate": _config_doc(
+        "限制整个数据集层面的转移拒绝比例。",
+        "降低更保守；提高可容忍整体盘口偏稀疏的数据。",
+    ),
+    "dp.cost_config.reject_transition_health.fail_when_exceeded": _config_doc(
+        "控制拒绝率超阈值时是否阻止后续训练。",
+        "true 防止低质量 demo 进入训练；false 只适合调试或诊断数据问题。",
+    ),
+
+    # 模型
+    "model.hidden_dim": _config_doc(
+        "设置 encoder/decoder 主干隐藏维度，控制模型容量。",
+        "增大表达力更强但更慢、更易过拟合；减小更快但可能欠拟合。",
+    ),
+    "model.code_dim": _config_doc(
+        "设置 VQ latent/codebook embedding 维度。",
+        "增大可表达更细模式但 codebook 更难稳定；减小更稳但信息瓶颈更强。",
+    ),
+    "model.num_codes": _config_doc(
+        "定义 archetype 数量 K。",
+        "增大可发现更多策略类型但 dead code 风险更高；减小更稳但策略粒度更粗。",
+    ),
+    "model.beta0": _config_doc(
+        "设置 commitment loss 权重，约束 encoder 输出贴近选中 code。",
+        "增大会让 latent 更贴近 code 但可能限制表达；减小更自由但 code assignment 更漂。",
+    ),
+    "model.encoder_input": _config_doc(
+        "配置 state/action/reward 输入进入 encoder 前的适配方式。",
+        "调整会改变模态权重和 reward 尺度，是影响 latent 质量的关键入口。",
+    ),
+    "model.encoder_input.state_adapter_dim": _config_doc(
+        "设置状态特征投影后的维度。",
+        "增大保留更多状态信息但更耗算力；减小可正则化但可能丢失细节。",
+    ),
+    "model.encoder_input.action_embedding_dim": _config_doc(
+        "设置 demonstration action 的 embedding 维度。",
+        "增大让动作模式更容易被编码；过大可能盖过状态和 reward 信号。",
+    ),
+    "model.encoder_input.reward_embedding_dim": _config_doc(
+        "设置逐步 reward 的 embedding 维度。",
+        "增大强化收益形状信息；过大可能让 encoder 过度依赖 teacher reward。",
+    ),
+    "model.encoder_input.fusion_dim": _config_doc(
+        "设置 state/action/reward 融合后的维度。",
+        "增大提升融合容量；减小提高正则化和速度。",
+    ),
+    "model.encoder_input.reward_normalization": _config_doc(
+        "定义 reward 输入归一化方式，控制重尾收益对 encoder 的影响。",
+        "robust 更抗极端值；standard 更贴近常规标准化和严格复现实验。",
+    ),
+    "model.encoder_input.reward_clip_value": _config_doc(
+        "设置归一化 reward 的裁剪边界。",
+        "增大保留极端行情但可能不稳；减小更稳但可能剪掉关键切换信号。",
+    ),
+    "model.encoder_input.fallback_to_standard_kurtosis_below": _config_doc(
+        "当训练 reward 分布接近正态时允许回退到 standard normalization。",
+        "阈值越高越容易回退；阈值越低越偏向保持 robust。",
+    ),
+    "model.codebook": _config_doc(
+        "配置 VQ codebook 初始化、更新和健康防护。",
+        "调整会影响 code 使用率、collapse 风险和论文复现严格性。",
+    ),
+    "model.codebook.init_method": _config_doc(
+        "定义 codebook 初始 embedding 的生成方式。",
+        "kmeans_warmup 更稳；random_normal 更贴近简单复现但 dead code 风险高。",
+    ),
+    "model.codebook.kmeans_warmup_batches": _config_doc(
+        "设置 K-means 初始化使用的 warmup batch 数。",
+        "增大初始化更充分但更慢；减小更快但聚类代表性更弱。",
+    ),
+    "model.codebook.update_method": _config_doc(
+        "定义 codebook embedding 更新方式。",
+        "ema 更稳定；gradient 更贴近论文公式但训练早期更容易 collapse。",
+    ),
+    "model.codebook.ema_decay": _config_doc(
+        "设置 EMA codebook 更新的衰减系数。",
+        "增大更新更平滑但适应慢；减小适应快但 code 抖动更大。",
+    ),
+    "model.codebook.ema_epsilon": _config_doc(
+        "EMA 更新时的数值稳定项，避免低计数 code 除零或爆炸。",
+        "通常不需要调；过大可能偏置低使用率 code，过小可能数值不稳。",
+    ),
+    "model.codebook.health": _config_doc(
+        "集中配置 codebook collapse 监控和恢复策略。",
+        "阈值越严越能保证 archetype 可用性；过严可能让训练过早失败。",
+    ),
+    "model.codebook.health.min_code_usage_ratio": _config_doc(
+        "要求被有效使用的 code 比例下限。",
+        "提高会要求更多 archetype 活跃；降低可容忍较少模式但多样性下降。",
+    ),
+    "model.codebook.health.max_dominant_code_ratio": _config_doc(
+        "限制单个 code 占据样本的最大比例。",
+        "降低可防止主导 code；提高可容忍市场确实由少数模式主导。",
+    ),
+    "model.codebook.health.usage_regularization_weight": _config_doc(
+        "设置鼓励 code 使用均衡的辅助正则权重。",
+        "增大可缓解 collapse 但改变 loss；严格复现论文公式时应设为 0。",
+    ),
+    "model.codebook.health.dead_code_patience": _config_doc(
+        "定义 code 连续未使用多少 epoch 后视为 dead code。",
+        "减小会更快重启但可能误判暂时低频 code；增大更保守但恢复慢。",
+    ),
+    "model.codebook.health.dead_code_restart": _config_doc(
+        "控制是否自动重启长期不用的 code。",
+        "true 提升可用 code 数；严格复现或诊断原始 collapse 行为时可关闭。",
+    ),
+    "model.codebook.health.restart_source": _config_doc(
+        "定义重启 dead code 时新 embedding 的来源。",
+        "高重构误差样本能补足未表达模式；换来源会影响恢复方向。",
+    ),
+    "model.codebook.health.restart_cooldown_epochs": _config_doc(
+        "重启后冷却多少 epoch 再允许 checkpoint 参与 best 选择。",
+        "增大更稳但延迟选择；减小更快但可能选到刚扰动后的不稳定模型。",
+    ),
+    "model.codebook.health.consecutive_collapse_epoch_limit": _config_doc(
+        "连续 collapse 多少 epoch 后停止训练并报错。",
+        "降低更早失败暴露问题；提高给恢复机制更多时间但浪费算力。",
+    ),
+    "model.codebook.health.local_optimum_escape": _config_doc(
+        "配置低频 code 扰动等逃离局部最优机制。",
+        "默认关闭；开启适合 collapse 诊断，但会改变实验条件。",
+    ),
+    "model.codebook.health.local_optimum_escape.enabled": _config_doc(
+        "控制是否启用局部最优逃逸扰动。",
+        "true 可帮助低使用率 code 探索；false 保持训练更可复现。",
+    ),
+    "model.codebook.health.local_optimum_escape.stagnant_usage_epochs": _config_doc(
+        "usage ratio 停滞多少 epoch 后触发逃逸条件。",
+        "减小更敏感；增大更保守，减少不必要扰动。",
+    ),
+    "model.codebook.health.local_optimum_escape.stagnant_perplexity_epochs": _config_doc(
+        "perplexity 停滞多少 epoch 后触发逃逸条件。",
+        "减小更快响应 collapse；增大避免对正常平台期过度干预。",
+    ),
+    "model.codebook.health.local_optimum_escape.best_score_no_improve_epochs": _config_doc(
+        "best score 长期无提升时触发逃逸条件的 epoch 数。",
+        "减小更激进；增大更耐心，适合慢收敛训练。",
+    ),
+    "model.codebook.health.local_optimum_escape.perturbation_probability_per_epoch": _config_doc(
+        "满足条件后每个 epoch 执行扰动的概率。",
+        "增大更容易跳出局部最优但不稳定；减小更温和。",
+    ),
+    "model.codebook.health.local_optimum_escape.perturbation_std_ratio": _config_doc(
+        "扰动幅度相对 code 向量尺度的比例。",
+        "增大探索更强但可能破坏已学模式；减小更安全但效果弱。",
+    ),
+    "model.codebook.health.local_optimum_escape.min_epochs_between_perturbations": _config_doc(
+        "两次扰动之间的最小间隔，避免连续扰动。",
+        "增大更稳定；减小恢复更快但训练轨迹更难复现。",
+    ),
+    "model.codebook.health.local_optimum_escape.only_perturb_low_usage_codes": _config_doc(
+        "限制只扰动低使用率 code，保护已稳定的主导 archetype。",
+        "true 更安全；false 探索范围更大但可能破坏有效 code。",
+    ),
+
+    # 训练
+    "training.batch_size": _config_doc(
+        "设置训练 batch 大小，影响梯度估计和显存。",
+        "增大更稳定但占显存；减小噪声更大但适合小显存。",
+    ),
+    "training.lr": _config_doc(
+        "设置优化器学习率，控制参数更新步幅。",
+        "增大收敛快但可能震荡；减小更稳但训练更慢。",
+    ),
+    "training.epochs": _config_doc(
+        "设置最大训练 epoch 数。",
+        "增大给模型更多收敛时间但可能过拟合；减小适合快速验证。",
+    ),
+    "training.seed": _config_doc(
+        "固定采样、初始化和训练随机性，保证实验可复现。",
+        "改变 seed 可做稳定性检查；对比实验应保持一致。",
+    ),
+    "training.device": _config_doc(
+        "指定训练设备。",
+        "cuda 更快但依赖 GPU；cpu 适合调试但训练慢。",
+    ),
+    "training.save_every": _config_doc(
+        "控制 checkpoint 保存间隔。",
+        "减小保存更密但产物更多；增大节省空间但可能错过中间好模型。",
+    ),
+    "training.early_stopping_patience": _config_doc(
+        "设置验证指标无提升时提前停止的耐心 epoch 数。",
+        "减小更省时但可能早停；增大更完整但更耗时，None 表示不早停。",
+    ),
+    "training.gradient_clip_norm": _config_doc(
+        "限制梯度范数，避免 LSTM/VQ 训练中梯度爆炸。",
+        "降低更稳但可能压制学习；提高更自由但数值风险增加。",
+    ),
+    "training.mixed_precision": _config_doc(
+        "控制是否使用混合精度加速训练。",
+        "true 更快更省显存；false 数值更直接，适合排查精度问题。",
+    ),
+    "training.paper_strict_reproduction": _config_doc(
+        "标记是否严格复现论文公式，自动关闭部分工程稳定增强。",
+        "true 提升论文可比性但稳定性下降；false 使用默认工程防护。",
+    ),
+    "training.full_validation_every_epochs": _config_doc(
+        "控制完整 validation 的执行频率。",
+        "减小选择更及时但更慢；增大训练更快但可能延迟发现退化。",
+    ),
+    "training.fast_val_probe_size": _config_doc(
+        "设置快速 validation probe 使用的样本数。",
+        "增大 probe 更稳定但更慢；减小更快但指标噪声更大。",
+    ),
+
+    # 选择策略
+    "selection_policy.selection_metric": _config_doc(
+        "指定用于选择 best checkpoint 的主指标。",
+        "切换指标会改变提升目标；必须与实验目标和报告解释一致。",
+    ),
+    "selection_policy.selection_mode": _config_doc(
+        "指定主指标是越大越好还是越小越好。",
+        "max 用于收益/综合分；min 用于损失类指标，配置错误会选错模型。",
+    ),
+    "selection_policy.min_code_usage_ratio": _config_doc(
+        "best checkpoint 必须满足的 code 使用率下限。",
+        "提高更重视 archetype 多样性；降低可接受更集中但风险更高。",
+    ),
+    "selection_policy.metric_weights": _config_doc(
+        "定义综合分中各验证指标的权重。",
+        "提高某项会让选择偏向该目标；调整后不同 batch 的综合分不可直接比较。",
+    ),
+    "selection_policy.risk": _config_doc(
+        "配置收益风险类 guardrail。",
+        "阈值越严越保守；越松更容易选中高收益但高风险的模型。",
+    ),
+    "selection_policy.risk.max_drawdown": _config_doc(
+        "限制 validation 最大回撤。",
+        "降低更保守；提高可容忍更大亏损波动。",
+    ),
+    "selection_policy.risk.min_sharpe_ratio": _config_doc(
+        "设置 validation Sharpe 下限。",
+        "提高要求更稳定收益；降低允许收益波动更大的模型。",
+    ),
+    "selection_policy.behavior": _config_doc(
+        "配置行为多样性和 decoder 对 code 敏感性的 guardrail。",
+        "阈值越严越能避免无效 archetype；过严可能拒绝真实相近策略。",
+    ),
+    "selection_policy.behavior.min_inter_code_action_diversity": _config_doc(
+        "要求不同 code 解码出的 action 序列有足够差异。",
+        "提高会强制 archetype 分化；降低可接受相似但稳定的 code。",
+    ),
+    "selection_policy.behavior.min_decoder_sensitivity_to_code": _config_doc(
+        "要求 decoder 输出对 code 变化有最小敏感度。",
+        "提高可防止 decoder 忽略 code；过高可能误伤相近 archetype。",
+    ),
+    "selection_policy.behavior.min_epoch_code_stability": _config_doc(
+        "要求相邻评估中 code assignment 保持一定稳定性。",
+        "提高更重视可复现标签；降低允许训练后期仍有迁移。",
+    ),
+    "selection_policy.teacher": _config_doc(
+        "配置 DP teacher 质量 guardrail。",
+        "阈值越严越能避免无收益 teacher 训练模型；越松适合低机会市场诊断。",
+    ),
+    "selection_policy.teacher.min_dp_teacher_profitable_ratio": _config_doc(
+        "要求 DP teacher 盈利 horizon 的最小比例。",
+        "提高可过滤弱 teacher 批次；降低可保留更困难或低波动市场。",
+    ),
+    "selection_policy.composite_score_sensitivity_perturbations": _config_doc(
+        "配置综合分权重扰动，用于检查 checkpoint 选择是否过度依赖单一权重。",
+        "增加扰动可提升稳健性审计；减少扰动更快但诊断较弱。",
+    ),
+
+    # 诊断
+    "diagnostics.tensorboard_enabled": _config_doc(
+        "控制是否写 TensorBoard 日志。",
+        "true 便于观察训练曲线；false 减少 IO 和产物体积。",
+    ),
+    "diagnostics.tensorboard_log_every_epochs": _config_doc(
+        "设置 TensorBoard 日志写入频率。",
+        "减小更细粒度但 IO 更多；增大更轻量。",
+    ),
+    "diagnostics.tensorboard_max_points_per_split": _config_doc(
+        "限制每个 split 写入可视化的点数。",
+        "增大图更完整但文件更大；减小更快但采样代表性下降。",
+    ),
+    "diagnostics.fixed_probe_seed": _config_doc(
+        "固定诊断 probe 抽样 seed，便于跨 epoch 对比同一批样本。",
+        "改变会换一组诊断样本；正式对比应保持一致。",
+    ),
+    "diagnostics.latent_visualization_enabled": _config_doc(
+        "控制是否输出 latent 降维可视化。",
+        "true 便于检查 code 分离；false 节省时间，尤其是 t-SNE 较慢时。",
+    ),
+    "diagnostics.latent_projections": _config_doc(
+        "指定 latent 可视化使用的降维方法。",
+        "pca 快且稳定；tsne 更直观但慢且随机性更强。",
+    ),
+    "diagnostics.failure_cases_enabled": _config_doc(
+        "控制是否输出验证失败样本和高误差案例。",
+        "true 便于定位模型弱点；false 减少报告生成成本。",
+    ),
+    "diagnostics.failure_cases_top_k": _config_doc(
+        "设置每类失败案例保留数量。",
+        "增大便于人工分析但产物更大；减小更精简。",
+    ),
+}
+
+
+def phase1_config_field_docs() -> Dict[str, Dict[str, str]]:
+    """返回 Phase I 配置字段说明副本。
+
+    key 使用 ``phase1_config.yaml`` 的点分路径；value 包含:
+    - ``why``: 为什么需要这个配置。
+    - ``tuning_effect``: 调节这个配置通常会产生什么影响。
+    """
+    return {path: dict(doc) for path, doc in PHASE1_CONFIG_FIELD_DOCS.items()}
 
 
 def apply_paper_strict_overrides(config: Phase1Config) -> Phase1Config:
