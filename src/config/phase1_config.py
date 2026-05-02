@@ -355,41 +355,33 @@ class Phase1DataProcessConfig:
 
 @dataclass(frozen=True)
 class Phase1Config:
-    """Phase I 顶层配置。"""
+    """Phase I 训练配置。
+
+    仅包含训练阶段所需字段。数据预处理字段已迁移至 ``Phase1DataProcessConfig``。
+    训练必须通过 ``data_process_manifest`` 指向离线数据预处理产物。
+    """
     pair: str
     train_batch_id: str
-    train_file: str
-    val_file: str
-    test_file: str
+    data_process_manifest: str
     artifact_root: str = "artifacts"
-    factor_profile: str = "short"
-    factor_list_file: Optional[str] = None
     horizon: int = 72
-    num_demos: int = 30000
-    sampling_strategy: Literal[
-        "stratified_uniform", "stratified_proportional"
-    ] = "stratified_uniform"
-    stratification: StratificationConfig = field(default_factory=StratificationConfig)
-    sampling_health: SamplingHealthConfig = field(default_factory=SamplingHealthConfig)
-    no_trade_control: NoTradeControlConfig = field(default_factory=NoTradeControlConfig)
-    no_trade_code_health: NoTradeCodeHealthConfig = field(
-        default_factory=NoTradeCodeHealthConfig
-    )
-    data_augmentation: DataAugmentationConfig = field(
-        default_factory=DataAugmentationConfig
-    )
     dp: DPConfig = field(default_factory=DPConfig)
+    stratification: StratificationConfig = field(default_factory=StratificationConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     selection_policy: SelectionPolicyConfig = field(
         default_factory=SelectionPolicyConfig
     )
     diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
+    data_augmentation: DataAugmentationConfig = field(
+        default_factory=DataAugmentationConfig
+    )
+    local_smoke_relaxed_guardrails: bool = False
+    factor_profile: str = "short"
+    factor_list_file: Optional[str] = None
     allow_missing_prospective_diagnostic: bool = False
     risk_acknowledged_by: Optional[str] = None
     expected_sign_off_followup_batch_id: Optional[str] = None
-    local_smoke_relaxed_guardrails: bool = False
-    data_process_manifest: Optional[str] = None
 
     # ---- 序列化与 hash ----
 
@@ -410,15 +402,12 @@ class Phase1Config:
         data = dict(payload)
         nested_fields = {
             "stratification": StratificationConfig,
-            "sampling_health": SamplingHealthConfig,
-            "no_trade_control": NoTradeControlConfig,
-            "no_trade_code_health": NoTradeCodeHealthConfig,
-            "data_augmentation": DataAugmentationConfig,
             "dp": DPConfig,
             "model": ModelConfig,
             "training": TrainingConfig,
             "selection_policy": SelectionPolicyConfig,
             "diagnostics": DiagnosticsConfig,
+            "data_augmentation": DataAugmentationConfig,
         }
         for name, klass in nested_fields.items():
             if name in data and isinstance(data[name], dict):
@@ -462,6 +451,34 @@ class Phase1Config:
         """
         canonical = json.dumps(
             self.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+    def training_config_hash(self) -> str:
+        """训练配置 hash: 只覆盖影响模型训练行为的字段。
+
+        不包含标识符（pair / train_batch_id / artifact_root / data_process_manifest）
+        和审计字段（allow_missing_prospective_diagnostic / risk_acknowledged_by /
+        expected_sign_off_followup_batch_id / factor_profile / factor_list_file），
+        这些不改变训练行为。
+        """
+        training_only = {
+            "horizon": self.horizon,
+            "dp": asdict(self.dp),
+            "stratification": asdict(self.stratification),
+            "model": asdict(self.model),
+            "training": asdict(self.training),
+            "selection_policy": asdict(self.selection_policy),
+            "diagnostics": asdict(self.diagnostics),
+            "data_augmentation": asdict(self.data_augmentation),
+            "local_smoke_relaxed_guardrails": self.local_smoke_relaxed_guardrails,
+        }
+        canonical = json.dumps(
+            training_only,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
@@ -519,7 +536,6 @@ def _config_doc(why: str, tuning_effect: str) -> Dict[str, str]:
 # ---------- 配置字段说明 ----------
 
 PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
-    # 顶层配置
     "pair": _config_doc(
         "标识本次训练对应的交易品种，用于定位输入数据和产物目录。",
         "换品种时必须调整；同一 batch 内不应混用不同品种，否则数据、报告和缓存会不可追溯。",
@@ -528,61 +544,21 @@ PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
         "标识一次 Phase I 实验批次，用于隔离产物、报告和缓存。",
         "改大或改名会写入新目录，适合 ablation；复跑同一实验应保持不变以便校验 hash。",
     ),
-    "train_file": _config_doc(
-        "训练 split 的行情与特征输入文件，是 DP demo 和 VQ 训练的数据来源。",
-        "换文件会改变 schema、样本分布和 config hash；只应指向已切好的 train 数据。",
-    ),
-    "val_file": _config_doc(
-        "验证 split 输入文件，用于 checkpoint 选择和泛化诊断。",
-        "应与 train 时间隔离；换文件会改变 best checkpoint 和 guardrail 结果。",
-    ),
-    "test_file": _config_doc(
-        "测试 split 输入文件，用于最终离线标签和报告审计。",
-        "不参与训练和选择；换文件只应用于新的评估批次，避免污染可比性。",
+    "data_process_manifest": _config_doc(
+        "Phase I 训练的唯一强制入口，指向离线数据预处理产物清单。",
+        "必须由 ``scripts/phase1_data_processor.py`` 生成；训练只读取已固化的 sampled horizons 与 DP teacher。",
     ),
     "artifact_root": _config_doc(
         "配置 Phase I 产物根目录，集中保存配置、schema、demo、模型和报告。",
         "调整后会改变输出位置；不改变模型行为，但会影响后续 Phase II 查找产物。",
     ),
-    "factor_profile": _config_doc(
-        "选择内置因子字段集合，保证输入 schema 与实验设定可审计。",
-        "short 更轻更稳；更大的 profile 增加状态维度和表达力，也增加过拟合与算力压力。",
-    ),
-    "factor_list_file": _config_doc(
-        "允许用外部因子清单覆盖或补充内置 profile。",
-        "设为空使用 profile；指定文件可精确控制特征，但需要确保 train/val/test 都包含这些列。",
-    ),
     "horizon": _config_doc(
         "定义每个 demonstration 的固定时间长度，也是 DP 和 decoder 的序列长度。",
         "增大可覆盖更长交易机会但计算更重、重叠风险更高；减小会偏向短周期模式。",
     ),
-    "num_demos": _config_doc(
-        "控制进入 DP 标注和 VQ 训练的训练 horizon 数量。",
-        "增大可提升覆盖面但更耗时；减小适合 smoke test，但 codebook 和指标稳定性会下降。",
-    ),
-    "sampling_strategy": _config_doc(
-        "决定不同 strata 的采样配额分配方式，影响 demo 分布。",
-        "uniform 强化小 strata 覆盖；proportional 更接近原始分布但可能被大类主导。",
-    ),
     "stratification": _config_doc(
         "集中控制后视/前瞻分层和 hindsight bias 诊断。",
         "调整子项会改变样本选择边界和报告签收条件，是比较实验必须固定的核心配置组。",
-    ),
-    "sampling_health": _config_doc(
-        "集中控制样本重叠、边界隔离和采样质量阈值。",
-        "阈值越严泛化审计越可靠但可能采不满；越松更容易跑通但验证指标风险更高。",
-    ),
-    "no_trade_control": _config_doc(
-        "控制 DP 全程 flat 样本是否保留以及如何补采样。",
-        "限制更严可减少无交易样本占比；过严可能丢掉真实低机会市场状态。",
-    ),
-    "no_trade_code_health": _config_doc(
-        "监控 no-trade 样本是否挤占少数 archetype 容量。",
-        "阈值越严越能发现 codebook 被 flat 模式占据；过严可能误伤正常防御型 archetype。",
-    ),
-    "data_augmentation": _config_doc(
-        "集中控制训练集增强，默认关闭以保持论文主实验干净。",
-        "开启可增加鲁棒性和样本量，但会改变训练分布，必须使用独立 batch 做 ablation。",
     ),
     "dp": _config_doc(
         "集中控制 single-trade DP teacher 的 horizon、折扣、仓位和成本语义。",
@@ -620,12 +596,15 @@ PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
         "允许本地 smoke test 放宽 guardrail，避免小 fixture 被正式阈值拦住。",
         "仅用于本地/CI 轻量验证；正式训练应保持 false，防止低质量模型被签收。",
     ),
-    "data_process_manifest": _config_doc(
-        "启用 Phase I manifest 训练模式时指向离线数据预处理产物清单。",
-        "填写后训练只读取已固化的 sampled horizons 与 DP teacher；为空时保留旧的一体化数据生成路径。",
+    "factor_profile": _config_doc(
+        "选择内置因子字段集合，用于报告审计。",
+        "应与数据预处理阶段使用的 profile 一致；实际特征列由 manifest 中的 schema 决定。",
+    ),
+    "factor_list_file": _config_doc(
+        "外部因子清单路径，用于报告审计。",
+        "应与数据预处理阶段使用的因子清单一致；实际特征列由 manifest 中的 schema 决定。",
     ),
 
-    # 分层采样
     "stratification.mode": _config_doc(
         "选择用 horizon 内统计还是过去窗口统计做分层，隔离 hindsight bias。",
         "hindsight_horizon 覆盖更均衡但带后视选择风险；prospective_past 更接近线上可观测条件。",
@@ -651,81 +630,10 @@ PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
         "阈值越小越保守；阈值越大更容易通过但隐藏后视采样收益的风险更高。",
     ),
 
-    # 采样健康
-    "sampling_health.max_no_trade_ratio": _config_doc(
-        "限制最终样本中 DP 全程 flat 的比例，避免训练集被无交易样本主导。",
-        "降低会强化交易样本占比；提高能保留更多真实低机会窗口。",
+    "data_augmentation": _config_doc(
+        "集中控制训练集增强，默认关闭以保持论文主实验干净。",
+        "开启可增加鲁棒性和样本量，但会改变训练分布，必须使用独立 batch 做 ablation。",
     ),
-    "sampling_health.flat_low_vol_max_ratio": _config_doc(
-        "限制 flat 且低波动 strata 的采样占比。",
-        "降低可减少重复低信息样本；提高可更贴近低波动市场的原始分布。",
-    ),
-    "sampling_health.min_gap_between_samples": _config_doc(
-        "约束相邻采样窗口的最小起点间隔，降低时间自相关和重叠泄漏。",
-        "增大会提升去相关质量但更难采满；减小会增加样本量但重叠风险上升。",
-    ),
-    "sampling_health.max_overlap_ratio": _config_doc(
-        "设置已采样窗口允许的最大平均重叠比例。",
-        "降低更保守；提高能提升采样可行性但验证指标可能偏乐观。",
-    ),
-    "sampling_health.split_boundary_embargo": _config_doc(
-        "为 paper_formula 模式设置 train/val/test 边界隔离行数，覆盖 markout 行。",
-        "增大减少边界泄漏但损失样本；减小增加可用窗口但泄漏风险更高。",
-    ),
-    "sampling_health.next_row_split_boundary_embargo": _config_doc(
-        "为 next_row_execution 模式设置边界隔离行数，覆盖额外执行/结算行。",
-        "通常应等于 horizon+2；调小可能遗漏后移 markout，调大更保守但少样本。",
-    ),
-    "sampling_health.warn_only": _config_doc(
-        "控制采样健康超阈值时是失败退出还是只写 warning。",
-        "false 适合正式训练；true 适合探索问题，但产物不宜作为签收版本。",
-    ),
-    "sampling_health.allow_overlap_relaxation": _config_doc(
-        "允许采不满时自动放松 min_gap_between_samples。",
-        "true 更容易采满稀有 strata 但必须报告实际放松值；正式实验默认 false 更可审计。",
-    ),
-
-    # No-trade 控制
-    "no_trade_control.keep_no_trade": _config_doc(
-        "决定是否保留 DP 判断全程不交易最优的样本。",
-        "true 保留真实市场空窗期；false 强化交易模式但可能让模型过度交易。",
-    ),
-    "no_trade_control.max_no_trade_ratio": _config_doc(
-        "控制 no-trade 样本在训练 demo 中的最大比例。",
-        "降低会增加补采样和交易样本权重；提高能保留更多防御状态。",
-    ),
-    "no_trade_control.min_profit_gate": _config_doc(
-        "定义交易样本进入训练集的最小收益门槛。",
-        "提高可过滤微弱机会和噪声交易；过高会让 demo 只覆盖极端行情。",
-    ),
-    "no_trade_control.cap_flat_low_vol_strata": _config_doc(
-        "控制是否对 flat/低波动 strata 单独限额。",
-        "true 减少低信息样本；false 更忠实原始分布但可能推高 no-trade 占比。",
-    ),
-    "no_trade_control.flat_low_vol_max_ratio": _config_doc(
-        "定义 flat/低波动 strata 的最大保留比例。",
-        "降低会增加更有动作变化的样本；提高可保留更多低波动状态。",
-    ),
-    "no_trade_control.resample_when_exceeded": _config_doc(
-        "当 no-trade 或 flat-low-vol 超阈值时是否触发补采样。",
-        "true 自动补足有效样本；false 更快但可能留下失衡训练集。",
-    ),
-
-    # No-trade codebook 健康
-    "no_trade_code_health.max_per_code_no_trade_ratio": _config_doc(
-        "限制单个 code 内 no-trade 样本比例，防止某个 archetype 退化为全 flat。",
-        "降低更严格地区分交易/非交易 code；提高可接受更防御的 archetype。",
-    ),
-    "no_trade_code_health.max_top2_no_trade_concentration": _config_doc(
-        "限制 no-trade 样本集中到前两个 code 的程度。",
-        "降低能暴露 no-trade 挤占容量；提高则允许少数 code 专门表达空仓状态。",
-    ),
-    "no_trade_code_health.min_active_trade_code_count": _config_doc(
-        "要求至少多少个 code 承载非 no-trade 交易样本。",
-        "提高会促进 archetype 多样性；降低适合小数据或确实交易机会稀少的品种。",
-    ),
-
-    # 数据增强
     "data_augmentation.temporal_contrastive": _config_doc(
         "配置时序偏移对比学习，帮助 encoder 对轻微时间错位保持稳健。",
         "开启会增加辅助 loss 和训练成本；关闭保持论文主实验更干净。",
@@ -803,7 +711,6 @@ PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
         "正式实验应保持 true；false 会污染泛化评估，通常只用于调试。",
     ),
 
-    # DP / 成本
     "dp.horizon": _config_doc(
         "DP teacher 使用的序列长度，应与顶层 horizon 保持一致。",
         "增减会改变 DP 状态空间和动作标签；不一致会导致训练样本 shape 错误。",

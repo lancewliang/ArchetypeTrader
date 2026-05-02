@@ -9,7 +9,7 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("polars")
 
-from scripts.phase1_data_processor import (  # noqa: E402
+from scripts.process_phase1_data import (  # noqa: E402
     Phase1DataProcessor,
     build_data_process_config,
     build_parser,
@@ -125,15 +125,10 @@ def _train_config(tmp_path: Path, manifest: Path) -> Phase1Config:
     return Phase1Config(
         pair="TEST",
         train_batch_id="manifest_train",
-        train_file="",
-        val_file="",
-        test_file="",
         data_process_manifest=str(manifest),
         artifact_root=str(tmp_path / "artifacts"),
         horizon=4,
-        num_demos=8,
         stratification=StratificationConfig(mode="prospective_past"),
-        sampling_health=SamplingHealthConfig(warn_only=True),
         dp=dp,
         model=model,
         training=training,

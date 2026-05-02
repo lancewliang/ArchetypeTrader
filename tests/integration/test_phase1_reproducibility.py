@@ -39,16 +39,26 @@ def test_config_hash_changes_when_field_changes():
     base = Phase1Config(
         pair="TEST",
         train_batch_id="b1",
-        train_file="t.feather",
-        val_file="v.feather",
-        test_file="te.feather",
+        data_process_manifest="/tmp/m1.json",
     )
     h1 = base.config_hash()
     other = Phase1Config(
         pair="TEST",
         train_batch_id="b2",
-        train_file="t.feather",
-        val_file="v.feather",
-        test_file="te.feather",
+        data_process_manifest="/tmp/m1.json",
     )
     assert h1 != other.config_hash()
+
+
+def test_training_config_hash_ignores_identifiers():
+    a = Phase1Config(
+        pair="TEST",
+        train_batch_id="b1",
+        data_process_manifest="/tmp/m1.json",
+    )
+    b = Phase1Config(
+        pair="OTHER",
+        train_batch_id="b2",
+        data_process_manifest="/tmp/m2.json",
+    )
+    assert a.training_config_hash() == b.training_config_hash()

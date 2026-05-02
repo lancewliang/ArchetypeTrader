@@ -29,9 +29,6 @@ from src.config.phase1_config import (
 
 _NESTED_CONFIG_TYPES = {
     "stratification": StratificationConfig,
-    "sampling_health": SamplingHealthConfig,
-    "no_trade_control": NoTradeControlConfig,
-    "no_trade_code_health": NoTradeCodeHealthConfig,
     "data_augmentation": DataAugmentationConfig,
     "data_augmentation.temporal_contrastive": TemporalContrastiveConfig,
     "data_augmentation.synthetic_horizon": SyntheticHorizonConfig,

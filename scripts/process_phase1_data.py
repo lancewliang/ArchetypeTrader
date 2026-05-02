@@ -7,21 +7,27 @@ instead of re-reading raw market data or re-running DP.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import logging
+import random
 import sys
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Dict, List, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+
 from src.config.phase1_config import (  # noqa: E402
     CostConfig,
     DPConfig,
     DataAugmentationConfig,
-    Phase1Config,
     Phase1DataProcessConfig,
     SamplingHealthConfig,
     StratificationConfig,
@@ -29,13 +35,25 @@ from src.config.phase1_config import (  # noqa: E402
 )
 from src.data.data_augmentation import TemporalContrastiveBuilder  # noqa: E402
 from src.data.demo_store import Phase1DemoStore  # noqa: E402
+from src.data.feature_registry import (  # noqa: E402
+    default_factor_list_path,
+    load_feature_selection,
+)
 from src.data.horizon_builder import HorizonBuilder  # noqa: E402
 from src.data.market_reader import MarketFileReader  # noqa: E402
 from src.data.phase1_processed_store import (  # noqa: E402
     Phase1ProcessedStore,
     stable_hash,
 )
-from src.trainers.phase1_trainer import Phase1FatalError, Phase1Trainer  # noqa: E402
+from src.data.sampling_health import SamplingHealthChecker, SamplingHealthError  # noqa: E402
+from src.data.schema import InputSchemaValidator  # noqa: E402
+from src.data.stratified_sampler import StratifiedWindowSampler  # noqa: E402
+from src.data.window_indexer import SlidingWindowIndexer, WindowIndexEntry  # noqa: E402
+from src.planners.demo_generator import Phase1DemoGenerator  # noqa: E402
+from src.planners.single_trade_dp import SingleTradeDPPlanner  # noqa: E402
+from src.trading.cost_model import LobDepthCostModel  # noqa: E402
+from src.trading.reward_alignment import RewardAlignment  # noqa: E402
+from src.utils.feather_io import write_ipc  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -168,23 +186,30 @@ def assert_prospective_diagnostic(args: argparse.Namespace) -> None:
     raise SystemExit(2)
 
 
+class Phase1FatalError(RuntimeError):
+    pass
+
+
 class Phase1DataProcessor:
     """Offline processor that writes Phase I manifest-mode training inputs."""
 
     def __init__(self, config: Phase1DataProcessConfig) -> None:
         self.config = config
-        self.trainer = Phase1Trainer(self._trainer_config())
+        self._logger = logging.getLogger(
+            f"phase1_data_process.{config.pair}.{config.data_batch_id}"
+        )
 
     def run(self) -> Path:
         artifacts_dir = self.config.artifacts_dir()
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        self.trainer._seed_everything()
-        self.trainer._check_prospective_diagnostic()
+        _seed_everything(self.config.seed)
+
+        _check_prospective_diagnostic(self.config)
 
         frames = MarketFileReader().read_split(
             self.config.train_file, self.config.val_file, self.config.test_file
         )
-        schema_validator = self.trainer._build_schema_validator()
+        schema_validator = _build_schema_validator(self.config)
         schema = schema_validator.validate(frames["train"])
         for split in ("val", "test"):
             schema_validator.validate_against_schema(frames[split], schema)
@@ -193,13 +218,13 @@ class Phase1DataProcessor:
         )
         schema_hash = stable_hash(schema.to_dict())
 
-        train_horizons, train_window_path = self.trainer._build_horizons_for_split(
+        train_horizons, train_window_path = self._build_horizons_for_split(
             "train", frames["train"], schema, artifacts_dir
         )
-        val_horizons, val_window_path = self.trainer._build_horizons_for_split(
+        val_horizons, val_window_path = self._build_horizons_for_split(
             "val", frames["val"], schema, artifacts_dir
         )
-        test_horizons, test_window_path = self.trainer._build_horizons_for_split(
+        test_horizons, test_window_path = self._build_horizons_for_split(
             "test", frames["test"], schema, artifacts_dir
         )
 
@@ -219,9 +244,9 @@ class Phase1DataProcessor:
             ).build_pairs(train_horizons, frames["train"], builder, pair=self.config.pair)
             train_horizons = list(train_horizons) + list(shifted)
 
-        train_horizons, train_reject = self.trainer._generate_demos(train_horizons)
-        val_horizons, val_reject = self.trainer._generate_demos(val_horizons)
-        test_horizons, test_reject = self.trainer._generate_demos(test_horizons)
+        train_horizons, train_reject = _generate_demos(self.config, train_horizons)
+        val_horizons, val_reject = _generate_demos(self.config, val_horizons)
+        test_horizons, test_reject = _generate_demos(self.config, test_horizons)
 
         input_file_audit = {
             split: _file_audit(path)
@@ -285,9 +310,10 @@ class Phase1DataProcessor:
                 "num_horizons": len(records),
             }
 
-        Phase1DemoStore(artifacts_dir, data_process_hash, schema_hash).save_demos(
-            train_horizons
-        )
+        demo_store = Phase1DemoStore(artifacts_dir, data_process_hash, schema_hash)
+        demo_store.save_demos(train_horizons, split="train")
+        demo_store.save_demos(val_horizons, split="val")
+        demo_store.save_demos(test_horizons, split="test")
         manifest = {
             "version": 1,
             "phase": "phase1_data_process",
@@ -310,32 +336,256 @@ class Phase1DataProcessor:
         }
         return store.write_manifest(manifest)
 
-    def _trainer_config(self) -> Phase1Config:
-        return Phase1Config(
-            pair=self.config.pair,
-            train_batch_id=self.config.data_batch_id,
-            train_file=self.config.train_file,
-            val_file=self.config.val_file,
-            test_file=self.config.test_file,
-            artifact_root=self.config.artifact_root,
-            factor_profile=self.config.factor_profile,
-            factor_list_file=self.config.factor_list_file,
+    def _build_horizons_for_split(
+        self,
+        split: str,
+        frame,
+        schema,
+        artifacts_dir: Path,
+    ):
+        indexer = SlidingWindowIndexer(
             horizon=self.config.horizon,
-            num_demos=self.config.num_demos,
-            sampling_strategy=self.config.sampling_strategy,
-            stratification=self.config.stratification,
-            sampling_health=self.config.sampling_health,
-            data_augmentation=self.config.data_augmentation,
-            dp=self.config.dp,
-            training=TrainingConfig(seed=self.config.seed),
-            allow_missing_prospective_diagnostic=(
-                self.config.allow_missing_prospective_diagnostic
-            ),
-            risk_acknowledged_by=self.config.risk_acknowledged_by,
-            expected_sign_off_followup_batch_id=(
-                self.config.expected_sign_off_followup_batch_id
-            ),
+            reward_alignment=self.config.dp.cost_config.reward_alignment,
+            prospective_lookback_minutes=self.config.stratification.prospective_lookback_minutes,
         )
+        all_entries = indexer.enumerate(
+            frame, stratification_mode=self.config.stratification.mode
+        )
+        embargo = _active_split_boundary_embargo(self.config)
+        entries, boundary_excluded = _filter_split_boundary_entries(
+            all_entries, frame_height=frame.height, embargo=embargo
+        )
+        if boundary_excluded:
+            self._logger.info(
+                "phase1_window_index_boundary_embargo_applied split=%s excluded=%d eligible=%d embargo=%d",
+                split,
+                boundary_excluded,
+                len(entries),
+                embargo,
+            )
+        num_samples = _num_samples_for_split(self.config, split, len(entries))
+        if split == "train":
+            _check_overlap_health_feasibility(self.config, num_samples, entries)
+        self._logger.info(
+            "phase1_window_index_enumerated split=%s candidates=%d eligible=%d target_samples=%d",
+            split,
+            len(all_entries),
+            len(entries),
+            num_samples,
+        )
+
+        sampler = StratifiedWindowSampler(
+            strategy=self.config.sampling_strategy,
+            min_gap_between_samples=self.config.sampling_health.min_gap_between_samples,
+            flat_low_vol_max_ratio=self.config.sampling_health.flat_low_vol_max_ratio,
+            allow_overlap_relaxation=self.config.sampling_health.allow_overlap_relaxation,
+            seed=self.config.seed
+            + (1 if split == "val" else 2 if split == "test" else 0),
+        )
+        prospective = self.config.stratification.mode == "prospective_past"
+        labels = [
+            StratifiedWindowSampler.assign_strata(e, prospective=prospective)
+            for e in entries
+        ]
+        sampled = sampler.sample(entries, num_samples=num_samples, strata_labels=labels)
+        effective_min_gap = sampler.last_effective_min_gap_between_samples
+        overlap_relaxation_applied = sampler.last_overlap_relaxation_applied
+        self._logger.info(
+            "phase1_windows_sampled split=%s sampled=%d unique_strata=%d effective_min_gap=%d overlap_relaxation=%s",
+            split,
+            len(sampled),
+            len({s.strata_label for s in sampled}),
+            effective_min_gap,
+            overlap_relaxation_applied,
+        )
+
+        if split == "train":
+            checker = SamplingHealthChecker(
+                horizon=self.config.horizon,
+                max_overlap_ratio=self.config.sampling_health.max_overlap_ratio,
+                min_gap_between_samples=self.config.sampling_health.min_gap_between_samples,
+                split_boundary_embargo=embargo,
+                flat_low_vol_max_ratio=self.config.sampling_health.flat_low_vol_max_ratio,
+                warn_only=self.config.sampling_health.warn_only,
+                effective_min_gap_between_samples=effective_min_gap,
+                overlap_relaxation_applied=overlap_relaxation_applied,
+            )
+            report = checker.check(
+                sampled=sampled,
+                split_boundaries={"train_end_row": frame.height - 1},
+                strata_labels=[s.strata_label for s in sampled],
+            )
+            self._logger.info(
+                "phase1_sampling_health_passed split=%s overlap=%.6f min_gap=%s flat_low_ratio=%.6f warnings=%d",
+                split,
+                report.window_overlap_ratio,
+                report.min_sample_gap,
+                report.flat_low_vol_sample_ratio,
+                len(report.sampling_health_warnings),
+            )
+
+        index_frame = indexer.to_frame(all_entries)
+        sampled_starts = {s.window_start for s in sampled}
+        eligible_starts = {e.window_start for e in entries}
+        index_frame = index_frame.with_columns(
+            [
+                (index_frame["window_start"].is_in(list(eligible_starts))).alias(
+                    "is_boundary_eligible"
+                ),
+                (index_frame["window_start"].is_in(list(sampled_starts))).alias(
+                    "is_sampled"
+                ),
+            ]
+        )
+        path = write_ipc(index_frame, artifacts_dir / f"window_index_{split}.feather")
+
+        builder = HorizonBuilder(
+            self.config.horizon, schema, self.config.dp.cost_config.reward_alignment
+        )
+        horizons = builder.build(frame, sampled, pair=self.config.pair, split=split)
+        self._logger.info(
+            "phase1_horizons_built split=%s horizons=%d window_index_path=%s",
+            split,
+            len(horizons),
+            path,
+        )
+        return horizons, path
+
+
+def _seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _check_prospective_diagnostic(config: Phase1DataProcessConfig) -> None:
+    if config.stratification.mode == "prospective_past":
+        return
+    if not config.stratification.require_prospective_diagnostic:
+        return
+    if config.stratification.diagnostic_pair_batch_id is None:
+        if not config.allow_missing_prospective_diagnostic:
+            raise Phase1FatalError(
+                "缺少 diagnostic_pair_batch_id; 主实验不可启动。"
+                "传入 --allow-missing-prospective-diagnostic + "
+                "--risk-acknowledged-by + --expected-sign-off-followup-batch-id 才能放行。"
+            )
+        if (
+            not config.risk_acknowledged_by
+            or not config.expected_sign_off_followup_batch_id
+        ):
+            raise Phase1FatalError(
+                "allow_missing_prospective_diagnostic=True 时必须显式声明"
+                "risk_acknowledged_by 与 expected_sign_off_followup_batch_id。"
+            )
+
+
+def _build_schema_validator(config: Phase1DataProcessConfig) -> InputSchemaValidator:
+    factor_path = default_factor_list_path(config.pair, config.factor_profile)
+    has_factor_file = bool(config.factor_list_file) or factor_path.exists()
+    if has_factor_file:
+        spec = load_feature_selection(
+            pair=config.pair,
+            profile=config.factor_profile,
+            factor_list_file=config.factor_list_file,
+        )
+        return InputSchemaValidator(
+            price_column=spec.price_column,
+            feature_columns=spec.feature_columns,
+            feature_source=spec.to_dict(),
+        )
+    return InputSchemaValidator(
+        feature_source={
+            "mode": "legacy_auto_numeric",
+            "pair": config.pair,
+            "profile": config.factor_profile,
+            "factor_list_path": str(factor_path),
+        }
+    )
+
+
+def _active_split_boundary_embargo(config: Phase1DataProcessConfig) -> int:
+    if config.dp.cost_config.reward_alignment == "paper_formula":
+        return config.sampling_health.split_boundary_embargo
+    return config.sampling_health.next_row_split_boundary_embargo
+
+
+def _filter_split_boundary_entries(
+    entries: List[WindowIndexEntry],
+    frame_height: int,
+    embargo: int,
+) -> Tuple[List[WindowIndexEntry], int]:
+    if embargo <= 0:
+        return list(entries), 0
+    max_markout_row = frame_height - 1 - embargo
+    eligible = [e for e in entries if e.last_markout_row <= max_markout_row]
+    return eligible, len(entries) - len(eligible)
+
+
+def _num_samples_for_split(
+    config: Phase1DataProcessConfig, split: str, num_entries: int
+) -> int:
+    if split == "train":
+        return min(config.num_demos, num_entries)
+    return min(num_entries, min(64, max(1, config.num_demos // 16)))
+
+
+def _check_overlap_health_feasibility(
+    config: Phase1DataProcessConfig,
+    num_samples: int,
+    entries: List[WindowIndexEntry],
+) -> None:
+    max_overlap = config.sampling_health.max_overlap_ratio
+    if (
+        config.sampling_health.warn_only
+        or num_samples <= 1
+        or len(entries) <= 1
+        or max_overlap >= 1.0
+    ):
+        return
+    span = entries[-1].window_start - entries[0].window_start
+    if span <= 0:
+        return
+    required_mean_gap = config.horizon * (1.0 - max_overlap)
+    if required_mean_gap <= 0:
+        return
+    min_possible_overlap = max(
+        0.0,
+        (config.horizon - (span / (num_samples - 1))) / config.horizon,
+    )
+    if min_possible_overlap <= max_overlap:
+        return
+    max_samples_for_overlap = int(span // required_mean_gap + 1)
+    raise SamplingHealthError(
+        "采样健康检查不可行: "
+        f"num_samples={num_samples} 在 eligible_span={span} rows, "
+        f"horizon={config.horizon} 下 window_overlap_ratio 理论下限约 "
+        f"{min_possible_overlap:.3f} > max={max_overlap}; "
+        f"请将 --num-demos 降到 <= {max_samples_for_overlap}，"
+        "或显式传 --sampling-health-warn-only / 提高 --sampling-max-overlap-ratio。"
+    )
+
+
+def _generate_demos(config: Phase1DataProcessConfig, horizons):
+    cost_model = LobDepthCostModel(
+        commission_rate=config.dp.cost_config.commission_rate,
+        book_levels=config.dp.cost_config.book_levels,
+        insufficient_depth_policy=config.dp.cost_config.insufficient_depth_policy,
+    )
+    alignment = RewardAlignment(config.dp.cost_config.reward_alignment)
+    planner = SingleTradeDPPlanner(
+        cost_model=cost_model,
+        reward_alignment=alignment,
+        max_position=config.dp.max_position,
+        gamma=config.dp.gamma,
+    )
+    gen = Phase1DemoGenerator(
+        planner=planner,
+        health=config.dp.cost_config.reject_transition_health,
+    )
+    return gen.generate(horizons)
 
 
 def _file_audit(path: str) -> dict:

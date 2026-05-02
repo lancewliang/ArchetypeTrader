@@ -54,8 +54,8 @@ class Phase1DemoStore:
 
     # ---------- demos ----------
 
-    def save_demos(self, demos: List[HorizonRecord]) -> Path:
-        """写 ``demos_train.feather``，包含 ``states / prices / actions / rewards / meta``。
+    def save_demos(self, demos: List[HorizonRecord], split: str = "train") -> Path:
+        """写 ``demos_{split}.feather``，包含 ``states / prices / actions / rewards / meta``。
 
         实现要点
         --------
@@ -92,7 +92,7 @@ class Phase1DemoStore:
                 }
             )
         frame = pl.DataFrame(rows)
-        target = self.artifacts_dir / "demos_train.feather"
+        target = self.artifacts_dir / f"demos_{split}.feather"
         return feather_io.write_ipc(frame, target)
 
     def load_demos(self, path: Optional[Path] = None) -> List[HorizonRecord]:

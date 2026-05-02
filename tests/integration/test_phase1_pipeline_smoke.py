@@ -1,8 +1,7 @@
-"""Phase I 端到端 smoke test."""
+"""Phase I 端到端 smoke test (data-process → manifest-train)."""
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -11,13 +10,17 @@ import pytest
 torch = pytest.importorskip("torch")
 polars = pytest.importorskip("polars")
 
-# 确保 src 在 sys.path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tests.fixtures.phase1.build_fixtures import FixtureSpec, build_fixtures  # noqa: E402
 
+from scripts.process_phase1_data import (  # noqa: E402
+    Phase1DataProcessor,
+    build_data_process_config,
+    build_parser as build_dp_parser,
+)
 from src.config.phase1_config import (  # noqa: E402
     CodebookConfig,
     CodebookHealthConfig,
@@ -27,12 +30,9 @@ from src.config.phase1_config import (  # noqa: E402
     DiagnosticsConfig,
     EncoderInputConfig,
     ModelConfig,
-    NoTradeCodeHealthConfig,
-    NoTradeControlConfig,
     Phase1Config,
     BehaviorGuardrailConfig,
     RiskGuardrailConfig,
-    SamplingHealthConfig,
     SelectionPolicyConfig,
     StratificationConfig,
     TrainingConfig,
@@ -40,10 +40,35 @@ from src.config.phase1_config import (  # noqa: E402
 from src.trainers.phase1_trainer import Phase1Trainer  # noqa: E402
 
 
-def _make_smoke_config(
-    tmp_path: Path, train_file, val_file, test_file, factor_file: Path
-) -> Phase1Config:
-    """构造小规模 smoke 配置: h=8, num_demos=12, K=4, epochs=2。"""
+def _run_data_processor(tmp_path: Path) -> Path:
+    fixtures_dir = tmp_path / "fixtures"
+    train, val, test = build_fixtures(
+        fixtures_dir, FixtureSpec(train_rows=400, val_rows=200, test_rows=200)
+    )
+    factor_file = tmp_path / "factors" / "TEST" / "short.txt"
+    factor_file.parent.mkdir(parents=True, exist_ok=True)
+    factor_file.write_text("mid_price\nreturn_1m\n", encoding="utf-8")
+    args = build_dp_parser().parse_args(
+        [
+            "--pair", "TEST",
+            "--data-batch-id", "smoke_dp",
+            "--train-file", str(train),
+            "--val-file", str(val),
+            "--test-file", str(test),
+            "--artifact-root", str(tmp_path / "artifacts"),
+            "--factor-list-file", str(factor_file),
+            "--horizon", "8",
+            "--num-demos", "12",
+            "--stratification-mode", "hindsight_horizon",
+            "--diagnostic-pair-batch-id", "diagnostic_batch",
+            "--local-smoke-relaxed-guardrails",
+            "--seed", "7",
+        ]
+    )
+    return Phase1DataProcessor(build_data_process_config(args)).run()
+
+
+def _make_smoke_config(tmp_path: Path, manifest: Path) -> Phase1Config:
     cost = CostConfig(reward_alignment="paper_formula")
     dp = DPConfig(horizon=8, cost_config=cost, max_position=1, gamma=1.0)
     enc = EncoderInputConfig(state_adapter_dim=8, action_embedding_dim=4, reward_embedding_dim=4, fusion_dim=16)
@@ -62,15 +87,6 @@ def _make_smoke_config(
         batch_size=4, lr=1e-3, epochs=2, seed=7, device="cpu",
         save_every=1, full_validation_every_epochs=1, fast_val_probe_size=8,
     )
-    sampling = SamplingHealthConfig(
-        max_no_trade_ratio=1.0,
-        flat_low_vol_max_ratio=1.0,
-        min_gap_between_samples=1,
-        max_overlap_ratio=1.0,
-        split_boundary_embargo=0,
-        next_row_split_boundary_embargo=0,
-        warn_only=True,
-    )
     selection = SelectionPolicyConfig(
         min_code_usage_ratio=0.0,
         risk=RiskGuardrailConfig(max_drawdown=10.0, min_sharpe_ratio=-999.0),
@@ -87,37 +103,22 @@ def _make_smoke_config(
     return Phase1Config(
         pair="TEST",
         train_batch_id="smoke",
-        train_file=str(train_file),
-        val_file=str(val_file),
-        test_file=str(test_file),
+        data_process_manifest=str(manifest),
         artifact_root=str(tmp_path / "artifacts"),
         factor_profile="short",
-        factor_list_file=str(factor_file),
         horizon=8,
-        num_demos=12,
-        sampling_strategy="stratified_uniform",
         stratification=stratification,
-        sampling_health=sampling,
-        no_trade_control=NoTradeControlConfig(),
-        no_trade_code_health=NoTradeCodeHealthConfig(),
-        data_augmentation=DataAugmentationConfig(),
         dp=dp,
         model=model,
         training=training,
         selection_policy=selection,
         diagnostics=DiagnosticsConfig(failure_cases_enabled=False, latent_visualization_enabled=False),
+        local_smoke_relaxed_guardrails=True,
     )
 
 
 @pytest.fixture
 def smoke_artifacts(tmp_path):
-    fixtures_dir = tmp_path / "fixtures"
-    train, val, test = build_fixtures(
-        fixtures_dir, FixtureSpec(train_rows=400, val_rows=200, test_rows=200)
-    )
-    factor_file = tmp_path / "factors" / "TEST" / "short.txt"
-    factor_file.parent.mkdir(parents=True, exist_ok=True)
-    factor_file.write_text("mid_price\nreturn_1m\n", encoding="utf-8")
     diagnostic_dir = tmp_path / "artifacts" / "TEST" / "diagnostic_batch" / "phase1"
     diagnostic_dir.mkdir(parents=True, exist_ok=True)
     (diagnostic_dir / "phase1_report.json").write_text(
@@ -132,7 +133,8 @@ def smoke_artifacts(tmp_path):
         ),
         encoding="utf-8",
     )
-    config = _make_smoke_config(tmp_path, train, val, test, factor_file)
+    manifest = _run_data_processor(tmp_path)
+    config = _make_smoke_config(tmp_path, manifest)
     trainer = Phase1Trainer(config)
     return trainer.run()
 
@@ -142,7 +144,6 @@ def test_pipeline_smoke_writes_required_artifacts(smoke_artifacts):
     for path in [
         a.phase1_config_yaml,
         a.input_schema_json,
-        a.window_index_train,
         a.demos_train,
         a.horizon_labels_train,
         a.horizon_labels_val,
@@ -156,9 +157,6 @@ def test_pipeline_smoke_writes_required_artifacts(smoke_artifacts):
         a.phase1_report,
         a.composite_score_sensitivity_json,
         a.sampling_leakage_diagnostics_json,
-        a.artifacts_dir / "action_diagnostics.json",
-        a.artifacts_dir / "horizon_boundary_diagnostics.json",
-        a.artifacts_dir / "code_stability_diagnostics.json",
     ]:
         assert path.exists(), f"missing artifact: {path}"
 
@@ -171,6 +169,7 @@ def test_phase1_report_required_keys(smoke_artifacts):
         "composite_score_sensitivity",
         "prospective_diagnostic_required",
         "stratification_mode",
+        "training_config_hash",
     }
     assert must_have.issubset(payload.keys())
 
@@ -190,4 +189,4 @@ def test_horizon_labels_within_archetype_range(smoke_artifacts):
     labels = pl.read_ipc(smoke_artifacts.horizon_labels_val)
     if labels.height > 0:
         max_id = labels["code_label"].max()
-        assert 0 <= max_id <= 3  # K=4
+        assert 0 <= max_id <= 3
