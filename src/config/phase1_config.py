@@ -135,7 +135,7 @@ class RejectTransitionHealthConfig:
 class CostConfig:
     """统一交易成本配置（DP teacher / student replay 必须共用）。"""
     reward_alignment: Literal["paper_formula", "next_row_execution"] = "paper_formula"
-    commission_rate: float = 0.0002  # 论文 δ = 0.02%
+    commission_rate: float = 0.0005  # 论文 δ = 0.02%
     slippage_model: Literal["lob_depth"] = "lob_depth"
     book_levels: int = 5
     mark_price: Literal["mid_price"] = "mid_price"
@@ -170,8 +170,8 @@ class EncoderInputConfig:
     fusion_dim: int = 128
     reward_normalization: Literal[
         "train_reward_robust", "train_reward_standard"
-    ] = "train_reward_robust"
-    reward_clip_value: float = 8.0
+    ] = "train_reward_standard"
+    reward_clip_value: float = 5.0
     fallback_to_standard_kurtosis_below: float = 6.0
 
 

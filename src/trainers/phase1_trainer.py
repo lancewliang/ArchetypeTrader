@@ -269,6 +269,9 @@ class Phase1Trainer:
             float(norm_stats.get("clip_ratio", 0.0)),
         )
 
+        self._log_reward_composition(train_horizons, "train")
+        self._log_reward_composition(val_horizons, "val")
+
         # 7. 保存 demos / labels（labels 在训练后由 best 模型回填 code_label）
         store = Phase1DemoStore(artifacts_dir, config_hash, schema_hash)
         demos_path = store.save_demos(train_horizons, split="train")
@@ -524,6 +527,63 @@ class Phase1Trainer:
             optimizer, T_max=self.config.training.epochs, eta_min=1e-5
         )
         return model, evaluator, loss_fn, optimizer
+
+    def _log_reward_composition(self, horizons, split: str) -> None:
+        import math as _math
+
+        all_rewards = [v for rec in horizons for v in (rec.rewards or [])]
+        if not all_rewards:
+            return
+
+        n = len(all_rewards)
+        n_horizons = len(horizons)
+        horizon_returns = [sum(rec.rewards) for rec in horizons if rec.rewards]
+
+        action_counter = {}
+        for rec in horizons:
+            for a in (rec.actions or []):
+                action_counter[a] = action_counter.get(a, 0) + 1
+        total_actions = sum(action_counter.values()) or 1
+
+        zero_step = sum(1 for v in all_rewards if abs(v) < 1e-9)
+        pos_step = sum(1 for v in all_rewards if v > 1e-9)
+        neg_step = sum(1 for v in all_rewards if v < -1e-9)
+
+        if horizon_returns:
+            hr_sorted = sorted(horizon_returns)
+            hr_pos = sum(1 for v in horizon_returns if v > 1e-9)
+            hr_neg = sum(1 for v in horizon_returns if v < -1e-9)
+        else:
+            hr_sorted = []
+            hr_pos = 0
+            hr_neg = 0
+
+        def _pct(vals, p):
+            k = (len(vals) - 1) * p / 100.0
+            f = int(k)
+            c = f + 1
+            if c >= len(vals):
+                return vals[-1]
+            return vals[f] + (vals[c] - vals[f]) * (k - f)
+
+        self._logger.warning(
+            "phase1_reward_composition_diagnostic 说明=训练前 reward 组成诊断 split=%s "
+            "step_rewards_n=%d zero=%d(%.4f) positive=%d(%.4f) negative=%d(%.4f) "
+            "horizon_n=%d horizon_return_positive=%d(%.4f) horizon_return_negative=%d(%.4f) "
+            "horizon_return_mean=%.10f horizon_return_p50=%.10f horizon_return_p95=%.10f "
+            "action_dist=%s max_position=%d commission_rate=%.6f",
+            split,
+            n, zero_step, zero_step / n, pos_step, pos_step / n, neg_step, neg_step / n,
+            n_horizons,
+            hr_pos, hr_pos / max(n_horizons, 1),
+            hr_neg, hr_neg / max(n_horizons, 1),
+            sum(horizon_returns) / max(len(horizon_returns), 1),
+            _pct(hr_sorted, 50) if hr_sorted else 0.0,
+            _pct(hr_sorted, 95) if hr_sorted else 0.0,
+            {str(k): f"{v / total_actions:.4f}" for k, v in sorted(action_counter.items())},
+            self.config.dp.max_position,
+            self.config.dp.cost_config.commission_rate,
+        )
 
     def _warmup_codebook(self, model, train_horizons, normalizer):
         """用前若干 batch 的 ``z_e`` 跑 K-means 初始化 codebook。

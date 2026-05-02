@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import asdict, dataclass
 from typing import Literal, Optional, Sequence
@@ -18,6 +19,23 @@ except ImportError:  # pragma: no cover
 from src.config.phase1_config import EncoderInputConfig
 
 _EPS = 1e-6
+
+_logger = logging.getLogger(__name__)
+
+
+def _percentile(values: Sequence[float], p: float) -> float:
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    if n == 0:
+        return 0.0
+    k = (n - 1) * p / 100.0
+    f = int(k)
+    c = f + 1
+    if c >= n:
+        return sorted_vals[-1]
+    d0 = sorted_vals[f]
+    d1 = sorted_vals[c]
+    return d0 + (d1 - d0) * (k - f)
 
 
 @dataclass
@@ -121,6 +139,42 @@ class RewardNormalizer:
         flat = [float(v) for v in rewards]
         if not flat:
             raise ValueError("train rewards 为空，无法拟合 normalizer")
+
+        n = len(flat)
+        mean_val = sum(flat) / n
+        var_val = sum((v - mean_val) ** 2 for v in flat) / max(n - 1, 1)
+        std_val = math.sqrt(max(var_val, 0.0))
+        median_val = _median(flat)
+        mad_val = _mad(flat, median_val)
+        zero_count = sum(1 for v in flat if abs(v) < _EPS)
+        positive_count = sum(1 for v in flat if v > _EPS)
+        negative_count = sum(1 for v in flat if v < -_EPS)
+        horizon_returns = []
+        _curr = 0.0
+        for v in flat:
+            _curr += v
+        horizon_returns.append(_curr)
+
+        _logger.warning(
+            "reward_normalizer_diagnostic 说明=原始 reward 分布诊断 "
+            "n=%d mean=%.10f std=%.10f median=%.10f mad=%.10f "
+            "min=%.10f max=%.10f "
+            "p1=%.10f p5=%.10f p25=%.10f p75=%.10f p95=%.10f p99=%.10f "
+            "zero_count=%d(%.4f) positive_count=%d(%.4f) negative_count=%d(%.4f) "
+            "sum=%.10f "
+            "scale_before_eps=%.10f eps=%.1e scale_hit_eps=%s",
+            n, mean_val, std_val, median_val, mad_val,
+            min(flat), max(flat),
+            _percentile(flat, 1), _percentile(flat, 5), _percentile(flat, 25),
+            _percentile(flat, 75), _percentile(flat, 95), _percentile(flat, 99),
+            zero_count, zero_count / n,
+            positive_count, positive_count / n,
+            negative_count, negative_count / n,
+            sum(flat),
+            1.4826 * mad_val if median_val != 0 or mad_val > 0 else 0.0,
+            _EPS,
+            (1.4826 * mad_val) < _EPS if mad_val >= 0 else True,
+        )
 
         kurt = _kurtosis(flat)
         skew = _skew(flat)

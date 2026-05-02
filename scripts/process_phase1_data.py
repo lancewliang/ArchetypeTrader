@@ -275,16 +275,19 @@ class Phase1DataProcessor:
         train_horizons, train_reject = _generate_demos(self.config, train_horizons)
         self._logger.info("演示样本生成完成 split=train 接受=%d 拒绝率=%.4f",
                           len(train_horizons), train_reject.dataset_reject_rate)
+        _log_reward_distribution(self._logger, train_horizons, "train")
 
         self._logger.info("正在生成演示样本 split=val num_horizons=%d", len(val_horizons))
         val_horizons, val_reject = _generate_demos(self.config, val_horizons)
         self._logger.info("演示样本生成完成 split=val 接受=%d 拒绝率=%.4f",
                           len(val_horizons), val_reject.dataset_reject_rate)
+        _log_reward_distribution(self._logger, val_horizons, "val")
 
         self._logger.info("正在生成演示样本 split=test num_horizons=%d", len(test_horizons))
         test_horizons, test_reject = _generate_demos(self.config, test_horizons)
         self._logger.info("演示样本生成完成 split=test 接受=%d 拒绝率=%.4f",
                           len(test_horizons), test_reject.dataset_reject_rate)
+        _log_reward_distribution(self._logger, test_horizons, "test")
 
         self._logger.info("正在计算数据哈希")
         input_file_audit = {
@@ -635,6 +638,76 @@ def _generate_demos(config: Phase1DataProcessConfig, horizons):
         health=config.dp.cost_config.reject_transition_health,
     )
     return gen.generate(horizons)
+
+
+def _log_reward_distribution(logger, horizons, split: str) -> None:
+    import math as _math
+
+    all_rewards = [v for rec in horizons for v in (rec.rewards or [])]
+    if not all_rewards:
+        logger.warning("reward_distribution_diagnostic split=%s 说明=无 reward 数据", split)
+        return
+
+    n = len(all_rewards)
+    horizon_returns = []
+    for rec in horizons:
+        if rec.rewards:
+            horizon_returns.append(sum(rec.rewards))
+
+    mean_val = sum(all_rewards) / n
+    var_val = sum((v - mean_val) ** 2 for v in all_rewards) / max(n - 1, 1)
+    std_val = _math.sqrt(max(var_val, 0.0))
+    sorted_r = sorted(all_rewards)
+    zero_count = sum(1 for v in all_rewards if abs(v) < 1e-9)
+    positive_count = sum(1 for v in all_rewards if v > 1e-9)
+    negative_count = sum(1 for v in all_rewards if v < -1e-9)
+
+    def _pct(vals, p):
+        k = (len(vals) - 1) * p / 100.0
+        f = int(k)
+        c = f + 1
+        if c >= len(vals):
+            return vals[-1]
+        return vals[f] + (vals[c] - vals[f]) * (k - f)
+
+    action_counter = {}
+    for rec in horizons:
+        for a in (rec.actions or []):
+            action_counter[a] = action_counter.get(a, 0) + 1
+    total_actions = sum(action_counter.values()) or 1
+
+    if horizon_returns:
+        hr_sorted = sorted(horizon_returns)
+        hr_mean = sum(horizon_returns) / len(horizon_returns)
+        hr_pos = sum(1 for v in horizon_returns if v > 1e-9)
+    else:
+        hr_sorted = []
+        hr_mean = 0.0
+        hr_pos = 0
+
+    logger.warning(
+        "reward_distribution_diagnostic 说明=DP teacher 原始 reward 分布 split=%s "
+        "step_rewards_n=%d mean=%.10f std=%.10f "
+        "min=%.10f p1=%.10f p5=%.10f p25=%.10f p50=%.10f p75=%.10f p95=%.10f p99=%.10f max=%.10f "
+        "zero_count=%d(%.4f) positive_count=%d(%.4f) negative_count=%d(%.4f) "
+        "horizon_n=%d horizon_return_mean=%.10f horizon_return_positive=%d(%.4f) "
+        "horizon_return_p50=%.10f horizon_return_p95=%.10f horizon_return_max=%.10f "
+        "action_dist=%s",
+        split,
+        n, mean_val, std_val,
+        sorted_r[0], _pct(sorted_r, 1), _pct(sorted_r, 5), _pct(sorted_r, 25),
+        _pct(sorted_r, 50), _pct(sorted_r, 75), _pct(sorted_r, 95), _pct(sorted_r, 99),
+        sorted_r[-1],
+        zero_count, zero_count / n,
+        positive_count, positive_count / n,
+        negative_count, negative_count / n,
+        len(horizon_returns), hr_mean,
+        hr_pos, hr_pos / max(len(horizon_returns), 1),
+        _pct(hr_sorted, 50) if hr_sorted else 0.0,
+        _pct(hr_sorted, 95) if hr_sorted else 0.0,
+        hr_sorted[-1] if hr_sorted else 0.0,
+        {str(k): f"{v / total_actions:.4f}" for k, v in sorted(action_counter.items())},
+    )
 
 
 def _file_audit(path: str) -> dict:
