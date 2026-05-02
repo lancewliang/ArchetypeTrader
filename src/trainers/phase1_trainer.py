@@ -99,6 +99,21 @@ class Phase1Trainer:
             "dp_teacher_hash": "",
         }
         self._logger = logging.getLogger("archetype.phase1")
+        self._device = self._resolve_device()
+        self._scheduler = None
+
+    def _resolve_device(self) -> str:
+        try:
+            import torch
+            requested = self.config.training.device
+            if requested == "cuda" and not torch.cuda.is_available():
+                self._logger.warning(
+                    "phase1_device_fallback 说明=cuda 不可用,回退到 cpu"
+                )
+                return "cpu"
+            return requested
+        except ImportError:
+            return "cpu"
 
     # ---------- 入口 ----------
 
@@ -503,7 +518,11 @@ class Phase1Trainer:
             fast_probe_size=self.config.training.fast_val_probe_size,
             reward_normalizer=reward_normalizer,
         )
+        model.to(self._device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=self.config.training.lr)
+        self._scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=self.config.training.epochs, eta_min=1e-5
+        )
         return model, evaluator, loss_fn, optimizer
 
     def _warmup_codebook(self, model, train_horizons, normalizer):
@@ -532,7 +551,10 @@ class Phase1Trainer:
         model.eval()
         with torch.no_grad():
             for batch in loader:
-                fused = model.input_adapter(batch["states"], batch["actions"], batch["rewards"])
+                states = batch["states"].to(self._device, non_blocking=True)
+                actions = batch["actions"].to(self._device, non_blocking=True)
+                rewards = batch["rewards"].to(self._device, non_blocking=True)
+                fused = model.input_adapter(states, actions, rewards)
                 z_e = model.encoder(fused)
                 z_e_list.append(z_e)
                 if len(z_e_list) >= self.config.model.codebook.kmeans_warmup_batches:
@@ -586,12 +608,17 @@ class Phase1Trainer:
         except ImportError:  # pragma: no cover
             raise RuntimeError("Phase1Trainer 需要 torch")
 
+        _use_cuda = self._device != "cpu"
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.config.training.batch_size,
             shuffle=True,
             collate_fn=collate_phase1,
+            num_workers=2,
+            pin_memory=_use_cuda,
         )
+        _amp_enabled = self.config.training.mixed_precision and _use_cuda
+        _scaler = torch.amp.GradScaler("cuda", enabled=_amp_enabled)
         self._logger.info(
             "phase1_train_loop_start 说明=训练循环开始 epochs=%d train_records=%d val_records=%d batches_per_epoch=%d batch_size=%d",
             self.config.training.epochs,
@@ -604,42 +631,51 @@ class Phase1Trainer:
         for epoch in range(self.config.training.epochs):
             model.train()
             for batch in train_loader:
-                outputs = model(batch["states"], batch["actions"], batch["rewards"])
-                loss = loss_fn(
-                    action_logits=outputs.action_logits,
-                    target_actions=batch["actions"],
-                    z_e=outputs.z_e,
-                    z_q_no_grad=outputs.z_q_no_grad,
-                    code_id=outputs.code_id,
-                    contrastive_pair_ids=batch["contrastive_pair_ids"],
-                )
-                optimizer.zero_grad()
-                loss.total.backward()
+                states = batch["states"].to(self._device, non_blocking=True)
+                actions = batch["actions"].to(self._device, non_blocking=True)
+                rewards = batch["rewards"].to(self._device, non_blocking=True)
+                with torch.amp.autocast("cuda", enabled=_amp_enabled):
+                    outputs = model(states, actions, rewards)
+                    loss = loss_fn(
+                        action_logits=outputs.action_logits,
+                        target_actions=actions,
+                        z_e=outputs.z_e,
+                        z_q_no_grad=outputs.z_q_no_grad,
+                        code_id=outputs.code_id,
+                        contrastive_pair_ids=batch["contrastive_pair_ids"],
+                    )
+                optimizer.zero_grad(set_to_none=True)
+                _scaler.scale(loss.total).backward()
                 if self.config.training.gradient_clip_norm > 0:
+                    _scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(
                         model.parameters(), self.config.training.gradient_clip_norm
                     )
-                optimizer.step()
-                # EMA 更新（gradient 模式下 update_codebook 是 no-op）
+                _scaler.step(optimizer)
+                _scaler.update()
                 model.quantizer.update_codebook(outputs.z_e.detach(), outputs.code_id.detach())
 
-            restarted_code_ids = self._maybe_restart_dead_codes(
-                model=model,
-                train_dataset=train_dataset,
-                epoch=epoch,
-            )
+            if self._scheduler is not None:
+                self._scheduler.step()
+
+            # 每 10 轮进行一次评估、诊断和 checkpoint 保存
+            evaluation_interval = 10
+            should_evaluate = (epoch + 1) % evaluation_interval == 0 or epoch == self.config.training.epochs - 1
+
+            restarted_code_ids = []
+            if should_evaluate:
+                restarted_code_ids = self._maybe_restart_dead_codes(
+                    model=model,
+                    train_dataset=train_dataset,
+                    epoch=epoch,
+                )
             restart_events = [
                 {"epoch": epoch, "code_id": int(cid)} for cid in restarted_code_ids
             ]
             self._dead_code_restart_events.extend(restart_events)
 
-            # 保存 last
             state = {"model": model.state_dict(), "epoch": epoch}
             metrics_for_select: Dict[str, Any] = {"epoch": epoch}
-
-            # 每 10 轮进行一次评估、诊断和 checkpoint 保存
-            evaluation_interval = 10
-            should_evaluate = (epoch + 1) % evaluation_interval == 0 or epoch == self.config.training.epochs - 1
 
             if should_evaluate:
                 full_val = (epoch + 1) % max(self.config.training.full_validation_every_epochs, 1) == 0
@@ -722,12 +758,15 @@ class Phase1Trainer:
         model.eval()
         with torch.no_grad():
             for batch in loader:
-                outputs = model(batch["states"], batch["actions"], batch["rewards"])
+                states = batch["states"].to(self._device, non_blocking=True)
+                actions = batch["actions"].to(self._device, non_blocking=True)
+                rewards = batch["rewards"].to(self._device, non_blocking=True)
+                outputs = model(states, actions, rewards)
                 per_step = torch.nn.functional.cross_entropy(
                     outputs.action_logits.reshape(-1, outputs.action_logits.shape[-1]),
-                    batch["actions"].reshape(-1),
+                    actions.reshape(-1),
                     reduction="none",
-                ).reshape(batch["actions"].shape)
+                ).reshape(actions.shape)
                 z_e_chunks.append(outputs.z_e.detach())
                 err_chunks.append(per_step.mean(dim=1).detach())
         if was_training:
@@ -762,14 +801,13 @@ class Phase1Trainer:
             if not recs:
                 out[split] = store.save_labels(labels, split)
                 continue
-            states = torch.tensor([r.states for r in recs], dtype=torch.float32)
-            actions = torch.tensor([r.actions for r in recs], dtype=torch.long)
-            # encoder 输入的 rewards 走 normalizer；保留 rec.rewards 供 demo_return 用。
+            states = torch.tensor([r.states for r in recs], dtype=torch.float32).to(self._device)
+            actions = torch.tensor([r.actions for r in recs], dtype=torch.long).to(self._device)
             if normalizer is not None:
                 normalized = [list(normalizer.transform(r.rewards)) for r in recs]
             else:
                 normalized = [list(r.rewards) for r in recs]
-            rewards = torch.tensor(normalized, dtype=torch.float32)
+            rewards = torch.tensor(normalized, dtype=torch.float32).to(self._device)
             code_ids, _ = model.encode(states, actions, rewards)
             for rec, code_id in zip(recs, code_ids.tolist()):
                 # demo_return 必须使用原始 rewards（actual return），而不是 normalizer 后的值。

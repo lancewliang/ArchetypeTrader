@@ -219,8 +219,8 @@ class VectorQuantizer(nn.Module if nn is not None else object):  # type: ignore[
 
         encodings = torch.nn.functional.one_hot(code_id, num_classes=self.num_codes).float()
         n_per_code = encodings.sum(dim=0)  # [K]
-        # batch 内每个 code 对应样本之和: e^T z_e 形状 [K, code_dim]
-        weight_sum = encodings.t() @ z_e
+        z_e_f32 = z_e.float()
+        weight_sum = encodings.t() @ z_e_f32
 
         self._ema_count.mul_(decay).add_(n_per_code, alpha=1 - decay)
         self._ema_weight.mul_(decay).add_(weight_sum, alpha=1 - decay)

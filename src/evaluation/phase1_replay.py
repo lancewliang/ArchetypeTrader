@@ -108,6 +108,8 @@ class Phase1ReplayEvaluator:
         cb_tensor = codebook
         if not isinstance(cb_tensor, torch.Tensor):
             cb_tensor = torch.tensor(cb_tensor, dtype=torch.float32)
+        _device = cb_tensor.device
+        states = states.to(_device)
         z_q = cb_tensor[code_id].unsqueeze(0)
         decoder.eval()
         with torch.no_grad():

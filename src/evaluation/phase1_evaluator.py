@@ -146,11 +146,15 @@ class Phase1Evaluator:
             records=probe_records,
             reward_normalizer=self.reward_normalizer,
         )
+        _device = next(model.parameters()).device
+        _use_cuda = _device.type == "cuda"
         loader = DataLoader(
             probe_dataset,
-            batch_size=64,
+            batch_size=256,
             shuffle=False,
             collate_fn=collate_phase1,
+            num_workers=2,
+            pin_memory=_use_cuda,
         )
         all_logits: List = []
         all_actions: List = []
@@ -159,9 +163,9 @@ class Phase1Evaluator:
         model.eval()
         with torch.no_grad():
             for batch in loader:
-                states = batch["states"]
-                actions = batch["actions"]
-                rewards = batch["rewards"]
+                states = batch["states"].to(_device, non_blocking=True)
+                actions = batch["actions"].to(_device, non_blocking=True)
+                rewards = batch["rewards"].to(_device, non_blocking=True)
                 outputs = model(states, actions, rewards)
                 all_logits.append(outputs.action_logits)
                 all_actions.append(actions)
@@ -397,13 +401,14 @@ class Phase1Evaluator:
         """固定一小批 states，分别用每个 code 解码，得到 logits / actions by code。"""
         import torch
 
-        states = torch.tensor([r.states for r in records], dtype=torch.float32)
+        _device = next(model.parameters()).device
+        states = torch.tensor([r.states for r in records], dtype=torch.float32).to(_device)
         K = model.quantizer.num_codes
         decoded_logits: Dict[int, list] = {}
         decoded_actions: Dict[int, list] = {}
         with torch.no_grad():
             for cid in range(K):
-                code_tensor = torch.full((states.shape[0],), cid, dtype=torch.long)
+                code_tensor = torch.full((states.shape[0],), cid, dtype=torch.long, device=_device)
                 logits = model.decode(states, code_tensor)
                 decoded_logits[cid] = logits.cpu().tolist()
                 decoded_actions[cid] = logits.argmax(dim=-1).cpu().tolist()
