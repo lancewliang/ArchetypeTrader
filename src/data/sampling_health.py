@@ -54,6 +54,8 @@ class SamplingHealthChecker:
         split_boundary_embargo: int,
         flat_low_vol_max_ratio: float,
         warn_only: bool = False,
+        effective_min_gap_between_samples: int | None = None,
+        overlap_relaxation_applied: bool = False,
     ) -> None:
         self.horizon = horizon
         self.max_overlap_ratio = max_overlap_ratio
@@ -61,6 +63,12 @@ class SamplingHealthChecker:
         self.split_boundary_embargo = split_boundary_embargo
         self.flat_low_vol_max_ratio = flat_low_vol_max_ratio
         self.warn_only = warn_only
+        self.effective_min_gap_between_samples = (
+            effective_min_gap_between_samples
+            if effective_min_gap_between_samples is not None
+            else min_gap_between_samples
+        )
+        self.overlap_relaxation_applied = overlap_relaxation_applied
 
     def check(
         self,
@@ -88,7 +96,8 @@ class SamplingHealthChecker:
             raise SamplingHealthError("sampled 为空，无法做健康检查")
 
         report = SamplingHealthReport(
-            effective_min_gap_between_samples=self.min_gap_between_samples,
+            effective_min_gap_between_samples=self.effective_min_gap_between_samples,
+            overlap_relaxation_applied=self.overlap_relaxation_applied,
         )
 
         sorted_samples = sorted(sampled, key=lambda s: s.window_start)
@@ -126,10 +135,13 @@ class SamplingHealthChecker:
                 f"window_overlap_ratio={report.window_overlap_ratio:.3f} > "
                 f"max={self.max_overlap_ratio}"
             )
-        if report.min_sample_gap > 0 and report.min_sample_gap < self.min_gap_between_samples:
+        if (
+            report.min_sample_gap > 0
+            and report.min_sample_gap < report.effective_min_gap_between_samples
+        ):
             report.sampling_health_warnings.append(
                 f"min_sample_gap={report.min_sample_gap} < "
-                f"min_gap_between_samples={self.min_gap_between_samples}"
+                f"effective_min_gap_between_samples={report.effective_min_gap_between_samples}"
             )
         if report.flat_low_vol_sample_ratio > self.flat_low_vol_max_ratio:
             report.sampling_health_warnings.append(

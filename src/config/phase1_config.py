@@ -59,7 +59,7 @@ class SamplingHealthConfig:
     """
     max_no_trade_ratio: float = 0.25
     flat_low_vol_max_ratio: float = 0.15
-    min_gap_between_samples: int = 36  # h=72 时的 50% overlap 上限
+    min_gap_between_samples: int = 12  # h=72 时的 50% overlap 上限
     max_overlap_ratio: float = 0.5
     split_boundary_embargo: int = 73            # paper_formula 默认 (h + 1)
     next_row_split_boundary_embargo: int = 74   # next_row_execution 默认 (h + 2)

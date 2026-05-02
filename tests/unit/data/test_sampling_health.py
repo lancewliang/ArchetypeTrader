@@ -90,3 +90,20 @@ def test_flat_low_vol_warn_when_ratio_high():
     rep = checker.check(_sampled([0, 10, 20]), {"train_end_row": 100},
                         ["flat|low|mixed", "flat|low|mixed", "up|mid|mixed"])
     assert any("flat_low_vol_sample_ratio" in w for w in rep.sampling_health_warnings)
+
+
+def test_effective_min_gap_used_after_overlap_relaxation():
+    checker = SamplingHealthChecker(
+        horizon=8,
+        max_overlap_ratio=1.0,
+        min_gap_between_samples=10,
+        split_boundary_embargo=0,
+        flat_low_vol_max_ratio=1.0,
+        warn_only=False,
+        effective_min_gap_between_samples=5,
+        overlap_relaxation_applied=True,
+    )
+    rep = checker.check(_sampled([0, 5]), {"train_end_row": 100}, ["up|low|mixed"] * 2)
+    assert rep.effective_min_gap_between_samples == 5
+    assert rep.overlap_relaxation_applied is True
+    assert rep.sampling_health_warnings == []

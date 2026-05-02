@@ -17,6 +17,8 @@ from src.config.phase1_config import (
     TrainingConfig,
     apply_paper_strict_overrides,
 )
+from src.data.sampling_health import SamplingHealthError
+from src.data.window_indexer import WindowIndexEntry
 from src.trainers.phase1_trainer import Phase1FatalError, Phase1Trainer
 
 
@@ -114,6 +116,58 @@ def test_num_samples_for_validation_is_capped_and_scales_down_for_smoke():
 
     trainer = Phase1Trainer(_config(num_demos=30_000))
     assert trainer._num_samples_for_split("test", 10_000) == 64
+
+
+def test_split_boundary_filter_excludes_close_markout_rows():
+    entries = [
+        WindowIndexEntry(
+            window_start=i,
+            window_end=i + 7,
+            last_execution_row=i + 7,
+            last_markout_row=i + 8,
+            horizon_return=0.0,
+            realized_volatility=0.001,
+            draw_pattern="mixed",
+            past_return=0.0,
+            past_realized_volatility=0.001,
+            past_draw_pattern="mixed",
+        )
+        for i in range(20)
+    ]
+
+    eligible, excluded = Phase1Trainer._filter_split_boundary_entries(
+        entries, frame_height=30, embargo=5
+    )
+
+    assert excluded == 3
+    assert max(e.last_markout_row for e in eligible) == 24
+
+
+def test_overlap_feasibility_fails_fast_when_num_samples_is_impossible():
+    trainer = Phase1Trainer(
+        _config(
+            horizon=10,
+            sampling_health=SamplingHealthConfig(max_overlap_ratio=0.5),
+        )
+    )
+    entries = [
+        WindowIndexEntry(
+            window_start=i,
+            window_end=i + 9,
+            last_execution_row=i + 9,
+            last_markout_row=i + 10,
+            horizon_return=0.0,
+            realized_volatility=0.001,
+            draw_pattern="mixed",
+            past_return=0.0,
+            past_realized_volatility=0.001,
+            past_draw_pattern="mixed",
+        )
+        for i in range(30)
+    ]
+
+    with pytest.raises(SamplingHealthError, match="采样健康检查不可行"):
+        trainer._check_overlap_health_feasibility(num_samples=10, entries=entries)
 
 
 def test_phase1_trainer_uses_factor_list_schema(tmp_path):
@@ -227,6 +281,38 @@ def test_train_phase1_cli_sets_prospective_lookback_minutes():
     config = build_config(args)
     assert config.stratification.mode == "prospective_past"
     assert config.stratification.prospective_lookback_minutes == 60
+
+
+def test_train_phase1_cli_sets_sampling_health_overrides():
+    from scripts.train_phase1 import build_config, build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--pair",
+            "TEST",
+            "--train-batch-id",
+            "batch",
+            "--train-file",
+            "train.feather",
+            "--val-file",
+            "val.feather",
+            "--test-file",
+            "test.feather",
+            "--sampling-min-gap-between-samples",
+            "12",
+            "--sampling-max-overlap-ratio",
+            "0.8",
+            "--sampling-flat-low-vol-max-ratio",
+            "0.2",
+            "--sampling-health-warn-only",
+        ]
+    )
+    config = build_config(args)
+    assert config.sampling_health.min_gap_between_samples == 12
+    assert config.sampling_health.max_overlap_ratio == 0.8
+    assert config.sampling_health.flat_low_vol_max_ratio == 0.2
+    assert config.sampling_health.warn_only is True
 
 
 def test_train_phase1_cli_local_smoke_relaxes_guardrails():

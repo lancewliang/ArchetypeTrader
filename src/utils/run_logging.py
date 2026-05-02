@@ -52,5 +52,5 @@ def configure_run_logger(
         )
     )
     logger.addHandler(handler)
-    logger.info("log_file=%s", log_path)
+    logger.info("log_file 说明=本次运行日志文件 path=%s", log_path)
     return logger, log_path

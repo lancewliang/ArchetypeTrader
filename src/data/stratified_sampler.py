@@ -13,7 +13,7 @@ import math
 import random
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Sequence
+from typing import Dict, List, Literal, Sequence, Set
 
 from .window_indexer import WindowIndexEntry
 
@@ -98,6 +98,8 @@ class StratifiedWindowSampler:
         self.flat_low_vol_max_ratio = flat_low_vol_max_ratio
         self.allow_overlap_relaxation = allow_overlap_relaxation
         self.seed = seed
+        self.last_effective_min_gap_between_samples = min_gap_between_samples
+        self.last_overlap_relaxation_applied = False
 
     def sample(
         self,
@@ -132,6 +134,8 @@ class StratifiedWindowSampler:
             raise ValueError(
                 f"num_samples={num_samples} 超过候选总数 {len(entries)}; 无法采样"
             )
+        self.last_effective_min_gap_between_samples = self.min_gap_between_samples
+        self.last_overlap_relaxation_applied = False
 
         rng = random.Random(self.seed)
 
@@ -182,7 +186,10 @@ class StratifiedWindowSampler:
                 i += 1
 
         # 抑制 flat|low|* strata 比例（"flat-low" 类容易让 DP 全 flat）。
-        flat_low_keys = [k for k in non_empty_strata if k.startswith("flat|low|")]
+        def is_flat_low(label: str) -> bool:
+            return label.startswith("flat|low|")
+
+        flat_low_keys = [k for k in non_empty_strata if is_flat_low(k)]
         flat_low_total = sum(quotas.get(k, 0) for k in flat_low_keys)
         cap = int(num_samples * self.flat_low_vol_max_ratio)
         if flat_low_total > cap and flat_low_keys:
@@ -227,15 +234,24 @@ class StratifiedWindowSampler:
         if len(sampled_indices) < num_samples:
             shortfall = num_samples - len(sampled_indices)
             already = set(sampled_indices)
-            spare_pool: List[int] = []
+            current_flat_low = sum(
+                1 for i in sampled_indices if is_flat_low(strata_labels[i])
+            )
+            flat_low_remaining = max(0, cap - current_flat_low)
+            non_flat_low_spare_pool: List[int] = []
+            flat_low_spare_pool: List[int] = []
             for label, idx_list in buckets.items():
                 for i in idx_list:
                     if i in already:
                         continue
-                    spare_pool.append(i)
-            spare_pool.sort()
+                    if is_flat_low(label):
+                        flat_low_spare_pool.append(i)
+                    else:
+                        non_flat_low_spare_pool.append(i)
+            non_flat_low_spare_pool.sort()
+            flat_low_spare_pool.sort()
             picked_extra = self._pick_with_gap(
-                spare_pool,
+                non_flat_low_spare_pool,
                 entries,
                 quota=shortfall,
                 min_gap=self.min_gap_between_samples,
@@ -243,17 +259,40 @@ class StratifiedWindowSampler:
             )
             sampled_indices.extend(picked_extra)
             chosen_starts.extend(entries[i].window_start for i in picked_extra)
+            remaining_shortfall = num_samples - len(sampled_indices)
+            if remaining_shortfall > 0 and flat_low_remaining > 0:
+                picked_flat_low_extra = self._pick_with_gap(
+                    flat_low_spare_pool,
+                    entries,
+                    quota=min(remaining_shortfall, flat_low_remaining),
+                    min_gap=self.min_gap_between_samples,
+                    chosen_starts=chosen_starts,
+                )
+                sampled_indices.extend(picked_flat_low_extra)
+                chosen_starts.extend(
+                    entries[i].window_start for i in picked_flat_low_extra
+                )
             if len(sampled_indices) < num_samples:
                 if not self.allow_overlap_relaxation:
                     raise RuntimeError(
                         f"无法在 min_gap={self.min_gap_between_samples} 下采到 {num_samples} 个样本; "
                         f"实际只能采 {len(sampled_indices)} 个；"
-                        "如需放宽请设 allow_overlap_relaxation=True 并记录原因。"
+                        "如需放宽请传 --sampling-allow-overlap-relaxation 并记录原因。"
                     )
                 # 放宽: 把 gap 折半，重新尝试一次（实操中通常够用）
                 relaxed_gap = max(1, self.min_gap_between_samples // 2)
+                self.last_effective_min_gap_between_samples = relaxed_gap
+                self.last_overlap_relaxation_applied = True
+                already = set(sampled_indices)
+                current_flat_low = sum(
+                    1 for i in sampled_indices if is_flat_low(strata_labels[i])
+                )
+                flat_low_remaining = max(0, cap - current_flat_low)
+                relaxed_non_flat_low_pool = [
+                    i for i in non_flat_low_spare_pool if i not in already
+                ]
                 picked_extra = self._pick_with_gap(
-                    spare_pool,
+                    relaxed_non_flat_low_pool,
                     entries,
                     quota=num_samples - len(sampled_indices),
                     min_gap=relaxed_gap,
@@ -261,6 +300,28 @@ class StratifiedWindowSampler:
                 )
                 sampled_indices.extend(picked_extra)
                 chosen_starts.extend(entries[i].window_start for i in picked_extra)
+                remaining_shortfall = num_samples - len(sampled_indices)
+                if remaining_shortfall > 0 and flat_low_remaining > 0:
+                    relaxed_flat_low_pool = [
+                        i for i in flat_low_spare_pool if i not in set(sampled_indices)
+                    ]
+                    picked_flat_low_extra = self._pick_with_gap(
+                        relaxed_flat_low_pool,
+                        entries,
+                        quota=min(remaining_shortfall, flat_low_remaining),
+                        min_gap=relaxed_gap,
+                        chosen_starts=chosen_starts,
+                    )
+                    sampled_indices.extend(picked_flat_low_extra)
+                    chosen_starts.extend(
+                        entries[i].window_start for i in picked_flat_low_extra
+                    )
+                if len(sampled_indices) < num_samples:
+                    raise RuntimeError(
+                        f"无法在放宽后的 min_gap={relaxed_gap} 下采到 {num_samples} 个样本; "
+                        f"实际只能采 {len(sampled_indices)} 个；请降低 num_samples、"
+                        "提高 flat_low_vol_max_ratio，或增加训练数据。"
+                    )
 
         sampled_indices = list(dict.fromkeys(sampled_indices))[:num_samples]
         result: List[SampledHorizon] = []
@@ -298,15 +359,23 @@ class StratifiedWindowSampler:
 
         贪心策略: 候选已被随机洗过；按顺序选择，跳过与已选窗口距离 < min_gap 的。
         """
+        if min_gap <= 0:
+            return list(candidate_indices[:quota])
         picked: List[int] = []
-        all_chosen_starts: List[int] = list(chosen_starts or [])
+        blocked_starts: Set[int] = set()
+
+        def block_around(start: int) -> None:
+            blocked_starts.update(range(start - min_gap + 1, start + min_gap))
+
+        for start in chosen_starts or []:
+            block_around(start)
         for idx in candidate_indices:
             if quota <= 0:
                 break
             start = entries[idx].window_start
-            if all(abs(start - s) >= min_gap for s in all_chosen_starts):
+            if start not in blocked_starts:
                 picked.append(idx)
-                all_chosen_starts.append(start)
+                block_around(start)
                 quota -= 1
         return picked
 

@@ -79,3 +79,42 @@ def test_oversampling_raises():
     )
     with pytest.raises(ValueError):
         sampler.sample(entries, num_samples=30, strata_labels=labels)
+
+
+def test_shortfall_refill_does_not_exceed_flat_low_cap():
+    entries = _entries(6)
+    labels = [
+        "up|mid|mixed",
+        "up|mid|mixed",
+        "flat|low|mixed",
+        "flat|low|mixed",
+        "flat|low|mixed",
+        "flat|low|mixed",
+    ]
+    sampler = StratifiedWindowSampler(
+        strategy="stratified_uniform",
+        min_gap_between_samples=1,
+        flat_low_vol_max_ratio=0.25,
+        seed=1,
+    )
+
+    with pytest.raises(RuntimeError, match="无法在 min_gap"):
+        sampler.sample(entries, num_samples=4, strata_labels=labels)
+
+
+def test_overlap_relaxation_records_effective_min_gap():
+    entries = _entries(4)
+    labels = ["up|mid|mixed"] * 4
+    sampler = StratifiedWindowSampler(
+        strategy="stratified_uniform",
+        min_gap_between_samples=2,
+        flat_low_vol_max_ratio=1.0,
+        allow_overlap_relaxation=True,
+        seed=1,
+    )
+
+    samples = sampler.sample(entries, num_samples=4, strata_labels=labels)
+
+    assert len(samples) == 4
+    assert sampler.last_overlap_relaxation_applied is True
+    assert sampler.last_effective_min_gap_between_samples == 1

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
 
@@ -66,6 +67,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--risk-acknowledged-by", default=None)
     p.add_argument("--expected-sign-off-followup-batch-id", default=None)
     p.add_argument("--prospective-lookback-minutes", type=int, default=1440)
+    p.add_argument("--sampling-min-gap-between-samples", type=int, default=None)
+    p.add_argument("--sampling-max-overlap-ratio", type=float, default=None)
+    p.add_argument("--sampling-flat-low-vol-max-ratio", type=float, default=None)
+    p.add_argument("--split-boundary-embargo", type=int, default=None)
+    p.add_argument("--next-row-split-boundary-embargo", type=int, default=None)
+    p.add_argument("--sampling-health-warn-only", action="store_true")
+    p.add_argument("--sampling-allow-overlap-relaxation", action="store_true")
     # reward 对齐 / 模型
     p.add_argument(
         "--reward-alignment",
@@ -154,6 +162,27 @@ def build_config(args: argparse.Namespace) -> Phase1Config:
         diagnostic_pair_batch_id=args.diagnostic_pair_batch_id,
     )
     sampling_health = SamplingHealthConfig()
+    sampling_overrides = {}
+    if args.sampling_min_gap_between_samples is not None:
+        sampling_overrides[
+            "min_gap_between_samples"
+        ] = args.sampling_min_gap_between_samples
+    if args.sampling_max_overlap_ratio is not None:
+        sampling_overrides["max_overlap_ratio"] = args.sampling_max_overlap_ratio
+    if args.sampling_flat_low_vol_max_ratio is not None:
+        sampling_overrides["flat_low_vol_max_ratio"] = args.sampling_flat_low_vol_max_ratio
+    if args.split_boundary_embargo is not None:
+        sampling_overrides["split_boundary_embargo"] = args.split_boundary_embargo
+    if args.next_row_split_boundary_embargo is not None:
+        sampling_overrides[
+            "next_row_split_boundary_embargo"
+        ] = args.next_row_split_boundary_embargo
+    if args.sampling_health_warn_only:
+        sampling_overrides["warn_only"] = True
+    if args.sampling_allow_overlap_relaxation:
+        sampling_overrides["allow_overlap_relaxation"] = True
+    if sampling_overrides:
+        sampling_health = replace(sampling_health, **sampling_overrides)
     selection_policy = SelectionPolicyConfig()
     diagnostics = DiagnosticsConfig()
     if args.local_smoke_relaxed_guardrails:
@@ -254,13 +283,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Phase1FatalError as exc:
         logger = getattr(trainer, "_logger", None)
         if logger is not None:
-            logger.exception("phase1_fatal_error error=%s", exc)
+            logger.exception("phase1_fatal_error 说明=Phase I 触发阻塞错误 error=%s", exc)
         print(f"[fatal] Phase I 训练终止: {exc}", file=sys.stderr)
         return 1
     except Exception:
         logger = getattr(trainer, "_logger", None)
         if logger is not None:
-            logger.exception("phase1_unexpected_error")
+            logger.exception("phase1_unexpected_error 说明=Phase I 发生未预期错误")
         raise
     return 0
 
