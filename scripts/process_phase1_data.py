@@ -54,6 +54,7 @@ from src.planners.single_trade_dp import SingleTradeDPPlanner  # noqa: E402
 from src.trading.cost_model import LobDepthCostModel  # noqa: E402
 from src.trading.reward_alignment import RewardAlignment  # noqa: E402
 from src.utils.feather_io import write_ipc  # noqa: E402
+from src.utils.run_logging import configure_run_logger  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -196,19 +197,35 @@ class Phase1DataProcessor:
     def __init__(self, config: Phase1DataProcessConfig) -> None:
         self.config = config
         self._logger = logging.getLogger(
-            f"phase1_data_process.{config.pair}.{config.data_batch_id}"
+            f"archetype.data_process.{config.pair}.{config.data_batch_id}"
         )
 
     def run(self) -> Path:
+        self._logger.info("Phase1运行开始 pair=%s batch_id=%s horizon=%d num_demos=%d",
+                          self.config.pair, self.config.data_batch_id,
+                          self.config.horizon, self.config.num_demos)
         artifacts_dir = self.config.artifacts_dir()
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        _seed_everything(self.config.seed)
+        self._logger.info("产物目录已创建 dir=%s", artifacts_dir)
 
+        _seed_everything(self.config.seed)
+        self._logger.info("随机种子已设置 seed=%d", self.config.seed)
+
+        self._logger.info("正在检查前瞻诊断配置 mode=%s diagnostic_batch_id=%s",
+                          self.config.stratification.mode,
+                          self.config.stratification.diagnostic_pair_batch_id)
         _check_prospective_diagnostic(self.config)
 
+        self._logger.info("正在读取市场数据 train=%s val=%s test=%s",
+                          self.config.train_file, self.config.val_file, self.config.test_file)
         frames = MarketFileReader().read_split(
             self.config.train_file, self.config.val_file, self.config.test_file
         )
+        self._logger.info("市场数据读取完成 train_rows=%d val_rows=%d test_rows=%d",
+                          frames["train"].height, frames["val"].height, frames["test"].height)
+
+        self._logger.info("正在构建Schema验证器 profile=%s factor_list=%s",
+                          self.config.factor_profile, self.config.factor_list_file)
         schema_validator = _build_schema_validator(self.config)
         schema = schema_validator.validate(frames["train"])
         for split in ("val", "test"):
@@ -217,18 +234,24 @@ class Phase1DataProcessor:
             schema, artifacts_dir / "input_schema.json"
         )
         schema_hash = stable_hash(schema.to_dict())
+        self._logger.info("Schema验证完成 schema_path=%s schema_hash=%s",
+                          schema_path, schema_hash)
 
+        self._logger.info("正在构建时间窗口 split=train")
         train_horizons, train_window_path = self._build_horizons_for_split(
             "train", frames["train"], schema, artifacts_dir
         )
+        self._logger.info("正在构建时间窗口 split=val")
         val_horizons, val_window_path = self._build_horizons_for_split(
             "val", frames["val"], schema, artifacts_dir
         )
+        self._logger.info("正在构建时间窗口 split=test")
         test_horizons, test_window_path = self._build_horizons_for_split(
             "test", frames["test"], schema, artifacts_dir
         )
 
         if self.config.data_augmentation.temporal_contrastive.enabled:
+            self._logger.info("数据增强功能已启用 时间对比学习")
             tc = self.config.data_augmentation.temporal_contrastive
             builder = HorizonBuilder(
                 self.config.horizon,
@@ -243,11 +266,27 @@ class Phase1DataProcessor:
                 seed=self.config.seed,
             ).build_pairs(train_horizons, frames["train"], builder, pair=self.config.pair)
             train_horizons = list(train_horizons) + list(shifted)
+            self._logger.info("数据增强已应用 原始=%d 增强=%d 总计=%d",
+                              len(train_horizons) - len(shifted), len(shifted), len(train_horizons))
+        else:
+            self._logger.info("数据增强功能未启用")
 
+        self._logger.info("正在生成演示样本 split=train num_horizons=%d", len(train_horizons))
         train_horizons, train_reject = _generate_demos(self.config, train_horizons)
-        val_horizons, val_reject = _generate_demos(self.config, val_horizons)
-        test_horizons, test_reject = _generate_demos(self.config, test_horizons)
+        self._logger.info("演示样本生成完成 split=train 接受=%d 拒绝率=%.4f",
+                          len(train_horizons), train_reject.dataset_reject_rate)
 
+        self._logger.info("正在生成演示样本 split=val num_horizons=%d", len(val_horizons))
+        val_horizons, val_reject = _generate_demos(self.config, val_horizons)
+        self._logger.info("演示样本生成完成 split=val 接受=%d 拒绝率=%.4f",
+                          len(val_horizons), val_reject.dataset_reject_rate)
+
+        self._logger.info("正在生成演示样本 split=test num_horizons=%d", len(test_horizons))
+        test_horizons, test_reject = _generate_demos(self.config, test_horizons)
+        self._logger.info("演示样本生成完成 split=test 接受=%d 拒绝率=%.4f",
+                          len(test_horizons), test_reject.dataset_reject_rate)
+
+        self._logger.info("正在计算数据哈希")
         input_file_audit = {
             split: _file_audit(path)
             for split, path in {
@@ -278,7 +317,10 @@ class Phase1DataProcessor:
                 "dp": asdict(self.config.dp),
             }
         )
+        self._logger.info("哈希计算完成 data_process_hash=%s dp_teacher_hash=%s",
+                          data_process_hash, dp_teacher_hash)
 
+        self._logger.info("正在保存产物文件")
         store = Phase1ProcessedStore(artifacts_dir)
         split_records = {
             "train": (train_horizons, train_window_path, train_reject),
@@ -287,6 +329,7 @@ class Phase1DataProcessor:
         }
         split_payload = {}
         for split, (records, window_path, reject_stats) in split_records.items():
+            self._logger.info("正在保存分集产物 split=%s num_records=%d", split, len(records))
             sampled_path = store.save_sampled_horizons(
                 split,
                 records,
@@ -310,10 +353,14 @@ class Phase1DataProcessor:
                 "num_horizons": len(records),
             }
 
+        self._logger.info("正在保存演示存储 train=%d val=%d test=%d",
+                          len(train_horizons), len(val_horizons), len(test_horizons))
         demo_store = Phase1DemoStore(artifacts_dir, data_process_hash, schema_hash)
         demo_store.save_demos(train_horizons, split="train")
         demo_store.save_demos(val_horizons, split="val")
         demo_store.save_demos(test_horizons, split="test")
+
+        self._logger.info("正在写入清单文件")
         manifest = {
             "version": 1,
             "phase": "phase1_data_process",
@@ -334,7 +381,9 @@ class Phase1DataProcessor:
             "feature_source": schema.feature_source or {},
             "splits": split_payload,
         }
-        return store.write_manifest(manifest)
+        manifest_path = store.write_manifest(manifest)
+        self._logger.info("Phase1运行完成 manifest_path=%s", manifest_path)
+        return manifest_path
 
     def _build_horizons_for_split(
         self,
@@ -357,7 +406,7 @@ class Phase1DataProcessor:
         )
         if boundary_excluded:
             self._logger.info(
-                "phase1_window_index_boundary_embargo_applied split=%s excluded=%d eligible=%d embargo=%d",
+                "窗口索引边界禁运已应用 split=%s 排除=%d 合格=%d embargo=%d",
                 split,
                 boundary_excluded,
                 len(entries),
@@ -367,7 +416,7 @@ class Phase1DataProcessor:
         if split == "train":
             _check_overlap_health_feasibility(self.config, num_samples, entries)
         self._logger.info(
-            "phase1_window_index_enumerated split=%s candidates=%d eligible=%d target_samples=%d",
+            "窗口索引枚举完成 split=%s 候选=%d 合格=%d 目标样本=%d",
             split,
             len(all_entries),
             len(entries),
@@ -391,7 +440,7 @@ class Phase1DataProcessor:
         effective_min_gap = sampler.last_effective_min_gap_between_samples
         overlap_relaxation_applied = sampler.last_overlap_relaxation_applied
         self._logger.info(
-            "phase1_windows_sampled split=%s sampled=%d unique_strata=%d effective_min_gap=%d overlap_relaxation=%s",
+            "窗口采样完成 split=%s 采样=%d 独立层=%d 实际最小间隔=%d 重叠放宽=%s",
             split,
             len(sampled),
             len({s.strata_label for s in sampled}),
@@ -416,7 +465,7 @@ class Phase1DataProcessor:
                 strata_labels=[s.strata_label for s in sampled],
             )
             self._logger.info(
-                "phase1_sampling_health_passed split=%s overlap=%.6f min_gap=%s flat_low_ratio=%.6f warnings=%d",
+                "采样健康检查通过 split=%s 重叠率=%.6f 最小间隔=%s 低波动占比=%.6f 警告=%d",
                 split,
                 report.window_overlap_ratio,
                 report.min_sample_gap,
@@ -610,9 +659,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     assert_prospective_diagnostic(args)
     config = build_data_process_config(args)
+
+    logger, log_path = configure_run_logger(
+        phase="data_process",
+        pair=config.pair,
+        batch_id=config.data_batch_id,
+    )
+
+    artifacts_dir = config.artifacts_dir()
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
     try:
         manifest = Phase1DataProcessor(config).run()
     except Phase1FatalError as exc:
+        logger.exception("phase1_fatal_error error=%s", exc)
         print(f"[fatal] Phase I 数据预处理终止: {exc}", file=sys.stderr)
         return 1
     print(f"data_process_manifest: {manifest}")
