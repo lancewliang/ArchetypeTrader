@@ -292,7 +292,7 @@ class Phase1Trainer:
         # encoder 输入的归一化由 dataset / evaluator 内部即时完成（同一 normalizer 实例）。
         train_dataset = Phase1DemoDataset(
             records=train_horizons,
-            contrastive_pairs=contrastive_pairs,
+            contrastive_pairs=None,
             reward_normalizer=norm,
         )
 
@@ -636,42 +636,57 @@ class Phase1Trainer:
             # 保存 last
             state = {"model": model.state_dict(), "epoch": epoch}
             metrics_for_select: Dict[str, Any] = {"epoch": epoch}
-            full_val = (epoch + 1) % max(self.config.training.full_validation_every_epochs, 1) == 0
-            ep_metrics = evaluator.evaluate_epoch(
-                epoch=epoch,
-                model=model,
-                val_data=val_dataset,
-                val_records=val_records,
-                full_validation=full_val,
-            )
-            metrics_for_select.update(ep_metrics.metrics)
-            if "val_weighted_reconstruction_accuracy" in metrics_for_select:
-                metrics_for_select["weighted_reconstruction_accuracy"] = metrics_for_select[
-                    "val_weighted_reconstruction_accuracy"
-                ]
-            metrics_for_select["_dead_code_restart_triggered"] = bool(restarted_code_ids)
-            metrics_for_select["_dead_code_restart_cooldown_epochs"] = (
-                self.config.model.codebook.health.restart_cooldown_epochs
-            )
-            metrics_for_select["dead_code_restarts"] = len(restarted_code_ids)
-            metrics_for_select["dead_code_restart_events"] = restart_events
-            metrics_for_select["_consecutive_collapse_epochs"] = (
-                history.consecutive_collapse_epochs + (
-                    1 if metrics_for_select.get("code_usage_ratio", 1.0) < self.config.selection_policy.min_code_usage_ratio else 0
-                )
-            )
-            metrics_for_select["_consecutive_collapse_limit"] = self.config.model.codebook.health.consecutive_collapse_epoch_limit
 
-            verdict = policy.evaluate(metrics_for_select, history)
-            metrics_for_select["phase1_composite_score"] = verdict.composite_score
-            metrics_for_select["phase1_composite_score_debug"] = verdict.composite_score_debug
-            checkpoint.save_last(state, metrics_for_select, epoch)
-            checkpoint.save_periodic(state, metrics_for_select, epoch, self.config.training.save_every)
-            checkpoint.commit_verdict(state, metrics_for_select, verdict, epoch)
+            # 每 10 轮进行一次评估、诊断和 checkpoint 保存
+            evaluation_interval = 10
+            should_evaluate = (epoch + 1) % evaluation_interval == 0 or epoch == self.config.training.epochs - 1
+
+            if should_evaluate:
+                full_val = (epoch + 1) % max(self.config.training.full_validation_every_epochs, 1) == 0
+                ep_metrics = evaluator.evaluate_epoch(
+                    epoch=epoch,
+                    model=model,
+                    val_data=val_dataset,
+                    val_records=val_records,
+                    full_validation=full_val,
+                )
+                metrics_for_select.update(ep_metrics.metrics)
+                if "val_weighted_reconstruction_accuracy" in metrics_for_select:
+                    metrics_for_select["weighted_reconstruction_accuracy"] = metrics_for_select[
+                        "val_weighted_reconstruction_accuracy"
+                    ]
+
+                metrics_for_select["_dead_code_restart_triggered"] = bool(restarted_code_ids)
+                metrics_for_select["_dead_code_restart_cooldown_epochs"] = (
+                    self.config.model.codebook.health.restart_cooldown_epochs
+                )
+                metrics_for_select["dead_code_restarts"] = len(restarted_code_ids)
+                metrics_for_select["dead_code_restart_events"] = restart_events
+                metrics_for_select["_consecutive_collapse_epochs"] = (
+                    history.consecutive_collapse_epochs + (
+                        1 if metrics_for_select.get("code_usage_ratio", 1.0) < self.config.selection_policy.min_code_usage_ratio else 0
+                    )
+                )
+                metrics_for_select["_consecutive_collapse_limit"] = self.config.model.codebook.health.consecutive_collapse_epoch_limit
+
+                verdict = policy.evaluate(metrics_for_select, history)
+                metrics_for_select["phase1_composite_score"] = verdict.composite_score
+                metrics_for_select["phase1_composite_score_debug"] = verdict.composite_score_debug
+                checkpoint.save_last(state, metrics_for_select, epoch)
+                checkpoint.save_periodic(state, metrics_for_select, epoch, self.config.training.save_every)
+                checkpoint.commit_verdict(state, metrics_for_select, verdict, epoch)
+                if verdict.decision == "promote_to_best":
+                    self._best_epoch_diagnostics = dict(ep_metrics.diagnostics)
+                history = policy.update_history(history, metrics_for_select, verdict)
+            else:
+                # 非评估轮次:不保存 checkpoint,不进行评估和诊断
+                verdict = SelectionVerdict(decision="skipped", reasons=["skipped_evaluation"], composite_score=0.0, composite_score_debug={})
+
             self._logger.info(
-                "phase1_epoch_result 说明=单个 epoch 训练与评估完成 epoch=%d full_validation=%s decision=%s score=%.6f code_usage_ratio=%s val_return_capture_ratio=%s val_sharpe_ratio=%s restarts=%d reasons=%s",
+                "phase1_epoch_result 说明=单个 epoch 训练完成 epoch=%d evaluated=%s full_validation=%s decision=%s score=%.6f code_usage_ratio=%s val_return_capture_ratio=%s val_sharpe_ratio=%s restarts=%d reasons=%s",
                 epoch,
-                full_val,
+                should_evaluate,
+                full_val if should_evaluate else False,
                 verdict.decision,
                 verdict.composite_score,
                 metrics_for_select.get("code_usage_ratio"),
@@ -680,9 +695,6 @@ class Phase1Trainer:
                 len(restarted_code_ids),
                 ",".join(verdict.reasons),
             )
-            if verdict.decision == "promote_to_best":
-                self._best_epoch_diagnostics = dict(ep_metrics.diagnostics)
-            history = policy.update_history(history, metrics_for_select, verdict)
         return history
 
     def _maybe_restart_dead_codes(self, *, model, train_dataset, epoch: int) -> List[int]:

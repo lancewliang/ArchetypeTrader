@@ -11,7 +11,7 @@ from src.config.phase1_config import SelectionPolicyConfig
 from src.evaluation.phase1_metrics import phase1_composite_score
 
 
-SelectionDecision = Literal["promote_to_best", "reject", "keep_as_periodic", "fatal"]
+SelectionDecision = Literal["promote_to_best", "reject", "keep_as_periodic", "fatal", "skipped"]
 
 
 @dataclass
