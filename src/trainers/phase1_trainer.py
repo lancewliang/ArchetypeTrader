@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -41,6 +42,7 @@ from src.trading.env import TradingEnv
 from src.trading.reward_alignment import RewardAlignment
 from src.utils.feather_io import atomic_write_json
 from src.utils.feather_io import read_json
+from src.utils.run_logging import configure_run_logger
 
 from .phase1_checkpoint import Phase1CheckpointManager, Phase1FatalCollapse
 from .selection_policy import (
@@ -99,6 +101,7 @@ class Phase1Trainer:
         self._sampling_health_reports: Dict[str, dict] = {}
         self._dead_code_restart_events: List[dict] = []
         self._best_epoch_diagnostics: Dict[str, Any] = {}
+        self._logger = logging.getLogger("archetype.phase1")
 
     # ---------- 入口 ----------
 
@@ -160,24 +163,54 @@ class Phase1Trainer:
         SamplingHealthError : 采样健康检查阻塞（默认 ``warn_only=False``）。
         RejectTransitionExceeded : reject_transition 超阈值且 ``fail_when_exceeded=True``。
         """
+        self._logger, log_path = configure_run_logger(
+            phase="phase1",
+            pair=self.config.pair,
+            batch_id=self.config.train_batch_id,
+        )
+        self._logger.info(
+            "phase1_start pair=%s batch=%s artifact_root=%s log_path=%s",
+            self.config.pair,
+            self.config.train_batch_id,
+            self.config.artifact_root,
+            log_path,
+        )
         artifacts_dir = self.config.artifacts_dir()
         artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self._logger.info("phase1_artifacts_dir_ready path=%s", artifacts_dir)
 
         # 0a. 设置全局 seed（最早进行，覆盖后续所有 sampler/torch 操作）。
         self._seed_everything()
+        self._logger.info("phase1_seed_set seed=%s", self.config.training.seed)
 
         # 0b. 强制 prospective 对照 CLI 检查（trainer 层第二道防线）。
         self._check_prospective_diagnostic()
+        self._logger.info(
+            "phase1_prospective_check_passed mode=%s required=%s diagnostic_batch=%s allow_missing=%s",
+            self.config.stratification.mode,
+            self.config.stratification.require_prospective_diagnostic,
+            self.config.stratification.diagnostic_pair_batch_id,
+            self.config.allow_missing_prospective_diagnostic,
+        )
 
         # 1. 写 phase1_config.yaml。
         config_yaml = artifacts_dir / "phase1_config.yaml"
         self.config.write_yaml(config_yaml)
         config_hash = self.config.config_hash()
+        self._logger.info(
+            "phase1_config_written path=%s config_hash=%s", config_yaml, config_hash
+        )
 
         # 2. 读三个 split + schema。
         reader = MarketFileReader()
         frames = reader.read_split(
             self.config.train_file, self.config.val_file, self.config.test_file
+        )
+        self._logger.info(
+            "phase1_market_data_loaded train_rows=%s val_rows=%s test_rows=%s",
+            getattr(frames["train"], "height", None),
+            getattr(frames["val"], "height", None),
+            getattr(frames["test"], "height", None),
         )
         schema_validator = self._build_schema_validator()
         schema = schema_validator.validate(frames["train"])
@@ -188,6 +221,12 @@ class Phase1Trainer:
             schema, artifacts_dir / "input_schema.json"
         )
         schema_hash = self._schema_hash(schema)
+        self._logger.info(
+            "phase1_schema_validated path=%s schema_hash=%s feature_dim=%s",
+            schema_path,
+            schema_hash,
+            schema.feature_dim(),
+        )
 
         # 3. 滑窗 + 分层采样 + 健康检查
         train_horizons, train_window_path = self._build_horizons_for_split(
@@ -198,6 +237,13 @@ class Phase1Trainer:
         )
         test_horizons, _ = self._build_horizons_for_split(
             "test", frames["test"], schema, artifacts_dir
+        )
+        self._logger.info(
+            "phase1_horizons_ready train=%d val=%d test=%d train_window_index=%s",
+            len(train_horizons),
+            len(val_horizons),
+            len(test_horizons),
+            train_window_path,
         )
 
         # 4. 数据增强（仅 train）
@@ -217,31 +263,79 @@ class Phase1Trainer:
             )
             train_horizons = list(train_horizons) + list(shifted)
             contrastive_pairs = pairs
+            self._logger.info(
+                "phase1_temporal_contrastive_built shifted_horizons=%d pairs=%d train_horizons_total=%d",
+                len(shifted),
+                len(pairs),
+                len(train_horizons),
+            )
+        else:
+            self._logger.info("phase1_temporal_contrastive_disabled")
 
         # 5. DP demo 生成
         train_horizons, reject_stats = self._generate_demos(train_horizons)
+        self._logger.info(
+            "phase1_dp_done split=train horizons=%d dataset_reject_rate=%.6f max_horizon_reject_rate=%.6f",
+            len(train_horizons),
+            reject_stats.dataset_reject_rate,
+            max(reject_stats.per_horizon_reject_rate or [0.0]),
+        )
         # val/test 也跑 DP（label 导出与 teacher replay 都需要）
-        val_horizons, _ = self._generate_demos(val_horizons)
-        test_horizons, _ = self._generate_demos(test_horizons)
+        val_horizons, val_reject_stats = self._generate_demos(val_horizons)
+        self._logger.info(
+            "phase1_dp_done split=val horizons=%d dataset_reject_rate=%.6f max_horizon_reject_rate=%.6f",
+            len(val_horizons),
+            val_reject_stats.dataset_reject_rate,
+            max(val_reject_stats.per_horizon_reject_rate or [0.0]),
+        )
+        test_horizons, test_reject_stats = self._generate_demos(test_horizons)
+        self._logger.info(
+            "phase1_dp_done split=test horizons=%d dataset_reject_rate=%.6f max_horizon_reject_rate=%.6f",
+            len(test_horizons),
+            test_reject_stats.dataset_reject_rate,
+            max(test_reject_stats.per_horizon_reject_rate or [0.0]),
+        )
 
         # 6. RewardNormalizer fit (仅 train)
         norm = RewardNormalizer(self.config.model.encoder_input)
         flat_rewards = [v for rec in train_horizons for v in (rec.rewards or [])]
         norm.fit_train(flat_rewards)
         norm_path = atomic_write_json(norm.to_dict(), artifacts_dir / "reward_normalizer.json")
+        norm_stats = norm.to_dict()
+        self._logger.info(
+            "phase1_reward_normalizer_fit path=%s method=%s center=%.8f scale=%.8f clip_ratio=%.6f",
+            norm_path,
+            norm_stats.get("method"),
+            float(norm_stats.get("center", 0.0)),
+            float(norm_stats.get("scale", 0.0)),
+            float(norm_stats.get("clip_ratio", 0.0)),
+        )
 
         # 7. 保存 demos / labels（labels 在训练后由 best 模型回填 code_label）
         store = Phase1DemoStore(artifacts_dir, config_hash, schema_hash)
         demos_path = store.save_demos(train_horizons)
+        self._logger.info("phase1_demos_saved path=%s count=%d", demos_path, len(train_horizons))
 
         # 8. 模型与训练
         feature_dim = schema.feature_dim()
         model, evaluator, loss_fn, optimizer = self._build_training_components(
             feature_dim, val_horizons, reward_normalizer=norm,
         )
+        self._logger.info(
+            "phase1_training_components_ready feature_dim=%d num_codes=%d hidden_dim=%d code_dim=%d",
+            feature_dim,
+            self.config.model.num_codes,
+            self.config.model.hidden_dim,
+            self.config.model.code_dim,
+        )
 
         # codebook warmup: 用一批 train z_e 初始化
         self._warmup_codebook(model, train_horizons, norm)
+        self._logger.info(
+            "phase1_codebook_warmup_done init_method=%s warmup_batches=%d",
+            self.config.model.codebook.init_method,
+            self.config.model.codebook.kmeans_warmup_batches,
+        )
 
         ckpt = Phase1CheckpointManager(artifacts_dir)
         policy = Phase1SelectionPolicy(self.config.selection_policy)
@@ -273,6 +367,11 @@ class Phase1Trainer:
         except Phase1FatalCollapse as exc:
             # 把 fatal 转换为 trainer 层异常，由入口转非零退出码。
             raise Phase1FatalError(str(exc)) from exc
+        self._logger.info(
+            "phase1_train_loop_done best_epoch=%s manifest=%s",
+            history.best_epoch,
+            ckpt.manifest_path,
+        )
 
         # 9. 用 best checkpoint 导出 horizon labels
         if not ckpt.best_path.exists():
@@ -287,10 +386,22 @@ class Phase1Trainer:
             horizons_by_split={"train": train_horizons, "val": val_horizons, "test": test_horizons},
             normalizer=norm,
         )
+        self._logger.info(
+            "phase1_horizon_labels_exported train=%s val=%s test=%s",
+            labels_paths["train"],
+            labels_paths["val"],
+            labels_paths["test"],
+        )
 
         # 10. 导出 Phase II/III 产物
         encoder_path, decoder_path, codebook_path = self._export_phase2_artifacts(
             best_state
+        )
+        self._logger.info(
+            "phase1_phase2_artifacts_exported encoder=%s decoder=%s codebook=%s",
+            encoder_path,
+            decoder_path,
+            codebook_path,
         )
 
         # 11. composite sensitivity + 报告
@@ -339,16 +450,35 @@ class Phase1Trainer:
             signoff_blocked_reason = "local_smoke_relaxed_guardrails"
         report_summary["signoff_blocked_reason"] = signoff_blocked_reason
         writer.write_final_report(report_summary)
+        self._logger.info(
+            "phase1_report_written path=%s best_epoch=%s no_trade_ratio=%.6f signoff=%s blocked_reason=%s",
+            report_paths.phase1_report,
+            report_summary.get("best_epoch"),
+            float(report_summary.get("no_trade_ratio", 0.0)),
+            report_summary.get("best_checkpoint_signoff"),
+            report_summary.get("signoff_blocked_reason"),
+        )
         if self._best_epoch_diagnostics:
             diagnostics_payload = dict(self._best_epoch_diagnostics)
             diagnostics_payload["sampling_leakage"] = leakage_payload
             diagnostics_payload["composite_score_sensitivity"] = sensitivity
-            writer.write_diagnostics(diagnostics_payload)
+            diagnostic_paths = writer.write_diagnostics(diagnostics_payload)
+            self._logger.info(
+                "phase1_diagnostics_written count=%d paths=%s",
+                len(diagnostic_paths),
+                [str(path) for path in diagnostic_paths],
+            )
 
         # 采样诊断 JSON: 主实验记录 hindsight bias warning 与 followup batch
         leakage_path = artifacts_dir / "sampling_leakage_diagnostics.json"
         atomic_write_json(leakage_payload, leakage_path)
+        self._logger.info(
+            "phase1_sampling_leakage_written path=%s warning=%s",
+            leakage_path,
+            leakage_payload.get("hindsight_bias_warning"),
+        )
 
+        self._logger.info("phase1_complete artifacts_dir=%s", artifacts_dir)
         return TrainerArtifacts(
             artifacts_dir=artifacts_dir,
             phase1_config_yaml=config_yaml,
@@ -472,6 +602,12 @@ class Phase1Trainer:
         entries = indexer.enumerate(frame, stratification_mode=self.config.stratification.mode)
         # val/test split 不参与 train 采样；按固定 stride 抽出固定个 horizon。
         num_samples = self._num_samples_for_split(split, len(entries))
+        self._logger.info(
+            "phase1_window_index_enumerated split=%s candidates=%d target_samples=%d",
+            split,
+            len(entries),
+            num_samples,
+        )
 
         sampler = StratifiedWindowSampler(
             strategy=self.config.sampling_strategy,
@@ -483,6 +619,12 @@ class Phase1Trainer:
         prospective = self.config.stratification.mode == "prospective_past"
         labels = [StratifiedWindowSampler.assign_strata(e, prospective=prospective) for e in entries]
         sampled = sampler.sample(entries, num_samples=num_samples, strata_labels=labels)
+        self._logger.info(
+            "phase1_windows_sampled split=%s sampled=%d unique_strata=%d",
+            split,
+            len(sampled),
+            len({s.strata_label for s in sampled}),
+        )
 
         # 健康检查（仅 train; val/test 不阻塞）
         if split == "train":
@@ -505,6 +647,14 @@ class Phase1Trainer:
                 strata_labels=[s.strata_label for s in sampled],
             )
             self._sampling_health_reports[split] = asdict(report)
+            self._logger.info(
+                "phase1_sampling_health_passed split=%s overlap=%.6f min_gap=%s flat_low_ratio=%.6f warnings=%d",
+                split,
+                report.window_overlap_ratio,
+                report.min_sample_gap,
+                report.flat_low_vol_sample_ratio,
+                len(report.sampling_health_warnings),
+            )
 
         # 写 window index
         index_frame = indexer.to_frame(entries)
@@ -518,6 +668,12 @@ class Phase1Trainer:
         # 切 horizon
         builder = HorizonBuilder(self.config.horizon, schema, self.config.dp.cost_config.reward_alignment)
         horizons = builder.build(frame, sampled, pair=self.config.pair, split=split)
+        self._logger.info(
+            "phase1_horizons_built split=%s horizons=%d window_index_path=%s",
+            split,
+            len(horizons),
+            path,
+        )
         return horizons, path
 
     def _num_samples_for_split(self, split: str, num_entries: int) -> int:
@@ -688,6 +844,14 @@ class Phase1Trainer:
             shuffle=True,
             collate_fn=collate_phase1,
         )
+        self._logger.info(
+            "phase1_train_loop_start epochs=%d train_records=%d val_records=%d batches_per_epoch=%d batch_size=%d",
+            self.config.training.epochs,
+            len(train_dataset),
+            len(val_dataset),
+            len(train_loader),
+            self.config.training.batch_size,
+        )
 
         for epoch in range(self.config.training.epochs):
             model.train()
@@ -756,6 +920,18 @@ class Phase1Trainer:
             checkpoint.save_last(state, metrics_for_select, epoch)
             checkpoint.save_periodic(state, metrics_for_select, epoch, self.config.training.save_every)
             checkpoint.commit_verdict(state, metrics_for_select, verdict, epoch)
+            self._logger.info(
+                "phase1_epoch_result epoch=%d full_validation=%s decision=%s score=%.6f code_usage_ratio=%s val_return_capture_ratio=%s val_sharpe_ratio=%s restarts=%d reasons=%s",
+                epoch,
+                full_val,
+                verdict.decision,
+                verdict.composite_score,
+                metrics_for_select.get("code_usage_ratio"),
+                metrics_for_select.get("val_return_capture_ratio"),
+                metrics_for_select.get("val_sharpe_ratio"),
+                len(restarted_code_ids),
+                ",".join(verdict.reasons),
+            )
             if verdict.decision == "promote_to_best":
                 self._best_epoch_diagnostics = dict(ep_metrics.diagnostics)
             history = policy.update_history(history, metrics_for_select, verdict)

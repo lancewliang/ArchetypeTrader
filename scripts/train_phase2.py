@@ -121,8 +121,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         trainer.run()
     except Phase2FatalError as exc:
+        logger = getattr(trainer, "_logger", None)
+        if logger is not None:
+            logger.exception("phase2_fatal_error error=%s", exc)
         print(f"[fatal] Phase II 训练终止: {exc}", file=sys.stderr)
         return 1
+    except Exception:
+        logger = getattr(trainer, "_logger", None)
+        if logger is not None:
+            logger.exception("phase2_unexpected_error")
+        raise
     return 0
 
 
@@ -143,6 +151,9 @@ def run_kl_demo_ablation(config: Phase2Config, values: Sequence[float]) -> int:
         try:
             artifacts = trainer.run()
         except Phase2FatalError as exc:
+            logger = getattr(trainer, "_logger", None)
+            if logger is not None:
+                logger.exception("phase2_ablation_fatal_error alpha=%s error=%s", alpha, exc)
             summary.append({
                 "kl_demo_coef": float(alpha),
                 "status": "failed",

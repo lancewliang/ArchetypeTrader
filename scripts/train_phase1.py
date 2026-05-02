@@ -252,8 +252,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         trainer.run()
     except Phase1FatalError as exc:
+        logger = getattr(trainer, "_logger", None)
+        if logger is not None:
+            logger.exception("phase1_fatal_error error=%s", exc)
         print(f"[fatal] Phase I 训练终止: {exc}", file=sys.stderr)
         return 1
+    except Exception:
+        logger = getattr(trainer, "_logger", None)
+        if logger is not None:
+            logger.exception("phase1_unexpected_error")
+        raise
     return 0
 
 

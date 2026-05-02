@@ -1,3 +1,5 @@
 .opencode
 **.pyc
 /data/
+artifacts/
+*.feather

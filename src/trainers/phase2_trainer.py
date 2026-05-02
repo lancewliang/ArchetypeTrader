@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import logging
 import random as _random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +61,7 @@ from src.trainers.phase2_selection_policy import (
 )
 from src.trainers.phase2_dead_code import build_dead_code_mask
 from src.utils.feather_io import read_ipc, read_json
+from src.utils.run_logging import configure_run_logger
 
 
 class Phase2FatalError(RuntimeError):
@@ -103,6 +105,7 @@ class Phase2Trainer:
     def __init__(self, config: Phase2Config) -> None:
         self.config = config
         self._rollout_stats: List[Dict[str, Any]] = []
+        self._logger = logging.getLogger("archetype.phase2")
 
     def run(self) -> Phase2TrainerArtifacts:
         """完整主流程。
@@ -117,21 +120,48 @@ class Phase2Trainer:
         """
         import torch
 
+        self._logger, log_path = configure_run_logger(
+            phase="phase2",
+            pair=self.config.pair,
+            batch_id=self.config.phase2_batch_id,
+        )
+        self._logger.info(
+            "phase2_start pair=%s phase1_batch=%s phase2_batch=%s artifact_root=%s log_path=%s",
+            self.config.pair,
+            self.config.phase1_batch_id,
+            self.config.phase2_batch_id,
+            self.config.artifact_root,
+            log_path,
+        )
         self._validate_unsupported_features()
+        self._logger.info("phase2_unsupported_feature_check_passed")
 
         artifacts_dir = self.config.artifacts_dir()
         artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self._logger.info("phase2_artifacts_dir_ready path=%s", artifacts_dir)
 
         # 0. Seed
         self._seed_everything()
+        self._logger.info("phase2_seed_set seed=%s", self.config.seed)
 
         # 1. 校验 Phase I 产物
         validator = Phase1ArtifactValidator(self.config)
         val_result = validator.validate()
+        self._logger.info(
+            "phase2_phase1_artifacts_validated phase1_dir=%s reward_alignment=%s warnings=%d",
+            self.config.phase1_dir(),
+            val_result.resolved_reward_alignment,
+            len(val_result.warnings),
+        )
 
         # 2. 写 phase2_config.yaml
         config_yaml = artifacts_dir / "phase2_config.yaml"
         self.config.write_yaml(config_yaml)
+        self._logger.info(
+            "phase2_config_written path=%s config_hash=%s",
+            config_yaml,
+            self.config.config_hash(),
+        )
 
         # 3. 读取数据与 schema
         reader = MarketFileReader()
@@ -139,6 +169,13 @@ class Phase2Trainer:
             self.config.train_file, self.config.val_file, self.config.test_file
         )
         input_schema = read_json(self.config.phase1_dir() / "input_schema.json")
+        self._logger.info(
+            "phase2_market_data_loaded train_rows=%s val_rows=%s test_rows=%s schema_features=%s",
+            getattr(frames["train"], "height", None),
+            getattr(frames["val"], "height", None),
+            getattr(frames["test"], "height", None),
+            len(input_schema.get("feature_columns", [])) if isinstance(input_schema, dict) else None,
+        )
 
         # 4. 生成 horizon index
         reward_alignment_name = val_result.resolved_reward_alignment
@@ -156,14 +193,32 @@ class Phase2Trainer:
             train_labels = read_ipc(p1_dir / "horizon_labels_train.feather")
         if (p1_dir / "horizon_labels_val.feather").exists():
             val_labels = read_ipc(p1_dir / "horizon_labels_val.feather")
+        self._logger.info(
+            "phase2_phase1_labels_loaded train_labels=%s val_labels=%s",
+            getattr(train_labels, "height", 0) if train_labels is not None else 0,
+            getattr(val_labels, "height", 0) if val_labels is not None else 0,
+        )
 
         train_entries = indexer.build_index(frames["train"], "train", horizon, train_labels)
         val_entries = indexer.build_index(frames["val"], "val", horizon, val_labels)
         test_entries = indexer.build_index(frames["test"], "test", horizon, None)
+        self._logger.info(
+            "phase2_horizon_index_built train=%d val=%d test=%d horizon=%d",
+            len(train_entries),
+            len(val_entries),
+            len(test_entries),
+            horizon,
+        )
 
         hi_train_path = indexer.write_index(train_entries, artifacts_dir / "phase2_horizon_index_train.feather")
         hi_val_path = indexer.write_index(val_entries, artifacts_dir / "phase2_horizon_index_val.feather")
         hi_test_path = indexer.write_index(test_entries, artifacts_dir / "phase2_horizon_index_test.feather")
+        self._logger.info(
+            "phase2_horizon_index_written train=%s val=%s test=%s",
+            hi_train_path,
+            hi_val_path,
+            hi_test_path,
+        )
 
         # 5. Join labels
         label_loader = Phase2LabelLoader(self.config)
@@ -175,6 +230,13 @@ class Phase2Trainer:
             val_entries = label_loader.load_and_join(
                 val_entries, "val", p1_dir / "horizon_labels_val.feather"
             )
+        self._logger.info(
+            "phase2_labels_joined train_labeled=%d/%d val_labeled=%d/%d",
+            sum(1 for entry in train_entries if entry.is_labeled),
+            len(train_entries),
+            sum(1 for entry in val_entries if entry.is_labeled),
+            len(val_entries),
+        )
 
         # 6. 构造 datasets
         # 使用 train frame 构造 train dataset
@@ -190,12 +252,24 @@ class Phase2Trainer:
             frames["test"], test_entries, input_schema, self.config,
             reward_alignment=reward_alignment_name,
         )
+        self._logger.info(
+            "phase2_datasets_ready train=%d val=%d test=%d reward_alignment=%s",
+            len(train_dataset),
+            len(val_dataset),
+            len(test_dataset),
+            reward_alignment_name,
+        )
 
         # 7. 加载 Phase1FrozenPolicy
         frozen_policy = Phase1FrozenPolicy.load(
             p1_dir / "decoder.pt",
             p1_dir / "codebook.pt",
             device=self.config.device,
+        )
+        self._logger.info(
+            "phase2_frozen_policy_loaded num_codes=%d device=%s",
+            frozen_policy.num_codes,
+            self.config.device,
         )
 
         # 8. 构造 trading env factory
@@ -222,6 +296,12 @@ class Phase2Trainer:
         factory = HorizonFactory(self.config, train_dataset, frozen_policy, trading_env_factory)
         envs, shard_infos = factory.create_envs()
         env_shards_path = factory.write_shards(shard_infos, artifacts_dir / "phase2_env_shards.feather")
+        self._logger.info(
+            "phase2_envs_ready num_envs=%d shard_count=%d env_shards=%s",
+            len(envs),
+            len(shard_infos),
+            env_shards_path,
+        )
 
         # 10. 初始化 selector + ActorCritic + PPOTrainer
         state_spec = train_dataset.state_spec()
@@ -254,6 +334,13 @@ class Phase2Trainer:
             train_dataset,
             dead_code_mask_list,
         )
+        self._logger.info(
+            "phase2_selector_ready state_dim=%d num_codes=%d dead_code_mask_count=%d probe_pick_rate=%.6f",
+            state_spec.total_dim,
+            num_codes,
+            sum(1 for flag in dead_code_mask_list if flag),
+            float(unmasked_probe.get("probe_pick_rate", 0.0)),
+        )
 
         actor_critic = ActorCritic(selector, dead_code_mask=dead_code_mask)
 
@@ -274,6 +361,14 @@ class Phase2Trainer:
 
         resume_audit = self._maybe_resume(ppo_trainer, ckpt_mgr)
         start_update = int(resume_audit.get("restored_update_count", 0))
+        self._logger.info(
+            "phase2_training_ready num_updates=%d start_update=%d rollout_length=%d num_envs=%d resume_from=%s",
+            num_updates,
+            start_update,
+            self.config.rollout_length,
+            self.config.num_envs,
+            self.config.resume_from,
+        )
 
         # Evaluator
         val_runner = Phase2BacktestRunner(
@@ -286,6 +381,12 @@ class Phase2Trainer:
 
         # 11. 训练循环
         eval_every = max(num_updates // 20, 1)
+        self._logger.info(
+            "phase2_train_loop_start num_updates=%d eval_every=%d total_timesteps=%d",
+            num_updates,
+            eval_every,
+            self.config.total_timesteps,
+        )
         early_stop_triggered = False
         early_stop_update_idx: Optional[int] = None
         early_stop_best: Optional[float] = None
@@ -365,6 +466,17 @@ class Phase2Trainer:
                     )
                 ckpt_mgr.commit_verdict(state, verdict, update_idx, eval_metrics)
                 history = policy.update_history(history, eval_metrics, verdict)
+                self._logger.info(
+                    "phase2_eval_result update=%d decision=%s score=%.6f val_net_return=%s sharpe=%s approx_kl=%.6f reward_mean=%.6f reasons=%s",
+                    update_idx,
+                    verdict.decision,
+                    float(eval_metrics.get("phase2_composite_score", 0.0)),
+                    eval_metrics.get("val_net_return"),
+                    eval_metrics.get("sharpe_ratio"),
+                    stats.approx_kl,
+                    stats.reward_mean,
+                    ",".join(verdict.reasons),
+                )
 
                 # 保存 replay log
                 replay_dicts = [
@@ -398,14 +510,31 @@ class Phase2Trainer:
                     if early_stop_wait >= self.config.early_stopping.patience:
                         early_stop_triggered = True
                         early_stop_update_idx = update_idx
+                        self._logger.info(
+                            "phase2_early_stopping_triggered update=%d metric=%s best=%s wait=%d",
+                            update_idx,
+                            self.config.early_stopping.metric,
+                            early_stop_best,
+                            early_stop_wait,
+                        )
                         break
 
         # 12. 最终评估与报告
+        self._logger.info(
+            "phase2_train_loop_done updates_completed=%d early_stop=%s",
+            len(self._rollout_stats),
+            early_stop_triggered,
+        )
         report_paths = Phase2ReportPaths.from_artifacts_dir(artifacts_dir)
         writer = Phase2ReportWriter(report_paths)
 
         # 写 rollout stats
         rollout_stats_path = writer.write_rollout_stats(self._rollout_stats)
+        self._logger.info(
+            "phase2_rollout_stats_written path=%s rows=%d",
+            rollout_stats_path,
+            len(self._rollout_stats),
+        )
 
         # 用 best checkpoint 做 walk-forward
         test_runner = Phase2BacktestRunner(
@@ -420,6 +549,9 @@ class Phase2Trainer:
         if ckpt_mgr.best_path.exists():
             best_state = ckpt_mgr.load(ckpt_mgr.best_path)
             selector.load_state_dict(best_state["model_state"])
+            self._logger.info("phase2_best_checkpoint_loaded path=%s", ckpt_mgr.best_path)
+        else:
+            self._logger.info("phase2_best_checkpoint_missing path=%s", ckpt_mgr.best_path)
 
         # Per-horizon records
         train_runner = Phase2BacktestRunner(
@@ -428,6 +560,12 @@ class Phase2Trainer:
         train_records = train_runner.run_walk_forward("train", deterministic=True)
         val_records = val_runner.run_walk_forward("val", deterministic=True)
         test_records = test_runner.run_walk_forward("test", deterministic=True)
+        self._logger.info(
+            "phase2_walk_forward_done train_records=%d val_records=%d test_records=%d",
+            len(train_records),
+            len(val_records),
+            len(test_records),
+        )
 
         train_rec_dicts = [Phase2Evaluator._record_to_dict(r) for r in train_records]
         val_rec_dicts = [Phase2Evaluator._record_to_dict(r) for r in val_records]
@@ -436,6 +574,12 @@ class Phase2Trainer:
         phr_train = writer.write_per_horizon_records(train_rec_dicts, "train")
         phr_val = writer.write_per_horizon_records(val_rec_dicts, "val")
         phr_test = writer.write_per_horizon_records(test_rec_dicts, "test")
+        self._logger.info(
+            "phase2_per_horizon_records_written train=%s val=%s test=%s",
+            phr_train,
+            phr_val,
+            phr_test,
+        )
 
         # Rolling validation
         rolling_result = last_candidate_rolling_result or evaluator.evaluate_rolling_validation()
@@ -455,6 +599,12 @@ class Phase2Trainer:
                 "fold_initial_position_policy": rolling_result.fold_initial_position_policy,
             },
             rolling_records,
+        )
+        self._logger.info(
+            "phase2_rolling_validation_written folds=%d records=%d guardrail_pass=%s",
+            len(rolling_result.fold_metrics),
+            len(rolling_records),
+            rolling_guardrail_pass,
         )
 
         # Build report
@@ -492,6 +642,11 @@ class Phase2Trainer:
         }
         writer.write_baselines(bl_val_summary, "val")
         writer.write_baselines(bl_test_summary, "test")
+        self._logger.info(
+            "phase2_baselines_written val=%d test=%d",
+            len(bl_val_summary),
+            len(bl_test_summary),
+        )
 
         sensitivity = phase2_composite_score_sensitivity(
             [
@@ -502,6 +657,10 @@ class Phase2Trainer:
             self.config.selection_policy.composite_score_sensitivity_perturbations,
         )
         writer.write_sensitivity(sensitivity)
+        self._logger.info(
+            "phase2_sensitivity_written entries=%d",
+            len(sensitivity.get("results", [])) if isinstance(sensitivity, dict) else 0,
+        )
 
         # Label coverage
         train_coverage = label_loader.compute_coverage_stats(train_entries, "train")
@@ -516,6 +675,12 @@ class Phase2Trainer:
             alignment,
             num_codes,
             dead_code_mask_list,
+        )
+        self._logger.info(
+            "phase2_diagnostics_done label_coverage=%.6f ood_warnings=%d stress_scenarios=%d",
+            train_coverage.coverage_ratio,
+            distribution_summary["warning_count"],
+            len(execution_stress_summary.get("scenarios", [])),
         )
         kl_dominance_values = [
             float(r.get("kl_demo_dominance_ratio", 0.0))
@@ -638,7 +803,15 @@ class Phase2Trainer:
         }
 
         report_path = writer.write_final_report(report_summary)
+        self._logger.info(
+            "phase2_report_written path=%s val_net_return=%s test_net_return=%s guardrails_pass=%s",
+            report_path,
+            report_summary["val_metrics"].get("net_return"),
+            report_summary["test_metrics"].get("net_return"),
+            report_summary.get("guardrails_pass"),
+        )
 
+        self._logger.info("phase2_complete artifacts_dir=%s", artifacts_dir)
         return Phase2TrainerArtifacts(
             artifacts_dir=artifacts_dir,
             phase2_config_yaml=config_yaml,
