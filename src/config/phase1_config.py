@@ -316,6 +316,44 @@ class DiagnosticsConfig:
 # ---------- 顶层配置 ----------
 
 @dataclass(frozen=True)
+class Phase1DataProcessConfig:
+    """Offline Phase I data processing config.
+
+    It contains only fields that can affect sampled horizons or DP teacher
+    outputs. Model and optimizer fields intentionally stay in ``Phase1Config``.
+    """
+    pair: str
+    data_batch_id: str
+    train_file: str
+    val_file: str
+    test_file: str
+    artifact_root: str = "artifacts"
+    factor_profile: str = "short"
+    factor_list_file: Optional[str] = None
+    horizon: int = 72
+    num_demos: int = 30000
+    sampling_strategy: Literal[
+        "stratified_uniform", "stratified_proportional"
+    ] = "stratified_uniform"
+    stratification: StratificationConfig = field(default_factory=StratificationConfig)
+    sampling_health: SamplingHealthConfig = field(default_factory=SamplingHealthConfig)
+    data_augmentation: DataAugmentationConfig = field(
+        default_factory=DataAugmentationConfig
+    )
+    dp: DPConfig = field(default_factory=DPConfig)
+    seed: int = 42
+    allow_missing_prospective_diagnostic: bool = False
+    risk_acknowledged_by: Optional[str] = None
+    expected_sign_off_followup_batch_id: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def artifacts_dir(self) -> Path:
+        return Path(self.artifact_root) / self.pair / self.data_batch_id / "phase1"
+
+
+@dataclass(frozen=True)
 class Phase1Config:
     """Phase I 顶层配置。"""
     pair: str
@@ -351,6 +389,7 @@ class Phase1Config:
     risk_acknowledged_by: Optional[str] = None
     expected_sign_off_followup_batch_id: Optional[str] = None
     local_smoke_relaxed_guardrails: bool = False
+    data_process_manifest: Optional[str] = None
 
     # ---- 序列化与 hash ----
 
@@ -580,6 +619,10 @@ PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
     "local_smoke_relaxed_guardrails": _config_doc(
         "允许本地 smoke test 放宽 guardrail，避免小 fixture 被正式阈值拦住。",
         "仅用于本地/CI 轻量验证；正式训练应保持 false，防止低质量模型被签收。",
+    ),
+    "data_process_manifest": _config_doc(
+        "启用 Phase I manifest 训练模式时指向离线数据预处理产物清单。",
+        "填写后训练只读取已固化的 sampled horizons 与 DP teacher；为空时保留旧的一体化数据生成路径。",
     ),
 
     # 分层采样

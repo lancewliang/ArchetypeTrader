@@ -341,3 +341,78 @@ def test_train_phase1_cli_local_smoke_relaxes_guardrails():
     assert config.selection_policy.behavior.min_inter_code_action_diversity == 0.0
     assert config.training.full_validation_every_epochs == 1
     assert config.local_smoke_relaxed_guardrails is True
+
+
+def _minimal_manifest(tmp_path, *, pair: str = "TEST", create_artifacts: bool = True):
+    import json
+
+    manifest_dir = tmp_path / "processed"
+    manifest_dir.mkdir(parents=True)
+    if create_artifacts:
+        for name in (
+            "sampled_horizons_train.feather",
+            "dp_teacher_train.feather",
+            "sampled_horizons_val.feather",
+            "dp_teacher_val.feather",
+            "sampled_horizons_test.feather",
+            "dp_teacher_test.feather",
+        ):
+            (manifest_dir / name).touch()
+    payload = {
+        "version": 1,
+        "phase": "phase1_data_process",
+        "pair": pair,
+        "data_batch_id": "processed",
+        "artifact_dir": str(manifest_dir),
+        "created_at": "2026-05-02T00:00:00Z",
+        "input_files": {},
+        "input_schema_path": "input_schema.json",
+        "schema_hash": "schema",
+        "data_process_hash": "data",
+        "dp_teacher_hash": "teacher",
+        "feature_source": {},
+        "splits": {
+            split: {
+                "window_index_path": f"window_index_{split}.feather",
+                "sampled_horizons_path": f"sampled_horizons_{split}.feather",
+                "dp_teacher_path": f"dp_teacher_{split}.feather",
+                "num_horizons": 0,
+            }
+            for split in ("train", "val", "test")
+        },
+    }
+    path = manifest_dir / "data_process_manifest.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_phase1_trainer_manifest_pair_mismatch_fails(tmp_path):
+    manifest = _minimal_manifest(tmp_path, pair="OTHER")
+    trainer = Phase1Trainer(
+        _config(
+            artifact_root=str(tmp_path / "artifacts"),
+            data_process_manifest=str(manifest),
+            train_file="",
+            val_file="",
+            test_file="",
+        )
+    )
+
+    with pytest.raises(Phase1FatalError, match="pair mismatch"):
+        trainer.run()
+
+
+def test_phase1_trainer_manifest_missing_file_fails(tmp_path):
+    manifest = _minimal_manifest(tmp_path, pair="TEST", create_artifacts=False)
+    trainer = Phase1Trainer(
+        _config(
+            artifact_root=str(tmp_path / "artifacts"),
+            data_process_manifest=str(manifest),
+            train_file="",
+            val_file="",
+            test_file="",
+        )
+    )
+
+    with pytest.raises(FileNotFoundError):
+        trainer.run()

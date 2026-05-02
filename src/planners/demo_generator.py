@@ -21,6 +21,7 @@ class RejectTransitionExceeded(RuntimeError):
 @dataclass
 class RejectStats:
     dataset_reject_rate: float = 0.0
+    per_horizon_reject_count: List[int] = field(default_factory=list)
     per_horizon_reject_rate: List[float] = field(default_factory=list)
     worst_reject_horizons: List[dict] = field(default_factory=list)
     reject_by_action_pair: Dict[str, int] = field(default_factory=dict)
@@ -125,6 +126,7 @@ class Phase1DemoGenerator:
         stats = RejectStats()
         if total_evaluated_transitions > 0:
             stats.dataset_reject_rate = total_rejected_transitions / total_evaluated_transitions
+        stats.per_horizon_reject_count = per_horizon_reject_count
         stats.per_horizon_reject_rate = per_horizon_reject_rate
         stats.reject_by_action_pair = dict(action_pair_counter)
         stats.worst_reject_horizons = sorted(

@@ -43,9 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
     # 路径
     p.add_argument("--pair", required=True)
     p.add_argument("--train-batch-id", required=True)
-    p.add_argument("--train-file", required=True)
-    p.add_argument("--val-file", required=True)
-    p.add_argument("--test-file", required=True)
+    p.add_argument("--train-file", default=None)
+    p.add_argument("--val-file", default=None)
+    p.add_argument("--test-file", default=None)
+    p.add_argument("--data-process-manifest", default=None)
     p.add_argument("--artifact-root", default="artifacts")
     p.add_argument("--factor-profile", default="short")
     p.add_argument("--factor-list-file", default=None)
@@ -212,9 +213,10 @@ def build_config(args: argparse.Namespace) -> Phase1Config:
     config = Phase1Config(
         pair=args.pair,
         train_batch_id=args.train_batch_id,
-        train_file=args.train_file,
-        val_file=args.val_file,
-        test_file=args.test_file,
+        train_file=args.train_file or "",
+        val_file=args.val_file or "",
+        test_file=args.test_file or "",
+        data_process_manifest=args.data_process_manifest,
         artifact_root=args.artifact_root,
         factor_profile=args.factor_profile,
         factor_list_file=args.factor_list_file,
@@ -275,7 +277,18 @@ def assert_prospective_diagnostic(args: argparse.Namespace) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    assert_prospective_diagnostic(args)
+    if not args.data_process_manifest:
+        missing = [
+            name
+            for name in ("train_file", "val_file", "test_file")
+            if getattr(args, name) is None
+        ]
+        if missing:
+            parser.error(
+                "--train-file/--val-file/--test-file are required unless "
+                "--data-process-manifest is set"
+            )
+        assert_prospective_diagnostic(args)
     config = build_config(args)
     trainer = Phase1Trainer(config)
     try:

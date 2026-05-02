@@ -22,6 +22,7 @@ from src.data.demo_store import HorizonLabel, Phase1DemoStore
 from src.data.feature_registry import default_factor_list_path, load_feature_selection
 from src.data.horizon_builder import HorizonBuilder
 from src.data.market_reader import MarketFileReader
+from src.data.phase1_processed_store import Phase1ProcessedStore
 from src.data.sampling_health import SamplingHealthChecker, SamplingHealthError
 from src.data.schema import InputSchemaValidator
 from src.data.stratified_sampler import StratifiedWindowSampler
@@ -101,6 +102,14 @@ class Phase1Trainer:
         self._sampling_health_reports: Dict[str, dict] = {}
         self._dead_code_restart_events: List[dict] = []
         self._best_epoch_diagnostics: Dict[str, Any] = {}
+        self._processed_data_metadata: Dict[str, Any] = {
+            "processed_data_mode": "legacy_inline",
+            "data_process_manifest": "",
+            "data_batch_id": "",
+            "schema_hash": "",
+            "data_process_hash": "",
+            "dp_teacher_hash": "",
+        }
         self._logger = logging.getLogger("archetype.phase1")
 
     # ---------- 入口 ----------
@@ -189,15 +198,22 @@ class Phase1Trainer:
             self.config.training.seed,
         )
 
-        # 0b. 强制 prospective 对照 CLI 检查（trainer 层第二道防线）。
-        self._check_prospective_diagnostic()
-        self._logger.info(
-            "phase1_prospective_check_passed 说明=前瞻分层对照检查通过 mode=%s required=%s diagnostic_batch=%s allow_missing=%s",
-            self.config.stratification.mode,
-            self.config.stratification.require_prospective_diagnostic,
-            self.config.stratification.diagnostic_pair_batch_id,
-            self.config.allow_missing_prospective_diagnostic,
-        )
+        manifest_mode = bool(self.config.data_process_manifest)
+        if not manifest_mode:
+            # 0b. 强制 prospective 对照 CLI 检查（trainer 层第二道防线）。
+            self._check_prospective_diagnostic()
+            self._logger.info(
+                "phase1_prospective_check_passed 说明=前瞻分层对照检查通过 mode=%s required=%s diagnostic_batch=%s allow_missing=%s",
+                self.config.stratification.mode,
+                self.config.stratification.require_prospective_diagnostic,
+                self.config.stratification.diagnostic_pair_batch_id,
+                self.config.allow_missing_prospective_diagnostic,
+            )
+        else:
+            self._logger.info(
+                "phase1_manifest_mode_enabled 说明=训练将只读取离线数据处理产物 manifest=%s",
+                self.config.data_process_manifest,
+            )
 
         # 1. 写 phase1_config.yaml。
         config_yaml = artifacts_dir / "phase1_config.yaml"
@@ -209,102 +225,149 @@ class Phase1Trainer:
             config_hash,
         )
 
-        # 2. 读三个 split + schema。
-        reader = MarketFileReader()
-        frames = reader.read_split(
-            self.config.train_file, self.config.val_file, self.config.test_file
-        )
-        self._logger.info(
-            "phase1_market_data_loaded 说明=训练/验证/测试市场数据已加载 train_rows=%s val_rows=%s test_rows=%s",
-            getattr(frames["train"], "height", None),
-            getattr(frames["val"], "height", None),
-            getattr(frames["test"], "height", None),
-        )
-        schema_validator = self._build_schema_validator()
-        schema = schema_validator.validate(frames["train"])
-        # val/test 必须沿用 train schema，不能各自重新推导 feature list。
-        for name in ("val", "test"):
-            schema_validator.validate_against_schema(frames[name], schema)
-        schema_path = schema_validator.write_schema_json(
-            schema, artifacts_dir / "input_schema.json"
-        )
-        schema_hash = self._schema_hash(schema)
-        self._logger.info(
-            "phase1_schema_validated 说明=输入 schema 校验通过 path=%s schema_hash=%s feature_dim=%s",
-            schema_path,
-            schema_hash,
-            schema.feature_dim(),
-        )
-
-        # 3. 滑窗 + 分层采样 + 健康检查
-        train_horizons, train_window_path = self._build_horizons_for_split(
-            "train", frames["train"], schema, artifacts_dir
-        )
-        val_horizons, _ = self._build_horizons_for_split(
-            "val", frames["val"], schema, artifacts_dir
-        )
-        test_horizons, _ = self._build_horizons_for_split(
-            "test", frames["test"], schema, artifacts_dir
-        )
-        self._logger.info(
-            "phase1_horizons_ready 说明=各 split 的 horizon 已准备 train=%d val=%d test=%d train_window_index=%s",
-            len(train_horizons),
-            len(val_horizons),
-            len(test_horizons),
-            train_window_path,
-        )
-
-        # 4. 数据增强（仅 train）
         contrastive_pairs = []
-        if self.config.data_augmentation.temporal_contrastive.enabled:
-            tc = self.config.data_augmentation.temporal_contrastive
-            builder = HorizonBuilder(self.config.horizon, schema, self.config.dp.cost_config.reward_alignment)
-            tc_builder = TemporalContrastiveBuilder(
-                shift_bars=tc.shift_bars,
-                pair_ratio=tc.pair_ratio,
-                max_pairs=tc.max_pairs,
-                require_same_strata=tc.require_same_strata,
-                seed=self.config.training.seed,
+        if manifest_mode:
+            processed_store = Phase1ProcessedStore(
+                Path(self.config.data_process_manifest).parent
             )
-            shifted, pairs = tc_builder.build_pairs(
-                train_horizons, frames["train"], builder, pair=self.config.pair
+            manifest = processed_store.load_manifest(self.config.data_process_manifest)
+            if manifest.pair != self.config.pair:
+                raise Phase1FatalError(
+                    f"data_process_manifest pair mismatch: config={self.config.pair} manifest={manifest.pair}"
+                )
+            schema = processed_store.load_schema(manifest)
+            schema_hash = manifest.schema_hash
+            schema_path = atomic_write_json(
+                schema.to_dict(), artifacts_dir / "input_schema.json"
             )
-            train_horizons = list(train_horizons) + list(shifted)
-            contrastive_pairs = pairs
+            train_horizons = processed_store.load_records(manifest, "train")
+            val_horizons = processed_store.load_records(manifest, "val")
+            test_horizons = processed_store.load_records(manifest, "test")
+            reject_stats = processed_store.load_reject_stats(manifest, "train")
+            train_window_path = manifest.resolve(
+                manifest.splits["train"].window_index_path
+            )
+            self._processed_data_metadata = {
+                "processed_data_mode": "manifest",
+                "data_process_manifest": str(self.config.data_process_manifest),
+                "data_batch_id": manifest.data_batch_id,
+                "schema_hash": manifest.schema_hash,
+                "data_process_hash": manifest.data_process_hash,
+                "dp_teacher_hash": manifest.dp_teacher_hash,
+            }
             self._logger.info(
-                "phase1_temporal_contrastive_built 说明=时间对比增强样本已生成 shifted_horizons=%d pairs=%d train_horizons_total=%d",
-                len(shifted),
-                len(pairs),
+                "phase1_processed_data_loaded 说明=已从 manifest 加载固化训练数据 train=%d val=%d test=%d schema_hash=%s data_process_hash=%s dp_teacher_hash=%s",
                 len(train_horizons),
+                len(val_horizons),
+                len(test_horizons),
+                manifest.schema_hash,
+                manifest.data_process_hash,
+                manifest.dp_teacher_hash,
             )
         else:
+            # 2. 读三个 split + schema。
+            reader = MarketFileReader()
+            frames = reader.read_split(
+                self.config.train_file, self.config.val_file, self.config.test_file
+            )
             self._logger.info(
-                "phase1_temporal_contrastive_disabled 说明=时间对比增强未启用"
+                "phase1_market_data_loaded 说明=训练/验证/测试市场数据已加载 train_rows=%s val_rows=%s test_rows=%s",
+                getattr(frames["train"], "height", None),
+                getattr(frames["val"], "height", None),
+                getattr(frames["test"], "height", None),
+            )
+            schema_validator = self._build_schema_validator()
+            schema = schema_validator.validate(frames["train"])
+            # val/test 必须沿用 train schema，不能各自重新推导 feature list。
+            for name in ("val", "test"):
+                schema_validator.validate_against_schema(frames[name], schema)
+            schema_path = schema_validator.write_schema_json(
+                schema, artifacts_dir / "input_schema.json"
+            )
+            schema_hash = self._schema_hash(schema)
+            self._logger.info(
+                "phase1_schema_validated 说明=输入 schema 校验通过 path=%s schema_hash=%s feature_dim=%s",
+                schema_path,
+                schema_hash,
+                schema.feature_dim(),
             )
 
-        # 5. DP demo 生成
-        train_horizons, reject_stats = self._generate_demos(train_horizons)
-        self._logger.info(
-            "phase1_dp_done 说明=DP 示范样本已生成 split=train horizons=%d dataset_reject_rate=%.6f max_horizon_reject_rate=%.6f",
-            len(train_horizons),
-            reject_stats.dataset_reject_rate,
-            max(reject_stats.per_horizon_reject_rate or [0.0]),
-        )
-        # val/test 也跑 DP（label 导出与 teacher replay 都需要）
-        val_horizons, val_reject_stats = self._generate_demos(val_horizons)
-        self._logger.info(
-            "phase1_dp_done 说明=DP 示范样本已生成 split=val horizons=%d dataset_reject_rate=%.6f max_horizon_reject_rate=%.6f",
-            len(val_horizons),
-            val_reject_stats.dataset_reject_rate,
-            max(val_reject_stats.per_horizon_reject_rate or [0.0]),
-        )
-        test_horizons, test_reject_stats = self._generate_demos(test_horizons)
-        self._logger.info(
-            "phase1_dp_done 说明=DP 示范样本已生成 split=test horizons=%d dataset_reject_rate=%.6f max_horizon_reject_rate=%.6f",
-            len(test_horizons),
-            test_reject_stats.dataset_reject_rate,
-            max(test_reject_stats.per_horizon_reject_rate or [0.0]),
-        )
+            # 3. 滑窗 + 分层采样 + 健康检查
+            train_horizons, train_window_path = self._build_horizons_for_split(
+                "train", frames["train"], schema, artifacts_dir
+            )
+            val_horizons, _ = self._build_horizons_for_split(
+                "val", frames["val"], schema, artifacts_dir
+            )
+            test_horizons, _ = self._build_horizons_for_split(
+                "test", frames["test"], schema, artifacts_dir
+            )
+            self._logger.info(
+                "phase1_horizons_ready 说明=各 split 的 horizon 已准备 train=%d val=%d test=%d train_window_index=%s",
+                len(train_horizons),
+                len(val_horizons),
+                len(test_horizons),
+                train_window_path,
+            )
+
+            # 4. 数据增强（仅 train）
+            if self.config.data_augmentation.temporal_contrastive.enabled:
+                tc = self.config.data_augmentation.temporal_contrastive
+                builder = HorizonBuilder(self.config.horizon, schema, self.config.dp.cost_config.reward_alignment)
+                tc_builder = TemporalContrastiveBuilder(
+                    shift_bars=tc.shift_bars,
+                    pair_ratio=tc.pair_ratio,
+                    max_pairs=tc.max_pairs,
+                    require_same_strata=tc.require_same_strata,
+                    seed=self.config.training.seed,
+                )
+                shifted, pairs = tc_builder.build_pairs(
+                    train_horizons, frames["train"], builder, pair=self.config.pair
+                )
+                train_horizons = list(train_horizons) + list(shifted)
+                contrastive_pairs = pairs
+                self._logger.info(
+                    "phase1_temporal_contrastive_built 说明=时间对比增强样本已生成 shifted_horizons=%d pairs=%d train_horizons_total=%d",
+                    len(shifted),
+                    len(pairs),
+                    len(train_horizons),
+                )
+            else:
+                self._logger.info(
+                    "phase1_temporal_contrastive_disabled 说明=时间对比增强未启用"
+                )
+
+            # 5. DP demo 生成
+            train_horizons, reject_stats = self._generate_demos(train_horizons)
+            self._logger.info(
+                "phase1_dp_done 说明=DP 示范样本已生成 split=train horizons=%d dataset_reject_rate=%.6f max_horizon_reject_rate=%.6f",
+                len(train_horizons),
+                reject_stats.dataset_reject_rate,
+                max(reject_stats.per_horizon_reject_rate or [0.0]),
+            )
+            # val/test 也跑 DP（label 导出与 teacher replay 都需要）
+            val_horizons, val_reject_stats = self._generate_demos(val_horizons)
+            self._logger.info(
+                "phase1_dp_done 说明=DP 示范样本已生成 split=val horizons=%d dataset_reject_rate=%.6f max_horizon_reject_rate=%.6f",
+                len(val_horizons),
+                val_reject_stats.dataset_reject_rate,
+                max(val_reject_stats.per_horizon_reject_rate or [0.0]),
+            )
+            test_horizons, test_reject_stats = self._generate_demos(test_horizons)
+            self._logger.info(
+                "phase1_dp_done 说明=DP 示范样本已生成 split=test horizons=%d dataset_reject_rate=%.6f max_horizon_reject_rate=%.6f",
+                len(test_horizons),
+                test_reject_stats.dataset_reject_rate,
+                max(test_reject_stats.per_horizon_reject_rate or [0.0]),
+            )
+            self._processed_data_metadata = {
+                "processed_data_mode": "legacy_inline",
+                "data_process_manifest": "",
+                "data_batch_id": "",
+                "schema_hash": schema_hash,
+                "data_process_hash": "",
+                "dp_teacher_hash": "",
+            }
 
         # 6. RewardNormalizer fit (仅 train)
         norm = RewardNormalizer(self.config.model.encoder_input)
@@ -1264,6 +1327,22 @@ class Phase1Trainer:
         summary["max_position"] = self.config.dp.max_position
         summary["factor_profile"] = self.config.factor_profile
         summary["factor_list_file"] = self.config.factor_list_file or ""
+        summary["processed_data_mode"] = self._processed_data_metadata.get(
+            "processed_data_mode", "legacy_inline"
+        )
+        summary["data_process_manifest"] = self._processed_data_metadata.get(
+            "data_process_manifest", ""
+        )
+        summary["data_batch_id"] = self._processed_data_metadata.get(
+            "data_batch_id", ""
+        )
+        summary["schema_hash"] = self._processed_data_metadata.get("schema_hash", "")
+        summary["data_process_hash"] = self._processed_data_metadata.get(
+            "data_process_hash", ""
+        )
+        summary["dp_teacher_hash"] = self._processed_data_metadata.get(
+            "dp_teacher_hash", ""
+        )
         summary["reward_normalization_resolved"] = norm_dict.get("method", "")
         summary["reward_norm_clip_ratio"] = norm_dict.get("clip_ratio", 0.0)
         summary["dataset_reject_rate"] = float(reject_stats.dataset_reject_rate)
