@@ -18,6 +18,7 @@ from src.config.phase1_config import (
 from src.data.data_augmentation import TemporalContrastiveBuilder
 from src.data.dataset import Phase1DemoDataset, collate_phase1
 from src.data.demo_store import HorizonLabel, Phase1DemoStore
+from src.data.feature_registry import default_factor_list_path, load_feature_selection
 from src.data.horizon_builder import HorizonBuilder
 from src.data.market_reader import MarketFileReader
 from src.data.sampling_health import SamplingHealthChecker
@@ -178,11 +179,11 @@ class Phase1Trainer:
         frames = reader.read_split(
             self.config.train_file, self.config.val_file, self.config.test_file
         )
-        schema_validator = InputSchemaValidator()
+        schema_validator = self._build_schema_validator()
         schema = schema_validator.validate(frames["train"])
-        # val/test 用同一 schema_validator 复用统计；这里只校验列存在性：
+        # val/test 必须沿用 train schema，不能各自重新推导 feature list。
         for name in ("val", "test"):
-            schema_validator.validate(frames[name])
+            schema_validator.validate_against_schema(frames[name], schema)
         schema_path = schema_validator.write_schema_json(
             schema, artifacts_dir / "input_schema.json"
         )
@@ -365,6 +366,38 @@ class Phase1Trainer:
         )
 
     # ---------- 子流程 ----------
+
+    def _build_schema_validator(self) -> InputSchemaValidator:
+        """构造 schema validator。
+
+        当显式传入 factor list，或默认 ``src/factors/{PAIR}/{profile}.txt``
+        存在时，使用固定字段 + 标的级因子清单。否则保留 legacy 自动数值列
+        推导路径，避免破坏既有 TEST fixture 与旧实验。
+        """
+
+        factor_path = default_factor_list_path(
+            self.config.pair, self.config.factor_profile
+        )
+        has_factor_file = bool(self.config.factor_list_file) or factor_path.exists()
+        if has_factor_file:
+            spec = load_feature_selection(
+                pair=self.config.pair,
+                profile=self.config.factor_profile,
+                factor_list_file=self.config.factor_list_file,
+            )
+            return InputSchemaValidator(
+                price_column=spec.price_column,
+                feature_columns=spec.feature_columns,
+                feature_source=spec.to_dict(),
+            )
+        return InputSchemaValidator(
+            feature_source={
+                "mode": "legacy_auto_numeric",
+                "pair": self.config.pair,
+                "profile": self.config.factor_profile,
+                "factor_list_path": str(factor_path),
+            }
+        )
 
     def _check_prospective_diagnostic(self) -> None:
         """``require_prospective_diagnostic=True`` 时检查 ``--diagnostic-pair-batch-id``。
@@ -941,6 +974,9 @@ class Phase1Trainer:
         # 用 trainer 在 demo 生成后实际统计的 no_trade_ratio 覆盖默认。
         summary["no_trade_ratio"] = float(no_trade_ratio)
         summary["reward_alignment"] = cost.reward_alignment
+        summary["max_position"] = self.config.dp.max_position
+        summary["factor_profile"] = self.config.factor_profile
+        summary["factor_list_file"] = self.config.factor_list_file or ""
         summary["reward_normalization_resolved"] = norm_dict.get("method", "")
         summary["reward_norm_clip_ratio"] = norm_dict.get("clip_ratio", 0.0)
         summary["dataset_reject_rate"] = float(reject_stats.dataset_reject_rate)

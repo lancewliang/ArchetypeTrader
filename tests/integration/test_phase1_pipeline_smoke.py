@@ -40,7 +40,9 @@ from src.config.phase1_config import (  # noqa: E402
 from src.trainers.phase1_trainer import Phase1Trainer  # noqa: E402
 
 
-def _make_smoke_config(tmp_path: Path, train_file, val_file, test_file) -> Phase1Config:
+def _make_smoke_config(
+    tmp_path: Path, train_file, val_file, test_file, factor_file: Path
+) -> Phase1Config:
     """构造小规模 smoke 配置: h=8, num_demos=12, K=4, epochs=2。"""
     cost = CostConfig(reward_alignment="paper_formula")
     dp = DPConfig(horizon=8, cost_config=cost, max_position=1, gamma=1.0)
@@ -89,6 +91,8 @@ def _make_smoke_config(tmp_path: Path, train_file, val_file, test_file) -> Phase
         val_file=str(val_file),
         test_file=str(test_file),
         artifact_root=str(tmp_path / "artifacts"),
+        factor_profile="short",
+        factor_list_file=str(factor_file),
         horizon=8,
         num_demos=12,
         sampling_strategy="stratified_uniform",
@@ -111,6 +115,9 @@ def smoke_artifacts(tmp_path):
     train, val, test = build_fixtures(
         fixtures_dir, FixtureSpec(train_rows=400, val_rows=200, test_rows=200)
     )
+    factor_file = tmp_path / "factors" / "TEST" / "short.txt"
+    factor_file.parent.mkdir(parents=True, exist_ok=True)
+    factor_file.write_text("mid_price\nreturn_1m\n", encoding="utf-8")
     diagnostic_dir = tmp_path / "artifacts" / "TEST" / "diagnostic_batch" / "phase1"
     diagnostic_dir.mkdir(parents=True, exist_ok=True)
     (diagnostic_dir / "phase1_report.json").write_text(
@@ -125,7 +132,7 @@ def smoke_artifacts(tmp_path):
         ),
         encoding="utf-8",
     )
-    config = _make_smoke_config(tmp_path, train, val, test)
+    config = _make_smoke_config(tmp_path, train, val, test, factor_file)
     trainer = Phase1Trainer(config)
     return trainer.run()
 
@@ -172,6 +179,9 @@ def test_input_schema_excludes_close(smoke_artifacts):
     schema = json.loads(smoke_artifacts.input_schema_json.read_text(encoding="utf-8"))
     assert schema["price_column"] == "close"
     assert "close" not in schema["feature_columns"]
+    assert schema["feature_source"]["mode"] == "fixed_plus_factor_list"
+    assert schema["feature_source"]["profile"] == "short"
+    assert schema["feature_columns"][-2:] == ["mid_price", "return_1m"]
 
 
 def test_horizon_labels_within_archetype_range(smoke_artifacts):

@@ -106,3 +106,89 @@ def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):
     )
     assert payload["hindsight_bias_warning"] == "exceeded"
     assert payload["hindsight_vs_prospective_metric_delta"]["val_return_capture_ratio"]["exceeded"]
+
+
+def test_phase1_trainer_uses_factor_list_schema(tmp_path):
+    import polars as pl
+
+    factor_file = tmp_path / "short.txt"
+    factor_file.write_text("factor_a\n", encoding="utf-8")
+    frame = pl.DataFrame(
+        {
+            "timestamp": [0, 1, 2],
+            "close": [100.0, 101.0, 102.0],
+            "ask1_price": [101.0, 102.0, 103.0],
+            "ask1_size": [10.0, 10.0, 10.0],
+            "bid1_price": [99.0, 100.0, 101.0],
+            "bid1_size": [10.0, 10.0, 10.0],
+            "ask2_price": [102.0, 103.0, 104.0],
+            "ask2_size": [10.0, 10.0, 10.0],
+            "bid2_price": [98.0, 99.0, 100.0],
+            "bid2_size": [10.0, 10.0, 10.0],
+            "ask3_price": [103.0, 104.0, 105.0],
+            "ask3_size": [10.0, 10.0, 10.0],
+            "bid3_price": [97.0, 98.0, 99.0],
+            "bid3_size": [10.0, 10.0, 10.0],
+            "ask4_price": [104.0, 105.0, 106.0],
+            "ask4_size": [10.0, 10.0, 10.0],
+            "bid4_price": [96.0, 97.0, 98.0],
+            "bid4_size": [10.0, 10.0, 10.0],
+            "ask5_price": [105.0, 106.0, 107.0],
+            "ask5_size": [10.0, 10.0, 10.0],
+            "bid5_price": [95.0, 96.0, 97.0],
+            "bid5_size": [10.0, 10.0, 10.0],
+            "total_trade_volume": [100.0, 101.0, 102.0],
+            "turnover": [1000.0, 1010.0, 1020.0],
+            "open_interest": [50.0, 51.0, 52.0],
+            "factor_a": [0.1, 0.2, 0.3],
+            "unused_numeric_feature": [9.0, 9.0, 9.0],
+        }
+    )
+    trainer = Phase1Trainer(
+        _config(factor_list_file=str(factor_file), factor_profile="short")
+    )
+    schema = trainer._build_schema_validator().validate(frame)
+    assert schema.feature_columns[-1] == "factor_a"
+    assert "unused_numeric_feature" not in schema.feature_columns
+    assert schema.feature_source["mode"] == "fixed_plus_factor_list"
+
+
+def test_phase1_trainer_rejects_missing_factor_column(tmp_path):
+    import polars as pl
+
+    factor_file = tmp_path / "short.txt"
+    factor_file.write_text("factor_a\n", encoding="utf-8")
+    frame = pl.DataFrame({"timestamp": [0, 1], "close": [100.0, 101.0]})
+    trainer = Phase1Trainer(_config(factor_list_file=str(factor_file)))
+    with pytest.raises(ValueError, match="ask1_price"):
+        trainer._build_schema_validator().validate(frame)
+
+
+def test_train_phase1_cli_sets_dp_max_position_10():
+    from scripts.train_phase1 import build_config, build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--pair",
+            "AL",
+            "--train-batch-id",
+            "batch",
+            "--train-file",
+            "data/AL/df_train.feather",
+            "--val-file",
+            "data/AL/df_val.feather",
+            "--test-file",
+            "data/AL/df_test.feather",
+            "--factor-profile",
+            "short",
+            "--factor-list-file",
+            "src/factors/AL/short.txt",
+            "--max-position",
+            "10",
+        ]
+    )
+    config = build_config(args)
+    assert config.factor_profile == "short"
+    assert config.factor_list_file == "src/factors/AL/short.txt"
+    assert config.dp.max_position == 10

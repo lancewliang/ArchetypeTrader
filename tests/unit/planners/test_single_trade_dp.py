@@ -26,6 +26,21 @@ def _make_planner(commission: float = 0.0):
     return SingleTradeDPPlanner(cost_model=cm, reward_alignment=align, max_position=1)
 
 
+def test_single_trade_dp_respects_max_position_10():
+    cm = LobDepthCostModel(commission_rate=0.0)
+    align = RewardAlignment("paper_formula")
+    planner = SingleTradeDPPlanner(
+        cost_model=cm,
+        reward_alignment=align,
+        max_position=10,
+    )
+    prices = [100.0, 101.0, 102.0]
+    books = [_book(100.0, spread_bps=0.0, depth=100.0), _book(101.0, spread_bps=0.0, depth=100.0)]
+    res = planner.plan(DPInputs(prices=prices, execution_books=books, horizon=2))
+    assert res.actions == [2, 2]
+    assert res.total_return == pytest.approx(20.0)
+
+
 def test_monotonic_uptrend_chooses_flat_to_long():
     """单调上涨 → flat→long，至多 1 切换。"""
     planner = _make_planner(commission=0.0)

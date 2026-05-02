@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from src.utils.feather_io import atomic_write_json
 
@@ -46,6 +46,7 @@ class InputSchema:
     excluded_columns: List[str] = field(default_factory=list)
     orderbook_columns: List[str] = field(default_factory=list)
     num_rows: int = 0
+    feature_source: Optional[Dict[str, Any]] = None
 
     def assert_close_not_in_features(self) -> None:
         """``close`` 不得进入 ``feature_columns``；该规则是 sign-off 阻塞项。"""
@@ -78,10 +79,14 @@ class InputSchemaValidator:
         timestamp_column: str = "timestamp",
         price_column: str = "close",
         excluded_columns: Optional[List[str]] = None,
+        feature_columns: Optional[List[str]] = None,
+        feature_source: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.timestamp_column = timestamp_column
         self.price_column = price_column
         self.excluded_columns = list(excluded_columns or DEFAULT_EXCLUDED_COLUMNS)
+        self.explicit_feature_columns = list(feature_columns) if feature_columns is not None else None
+        self.feature_source = feature_source
 
     def validate(self, frame) -> InputSchema:
         """对 polars DataFrame 做 schema 校验，返回 ``InputSchema``。
@@ -133,6 +138,20 @@ class InputSchemaValidator:
                     f"{self.timestamp_column} 必须单调非降，行 {i} 出现回退"
                 )
 
+        if self.explicit_feature_columns is not None:
+            feature_columns, orderbook_columns = self._validate_explicit_features(frame)
+            schema = InputSchema(
+                timestamp_column=self.timestamp_column,
+                price_column=self.price_column,
+                feature_columns=feature_columns,
+                excluded_columns=list(self.excluded_columns),
+                orderbook_columns=orderbook_columns,
+                num_rows=frame.height,
+                feature_source=self.feature_source,
+            )
+            schema.assert_close_not_in_features()
+            return schema
+
         # 拆 feature / orderbook / excluded
         excluded_set = set(self.excluded_columns)
         orderbook_columns: List[str] = []
@@ -163,11 +182,59 @@ class InputSchemaValidator:
             excluded_columns=list(self.excluded_columns),
             orderbook_columns=orderbook_columns,
             num_rows=frame.height,
+            feature_source=self.feature_source,
         )
         # close 不可进入 features 是设计硬约束。
         schema.assert_close_not_in_features()
         return schema
 
+    def validate_against_schema(self, frame, schema: InputSchema) -> InputSchema:
+        """使用 train 生成的 schema 校验 val/test。
+
+        不重新推导 feature list，确保三个 split 的模型输入列完全一致。
+        """
+        validator = InputSchemaValidator(
+            timestamp_column=schema.timestamp_column,
+            price_column=schema.price_column,
+            excluded_columns=schema.excluded_columns,
+            feature_columns=schema.feature_columns,
+            feature_source=schema.feature_source,
+        )
+        checked = validator.validate(frame)
+        if checked.feature_columns != schema.feature_columns:
+            raise ValueError("split feature_columns 与 train schema 不一致")
+        return checked
+
     def write_schema_json(self, schema: InputSchema, path: Path) -> Path:
         """原子写 ``input_schema.json``。"""
         return atomic_write_json(schema.to_dict(), path)
+
+    def _validate_explicit_features(self, frame) -> tuple[List[str], List[str]]:
+        """校验显式配置的 feature columns。"""
+
+        columns = set(frame.columns)
+        feature_columns: List[str] = []
+        orderbook_columns: List[str] = []
+        seen = set()
+        for col in self.explicit_feature_columns or []:
+            if col == self.price_column:
+                raise ValueError(
+                    f"{self.price_column} 不能进入 feature_columns；schema 校验失败"
+                )
+            if col in seen:
+                continue
+            if col not in columns:
+                raise ValueError(f"配置的特征列 {col} 在 frame 中缺失")
+            series = frame[col]
+            if not series.dtype.is_numeric():
+                raise ValueError(f"配置的特征列 {col} 不是数值类型")
+            if series.null_count() > 0:
+                raise ValueError(f"特征列 {col} 含 null 值")
+            arr = series.to_numpy()
+            if not all(math.isfinite(float(v)) for v in arr):
+                raise ValueError(f"特征列 {col} 含 NaN 或 Inf")
+            feature_columns.append(col)
+            if col in KNOWN_ORDERBOOK_COLUMNS:
+                orderbook_columns.append(col)
+            seen.add(col)
+        return feature_columns, orderbook_columns

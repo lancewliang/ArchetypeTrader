@@ -324,6 +324,8 @@ class Phase1Config:
     val_file: str
     test_file: str
     artifact_root: str = "artifacts"
+    factor_profile: str = "short"
+    factor_list_file: Optional[str] = None
     horizon: int = 72
     num_demos: int = 30000
     sampling_strategy: Literal[

@@ -78,3 +78,48 @@ def test_orderbook_columns_recognized():
 def test_assert_close_not_in_features_helper():
     schema = InputSchemaValidator().validate(_make_frame())
     schema.assert_close_not_in_features()
+
+
+def test_schema_uses_explicit_feature_columns_only():
+    frame = _make_frame(extra={"factor_a": [1.0, 2.0, 3.0], "unused_numeric_feature": [9.0, 9.0, 9.0]})
+    schema = InputSchemaValidator(feature_columns=["factor_a"]).validate(frame)
+    assert schema.feature_columns == ["factor_a"]
+    assert "unused_numeric_feature" not in schema.feature_columns
+    assert "return_1m" not in schema.feature_columns
+
+
+def test_schema_requires_all_configured_features():
+    with pytest.raises(ValueError, match="missing_feature"):
+        InputSchemaValidator(feature_columns=["missing_feature"]).validate(_make_frame())
+
+
+def test_schema_rejects_non_numeric_configured_feature():
+    frame = _make_frame(extra={"factor_a": ["x", "y", "z"]})
+    with pytest.raises(ValueError, match="不是数值类型"):
+        InputSchemaValidator(feature_columns=["factor_a"]).validate(frame)
+
+
+def test_schema_validate_against_schema_rejects_missing_val_feature():
+    train = _make_frame(extra={"factor_a": [1.0, 2.0, 3.0]})
+    val = _make_frame()
+    validator = InputSchemaValidator(feature_columns=["factor_a"])
+    schema = validator.validate(train)
+    with pytest.raises(ValueError, match="factor_a"):
+        validator.validate_against_schema(val, schema)
+
+
+def test_schema_feature_source_written_to_json(tmp_path):
+    feature_source = {
+        "mode": "fixed_plus_factor_list",
+        "pair": "AL",
+        "profile": "short",
+    }
+    schema = InputSchemaValidator(
+        feature_columns=["return_1m"],
+        feature_source=feature_source,
+    ).validate(_make_frame())
+    path = InputSchemaValidator().write_schema_json(schema, tmp_path / "schema.json")
+    import json
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["feature_source"] == feature_source

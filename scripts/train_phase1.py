@@ -44,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--val-file", required=True)
     p.add_argument("--test-file", required=True)
     p.add_argument("--artifact-root", default="artifacts")
+    p.add_argument("--factor-profile", default="short")
+    p.add_argument("--factor-list-file", default=None)
     # horizon / 采样
     p.add_argument("--horizon", type=int, default=72)
     p.add_argument("--num-demos", type=int, default=30000)
@@ -70,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-archetypes", type=int, default=10)
     p.add_argument("--code-dim", type=int, default=16)
     p.add_argument("--hidden-dim", type=int, default=128)
+    p.add_argument("--max-position", type=int, default=1)
     # 训练
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch-size", type=int, default=256)
@@ -97,7 +100,7 @@ def build_config(args: argparse.Namespace) -> Phase1Config:
       trainer 与最终报告会在 ``sampling_leakage_diagnostics.json`` 中复述。
     """
     cost = CostConfig(reward_alignment=args.reward_alignment)
-    dp = DPConfig(horizon=args.horizon, cost_config=cost)
+    dp = DPConfig(horizon=args.horizon, cost_config=cost, max_position=args.max_position)
     encoder_input = EncoderInputConfig()
     codebook = CodebookConfig(health=CodebookHealthConfig())
     model = ModelConfig(
@@ -126,6 +129,8 @@ def build_config(args: argparse.Namespace) -> Phase1Config:
         val_file=args.val_file,
         test_file=args.test_file,
         artifact_root=args.artifact_root,
+        factor_profile=args.factor_profile,
+        factor_list_file=args.factor_list_file,
         horizon=args.horizon,
         num_demos=args.num_demos,
         sampling_strategy=args.sampling_strategy,

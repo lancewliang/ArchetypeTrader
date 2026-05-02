@@ -33,6 +33,18 @@ def test_action_to_position_mapping():
     assert env._action_to_position(2) == 1
 
 
+def test_trading_env_action_mapping_respects_max_position_10():
+    cm = LobDepthCostModel(commission_rate=0.0002)
+    env = TradingEnv(
+        cost_model=cm,
+        reward_alignment=RewardAlignment("paper_formula"),
+        max_position=10,
+    )
+    assert env._action_to_position(0) == -10
+    assert env._action_to_position(1) == 0
+    assert env._action_to_position(2) == 10
+
+
 def test_invalid_action_raises():
     env = _make_env()
     with pytest.raises(ValueError):

@@ -58,6 +58,9 @@ def _generate_split(rows: int, base_price: float, seed: int):
     columns["return_1m"] = [0.0] + [
         (closes[i] - closes[i - 1]) / max(closes[i - 1], 1e-9) for i in range(1, rows)
     ]
+    columns["total_trade_volume"] = [1000.0 + (i % 17) for i in range(rows)]
+    columns["turnover"] = [columns["total_trade_volume"][i] * closes[i] for i in range(rows)]
+    columns["open_interest"] = [5000.0 + (i % 23) for i in range(rows)]
     return pl.DataFrame(columns)
 
 
