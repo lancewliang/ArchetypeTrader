@@ -214,6 +214,25 @@ def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):
     assert payload["hindsight_vs_prospective_metric_delta"]["val_return_capture_ratio"]["exceeded"]
 
 
+def test_sampling_leakage_diagnostics_missing_prospective_report_no_throw(tmp_path):
+    config = _config(
+        artifact_root=str(tmp_path),
+        stratification=StratificationConfig(
+            mode="hindsight_horizon",
+            diagnostic_pair_batch_id="nonexistent_batch",
+            hindsight_vs_prospective_max_delta={
+                "val_return_capture_ratio": 0.20,
+            },
+        ),
+    )
+    trainer = Phase1Trainer(config)
+    payload = trainer._build_sampling_leakage_diagnostics(
+        {"val_return_capture_ratio": 0.50}
+    )
+    assert payload["hindsight_bias_warning"] == "missing_prospective_report"
+    assert payload["signoff_blocked_reason"] == "missing_prospective_report"
+
+
 def _minimal_manifest(tmp_path, *, pair: str = "TEST", create_artifacts: bool = True):
     manifest_dir = tmp_path / "processed"
     manifest_dir.mkdir(parents=True)

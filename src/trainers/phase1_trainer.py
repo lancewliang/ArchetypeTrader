@@ -437,13 +437,23 @@ class Phase1Trainer:
             best_epoch=history.best_epoch if history.best_epoch is not None else 0,
             no_trade_ratio=no_trade_ratio,
         )
+        report_summary["local_smoke_relaxed_guardrails"] = (
+            self.config.local_smoke_relaxed_guardrails
+        )
+        report_summary["training_config_hash"] = training_hash
+        writer.write_final_report(report_summary)
+        self._logger.info(
+            "phase1_report_written 说明=Phase I 最终报告已写入 path=%s best_epoch=%s no_trade_ratio=%.6f training_config_hash=%s",
+            report_paths.phase1_report,
+            report_summary.get("best_epoch"),
+            float(report_summary.get("no_trade_ratio", 0.0)),
+            training_hash,
+        )
+
         leakage_payload = self._build_sampling_leakage_diagnostics(report_summary)
         report_summary["hindsight_bias_warning"] = leakage_payload["hindsight_bias_warning"]
         report_summary["hindsight_vs_prospective_metric_delta"] = leakage_payload.get(
             "hindsight_vs_prospective_metric_delta", {}
-        )
-        report_summary["local_smoke_relaxed_guardrails"] = (
-            self.config.local_smoke_relaxed_guardrails
         )
         report_summary["best_checkpoint_signoff"] = (
             leakage_payload["hindsight_bias_warning"]
@@ -454,17 +464,13 @@ class Phase1Trainer:
         if self.config.local_smoke_relaxed_guardrails and not signoff_blocked_reason:
             signoff_blocked_reason = "local_smoke_relaxed_guardrails"
         report_summary["signoff_blocked_reason"] = signoff_blocked_reason
-        report_summary["training_config_hash"] = training_hash
         writer.write_final_report(report_summary)
         self._logger.info(
-            "phase1_report_written 说明=Phase I 最终报告已写入 path=%s best_epoch=%s no_trade_ratio=%.6f signoff=%s blocked_reason=%s training_config_hash=%s",
-            report_paths.phase1_report,
-            report_summary.get("best_epoch"),
-            float(report_summary.get("no_trade_ratio", 0.0)),
+            "phase1_report_updated 说明=Phase I 报告已更新 leakage 诊断 signoff=%s blocked_reason=%s",
             report_summary.get("best_checkpoint_signoff"),
             report_summary.get("signoff_blocked_reason"),
-            training_hash,
         )
+
         if self._best_epoch_diagnostics:
             diagnostics_payload = dict(self._best_epoch_diagnostics)
             diagnostics_payload["sampling_leakage"] = leakage_payload
@@ -489,6 +495,13 @@ class Phase1Trainer:
             "phase1_complete 说明=Phase I 流程完成 artifacts_dir=%s",
             artifacts_dir,
         )
+
+        if signoff_blocked_reason and not self.config.allow_missing_prospective_diagnostic:
+            raise Phase1FatalError(
+                f"Phase I 训练完成但 sign-off 被阻塞: {signoff_blocked_reason}; "
+                "report 已写入，但主实验不可 sign-off。"
+            )
+
         return TrainerArtifacts(
             artifacts_dir=artifacts_dir,
             phase1_config_yaml=config_yaml,
@@ -1349,14 +1362,9 @@ class Phase1Trainer:
         )
         payload["prospective_report_path"] = str(prospective_report)
         if not prospective_report.exists():
-            if self.config.allow_missing_prospective_diagnostic:
-                payload["hindsight_bias_warning"] = "missing_acknowledged"
-                payload["signoff_blocked_reason"] = "missing_prospective_report"
-                return payload
-            raise Phase1FatalError(
-                f"缺少 prospective 对照报告: {prospective_report}; "
-                "主实验不可 sign-off。"
-            )
+            payload["hindsight_bias_warning"] = "missing_prospective_report"
+            payload["signoff_blocked_reason"] = "missing_prospective_report"
+            return payload
 
         prospective = read_json(prospective_report)
         exceeded: List[str] = []
