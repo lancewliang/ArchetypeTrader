@@ -21,6 +21,10 @@ from typing import Any, Dict, List, Optional
 import polars as pl
 
 from src.config.phase2_config import Phase2Config
+from src.data.feature_provenance import (
+    evaluate_feature_provenance,
+    file_sha256_short,
+)
 from src.trading.reward_alignment import RewardAlignment
 from src.utils.feather_io import read_json, write_ipc
 
@@ -43,6 +47,9 @@ class Phase1ArtifactValidationResult:
     phase1_report: Optional[Dict[str, Any]] = None
     resolved_reward_alignment: str = "paper_formula"
     cost_config: Dict[str, Any] = field(default_factory=dict)
+    no_leakage_signoff: bool = True
+    no_leakage_signoff_blockers: List[str] = field(default_factory=list)
+    feature_provenance_hash: str = ""
 
 
 class Phase1ArtifactValidator:
@@ -69,12 +76,24 @@ class Phase1ArtifactValidator:
         phase1_dir = self.config.phase1_dir()
         errors: List[str] = []
         warnings: List[str] = []
+        no_leakage_signoff = True
+        no_leakage_signoff_blockers: List[str] = []
+        feature_provenance_hash = ""
 
         # 1. 文件齐全性
         required = self.config.phase1_artifacts.required_files
         for fname in required:
             fpath = phase1_dir / fname
             if not fpath.exists():
+                if fname == "feature_provenance.json":
+                    no_leakage_signoff = False
+                    no_leakage_signoff_blockers.append(
+                        f"缺少 feature_provenance.json: {fpath}"
+                    )
+                    warnings.append(
+                        f"Phase I 缺少 feature_provenance.json，本次 Phase II 仅允许实验运行，no_leakage_signoff=false: {fpath}"
+                    )
+                    continue
                 errors.append(f"缺少必要文件: {fpath}")
 
         if errors:
@@ -92,6 +111,30 @@ class Phase1ArtifactValidator:
         phase1_report: Dict[str, Any] = {}
         if report_path.exists():
             phase1_report = read_json(report_path)
+
+        # 2b. feature provenance no-leakage sign-off
+        provenance_path = phase1_dir / "feature_provenance.json"
+        if provenance_path.exists():
+            input_schema = read_json(phase1_dir / "input_schema.json")
+            feature_columns = (
+                input_schema.get("feature_columns", [])
+                if isinstance(input_schema, dict)
+                else []
+            )
+            provenance = read_json(provenance_path)
+            provenance_check = evaluate_feature_provenance(
+                provenance,
+                feature_columns=feature_columns,
+            )
+            feature_provenance_hash = file_sha256_short(provenance_path)
+            if not provenance_check.no_leakage_signoff:
+                no_leakage_signoff = False
+                no_leakage_signoff_blockers.extend(provenance_check.blockers)
+                warnings.append(
+                    "feature_provenance no-leakage signoff failed: "
+                    + "; ".join(provenance_check.blockers)
+                )
+            warnings.extend(provenance_check.warnings)
 
         # 3. 读取 phase1_config.yaml
         config_path = phase1_dir / "phase1_config.yaml"
@@ -152,6 +195,9 @@ class Phase1ArtifactValidator:
             phase1_report=phase1_report,
             resolved_reward_alignment=resolved_reward_alignment,
             cost_config=cost_cfg,
+            no_leakage_signoff=no_leakage_signoff,
+            no_leakage_signoff_blockers=no_leakage_signoff_blockers,
+            feature_provenance_hash=feature_provenance_hash,
         )
 
 

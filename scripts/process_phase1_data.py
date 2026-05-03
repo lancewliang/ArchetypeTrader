@@ -39,6 +39,7 @@ from src.data.feature_registry import (  # noqa: E402
     default_factor_list_path,
     load_feature_selection,
 )
+from src.data.feature_provenance import write_feature_provenance_json  # noqa: E402
 from src.data.horizon_builder import HorizonBuilder  # noqa: E402
 from src.data.market_reader import MarketFileReader  # noqa: E402
 from src.data.phase1_processed_store import (  # noqa: E402
@@ -323,6 +324,23 @@ class Phase1DataProcessor:
         self._logger.info("哈希计算完成 data_process_hash=%s dp_teacher_hash=%s",
                           data_process_hash, dp_teacher_hash)
 
+        feature_provenance_path = write_feature_provenance_json(
+            schema,
+            artifacts_dir / "feature_provenance.json",
+            metadata={
+                "created_by": "scripts/process_phase1_data.py",
+                "pair": self.config.pair,
+                "data_batch_id": self.config.data_batch_id,
+                "schema_hash": schema_hash,
+                "data_process_hash": data_process_hash,
+            },
+        )
+        self._logger.info(
+            "feature_provenance_written path=%s features=%d",
+            feature_provenance_path,
+            len(schema.feature_columns),
+        )
+
         self._logger.info("正在保存产物文件")
         store = Phase1ProcessedStore(artifacts_dir)
         split_records = {
@@ -378,6 +396,9 @@ class Phase1DataProcessor:
             },
             "input_file_audit": input_file_audit,
             "input_schema_path": _relative_to_artifact(schema_path, artifacts_dir),
+            "feature_provenance_path": _relative_to_artifact(
+                feature_provenance_path, artifacts_dir
+            ),
             "schema_hash": schema_hash,
             "data_process_hash": data_process_hash,
             "dp_teacher_hash": dp_teacher_hash,

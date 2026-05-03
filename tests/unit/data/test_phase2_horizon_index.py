@@ -151,6 +151,17 @@ class TestPhase2HorizonIndexer:
         with pytest.raises(Phase1ArtifactValidationError):
             Phase1ArtifactValidator(config).validate()
 
+    def test_missing_feature_provenance_warns_without_blocking_experiment(self, tmp_path):
+        """缺少 provenance 时允许实验运行，但 no-leakage signoff=false。"""
+        config = _make_config(tmp_path, horizon=8)
+        (config.phase1_dir() / "feature_provenance.json").unlink()
+
+        result = Phase1ArtifactValidator(config).validate()
+
+        assert result.valid is True
+        assert result.no_leakage_signoff is False
+        assert result.no_leakage_signoff_blockers
+
     def test_gap_bars_uses_bar_units_when_gap_check_disabled(self, tmp_path):
         """gap_bars 记录 bar 数，不把分钟阈值和 bar 阈值混用。"""
         config = _make_config(tmp_path, horizon=4, exclude_gap=False)

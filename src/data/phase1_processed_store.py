@@ -72,6 +72,7 @@ class Phase1DataProcessManifest:
     feature_source: Dict[str, Any]
     splits: Dict[str, Phase1SplitArtifact]
     manifest_path: Optional[Path] = None
+    feature_provenance_path: str = ""
     input_file_audit: Optional[Dict[str, Any]] = None
 
     @classmethod
@@ -97,6 +98,7 @@ class Phase1DataProcessManifest:
             feature_source=dict(payload.get("feature_source", {})),
             splits=splits,
             manifest_path=manifest_path,
+            feature_provenance_path=str(payload.get("feature_provenance_path", "")),
             input_file_audit=payload.get("input_file_audit"),
         )
 
@@ -115,6 +117,7 @@ class Phase1DataProcessManifest:
             "created_at": self.created_at,
             "input_files": self.input_files,
             "input_schema_path": self.input_schema_path,
+            "feature_provenance_path": self.feature_provenance_path,
             "schema_hash": self.schema_hash,
             "data_process_hash": self.data_process_hash,
             "dp_teacher_hash": self.dp_teacher_hash,

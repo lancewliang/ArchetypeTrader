@@ -1,4 +1,4 @@
-"""``scripts.phase1_data_processor`` tests."""
+"""``scripts.process_phase1_data`` tests."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.phase1_data_processor import (
+from scripts.process_phase1_data import (
     Phase1DataProcessor,
     assert_prospective_diagnostic,
     build_data_process_config,
@@ -71,11 +71,17 @@ def test_phase1_data_processor_writes_manifest_and_split_files(tmp_path):
 def test_phase1_data_processor_records_schema_and_hashes(tmp_path):
     config = build_data_process_config(_args(tmp_path))
 
-    manifest = json.loads(Phase1DataProcessor(config).run().read_text(encoding="utf-8"))
+    manifest_path = Phase1DataProcessor(config).run()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["schema_hash"]
     assert manifest["data_process_hash"]
     assert manifest["dp_teacher_hash"]
+    assert manifest["feature_provenance_path"] == "feature_provenance.json"
+    provenance_path = manifest_path.parent / manifest["feature_provenance_path"]
+    assert provenance_path.exists()
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    assert set(provenance["feature_columns"]) == set(manifest["feature_source"]["feature_columns"])
     assert manifest["feature_source"]["mode"] == "fixed_plus_factor_list"
 
 

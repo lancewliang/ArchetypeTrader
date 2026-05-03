@@ -700,6 +700,9 @@ class Phase2Trainer:
             "config_hash": self.config.config_hash(),
             "phase1_hash": p1_report.get("config_hash", ""),
             "phase1_batch_id": self.config.phase1_batch_id,
+            "feature_provenance_hash": val_result.feature_provenance_hash,
+            "no_leakage_signoff": val_result.no_leakage_signoff,
+            "no_leakage_signoff_blockers": val_result.no_leakage_signoff_blockers,
             "phase2_batch_id": self.config.phase2_batch_id,
             "selection_metric": self.config.selection_policy.selection_metric,
             "metric_weights": dict(self.config.selection_policy.metric_weights),
@@ -792,7 +795,7 @@ class Phase2Trainer:
                     else self.config.ppo.entropy_coef
                 ),
             },
-            "guardrails_pass": rolling_guardrail_pass,
+            "guardrails_pass": rolling_guardrail_pass and val_result.no_leakage_signoff,
             "val_guardrails_pass": rolling_guardrail_pass,
             "test_guardrails_pass_report_only": True,
             "dead_code_mask": dead_code_mask_list,

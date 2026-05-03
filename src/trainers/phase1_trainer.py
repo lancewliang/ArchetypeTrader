@@ -17,6 +17,7 @@ from src.config.phase1_config import (
 )
 from src.data.dataset import Phase1DemoDataset, collate_phase1
 from src.data.demo_store import HorizonLabel, Phase1DemoStore
+from src.data.feature_provenance import file_sha256_short
 from src.data.phase1_processed_store import Phase1ProcessedStore
 from src.data.state_normalizer import StateNormalizer
 from src.evaluation.phase1_evaluator import Phase1Evaluator
@@ -56,6 +57,7 @@ class TrainerArtifacts:
     artifacts_dir: Path
     phase1_config_yaml: Path
     input_schema_json: Path
+    feature_provenance_json: Path
     window_index_train: Path
     demos_train: Path
     horizon_labels_train: Path
@@ -103,6 +105,7 @@ class Phase1Trainer:
             "schema_hash": "",
             "data_process_hash": "",
             "dp_teacher_hash": "",
+            "feature_provenance_hash": "",
         }
         self._logger = logging.getLogger("archetype.phase1")
         self._device = self._resolve_device()
@@ -236,6 +239,10 @@ class Phase1Trainer:
         schema_path = atomic_write_json(
             schema.to_dict(), artifacts_dir / "input_schema.json"
         )
+        feature_provenance_path = self._resolve_feature_provenance(
+            manifest=manifest,
+            artifacts_dir=artifacts_dir,
+        )
         train_horizons = processed_store.load_records(manifest, "train")
         val_horizons = processed_store.load_records(manifest, "val")
         test_horizons = processed_store.load_records(manifest, "test")
@@ -250,6 +257,7 @@ class Phase1Trainer:
             "schema_hash": manifest.schema_hash,
             "data_process_hash": manifest.data_process_hash,
             "dp_teacher_hash": manifest.dp_teacher_hash,
+            "feature_provenance_hash": file_sha256_short(feature_provenance_path),
         }
         self._logger.info(
             "phase1_processed_data_loaded 说明=已从 manifest 加载固化训练数据 train=%d val=%d test=%d schema_hash=%s data_process_hash=%s dp_teacher_hash=%s",
@@ -506,6 +514,7 @@ class Phase1Trainer:
             artifacts_dir=artifacts_dir,
             phase1_config_yaml=config_yaml,
             input_schema_json=schema_path,
+            feature_provenance_json=feature_provenance_path,
             window_index_train=train_window_path,
             demos_train=demos_path,
             horizon_labels_train=labels_paths["train"],
@@ -525,6 +534,33 @@ class Phase1Trainer:
         )
 
     # ---------- 子流程 ----------
+
+    def _resolve_feature_provenance(
+        self,
+        *,
+        manifest,
+        artifacts_dir: Path,
+    ) -> Path:
+        """Resolve the feature provenance written by ``process_phase1_data.py``."""
+
+        candidates: List[Path] = []
+        source_ref = getattr(manifest, "feature_provenance_path", "")
+        if source_ref:
+            candidates.append(manifest.resolve(source_ref))
+        candidates.append(artifacts_dir / "feature_provenance.json")
+
+        for path in candidates:
+            if path.exists():
+                self._logger.info(
+                    "phase1_feature_provenance_resolved 说明=使用数据预处理阶段产物 path=%s",
+                    path,
+                )
+                return path
+
+        raise Phase1FatalError(
+            "Phase I 数据预处理产物缺少 feature_provenance.json；"
+            "请重新运行 scripts/process_phase1_data.py 生成完整 manifest。"
+        )
 
     def _build_training_components(self, feature_dim, val_horizons, reward_normalizer=None):
         """实例化 model / loss / optimizer / evaluator。
@@ -1303,6 +1339,9 @@ class Phase1Trainer:
         )
         summary["dp_teacher_hash"] = self._processed_data_metadata.get(
             "dp_teacher_hash", ""
+        )
+        summary["feature_provenance_hash"] = self._processed_data_metadata.get(
+            "feature_provenance_hash", ""
         )
         summary["reward_normalization_resolved"] = norm_dict.get("method", "")
         summary["reward_norm_clip_ratio"] = norm_dict.get("clip_ratio", 0.0)

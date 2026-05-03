@@ -46,7 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rollout-length", type=int, default=128)
     p.add_argument("--update-epochs", type=int, default=4)
     p.add_argument("--minibatch-size", type=int, default=256)
-    p.add_argument("--max-position", type=int, default=1)
+    p.add_argument(
+        "--max-position",
+        type=int,
+        default=None,
+        help="最大持仓；默认从 Phase I phase1_config.yaml 继承，缺失时回退为 1",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda")
     # KL/demo 消融
@@ -70,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def build_config(args: argparse.Namespace) -> Phase2Config:
     """把 CLI args 翻译为 Phase2Config。"""
+    max_position = (
+        args.max_position
+        if args.max_position is not None
+        else _phase1_max_position_or_default(args)
+    )
     ppo_kwargs: dict = {
         "update_epochs": args.update_epochs,
         "minibatch_size": args.minibatch_size,
@@ -92,7 +102,7 @@ def build_config(args: argparse.Namespace) -> Phase2Config:
         total_timesteps=args.total_timesteps,
         num_envs=args.num_envs,
         rollout_length=args.rollout_length,
-        max_position=args.max_position,
+        max_position=max_position,
         seed=args.seed,
         device=args.device,
         allow_phase1_hindsight_warning=args.allow_phase1_hindsight_warning,
@@ -108,6 +118,31 @@ def build_config(args: argparse.Namespace) -> Phase2Config:
     if config.paper_strict_reproduction:
         config = config.apply_paper_strict_overrides()
     return config
+
+
+def _phase1_max_position_or_default(args: argparse.Namespace) -> int:
+    """Read Phase I max_position so Phase II defaults to the frozen contract."""
+    config_path = (
+        Path(args.artifact_root)
+        / args.pair
+        / args.phase1_batch_id
+        / "phase1"
+        / "phase1_config.yaml"
+    )
+    if not config_path.exists():
+        return 1
+    try:
+        import yaml
+
+        with config_path.open("r", encoding="utf-8") as f:
+            phase1_config = yaml.safe_load(f) or {}
+        dp_config = phase1_config.get("dp", {})
+        max_position = dp_config.get("max_position")
+        if max_position is None:
+            return 1
+        return int(max_position)
+    except Exception:
+        return 1
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
