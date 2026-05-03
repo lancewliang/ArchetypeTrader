@@ -1014,19 +1014,19 @@ class Phase1Trainer:
                     epoch_batch_diagnostic["z_e_norm"],
                     epoch_batch_diagnostic["z_q_norm"],
                 )
-            self._logger.info(
-                "phase1_epoch_result 说明=单个 epoch 训练完成 epoch=%d evaluated=%s full_validation=%s decision=%s score=%.6f code_usage_ratio=%s val_return_capture_ratio=%s val_sharpe_ratio=%s restarts=%d reasons=%s",
-                epoch,
-                should_evaluate,
-                full_val if should_evaluate else False,
-                verdict.decision,
-                verdict.composite_score,
-                metrics_for_select.get("code_usage_ratio"),
-                metrics_for_select.get("val_return_capture_ratio"),
-                metrics_for_select.get("val_sharpe_ratio"),
-                len(restarted_code_ids),
-                ",".join(verdict.reasons),
-            )
+            if should_evaluate:
+                self._logger.info(
+                    "phase1_epoch_result 说明=单个 epoch 训练完成 epoch=%d full_validation=%s decision=%s score=%.6f code_usage_ratio=%s val_return_capture_ratio=%s val_sharpe_ratio=%s restarts=%d reasons=%s",
+                    epoch,
+                    full_val,
+                    verdict.decision,
+                    verdict.composite_score,
+                    metrics_for_select.get("code_usage_ratio"),
+                    metrics_for_select.get("val_return_capture_ratio"),
+                    metrics_for_select.get("val_sharpe_ratio"),
+                    len(restarted_code_ids),
+                    ",".join(verdict.reasons),
+                )
         return history
 
     def _maybe_restart_dead_codes(self, *, model, train_dataset, epoch: int) -> List[int]:
@@ -1092,20 +1092,40 @@ class Phase1Trainer:
         except ImportError:  # pragma: no cover
             raise RuntimeError("export_horizon_labels 需要 torch")
         out: Dict[str, Path] = {}
+        export_batch_size = max(1, min(int(self.config.training.batch_size), 1024))
+        was_training = model.training
+        model.eval()
         for split, recs in horizons_by_split.items():
             labels: List[HorizonLabel] = []
             if not recs:
                 out[split] = store.save_labels(labels, split)
                 continue
-            states = torch.tensor([r.states for r in recs], dtype=torch.float32).to(self._device)
-            actions = torch.tensor([r.actions for r in recs], dtype=torch.long).to(self._device)
-            if normalizer is not None:
-                normalized = [list(normalizer.transform(r.rewards)) for r in recs]
-            else:
-                normalized = [list(r.rewards) for r in recs]
-            rewards = torch.tensor(normalized, dtype=torch.float32).to(self._device)
-            code_ids, _ = model.encode(states, actions, rewards)
-            for rec, code_id in zip(recs, code_ids.tolist()):
+            code_id_values: List[int] = []
+            with torch.no_grad():
+                for start in range(0, len(recs), export_batch_size):
+                    chunk = recs[start : start + export_batch_size]
+                    states = torch.tensor(
+                        [r.states for r in chunk],
+                        dtype=torch.float32,
+                        device=self._device,
+                    )
+                    actions = torch.tensor(
+                        [r.actions for r in chunk],
+                        dtype=torch.long,
+                        device=self._device,
+                    )
+                    if normalizer is not None:
+                        normalized = [list(normalizer.transform(r.rewards)) for r in chunk]
+                    else:
+                        normalized = [list(r.rewards) for r in chunk]
+                    rewards = torch.tensor(
+                        normalized,
+                        dtype=torch.float32,
+                        device=self._device,
+                    )
+                    code_ids, _ = model.encode(states, actions, rewards)
+                    code_id_values.extend(int(v) for v in code_ids.detach().cpu().tolist())
+            for rec, code_id in zip(recs, code_id_values):
                 # demo_return 必须使用原始 rewards（actual return），而不是 normalizer 后的值。
                 demo_return = sum(rec.rewards or [])
                 action_seq = list(rec.actions or [])
@@ -1154,6 +1174,8 @@ class Phase1Trainer:
                     )
                 )
             out[split] = store.save_labels(labels, split)
+        if was_training:
+            model.train()
         return out
 
     def _export_phase2_artifacts(self, state: Dict[str, Any]):

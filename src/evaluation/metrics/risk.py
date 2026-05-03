@@ -72,6 +72,39 @@ def equity_curve_from_step_returns(step_returns: Sequence[float]) -> List[float]
     return curve
 
 
+def step_returns_from_pnl(step_pnl: Sequence[float], capital_base: float) -> List[float]:
+    """把原始 PnL 序列换算成相对收益率序列。"""
+    base = float(capital_base)
+    if base <= 0:
+        raise ValueError("capital_base must be positive")
+    return [float(v) / base for v in step_pnl]
+
+
+def equity_curve_from_step_pnl(step_pnl: Sequence[float], capital_base: float) -> List[float]:
+    """原始 PnL → 相对收益率 → 净值曲线。"""
+    return equity_curve_from_step_returns(step_returns_from_pnl(step_pnl, capital_base))
+
+
+def cumulative_pnl_curve(step_pnl: Sequence[float]) -> List[float]:
+    """原始 PnL 累计曲线，初值隐含为 0。"""
+    curve: List[float] = []
+    cum = 0.0
+    for v in step_pnl:
+        cum += float(v)
+        curve.append(cum)
+    return curve
+
+
+def max_drawdown_abs(cumulative_pnl: Sequence[float]) -> float:
+    """累计 PnL 曲线的绝对最大回撤。"""
+    peak = float("-inf")
+    mdd = 0.0
+    for v in cumulative_pnl:
+        peak = max(peak, float(v))
+        mdd = max(mdd, peak - float(v))
+    return mdd
+
+
 def max_drawdown(equity_curve: Sequence[float]) -> float:
     """``max((peak - trough) / peak)``，返回非负浮点数。
 

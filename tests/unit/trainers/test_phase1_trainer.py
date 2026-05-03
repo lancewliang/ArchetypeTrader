@@ -18,6 +18,8 @@ from src.config.phase1_config import (
     TrainingConfig,
     apply_paper_strict_overrides,
 )
+from src.data.demo_store import Phase1DemoStore
+from src.data.horizon_builder import HorizonRecord
 from src.trainers.phase1_trainer import Phase1FatalError, Phase1Trainer
 
 
@@ -111,6 +113,65 @@ def test_batch_amp_rejects_nonfinite_inputs():
             batch_idx=0,
             logged=False,
         )
+
+
+def test_export_horizon_labels_batches_encoder_calls(tmp_path):
+    torch = pytest.importorskip("torch")
+
+    class FakeModel:
+        def __init__(self):
+            self.training = True
+            self.batch_sizes = []
+
+        def eval(self):
+            self.training = False
+            return self
+
+        def train(self):
+            self.training = True
+            return self
+
+        def encode(self, states, actions, rewards):
+            self.batch_sizes.append(int(states.shape[0]))
+            ids = torch.arange(states.shape[0], device=states.device) % 3
+            return ids, None
+
+    def record(idx: int) -> HorizonRecord:
+        return HorizonRecord(
+            sample_id=f"r{idx}",
+            start_index=idx,
+            end_index=idx + 2,
+            pair="TEST",
+            split="train",
+            strata_label="up|low|mixed",
+            states=[[0.1, 0.2], [0.2, 0.3], [0.3, 0.4]],
+            prices=[100.0, 100.1, 100.2, 100.3],
+            execution_books=[],
+            actions=[1, 2, 2],
+            rewards=[0.0, 0.1, 0.2],
+        )
+
+    trainer = Phase1Trainer(
+        _config(
+            artifact_root=str(tmp_path),
+            training=TrainingConfig(device="cpu", batch_size=2),
+            horizon=3,
+        )
+    )
+    store = Phase1DemoStore(tmp_path / "phase1", "cfg", "schema")
+    model = FakeModel()
+    paths = trainer._export_horizon_labels(
+        model,
+        store=store,
+        horizons_by_split={"train": [record(i) for i in range(5)]},
+        normalizer=None,
+    )
+
+    labels = store.load_labels("train")
+    assert paths["train"].exists()
+    assert model.batch_sizes == [2, 2, 1]
+    assert model.training is True
+    assert [label.code_label for label in labels] == [0, 1, 0, 1, 0]
 
 
 def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):

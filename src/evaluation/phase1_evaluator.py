@@ -12,6 +12,7 @@ evaluate_epoch 流程:
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -36,10 +37,13 @@ from .metrics.behavior import (
 from .metrics.risk import (
     DEFAULT_ANNUALIZATION_FACTOR,
     calmar_ratio,
+    cumulative_pnl_curve,
     equity_curve_from_step_returns,
+    max_drawdown_abs,
     max_drawdown,
     sharpe_ratio,
     sortino_ratio,
+    step_returns_from_pnl,
 )
 from .phase1_metrics import (
     codebook_displacement,
@@ -86,6 +90,7 @@ class Phase1Evaluator:
         annualization_factor: int = DEFAULT_ANNUALIZATION_FACTOR,
         fast_probe_size: int = 2048,
         reward_normalizer=None,
+        risk_capital_base: Optional[float] = None,
     ) -> None:
         self.replay_evaluator = replay_evaluator
         self.annualization_factor = annualization_factor
@@ -94,6 +99,7 @@ class Phase1Evaluator:
         # 否则 val/test code_id 会和 train 不在同一表征空间，所有 capture / regret
         # 都会被误读。
         self.reward_normalizer = reward_normalizer
+        self.risk_capital_base = risk_capital_base
         self._previous_code_ids: Optional[List[int]] = None
         self._previous_codebook: Optional[List[List[float]]] = None
 
@@ -114,7 +120,7 @@ class Phase1Evaluator:
            single-trade consistency。
         3. VQ 指标: usage / perplexity / inter_code_distance / silhouette。
         4. teacher + student replay (per horizon) → 收益与 capture / regret。
-        5. 风险指标: Sharpe / Sortino / MDD / Calmar (以 student 拼接的 step returns)。
+        5. 风险指标: raw PnL 先按名义本金归一化，再算 Sharpe / MDD / Calmar。
         6. DP teacher quality: profitable_ratio / sharpe / 收益分布。
         7. per-archetype 汇总 + no_trade 集中度 + active_trade_code_count。
         8. 行为多样性: 固定一小批 states，分别用每个 code 解码，比较 logits 与
@@ -233,10 +239,14 @@ class Phase1Evaluator:
         student_records: List[HorizonReplayRecord] = []
         per_horizon_replay: List[dict] = []
         decoded_actions: List[List[int]] = []
+        risk_capital_base = self._risk_capital_base(probe_records)
         for rec, code_id in zip(probe_records, all_code_ids):
             teacher = self.replay_evaluator.replay_dp_teacher(rec)
             student = self.replay_evaluator.replay_student_online(
                 rec, model.decoder, model.quantizer.codebook, code_id
+            )
+            student_step_return_rates = step_returns_from_pnl(
+                student.student_step_returns, risk_capital_base
             )
             teacher_records.append(teacher)
             student_records.append(student)
@@ -260,7 +270,8 @@ class Phase1Evaluator:
                         teacher.teacher_actions, student.student_actions
                     ),
                     "step_rewards": student.student_step_returns,
-                    "cumulative_returns": equity_curve_from_step_returns(student.student_step_returns),
+                    "cumulative_pnl": cumulative_pnl_curve(student.student_step_returns),
+                    "cumulative_returns": equity_curve_from_step_returns(student_step_return_rates),
                     "drawdowns": [],  # 需要时再补
                     "price_series": rec.prices,
                     "positions": [int(a) - 1 for a in student.student_actions],  # action→position
@@ -285,15 +296,25 @@ class Phase1Evaluator:
             boundary.horizon_boundary_position_consistency
         )
 
-        # 风险指标: 把所有 student step returns 拼起来再算
+        # 风险指标: replay 输出是 raw PnL；先归一化成收益率，再交给 MDD/Calmar。
         flat_student_steps: List[float] = []
         for r in student_records:
             flat_student_steps.extend(r.student_step_returns)
-        out.metrics["val_sharpe_ratio"] = sharpe_ratio(flat_student_steps, self.annualization_factor)
-        out.metrics["val_sortino_ratio"] = sortino_ratio(flat_student_steps, self.annualization_factor)
-        equity = equity_curve_from_step_returns(flat_student_steps)
+        flat_student_return_rates = step_returns_from_pnl(
+            flat_student_steps, risk_capital_base
+        )
+        out.metrics["val_risk_capital_base"] = risk_capital_base
+        out.metrics["val_sharpe_ratio"] = sharpe_ratio(flat_student_return_rates, self.annualization_factor)
+        out.metrics["val_sortino_ratio"] = sortino_ratio(flat_student_return_rates, self.annualization_factor)
+        equity = equity_curve_from_step_returns(flat_student_return_rates)
         out.metrics["val_max_drawdown"] = max_drawdown(equity)
-        annual_ret = student_total * (self.annualization_factor / max(len(flat_student_steps), 1))
+        out.metrics["val_max_drawdown_abs"] = max_drawdown_abs(
+            cumulative_pnl_curve(flat_student_steps)
+        )
+        annual_ret = sum(flat_student_return_rates) * (
+            self.annualization_factor / max(len(flat_student_return_rates), 1)
+        )
+        out.metrics["val_annual_return_ratio"] = annual_ret
         out.metrics["val_calmar_ratio"] = calmar_ratio(annual_ret, out.metrics["val_max_drawdown"])
 
         # DP teacher quality
@@ -361,9 +382,12 @@ class Phase1Evaluator:
                 "switch_timing_error_distribution": sw.switch_timing_error_distribution,
             },
             "risk": {
+                "val_risk_capital_base": out.metrics["val_risk_capital_base"],
                 "val_sharpe_ratio": out.metrics["val_sharpe_ratio"],
                 "val_sortino_ratio": out.metrics["val_sortino_ratio"],
                 "val_max_drawdown": out.metrics["val_max_drawdown"],
+                "val_max_drawdown_abs": out.metrics["val_max_drawdown_abs"],
+                "val_annual_return_ratio": out.metrics["val_annual_return_ratio"],
                 "val_calmar_ratio": out.metrics["val_calmar_ratio"],
             },
             "archetype_separation": {
@@ -396,6 +420,33 @@ class Phase1Evaluator:
         self._previous_code_ids = list(all_code_ids)
         self._previous_codebook = [list(row) for row in codebook_list]
         return out
+
+    def _risk_capital_base(self, records: Sequence[HorizonRecord]) -> float:
+        """估算把 raw PnL 转成收益率所需的名义本金。"""
+        if self.risk_capital_base is not None and self.risk_capital_base > 0:
+            return float(self.risk_capital_base)
+
+        prices: List[float] = []
+        for rec in records:
+            prices.extend(
+                float(v) for v in rec.prices
+                if v is not None and math.isfinite(float(v)) and float(v) > 0
+            )
+        if not prices:
+            return 1.0
+        prices.sort()
+        mid = len(prices) // 2
+        if len(prices) % 2:
+            median_price = prices[mid]
+        else:
+            median_price = (prices[mid - 1] + prices[mid]) / 2.0
+
+        try:
+            env = self.replay_evaluator.env_factory()
+            max_position = max(abs(float(getattr(env, "max_position", 1.0))), 1.0)
+        except Exception:
+            max_position = 1.0
+        return max(median_price * max_position, 1.0)
 
     def _behavior_probe(self, model, records: List[HorizonRecord]):
         """固定一小批 states，分别用每个 code 解码，得到 logits / actions by code。"""

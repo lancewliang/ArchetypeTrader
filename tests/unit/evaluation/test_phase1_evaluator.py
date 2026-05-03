@@ -87,7 +87,10 @@ def test_evaluate_epoch_returns_required_metric_keys():
         "val_student_online_net_return",
         "val_return_capture_ratio",
         "val_sharpe_ratio",
+        "val_risk_capital_base",
         "val_max_drawdown",
+        "val_max_drawdown_abs",
+        "val_annual_return_ratio",
         "inter_code_action_diversity",
         "decoder_sensitivity_to_code",
         "confusion_matrix",
@@ -99,6 +102,7 @@ def test_evaluate_epoch_returns_required_metric_keys():
         "per_code_switch_point_distribution",
     }
     assert required.issubset(out.metrics.keys())
+    assert out.metrics["val_risk_capital_base"] > 90.0
     assert "action" in out.diagnostics
     assert "horizon_boundary" in out.diagnostics
 
