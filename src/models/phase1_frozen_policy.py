@@ -99,6 +99,7 @@ class Phase1FrozenPolicy:
             # 需要从 state_dict 重建 decoder
             # 推断维度
             if isinstance(decoder_state, dict):
+                decoder_state = cls._normalize_decoder_state_dict(decoder_state)
                 # 尝试从 state_dict 推断结构
                 from src.models.vq_archetype import ArchetypeDecoder
                 # 从 state_proj.weight 推断 feature_dim
@@ -121,16 +122,66 @@ class Phase1FrozenPolicy:
             else:
                 raise ValueError(f"无法加载 decoder: 未知格式 {type(decoder_state)}")
 
-        if isinstance(codebook_data, torch.Tensor):
-            codebook = codebook_data
-        elif isinstance(codebook_data, dict) and "codebook" in codebook_data:
-            codebook = codebook_data["codebook"]
-        elif isinstance(codebook_data, nn.Parameter):
-            codebook = codebook_data.data
-        else:
-            codebook = torch.tensor(codebook_data, dtype=torch.float32)
+        codebook = cls._extract_codebook_tensor(codebook_data)
 
         return cls(decoder, codebook, device)
+
+    @staticmethod
+    def _normalize_decoder_state_dict(state: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize exported decoder state dicts to ``ArchetypeDecoder`` keys.
+
+        Older Phase I exports saved keys as ``decoder.state_proj.weight`` while
+        ``ArchetypeDecoder.load_state_dict`` expects ``state_proj.weight``.
+        """
+        if "model" in state and isinstance(state["model"], dict):
+            return Phase1FrozenPolicy._normalize_decoder_state_dict(state["model"])
+        if "state_dict" in state and isinstance(state["state_dict"], dict):
+            return Phase1FrozenPolicy._normalize_decoder_state_dict(state["state_dict"])
+
+        decoder_items = {
+            key[len("decoder."):]: value
+            for key, value in state.items()
+            if isinstance(key, str) and key.startswith("decoder.")
+        }
+        if decoder_items:
+            return decoder_items
+        return dict(state)
+
+    @staticmethod
+    def _extract_codebook_tensor(data: Any) -> torch.Tensor:
+        """Extract codebook tensor from raw tensor or quantizer state dict."""
+        if isinstance(data, nn.Parameter):
+            return data.data
+        if isinstance(data, torch.Tensor):
+            return data
+        if isinstance(data, dict):
+            for nested_key in ("model", "state_dict"):
+                nested = data.get(nested_key)
+                if isinstance(nested, dict):
+                    try:
+                        return Phase1FrozenPolicy._extract_codebook_tensor(nested)
+                    except ValueError:
+                        pass
+
+            for key in ("codebook", "quantizer.codebook"):
+                value = data.get(key)
+                if isinstance(value, nn.Parameter):
+                    return value.data
+                if isinstance(value, torch.Tensor):
+                    return value
+
+            suffix_matches = [
+                value for key, value in data.items()
+                if isinstance(key, str)
+                and key.endswith(".codebook")
+                and isinstance(value, (torch.Tensor, nn.Parameter))
+            ]
+            if len(suffix_matches) == 1:
+                value = suffix_matches[0]
+                return value.data if isinstance(value, nn.Parameter) else value
+
+            raise ValueError("无法从 codebook.pt 中提取 codebook tensor")
+        return torch.tensor(data, dtype=torch.float32)
 
     def reset(self, code_id: int) -> None:
         """重置 recurrent state，设置当前 horizon 使用的 code_id。

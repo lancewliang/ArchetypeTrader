@@ -1,4 +1,4 @@
-"""Phase II backtest 入口: 加载 best selector + frozen Phase I 产物，执行 test walk-forward。
+"""Phase II backtest 入口: 加载 best selector + frozen Phase I 产物，执行 eval/test walk-forward。
 
 设计文档锚点: Phase II 执行计划 §Step 1 / §Step 9。
 
@@ -28,7 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pair", required=True)
     p.add_argument("--phase1-batch-id", required=True)
     p.add_argument("--phase2-batch-id", required=True)
-    p.add_argument("--test-file", required=True, help="测试数据 feather 路径")
+    p.add_argument("--split", choices=("val", "test"), default="test",
+                   help="回测 split；val 对应 eval 集，test 对应最终测试集")
+    p.add_argument("--eval-file", "--val-file", dest="eval_file", default=None,
+                   help="eval/val 数据 feather 路径")
+    p.add_argument("--test-file", default=None, help="测试数据 feather 路径")
     p.add_argument("--checkpoint", required=True, help="best_selector.pt 路径")
     p.add_argument("--artifact-root", default="artifacts")
     p.add_argument("--max-position", type=int, default=1)
@@ -44,7 +48,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     步骤:
     1. 加载 Phase I 冻结产物。
     2. 加载 best selector checkpoint。
-    3. 构造 test dataset 和 HorizonEnv。
+    3. 构造 eval/test dataset 和 HorizonEnv。
     4. 执行 deterministic argmax walk-forward backtest。
     5. 可选: stochastic seed pack 诊断。
     6. 输出 per-horizon records 和 report。
@@ -69,13 +73,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    selected_file = args.eval_file if args.split == "val" else args.test_file
+    if not selected_file:
+        parser.error(
+            "--eval-file/--val-file is required when --split=val; "
+            "--test-file is required when --split=test"
+        )
 
     # 构建最小 config
     config = Phase2Config(
         pair=args.pair,
         phase1_batch_id=args.phase1_batch_id,
         phase2_batch_id=args.phase2_batch_id,
-        test_file=args.test_file,
+        val_file=selected_file if args.split == "val" else "",
+        test_file=selected_file if args.split == "test" else "",
         artifact_root=args.artifact_root,
         max_position=args.max_position,
         seed=args.seed,
@@ -92,19 +103,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         p1_dir / "decoder.pt", p1_dir / "codebook.pt", device="cpu"
     )
 
-    # 读取 test 数据
+    # 读取 eval/test 数据。backtest 路径不加载任何 split label 参与决策。
     reader = MarketFileReader()
-    import polars as pl
-    test_frame = pl.read_ipc(args.test_file)
+    frame = reader.read(selected_file)
 
-    # 生成 test horizon index
+    # 生成 eval/test horizon index
     indexer = Phase2HorizonIndexer(config)
-    test_entries = indexer.build_index(test_frame, "test", config.horizon, None)
-    test_dataset = Phase2Dataset(test_frame, test_entries, input_schema, config)
+    entries = indexer.build_index(frame, args.split, config.horizon, None)
+    dataset = Phase2Dataset(frame, entries, input_schema, config)
 
     # 加载 selector
     ckpt = torch.load(args.checkpoint, map_location="cpu")
-    state_spec = test_dataset.state_spec()
+    state_spec = dataset.state_spec()
     selector = ArchetypeSelector(
         state_dim=state_spec.total_dim,
         num_codes=frozen_policy.num_codes,
@@ -144,8 +154,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
     # 执行 backtest
-    runner = Phase2BacktestRunner(config, actor_critic, frozen_policy, test_dataset, env_factory)
-    records = runner.run_walk_forward("test", deterministic=True)
+    runner = Phase2BacktestRunner(config, actor_critic, frozen_policy, dataset, env_factory)
+    records = runner.run_walk_forward(args.split, deterministic=True)
 
     # 输出结果
     from src.evaluation.phase2_metrics import phase2_composite_metrics
@@ -156,11 +166,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     report_paths = Phase2ReportPaths.from_artifacts_dir(artifacts_dir)
     writer = Phase2ReportWriter(report_paths)
-    writer.write_per_horizon_records(rec_dicts, "test")
+    writer.write_per_horizon_records(rec_dicts, args.split)
 
-    print(f"[info] Test net_return: {metrics.get('net_return', 0.0):.6f}")
-    print(f"[info] Test sharpe: {metrics.get('sharpe_ratio', 0.0):.4f}")
-    print(f"[info] Test max_drawdown: {metrics.get('max_drawdown', 0.0):.4f}")
+    label = "Eval" if args.split == "val" else "Test"
+    print(f"[info] {label} net_return: {metrics.get('net_return', 0.0):.6f}")
+    print(f"[info] {label} sharpe: {metrics.get('sharpe_ratio', 0.0):.4f}")
+    print(f"[info] {label} max_drawdown: {metrics.get('max_drawdown', 0.0):.4f}")
     print(f"[info] Results written to {artifacts_dir}")
 
     return 0

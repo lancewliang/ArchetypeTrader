@@ -3,7 +3,7 @@
 设计文档锚点: Phase II 执行计划 §Step 1 / §Step 9。
 
 CLI 参数至少包含:
---pair / --phase1-batch-id / --phase2-batch-id / --train-file / --val-file / --test-file /
+--pair / --phase1-batch-id / --phase2-batch-id / --train-file / --val-file /
 --total-timesteps / --num-envs / --rollout-length / --seed /
 --allow-phase1-hindsight-warning / --paper-strict-reproduction / --resume-from
 """
@@ -38,7 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--phase2-batch-id", required=True, help="Phase II batch ID")
     p.add_argument("--train-file", required=True, help="训练数据 feather 路径")
     p.add_argument("--val-file", required=True, help="验证数据 feather 路径")
-    p.add_argument("--test-file", required=True, help="测试数据 feather 路径")
+    p.add_argument(
+        "--test-file",
+        default="",
+        help="兼容旧命令；Phase II 训练不会读取 test 数据，请用 backtest_phase2.py 评估 test",
+    )
     p.add_argument("--artifact-root", default="artifacts")
     # 训练超参
     p.add_argument("--total-timesteps", type=int, default=1_000_000)
@@ -97,7 +101,7 @@ def build_config(args: argparse.Namespace) -> Phase2Config:
         phase2_batch_id=args.phase2_batch_id,
         train_file=args.train_file,
         val_file=args.val_file,
-        test_file=args.test_file,
+        test_file="",
         artifact_root=args.artifact_root,
         total_timesteps=args.total_timesteps,
         num_envs=args.num_envs,

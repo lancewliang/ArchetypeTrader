@@ -36,7 +36,6 @@ class TestPhase2Trainer:
         for path in [
             artifacts.per_horizon_records_train,
             artifacts.per_horizon_records_val,
-            artifacts.per_horizon_records_test,
         ]:
             assert path.exists()
             assert pl.read_ipc(path).height > 0
@@ -50,7 +49,7 @@ class TestPhase2Trainer:
 
     def test_kl_demo_ablation_matrix_outputs_json_and_csv(self, tmp_path):
         """KL/demo ablation matrix 能生成 JSON 与 summary CSV。"""
-        train, val, test = write_market_splits(tmp_path / "market")
+        train, val, _test = write_market_splits(tmp_path / "market")
         config = make_config(
             tmp_path,
             horizon=4,
@@ -64,7 +63,6 @@ class TestPhase2Trainer:
                 **config.to_dict(),
                 "train_file": str(train),
                 "val_file": str(val),
-                "test_file": str(test),
             }
         )
         rc = run_kl_demo_ablation(config, [0.0, 0.1])

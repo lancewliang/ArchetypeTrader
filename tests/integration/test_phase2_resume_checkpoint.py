@@ -12,7 +12,7 @@ from tests.phase2_test_utils import make_config, write_market_splits
 
 
 def _run_initial_and_resume(tmp_path):
-    train, val, test = write_market_splits(tmp_path / "market")
+    train, val, _test = write_market_splits(tmp_path / "market")
     base = make_config(
         tmp_path,
         horizon=4,
@@ -21,7 +21,7 @@ def _run_initial_and_resume(tmp_path):
         total_timesteps=4,
         phase2_batch_id="resume_phase2",
     )
-    base = replace(base, train_file=str(train), val_file=str(val), test_file=str(test))
+    base = replace(base, train_file=str(train), val_file=str(val))
     first = Phase2Trainer(base).run()
     resumed_cfg = replace(
         base,

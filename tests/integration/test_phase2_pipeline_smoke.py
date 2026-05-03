@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 
-import polars as pl
 import pytest
 
 from tests.phase2_test_utils import run_smoke_phase2_training
@@ -29,7 +28,6 @@ class TestPhase2PipelineSmoke:
             smoke_artifacts.phase2_config_yaml,
             smoke_artifacts.horizon_index_train,
             smoke_artifacts.horizon_index_val,
-            smoke_artifacts.horizon_index_test,
             smoke_artifacts.env_shards,
             smoke_artifacts.best_selector,
             smoke_artifacts.last_selector,
@@ -37,7 +35,6 @@ class TestPhase2PipelineSmoke:
             smoke_artifacts.rollout_stats,
             smoke_artifacts.per_horizon_records_train,
             smoke_artifacts.per_horizon_records_val,
-            smoke_artifacts.per_horizon_records_test,
             smoke_artifacts.replay_log,
         ]:
             assert path.exists(), f"missing artifact: {path}"
@@ -47,12 +44,18 @@ class TestPhase2PipelineSmoke:
         """phase2_report.json 中 test_used_for_selection=false。"""
         payload = json.loads(smoke_artifacts.phase2_report.read_text(encoding="utf-8"))
         assert payload["test_used_for_selection"] is False
+        assert payload["test_loaded_in_training"] is False
+        assert payload["test_metrics"] == {}
         assert payload["phase1_batch_id"] == "smoke_phase1"
         assert "equity_curve_summary" in payload
         assert "execution_stress_summary" in payload
 
     @pytest.mark.integration
-    def test_test_index_no_code_label(self, smoke_artifacts):
-        """phase2_horizon_index_test.feather 中默认无 code_label。"""
-        df = pl.read_ipc(smoke_artifacts.horizon_index_test)
-        assert "code_label" not in df.columns
+    def test_train_pipeline_does_not_emit_test_artifacts(self, smoke_artifacts):
+        """训练入口不生成 test horizon index / test per-horizon records。"""
+        assert not (
+            smoke_artifacts.artifacts_dir / "phase2_horizon_index_test.feather"
+        ).exists()
+        assert not (
+            smoke_artifacts.artifacts_dir / "phase2_per_horizon_records_test.feather"
+        ).exists()

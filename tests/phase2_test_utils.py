@@ -250,7 +250,7 @@ def write_market_splits(base_dir: Path) -> tuple[Path, Path, Path]:
 
 def run_smoke_phase2_training(tmp_path: Path, *, phase2_batch_id: str = "smoke_phase2") -> Phase2TrainerArtifacts:
     """Run a tiny real Phase II training flow and return artifacts."""
-    train, val, test = write_market_splits(Path(tmp_path) / "market")
+    train, val, _test = write_market_splits(Path(tmp_path) / "market")
     config = make_config(
         tmp_path,
         horizon=4,
@@ -263,6 +263,5 @@ def run_smoke_phase2_training(tmp_path: Path, *, phase2_batch_id: str = "smoke_p
         config,
         train_file=str(train),
         val_file=str(val),
-        test_file=str(test),
     )
     return Phase2Trainer(config).run()

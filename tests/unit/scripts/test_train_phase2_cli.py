@@ -16,8 +16,6 @@ def _required_args(tmp_path, *extra):
         "data/FU/train.feather",
         "--val-file",
         "data/FU/val.feather",
-        "--test-file",
-        "data/FU/test.feather",
         "--artifact-root",
         str(tmp_path / "artifacts"),
         *extra,
@@ -50,3 +48,19 @@ def test_train_phase2_cli_explicit_max_position_wins(tmp_path):
     config = build_config(args)
 
     assert config.max_position == 3
+
+
+def test_train_phase2_cli_test_file_is_optional_and_ignored_by_default(tmp_path):
+    args = build_parser().parse_args(_required_args(tmp_path))
+    config = build_config(args)
+
+    assert config.test_file == ""
+
+
+def test_train_phase2_cli_test_file_does_not_enter_config(tmp_path):
+    args = build_parser().parse_args(
+        _required_args(tmp_path, "--test-file", "data/FU/test.feather")
+    )
+    config = build_config(args)
+
+    assert config.test_file == ""

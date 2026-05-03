@@ -58,3 +58,32 @@ class TestPhase1FrozenPolicy:
         )
         with pytest.raises(ValueError):
             Phase1FrozenPolicy(decoder, torch.randn(3, 4), device="cpu")
+
+    def test_load_accepts_prefixed_decoder_state_dict(self, tmp_path):
+        """兼容旧 Phase I 导出的 decoder.* key。"""
+        decoder = ArchetypeDecoder(feature_dim=3, code_dim=4, hidden_dim=8)
+        prefixed = {
+            f"decoder.{key}": value
+            for key, value in decoder.state_dict().items()
+        }
+        decoder_path = tmp_path / "decoder.pt"
+        codebook_path = tmp_path / "codebook.pt"
+        torch.save(prefixed, decoder_path)
+        torch.save(torch.randn(3, 4) * 0.05, codebook_path)
+
+        policy = Phase1FrozenPolicy.load(decoder_path, codebook_path, device="cpu")
+
+        policy.reset(0)
+        assert policy.decode_step(torch.zeros(3)).action in (0, 1, 2)
+
+    def test_load_accepts_quantizer_codebook_state_dict(self, tmp_path):
+        """兼容旧 Phase I 导出的 quantizer.codebook key。"""
+        decoder = ArchetypeDecoder(feature_dim=3, code_dim=4, hidden_dim=8)
+        decoder_path = tmp_path / "decoder.pt"
+        codebook_path = tmp_path / "codebook.pt"
+        torch.save(decoder.state_dict(), decoder_path)
+        torch.save({"quantizer.codebook": torch.randn(3, 4) * 0.05}, codebook_path)
+
+        policy = Phase1FrozenPolicy.load(decoder_path, codebook_path, device="cpu")
+
+        assert policy.num_codes == 3

@@ -6,7 +6,7 @@
 - 写出 phase2_report.json / phase2_baselines_{val,test}.json /
   composite_score_sensitivity_phase2.json / phase2_rolling_validation.json。
 - phase2_report.json 至少包含: 配置 hash / Phase I hash / schema hash /
-  horizon 覆盖 / label 覆盖 / PPO 健康 / train/val/test scalar 指标 /
+  horizon 覆盖 / label 覆盖 / PPO 健康 / train/val scalar 指标 /
   equity_curve_summary / behavior_health_warnings / risk_health_warnings /
   ood_warning_count / rolling validation summary 等。
 """

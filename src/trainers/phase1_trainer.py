@@ -1248,11 +1248,17 @@ class Phase1Trainer:
         # state["model"] 是 state_dict；按前缀切分。
         sd = state.get("model", state)
         encoder_sd = {k: v for k, v in sd.items() if k.startswith(("input_adapter.", "encoder."))}
-        decoder_sd = {k: v for k, v in sd.items() if k.startswith("decoder.")}
-        codebook_sd = {k: v for k, v in sd.items() if k.startswith("quantizer.")}
+        decoder_sd = {
+            k[len("decoder."):]: v
+            for k, v in sd.items()
+            if k.startswith("decoder.")
+        }
+        codebook = sd.get("quantizer.codebook")
+        if codebook is None:
+            codebook = {k: v for k, v in sd.items() if k.startswith("quantizer.")}
         torch.save(encoder_sd, encoder_path)
         torch.save(decoder_sd, decoder_path)
-        torch.save(codebook_sd, codebook_path)
+        torch.save(codebook, codebook_path)
         return encoder_path, decoder_path, codebook_path
 
     def _reload_state(self, model, state):
