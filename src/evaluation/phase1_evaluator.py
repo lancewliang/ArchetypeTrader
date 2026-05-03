@@ -153,7 +153,7 @@ class Phase1Evaluator:
             batch_size=256,
             shuffle=False,
             collate_fn=collate_phase1,
-            num_workers=2,
+            num_workers=2 if _use_cuda else 0,
             pin_memory=_use_cuda,
         )
         all_logits: List = []

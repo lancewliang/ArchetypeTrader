@@ -6,6 +6,8 @@
 - 数据集不重写 Phase I horizon slicing 语义。
 - phase2_dataset 不调用 DP。
 """
+import json
+
 import pytest
 import numpy as np
 
@@ -18,6 +20,7 @@ except ImportError:
 from src.config.phase2_config import Phase2Config
 from src.data.phase2_dataset import Phase2Dataset
 from src.data.phase2_horizon_index import Phase2HorizonEntry
+from src.data.state_normalizer import StateNormalizer
 
 
 def _frame(num_rows=8):
@@ -87,3 +90,31 @@ class TestPhase2Dataset:
         )
         with pytest.raises(IndexError):
             ds.get_horizon_inputs(0)
+
+    def test_applies_phase1_state_normalizer(self, tmp_path):
+        """Phase II 必须复用 Phase I 持久化的 state normalizer。"""
+        config = Phase2Config(
+            pair="TEST",
+            phase1_batch_id="batch_001",
+            artifact_root=str(tmp_path),
+            horizon=3,
+        )
+        p1_dir = config.phase1_dir()
+        p1_dir.mkdir(parents=True)
+        normalizer = StateNormalizer.fit_matrix(
+            np.array([[0.0], [10.0], [20.0], [30.0]], dtype="float32"),
+            feature_columns=["feature_return_1"],
+        )
+        (p1_dir / "state_normalizer.json").write_text(
+            json.dumps(normalizer.to_dict()),
+            encoding="utf-8",
+        )
+
+        entries = [Phase2HorizonEntry("s0", 0, 2, "train")]
+        ds = Phase2Dataset(_frame(), entries, _schema(), config)
+
+        raw = _frame()["feature_return_1"].to_numpy()[:3].reshape(-1, 1)
+        np.testing.assert_allclose(
+            ds.get_horizon_states(0),
+            normalizer.transform_array(raw),
+        )

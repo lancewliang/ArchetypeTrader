@@ -3,7 +3,7 @@
 设计文档锚点: §6.4 与 §6.5。
 
 总损失:
-``L = L_rec + L_codebook + β0 * L_commit + λ_usage * L_usage + λ_tc * L_tc``
+``L = L_rec + L_codebook + β0 * L_commit + λ_usage * L_usage + λ_tc * L_tc + λ_align * L_align``
 """
 from __future__ import annotations
 
@@ -28,6 +28,18 @@ class LossOutputs:
     commitment: "torch.Tensor"
     usage: Optional["torch.Tensor"]
     contrastive: Optional["torch.Tensor"]
+    alignment: Optional["torch.Tensor"] = None
+
+
+def compute_soft_code_assignments(z_e, codebook, temperature: float):
+    """基于 encoder latent 与 codebook 距离计算 soft assignment。"""
+    temp = max(float(temperature), 1.0e-6)
+    distances = (
+        (z_e ** 2).sum(dim=1, keepdim=True)
+        - 2 * z_e @ codebook.t()
+        + (codebook ** 2).sum(dim=1)
+    )
+    return torch.softmax(-distances / temp, dim=1)
 
 
 class Phase1Loss(nn.Module if nn is not None else object):  # type: ignore[misc]
@@ -59,6 +71,8 @@ class Phase1Loss(nn.Module if nn is not None else object):  # type: ignore[misc]
         contrastive_temperature: float = 0.1,
         use_infonce: bool = False,
         num_codes: Optional[int] = None,
+        usage_profit_alignment_weight: float = 0.0,
+        usage_profit_alignment_target_corr: float = 0.2,
     ) -> None:
         if nn is None:  # pragma: no cover
             raise ImportError("Phase1Loss 需要 torch")
@@ -68,6 +82,8 @@ class Phase1Loss(nn.Module if nn is not None else object):  # type: ignore[misc]
         self.contrastive_weight = contrastive_weight
         self.contrastive_temperature = contrastive_temperature
         self.use_infonce = use_infonce
+        self.usage_profit_alignment_weight = usage_profit_alignment_weight
+        self.usage_profit_alignment_target_corr = usage_profit_alignment_target_corr
         # ``num_codes`` 必须由 trainer 显式传入（``ModelConfig.num_codes``），
         # 否则 KL(uniform || p_code) 会在 codebook collapse 时低估真实 K
         # （从 code_id 推断会漏掉未使用的 code，造成 usage_loss 偏小）。
@@ -83,6 +99,9 @@ class Phase1Loss(nn.Module if nn is not None else object):  # type: ignore[misc]
         z_q_no_grad,
         code_id,
         contrastive_pair_ids: Optional[List[str]] = None,
+        trajectory_returns=None,
+        codebook=None,
+        soft_assignment_temperature: float = 2.0,
     ) -> LossOutputs:
         """计算总损失。
 
@@ -109,12 +128,14 @@ class Phase1Loss(nn.Module if nn is not None else object):  # type: ignore[misc]
         rec = F.cross_entropy(action_logits.reshape(b * h, c), target_actions.reshape(b * h))
 
         # codebook loss: ||sg[z_e] - z_q||^2  → 推动 codebook 向 z_e 移动
-        codebook = ((z_e.detach() - z_q_no_grad) ** 2).mean()
+        codebook_loss = ((z_e.detach() - z_q_no_grad) ** 2).mean()
         # commitment loss: ||z_e - sg[z_q]||^2 → 推动 z_e 向选中的 code 收敛
         commitment = ((z_e - z_q_no_grad.detach()) ** 2).mean()
 
         usage = None
         if self.usage_weight > 0:
+            if code_id is None:
+                raise ValueError("usage loss requires code_id")
             # 优先使用 init 时显式传入的 num_codes；缺失时回退到从 code_id 推断
             # （仅用于单测；trainer 路径必须传入避免 collapse 低估 K）。
             if self.num_codes is not None:
@@ -127,18 +148,51 @@ class Phase1Loss(nn.Module if nn is not None else object):  # type: ignore[misc]
         if self.contrastive_weight > 0 and contrastive_pair_ids is not None:
             contrastive = self._contrastive_loss(z_e, contrastive_pair_ids)
 
-        total = rec + codebook + self.beta0 * commitment
+        alignment = None
+        if (
+            self.usage_profit_alignment_weight > 0
+            and trajectory_returns is not None
+            and codebook is not None
+        ):
+            soft_assignments = compute_soft_code_assignments(
+                z_e, codebook, soft_assignment_temperature
+            )
+            alignment = self._usage_profit_alignment(
+                soft_assignments,
+                trajectory_returns,
+                self.usage_profit_alignment_target_corr,
+            )
+
+        total = rec + codebook_loss + self.beta0 * commitment
         if usage is not None:
             total = total + self.usage_weight * usage
         if contrastive is not None:
             total = total + self.contrastive_weight * contrastive
+        if alignment is not None:
+            total = total + self.usage_profit_alignment_weight * alignment
         return LossOutputs(
             total=total,
             reconstruction=rec,
-            codebook=codebook,
+            codebook=codebook_loss,
             commitment=commitment,
             usage=usage,
             contrastive=contrastive,
+            alignment=alignment,
+        )
+
+    def forward_pretrain(self, *, action_logits, target_actions) -> LossOutputs:
+        """Phase A 损失：只计算 action reconstruction CE。"""
+        b, h, c = action_logits.shape
+        rec = F.cross_entropy(action_logits.reshape(b * h, c), target_actions.reshape(b * h))
+        zero = rec.new_zeros(())
+        return LossOutputs(
+            total=rec,
+            reconstruction=rec,
+            codebook=zero,
+            commitment=zero,
+            usage=None,
+            contrastive=None,
+            alignment=None,
         )
 
     # ---------- usage / contrastive ----------
@@ -169,3 +223,39 @@ class Phase1Loss(nn.Module if nn is not None else object):  # type: ignore[misc]
         b = F.normalize(z_e[b_idx], dim=-1)
         cos = (a * b).sum(dim=-1)
         return (1 - cos).mean()
+
+    def _usage_profit_alignment(
+        self,
+        soft_assignments,
+        trajectory_returns,
+        target_corr: float,
+        eps: float = 1.0e-6,
+    ):
+        """鼓励高收益 code 获得更高使用率，惩罚 usage-return 相关性不足。"""
+        if soft_assignments.shape[0] < 2 or soft_assignments.shape[1] < 2:
+            return soft_assignments.new_zeros(())
+
+        returns = trajectory_returns.to(
+            device=soft_assignments.device,
+            dtype=soft_assignments.dtype,
+        ).reshape(-1, 1)
+        if returns.shape[0] != soft_assignments.shape[0]:
+            raise ValueError(
+                "trajectory_returns batch size must match soft_assignments"
+            )
+
+        code_mass = soft_assignments.sum(dim=0).clamp_min(eps)
+        usage = code_mass / soft_assignments.shape[0]
+        code_returns = (soft_assignments * returns).sum(dim=0) / code_mass
+
+        usage_centered = usage - usage.mean()
+        return_centered = code_returns - code_returns.mean()
+        covariance = torch.mean(usage_centered * return_centered)
+        denom = torch.sqrt(
+            torch.mean(usage_centered ** 2) * torch.mean(return_centered ** 2) + eps
+        )
+        corr = covariance / denom
+        target = soft_assignments.new_tensor(
+            max(-1.0, min(1.0, float(target_corr)))
+        )
+        return torch.relu(target - corr)

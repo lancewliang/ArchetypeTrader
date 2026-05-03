@@ -163,6 +163,7 @@ def test_phase1_data_process_then_manifest_train_smoke(tmp_path, monkeypatch):
         artifacts.horizon_labels_train,
         artifacts.horizon_labels_val,
         artifacts.horizon_labels_test,
+        artifacts.state_normalizer_json,
         artifacts.phase1_report,
     ):
         assert path.exists()

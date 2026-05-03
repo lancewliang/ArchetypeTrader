@@ -43,6 +43,7 @@ class Phase1DemoDataset(Dataset):
             "states": Tensor[h, feature_dim],
             "actions": Tensor[h]  (long),
             "rewards": Tensor[h]  (float32, 经 normalizer.transform 后的 encoder 输入),
+            "trajectory_return": float,  # 原始 reward 求和，不做 normalizer transform
             "sample_id": str,
             "contrastive_pair_id": str,  # 没有 pair 时为空字符串
         }
@@ -91,6 +92,7 @@ class Phase1DemoDataset(Dataset):
         # rewards：必须经 normalizer 后再喂 encoder；缺 normalizer 时
         # 等价于使用原始数据（仅在单测/调试中允许）。
         rewards = rec.rewards
+        trajectory_return = float(sum(rewards))
         if self.reward_normalizer is not None:
             rewards = self.reward_normalizer.transform(rewards)
             # transform 输入是 list 时返回 list；包成 list 让 torch.tensor 接受。
@@ -100,6 +102,7 @@ class Phase1DemoDataset(Dataset):
             "states": torch.tensor(rec.states, dtype=torch.float32),
             "actions": torch.tensor(rec.actions, dtype=torch.long),
             "rewards": torch.tensor(rewards, dtype=torch.float32),
+            "trajectory_return": trajectory_return,
             "sample_id": rec.sample_id,
             "contrastive_pair_id": self._sample_to_pair.get(rec.sample_id, ""),
         }
@@ -113,10 +116,14 @@ def collate_phase1(batch: List[dict]) -> dict:
     states = torch.stack([b["states"] for b in batch], dim=0)
     actions = torch.stack([b["actions"] for b in batch], dim=0)
     rewards = torch.stack([b["rewards"] for b in batch], dim=0)
+    trajectory_returns = torch.tensor(
+        [b["trajectory_return"] for b in batch], dtype=torch.float32
+    )
     return {
         "states": states,
         "actions": actions,
         "rewards": rewards,
+        "trajectory_returns": trajectory_returns,
         "sample_ids": [b["sample_id"] for b in batch],
         "contrastive_pair_ids": [b["contrastive_pair_id"] for b in batch],
     }

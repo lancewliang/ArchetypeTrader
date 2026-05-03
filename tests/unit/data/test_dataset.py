@@ -10,7 +10,8 @@ from src.data.dataset import Phase1DemoDataset, collate_phase1
 from src.data.horizon_builder import HorizonRecord
 
 
-def _record(sample_id: str, h: int = 4):
+def _record(sample_id: str, h: int = 4, rewards=None):
+    rewards = rewards if rewards is not None else [0.0] * h
     return HorizonRecord(
         sample_id=sample_id,
         start_index=0,
@@ -22,7 +23,7 @@ def _record(sample_id: str, h: int = 4):
         prices=[100.0] * (h + 1),
         execution_books=[],
         actions=[1] * h,
-        rewards=[0.0] * h,
+        rewards=rewards,
     )
 
 
@@ -34,7 +35,14 @@ def test_dataset_length_matches_records():
 def test_getitem_returns_required_keys():
     ds = Phase1DemoDataset(records=[_record("a")])
     item = ds[0]
-    assert set(item) == {"states", "actions", "rewards", "sample_id", "contrastive_pair_id"}
+    assert set(item) == {
+        "states",
+        "actions",
+        "rewards",
+        "trajectory_return",
+        "sample_id",
+        "contrastive_pair_id",
+    }
     assert item["states"].shape == (4, 2)
     assert item["actions"].dtype == torch.long
 
@@ -51,7 +59,22 @@ def test_collate_stacks_tensors():
     assert batch["states"].shape == (2, 4, 2)
     assert batch["actions"].shape == (2, 4)
     assert batch["rewards"].shape == (2, 4)
+    assert batch["trajectory_returns"].shape == (2,)
     assert batch["sample_ids"] == ["a", "b"]
+
+
+def test_trajectory_return_uses_original_rewards_before_normalization():
+    class _Normalizer:
+        def transform(self, rewards):
+            return [0.0 for _ in rewards]
+
+    ds = Phase1DemoDataset(
+        records=[_record("a", rewards=[1.0, 2.0, -0.5, 0.25])],
+        reward_normalizer=_Normalizer(),
+    )
+    item = ds[0]
+    assert torch.allclose(item["rewards"], torch.zeros(4))
+    assert item["trajectory_return"] == pytest.approx(2.75)
 
 
 def test_missing_actions_raises():

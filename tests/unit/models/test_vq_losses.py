@@ -5,7 +5,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from src.models.vq_losses import Phase1Loss
+from src.models.vq_losses import Phase1Loss, compute_soft_code_assignments
 
 
 def _logits_and_targets(near_perfect: bool = True):
@@ -46,6 +46,28 @@ def test_total_includes_codebook_and_commitment():
     assert torch.allclose(out.total, expected)
 
 
+def test_phase_a_loss_only_reconstruction():
+    logits, targets = _logits_and_targets(True)
+    out = Phase1Loss(beta0=0.25, usage_weight=1.0).forward_pretrain(
+        action_logits=logits,
+        target_actions=targets,
+    )
+    assert torch.allclose(out.total, out.reconstruction)
+    assert out.codebook.item() == 0.0
+    assert out.commitment.item() == 0.0
+    assert out.usage is None
+    assert out.contrastive is None
+    assert out.alignment is None
+
+
+def test_soft_assignment_shape_and_row_sum():
+    z_e = torch.tensor([[0.0, 0.0], [2.0, 0.0]])
+    codebook = torch.tensor([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]])
+    assignments = compute_soft_code_assignments(z_e, codebook, temperature=0.5)
+    assert assignments.shape == (2, 3)
+    assert torch.allclose(assignments.sum(dim=1), torch.ones(2))
+
+
 def test_usage_loss_zero_when_weight_zero():
     logits, targets = _logits_and_targets(True)
     z_e = torch.randn(1, 8)
@@ -58,6 +80,57 @@ def test_usage_loss_zero_when_weight_zero():
         code_id=torch.tensor([0]),
     )
     assert out.usage is None
+
+
+def test_usage_profit_alignment_loss_smaller_when_high_return_code_used_more():
+    loss_fn = Phase1Loss(
+        usage_profit_alignment_weight=1.0,
+        usage_profit_alignment_target_corr=0.2,
+    )
+    returns = torch.tensor([0.0, 2.0, 2.0, 2.0])
+    good_assignments = torch.tensor(
+        [
+            [0.9, 0.1],
+            [0.2, 0.8],
+            [0.2, 0.8],
+            [0.2, 0.8],
+        ]
+    )
+    bad_assignments = torch.tensor(
+        [
+            [0.99, 0.01],
+            [0.49, 0.51],
+            [0.49, 0.51],
+            [0.49, 0.51],
+        ]
+    )
+    good = loss_fn._usage_profit_alignment(good_assignments, returns, 0.2)
+    bad = loss_fn._usage_profit_alignment(bad_assignments, returns, 0.2)
+    assert good.item() < bad.item()
+
+
+def test_total_includes_usage_profit_alignment_when_inputs_provided():
+    logits, targets = _logits_and_targets(True)
+    z_e = torch.tensor([[0.0, 0.0], [2.0, 0.0]], requires_grad=True)
+    z_q = z_e.detach()
+    codebook = torch.tensor([[0.0, 0.0], [2.0, 0.0]])
+    out = Phase1Loss(
+        usage_weight=0.0,
+        usage_profit_alignment_weight=0.5,
+        usage_profit_alignment_target_corr=0.2,
+    )(
+        action_logits=logits.expand(2, -1, -1).contiguous(),
+        target_actions=targets.expand(2, -1).contiguous(),
+        z_e=z_e,
+        z_q_no_grad=z_q,
+        code_id=torch.tensor([0, 1]),
+        trajectory_returns=torch.tensor([0.0, 1.0]),
+        codebook=codebook,
+        soft_assignment_temperature=1.0,
+    )
+    assert out.alignment is not None
+    expected = out.reconstruction + out.codebook + 0.25 * out.commitment + 0.5 * out.alignment
+    assert torch.allclose(out.total, expected)
 
 
 def test_contrastive_zero_when_no_pairs():

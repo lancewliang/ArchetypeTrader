@@ -8,6 +8,7 @@ pooling / 未来 state pooling 都会破坏 Phase II/III 在线推理因果性�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 try:
     import torch
@@ -36,7 +37,7 @@ class ModelOutputs:
     z_e: "torch.Tensor"
     z_q: "torch.Tensor"
     z_q_no_grad: "torch.Tensor"
-    code_id: "torch.Tensor"
+    code_id: Optional["torch.Tensor"]
 
 
 class ArchetypeEncoder(nn.Module if nn is not None else object):  # type: ignore[misc]
@@ -175,6 +176,19 @@ class VQArchetypeModel(nn.Module if nn is not None else object):  # type: ignore
             z_q=q.z_q,
             z_q_no_grad=q.z_q_no_grad,
             code_id=q.code_id,
+        )
+
+    def forward_pretrain(self, states, actions, rewards) -> ModelOutputs:
+        """Phase A 前向：跳过 VQ，用 encoder latent 直接条件化 decoder。"""
+        fused = self.input_adapter(states, actions, rewards)
+        z_e = self.encoder(fused)
+        logits = self.decoder(states, z_e)
+        return ModelOutputs(
+            action_logits=logits,
+            z_e=z_e,
+            z_q=z_e,
+            z_q_no_grad=z_e.detach(),
+            code_id=None,
         )
 
     @_no_grad()

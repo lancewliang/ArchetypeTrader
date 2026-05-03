@@ -32,6 +32,23 @@ def test_forward_logits_shape():
     assert out.code_id.shape == (2,)
 
 
+def test_forward_pretrain_skips_quantizer_and_uses_z_e_directly():
+    model = _make_model()
+
+    def _raise_if_called(_z_e):
+        raise AssertionError("quantizer should not run during Phase A pretrain")
+
+    model.quantizer.quantize = _raise_if_called
+    states = torch.randn(2, 6, 2)
+    actions = torch.zeros(2, 6, dtype=torch.long)
+    rewards = torch.zeros(2, 6)
+    out = model.forward_pretrain(states, actions, rewards)
+    assert out.action_logits.shape == (2, 6, 3)
+    assert out.code_id is None
+    assert torch.allclose(out.z_q, out.z_e)
+    assert torch.allclose(out.z_q_no_grad, out.z_e.detach())
+
+
 def test_decoder_is_unidirectional():
     """硬约束: decoder.lstm.bidirectional == False。"""
     model = _make_model()

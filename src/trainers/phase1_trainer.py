@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,6 +18,7 @@ from src.config.phase1_config import (
 from src.data.dataset import Phase1DemoDataset, collate_phase1
 from src.data.demo_store import HorizonLabel, Phase1DemoStore
 from src.data.phase1_processed_store import Phase1ProcessedStore
+from src.data.state_normalizer import StateNormalizer
 from src.evaluation.phase1_evaluator import Phase1Evaluator
 from src.evaluation.phase1_metrics import (
     composite_score_sensitivity_across_epochs,
@@ -46,6 +48,9 @@ class Phase1FatalError(RuntimeError):
     """trainer 主流程里被 selection_policy 判定 fatal 后转抛出。"""
 
 
+_AMP_SAFE_INPUT_ABS_MAX = 1.0e4
+
+
 @dataclass
 class TrainerArtifacts:
     artifacts_dir: Path
@@ -56,6 +61,7 @@ class TrainerArtifacts:
     horizon_labels_train: Path
     horizon_labels_val: Path
     horizon_labels_test: Path
+    state_normalizer_json: Path
     reward_normalizer_json: Path
     best_vq_model: Path
     last_vq_model: Path
@@ -255,6 +261,32 @@ class Phase1Trainer:
             manifest.dp_teacher_hash,
         )
 
+        state_norm = StateNormalizer.fit_records(
+            train_horizons,
+            feature_columns=schema.feature_columns,
+        )
+        state_norm_path = atomic_write_json(
+            state_norm.to_dict(), artifacts_dir / "state_normalizer.json"
+        )
+        state_train_diag = state_norm.transform_records(train_horizons)
+        state_val_diag = state_norm.transform_records(val_horizons)
+        state_test_diag = state_norm.transform_records(test_horizons)
+        self._logger.info(
+            "phase1_state_normalizer_fit 说明=状态特征归一化器已用训练集拟合 path=%s method=%s feature_dim=%d clip=%.2f train_max_abs_before=%.6e train_max_abs_after=%.6e val_max_abs_before=%.6e val_max_abs_after=%.6e test_max_abs_before=%.6e test_max_abs_after=%.6e log_transform_columns=%d fallback_to_standard_count=%d",
+            state_norm_path,
+            state_norm.stats.method,
+            len(schema.feature_columns),
+            state_norm.stats.clip_value,
+            state_train_diag["max_abs_before"],
+            state_train_diag["max_abs_after"],
+            state_val_diag["max_abs_before"],
+            state_val_diag["max_abs_after"],
+            state_test_diag["max_abs_before"],
+            state_test_diag["max_abs_after"],
+            sum(1 for kind in state_norm.stats.transform_kinds if kind == "signed_log1p"),
+            state_norm.stats.fallback_to_standard_count,
+        )
+
         norm = RewardNormalizer(self.config.model.encoder_input)
         flat_rewards = [v for rec in train_horizons for v in (rec.rewards or [])]
         norm.fit_train(flat_rewards)
@@ -294,13 +326,20 @@ class Phase1Trainer:
             self.config.model.code_dim,
         )
 
-        # codebook warmup: 用一批 train z_e 初始化
-        self._warmup_codebook(model, train_horizons, norm)
-        self._logger.info(
-            "phase1_codebook_warmup_done 说明=codebook 预热完成 init_method=%s warmup_batches=%d",
-            self.config.model.codebook.init_method,
-            self.config.model.codebook.kmeans_warmup_batches,
-        )
+        # codebook warmup: Phase A 开启时延后到预训练结束后执行，避免用随机 encoder 初始化。
+        pretrain_epochs = self._effective_pretrain_epochs()
+        if pretrain_epochs > 0:
+            self._logger.info(
+                "phase1_codebook_warmup_deferred 说明=Phase A 启用,codebook warmup 将在预训练结束后执行 pretrain_epochs=%d",
+                pretrain_epochs,
+            )
+        else:
+            self._warmup_codebook(model, train_horizons, norm)
+            self._logger.info(
+                "phase1_codebook_warmup_done 说明=codebook 预热完成 init_method=%s warmup_batches=%d",
+                self.config.model.codebook.init_method,
+                self.config.model.codebook.kmeans_warmup_batches,
+            )
 
         ckpt = Phase1CheckpointManager(artifacts_dir)
         policy = Phase1SelectionPolicy(self.config.selection_policy)
@@ -394,6 +433,7 @@ class Phase1Trainer:
             metrics=best_metrics_payload,
             reject_stats=reject_stats,
             normalizer=norm,
+            state_normalizer=state_norm,
             best_epoch=history.best_epoch if history.best_epoch is not None else 0,
             no_trade_ratio=no_trade_ratio,
         )
@@ -458,6 +498,7 @@ class Phase1Trainer:
             horizon_labels_train=labels_paths["train"],
             horizon_labels_val=labels_paths["val"],
             horizon_labels_test=labels_paths["test"],
+            state_normalizer_json=state_norm_path,
             reward_normalizer_json=norm_path,
             best_vq_model=ckpt.best_path,
             last_vq_model=ckpt.last_path,
@@ -501,6 +542,14 @@ class Phase1Trainer:
             else 0.0,
             contrastive_temperature=self.config.data_augmentation.temporal_contrastive.temperature,
             num_codes=self.config.model.num_codes,
+            usage_profit_alignment_weight=(
+                self.config.model.codebook.health.usage_profit_alignment_weight
+                if not self.config.training.paper_strict_reproduction
+                else 0.0
+            ),
+            usage_profit_alignment_target_corr=(
+                self.config.model.codebook.health.usage_profit_alignment_target_corr
+            ),
         )
         cost_model = LobDepthCostModel(
             commission_rate=self.config.dp.cost_config.commission_rate,
@@ -523,10 +572,76 @@ class Phase1Trainer:
         )
         model.to(self._device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=self.config.training.lr)
-        self._scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=self.config.training.epochs, eta_min=1e-5
-        )
         return model, evaluator, loss_fn, optimizer
+
+    def _effective_pretrain_epochs(self) -> int:
+        """返回本次训练实际使用的 Phase A epoch 数。"""
+        configured = int(self.config.training.pretrain_epochs)
+        if configured < 0:
+            raise Phase1FatalError("training.pretrain_epochs must be >= 0")
+        if configured >= self.config.training.epochs:
+            effective = max(self.config.training.epochs - 1, 0)
+            if effective != configured:
+                self._logger.warning(
+                    "phase1_pretrain_epochs_clamped 说明=pretrain_epochs 必须小于 epochs,已自动收敛到可运行值 configured=%d epochs=%d effective=%d",
+                    configured,
+                    self.config.training.epochs,
+                    effective,
+                )
+            return effective
+        return configured
+
+    @staticmethod
+    def _set_optimizer_lr(optimizer, lr: float) -> None:
+        for group in optimizer.param_groups:
+            group["lr"] = float(lr)
+
+    def _batch_amp_enabled(
+        self,
+        *,
+        base_amp_enabled: bool,
+        states,
+        rewards,
+        epoch: int,
+        batch_idx: int,
+        logged: bool,
+    ) -> tuple[bool, bool]:
+        """根据 batch 输入量级决定是否安全启用 CUDA autocast。
+
+        Phase I 的特征产物中可能包含未标准化的大额成交量/金额类字段。fp32
+        前向仍然有限，但 fp16 线性层会在输入量级过大时溢出为 inf/nan。
+        """
+        import torch
+
+        if not bool(torch.isfinite(states).all().item()):
+            raise Phase1FatalError(
+                f"phase1 batch contains non-finite states: epoch={epoch} batch={batch_idx}"
+            )
+        if not bool(torch.isfinite(rewards).all().item()):
+            raise Phase1FatalError(
+                f"phase1 batch contains non-finite rewards: epoch={epoch} batch={batch_idx}"
+            )
+        if not base_amp_enabled:
+            return False, logged
+
+        state_abs_max = float(states.detach().abs().max().item())
+        reward_abs_max = float(rewards.detach().abs().max().item())
+        max_abs = max(state_abs_max, reward_abs_max)
+        if max_abs <= _AMP_SAFE_INPUT_ABS_MAX:
+            return True, logged
+
+        if not logged:
+            self._logger.warning(
+                "phase1_amp_disabled_for_input_scale 说明=batch 连续输入量级超过 fp16 安全阈值,本轮训练将对超阈值 batch 使用 fp32 前向以避免 NaN epoch=%d batch=%d max_abs=%.6e threshold=%.6e state_abs_max=%.6e reward_abs_max=%.6e",
+                epoch,
+                batch_idx,
+                max_abs,
+                _AMP_SAFE_INPUT_ABS_MAX,
+                state_abs_max,
+                reward_abs_max,
+            )
+            logged = True
+        return False, logged
 
     def _log_reward_composition(self, horizons, split: str) -> None:
         import math as _math
@@ -608,6 +723,7 @@ class Phase1Trainer:
         dataset = Phase1DemoDataset(records=warmup_records, reward_normalizer=normalizer)
         loader = DataLoader(dataset, batch_size=self.config.training.batch_size, shuffle=False, collate_fn=collate_phase1)
         z_e_list = []
+        was_training = model.training
         model.eval()
         with torch.no_grad():
             for batch in loader:
@@ -622,6 +738,8 @@ class Phase1Trainer:
         if z_e_list:
             samples = torch.cat(z_e_list, dim=0)
             model.quantizer.warmup_initialize(samples)
+        if was_training:
+            model.train()
 
     def _train_loop(
         self,
@@ -674,36 +792,79 @@ class Phase1Trainer:
             batch_size=self.config.training.batch_size,
             shuffle=True,
             collate_fn=collate_phase1,
-            num_workers=2,
+            num_workers=2 if _use_cuda else 0,
             pin_memory=_use_cuda,
         )
         _amp_enabled = self.config.training.mixed_precision and _use_cuda
         _scaler = torch.amp.GradScaler("cuda", enabled=_amp_enabled)
+        effective_pretrain_epochs = self._effective_pretrain_epochs()
+        phase_b_epochs = max(self.config.training.epochs - effective_pretrain_epochs, 1)
+        self._scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=phase_b_epochs, eta_min=1e-5
+        )
         self._logger.info(
-            "phase1_train_loop_start 说明=训练循环开始 epochs=%d train_records=%d val_records=%d batches_per_epoch=%d batch_size=%d",
+            "phase1_train_loop_start 说明=训练循环开始 epochs=%d pretrain_epochs=%d train_records=%d val_records=%d batches_per_epoch=%d batch_size=%d",
             self.config.training.epochs,
+            effective_pretrain_epochs,
             len(train_dataset),
             len(val_dataset),
             len(train_loader),
             self.config.training.batch_size,
         )
 
+        _last_batch_idx = len(train_loader) - 1
+        _amp_disabled_for_input_scale_logged = False
         for epoch in range(self.config.training.epochs):
+            is_phase_a = epoch < effective_pretrain_epochs
+            if is_phase_a and self.config.training.pretrain_lr is not None:
+                self._set_optimizer_lr(optimizer, self.config.training.pretrain_lr)
+            elif (
+                epoch == effective_pretrain_epochs
+                and effective_pretrain_epochs > 0
+                and self.config.training.pretrain_lr is not None
+            ):
+                self._set_optimizer_lr(optimizer, self.config.training.lr)
             model.train()
-            for batch in train_loader:
+            epoch_batch_diagnostic: Optional[Dict[str, Any]] = None
+            for batch_idx, batch in enumerate(train_loader):
                 states = batch["states"].to(self._device, non_blocking=True)
                 actions = batch["actions"].to(self._device, non_blocking=True)
                 rewards = batch["rewards"].to(self._device, non_blocking=True)
-                with torch.amp.autocast("cuda", enabled=_amp_enabled):
-                    outputs = model(states, actions, rewards)
-                    loss = loss_fn(
-                        action_logits=outputs.action_logits,
-                        target_actions=actions,
-                        z_e=outputs.z_e,
-                        z_q_no_grad=outputs.z_q_no_grad,
-                        code_id=outputs.code_id,
-                        contrastive_pair_ids=batch["contrastive_pair_ids"],
+                trajectory_returns = batch["trajectory_returns"].to(
+                    self._device, non_blocking=True
+                )
+                batch_amp_enabled, _amp_disabled_for_input_scale_logged = (
+                    self._batch_amp_enabled(
+                        base_amp_enabled=_amp_enabled,
+                        states=states,
+                        rewards=rewards,
+                        epoch=epoch,
+                        batch_idx=batch_idx,
+                        logged=_amp_disabled_for_input_scale_logged,
                     )
+                )
+                with torch.amp.autocast("cuda", enabled=batch_amp_enabled):
+                    if is_phase_a:
+                        outputs = model.forward_pretrain(states, actions, rewards)
+                        loss = loss_fn.forward_pretrain(
+                            action_logits=outputs.action_logits,
+                            target_actions=actions,
+                        )
+                    else:
+                        outputs = model(states, actions, rewards)
+                        loss = loss_fn(
+                            action_logits=outputs.action_logits,
+                            target_actions=actions,
+                            z_e=outputs.z_e,
+                            z_q_no_grad=outputs.z_q_no_grad,
+                            code_id=outputs.code_id,
+                            contrastive_pair_ids=batch["contrastive_pair_ids"],
+                            trajectory_returns=trajectory_returns,
+                            codebook=model.quantizer.codebook,
+                            soft_assignment_temperature=(
+                                self.config.model.codebook.health.usage_profit_alignment_temperature
+                            ),
+                        )
                 optimizer.zero_grad(set_to_none=True)
                 _scaler.scale(loss.total).backward()
                 if self.config.training.gradient_clip_norm > 0:
@@ -713,14 +874,67 @@ class Phase1Trainer:
                     )
                 _scaler.step(optimizer)
                 _scaler.update()
-                model.quantizer.update_codebook(outputs.z_e.detach(), outputs.code_id.detach())
+                if not is_phase_a and outputs.code_id is not None:
+                    model.quantizer.update_codebook(
+                        outputs.z_e.detach(), outputs.code_id.detach()
+                    )
 
-            if self._scheduler is not None:
+                if batch_idx == _last_batch_idx:
+                    if outputs.code_id is not None:
+                        _code_ids = outputs.code_id.detach()
+                        _unique = torch.unique(_code_ids).numel()
+                        _counts = torch.bincount(_code_ids.flatten(), minlength=self.config.model.num_codes).float()
+                        _total = _counts.sum().clamp_min(1.0)
+                        _p = _counts / _total
+                        _entropy = -(_p * _p.clamp_min(1e-8).log()).sum().item()
+                    else:
+                        _unique = 0
+                        _entropy = 0.0
+                    _max_entropy = math.log(self.config.model.num_codes)
+                    epoch_batch_diagnostic = {
+                        "phase": "A" if is_phase_a else "B",
+                        "epoch": epoch,
+                        "batch_idx": batch_idx,
+                        "batch_count": len(train_loader),
+                        "loss_total": loss.total.item(),
+                        "loss_reconstruction": loss.reconstruction.item(),
+                        "loss_commitment": loss.commitment.item(),
+                        "loss_usage": (
+                            f"{loss.usage.item():.6f}" if loss.usage is not None else "None"
+                        ),
+                        "loss_alignment": (
+                            f"{loss.alignment.item():.6f}" if loss.alignment is not None else "None"
+                        ),
+                        "code_unique": _unique,
+                        "num_codes": self.config.model.num_codes,
+                        "code_entropy": _entropy,
+                        "max_entropy": _max_entropy,
+                        "z_e_norm": outputs.z_e.detach().norm(dim=-1).mean().item(),
+                        "z_q_norm": outputs.z_q_no_grad.detach().norm(dim=-1).mean().item(),
+                    }
+
+            if is_phase_a and epoch + 1 == effective_pretrain_epochs:
+                self._warmup_codebook(
+                    model,
+                    train_dataset.records,
+                    train_dataset.reward_normalizer,
+                )
+                self._logger.info(
+                    "phase1_codebook_warmup_after_pretrain_done 说明=Phase A 结束后已初始化 codebook epoch=%d init_method=%s warmup_batches=%d",
+                    epoch,
+                    self.config.model.codebook.init_method,
+                    self.config.model.codebook.kmeans_warmup_batches,
+                )
+
+            if self._scheduler is not None and not is_phase_a:
                 self._scheduler.step()
 
-            # 每 10 轮进行一次评估、诊断和 checkpoint 保存
-            evaluation_interval = 10
-            should_evaluate = (epoch + 1) % evaluation_interval == 0 or epoch == self.config.training.epochs - 1
+            # 每 5 轮进行一次评估、诊断和 checkpoint 保存；Phase A 不参与选择。
+            evaluation_interval = 5
+            should_evaluate = (not is_phase_a) and (
+                (epoch + 1) % evaluation_interval == 0
+                or epoch == self.config.training.epochs - 1
+            )
 
             restarted_code_ids = []
             if should_evaluate:
@@ -778,6 +992,28 @@ class Phase1Trainer:
                 # 非评估轮次:不保存 checkpoint,不进行评估和诊断
                 verdict = SelectionVerdict(decision="skipped", reasons=["skipped_evaluation"], composite_score=0.0, composite_score_debug={})
 
+            if epoch_batch_diagnostic is not None:
+                self._logger.info(
+                    "phase1_batch_diagnostic 说明=训练 batch 诊断 phase=%s epoch=%d batch=%d/%d "
+                    "loss_total=%.6f loss_rec=%.6f loss_commit=%.6f loss_usage=%s loss_alignment=%s "
+                    "code_unique=%d/%d code_entropy=%.4f/%.4f "
+                    "z_e_norm=%.4f z_q_norm=%.4f",
+                    epoch_batch_diagnostic["phase"],
+                    epoch_batch_diagnostic["epoch"],
+                    epoch_batch_diagnostic["batch_idx"],
+                    epoch_batch_diagnostic["batch_count"],
+                    epoch_batch_diagnostic["loss_total"],
+                    epoch_batch_diagnostic["loss_reconstruction"],
+                    epoch_batch_diagnostic["loss_commitment"],
+                    epoch_batch_diagnostic["loss_usage"],
+                    epoch_batch_diagnostic["loss_alignment"],
+                    epoch_batch_diagnostic["code_unique"],
+                    epoch_batch_diagnostic["num_codes"],
+                    epoch_batch_diagnostic["code_entropy"],
+                    epoch_batch_diagnostic["max_entropy"],
+                    epoch_batch_diagnostic["z_e_norm"],
+                    epoch_batch_diagnostic["z_q_norm"],
+                )
             self._logger.info(
                 "phase1_epoch_result 说明=单个 epoch 训练完成 epoch=%d evaluated=%s full_validation=%s decision=%s score=%.6f code_usage_ratio=%s val_return_capture_ratio=%s val_sharpe_ratio=%s restarts=%d reasons=%s",
                 epoch,
@@ -986,9 +1222,19 @@ class Phase1Trainer:
             out.append(payload)
         return out
 
-    def _build_final_summary(self, *, metrics, reject_stats, normalizer, best_epoch, no_trade_ratio: float = 0.0) -> dict:
+    def _build_final_summary(
+        self,
+        *,
+        metrics,
+        reject_stats,
+        normalizer,
+        state_normalizer=None,
+        best_epoch,
+        no_trade_ratio: float = 0.0,
+    ) -> dict:
         cost = self.config.dp.cost_config
         norm_dict = normalizer.to_dict() if normalizer.stats else {}
+        state_norm_dict = state_normalizer.to_dict() if state_normalizer is not None else {}
         summary = dict(metrics)
         if "val_weighted_reconstruction_accuracy" in summary:
             summary.setdefault(
@@ -1025,6 +1271,9 @@ class Phase1Trainer:
         )
         summary["reward_normalization_resolved"] = norm_dict.get("method", "")
         summary["reward_norm_clip_ratio"] = norm_dict.get("clip_ratio", 0.0)
+        summary["state_normalization_resolved"] = state_norm_dict.get("method", "")
+        summary["state_norm_max_abs_before"] = state_norm_dict.get("max_abs_before", 0.0)
+        summary["state_norm_max_abs_after_fit"] = state_norm_dict.get("max_abs_after_fit", 0.0)
         summary["dataset_reject_rate"] = float(reject_stats.dataset_reject_rate)
         summary["stratification_mode"] = self.config.stratification.mode
         summary["is_hindsight_stratification"] = self.config.stratification.mode == "hindsight_horizon"

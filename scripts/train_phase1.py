@@ -62,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hidden-dim", type=int, default=128)
     p.add_argument("--max-position", type=int, default=1)
     p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--pretrain-epochs", type=int, default=10)
+    p.add_argument("--pretrain-lr", type=float, default=None)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=42)
@@ -115,6 +117,8 @@ def build_config(args: argparse.Namespace) -> Phase1Config:
         batch_size=args.batch_size,
         lr=args.lr,
         epochs=args.epochs,
+        pretrain_epochs=args.pretrain_epochs,
+        pretrain_lr=args.pretrain_lr,
         seed=args.seed,
         device=args.device,
         paper_strict_reproduction=args.paper_strict_reproduction,

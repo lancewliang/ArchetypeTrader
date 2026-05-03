@@ -37,8 +37,80 @@ def test_apply_paper_strict_disables_engineering_options():
     new = apply_paper_strict_overrides(cfg)
     assert new.model.codebook.update_method == "gradient"
     assert new.model.codebook.health.usage_regularization_weight == 0.0
+    assert new.model.codebook.health.usage_profit_alignment_weight == 0.0
     assert new.model.codebook.health.dead_code_restart is False
     assert new.model.encoder_input.reward_normalization == "train_reward_standard"
+    assert new.training.pretrain_epochs == 0
+
+
+def test_effective_pretrain_epochs_clamps_to_leave_phase_b():
+    trainer = Phase1Trainer(
+        _config(training=TrainingConfig(epochs=2, pretrain_epochs=10, device="cpu"))
+    )
+    assert trainer._effective_pretrain_epochs() == 1
+
+
+def test_build_training_components_wires_alignment_weight(tmp_path):
+    pytest.importorskip("torch")
+    health = CodebookHealthConfig(
+        usage_regularization_weight=0.0,
+        usage_profit_alignment_weight=0.07,
+        usage_profit_alignment_target_corr=0.4,
+        dead_code_restart=False,
+    )
+    model_cfg = ModelConfig(
+        hidden_dim=16,
+        code_dim=4,
+        num_codes=4,
+        codebook=CodebookConfig(init_method="random_normal", health=health),
+    )
+    trainer = Phase1Trainer(
+        _config(
+            artifact_root=str(tmp_path),
+            model=model_cfg,
+            training=TrainingConfig(device="cpu"),
+        )
+    )
+    _, _, loss_fn, _ = trainer._build_training_components(
+        feature_dim=2,
+        val_horizons=[],
+        reward_normalizer=None,
+    )
+    assert loss_fn.usage_profit_alignment_weight == pytest.approx(0.07)
+    assert loss_fn.usage_profit_alignment_target_corr == pytest.approx(0.4)
+
+
+def test_batch_amp_disabled_when_inputs_exceed_fp16_safe_range():
+    torch = pytest.importorskip("torch")
+    trainer = Phase1Trainer(_config(training=TrainingConfig(device="cpu")))
+    states = torch.tensor([[[1.0e10]]])
+    rewards = torch.zeros(1, 1)
+    enabled, logged = trainer._batch_amp_enabled(
+        base_amp_enabled=True,
+        states=states,
+        rewards=rewards,
+        epoch=0,
+        batch_idx=0,
+        logged=False,
+    )
+    assert enabled is False
+    assert logged is True
+
+
+def test_batch_amp_rejects_nonfinite_inputs():
+    torch = pytest.importorskip("torch")
+    trainer = Phase1Trainer(_config(training=TrainingConfig(device="cpu")))
+    states = torch.tensor([[[float("nan")]]])
+    rewards = torch.zeros(1, 1)
+    with pytest.raises(Phase1FatalError, match="non-finite states"):
+        trainer._batch_amp_enabled(
+            base_amp_enabled=True,
+            states=states,
+            rewards=rewards,
+            epoch=0,
+            batch_idx=0,
+            logged=False,
+        )
 
 
 def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):

@@ -194,9 +194,12 @@ class CodebookHealthConfig:
     默认 ``dead_code_restart=True``；严格复现论文公式 (4) 时通过
     ``Phase1Config.training.paper_strict_reproduction`` 关闭 usage regularization 与 restart。
     """
-    min_code_usage_ratio: float = 0.7
+    min_code_usage_ratio: float = 0.5
     max_dominant_code_ratio: float = 0.5
     usage_regularization_weight: float = 0.01
+    usage_profit_alignment_weight: float = 0.05
+    usage_profit_alignment_target_corr: float = 0.2
+    usage_profit_alignment_temperature: float = 2.0
     dead_code_patience: int = 5
     dead_code_restart: bool = True
     restart_source: str = "high_reconstruction_error_samples"
@@ -212,10 +215,11 @@ class CodebookConfig:
     init_method: Literal[
         "random_normal", "sample_encoder_outputs", "kmeans_warmup"
     ] = "kmeans_warmup"
-    kmeans_warmup_batches: int = 32
+    kmeans_warmup_batches: int = 64
     update_method: Literal["gradient", "ema"] = "ema"
-    ema_decay: float = 0.99
+    ema_decay: float = 0.95
     ema_epsilon: float = 1.0e-5
+    gumbel_temperature: float = 2.0
     health: CodebookHealthConfig = field(default_factory=CodebookHealthConfig)
 
 
@@ -237,6 +241,8 @@ class TrainingConfig:
     batch_size: int = 256
     lr: float = 1.0e-3
     epochs: int = 100
+    pretrain_epochs: int = 10
+    pretrain_lr: Optional[float] = None
     seed: int = 42
     device: str = "cuda"
     save_every: int = 10
@@ -845,6 +851,10 @@ PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
         "EMA 更新时的数值稳定项，避免低计数 code 除零或爆炸。",
         "通常不需要调；过大可能偏置低使用率 code，过小可能数值不稳。",
     ),
+    "model.codebook.gumbel_temperature": _config_doc(
+        "Gumbel-Softmax 温度参数，控制多样性损失的梯度强度。增大使软分配更均匀（梯度更强但信号更模糊）；减小使软分配更尖锐（接近硬分配）。",
+        "典型范围 0.1~10.0；collapse 严重时可增大到 5.0~10.0。",
+    ),
     "model.codebook.health": _config_doc(
         "集中配置 codebook collapse 监控和恢复策略。",
         "阈值越严越能保证 archetype 可用性；过严可能让训练过早失败。",
@@ -858,8 +868,20 @@ PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
         "降低可防止主导 code；提高可容忍市场确实由少数模式主导。",
     ),
     "model.codebook.health.usage_regularization_weight": _config_doc(
-        "设置鼓励 code 使用均衡的辅助正则权重。",
+        "设置鼓励 code 使用均衡的辅助正则权重（KL-uniform）。",
         "增大可缓解 collapse 但改变 loss；严格复现论文公式时应设为 0。",
+    ),
+    "model.codebook.health.usage_profit_alignment_weight": _config_doc(
+        "设置 code 使用率与轨迹收益正相关的辅助损失权重。",
+        "增大可鼓励高收益 archetype 被更多使用；过大可能压制重构目标，严格复现论文公式时应设为 0。",
+    ),
+    "model.codebook.health.usage_profit_alignment_target_corr": _config_doc(
+        "设置 usage-profit alignment 期望达到的最小相关系数。",
+        "提高会更强地惩罚收益与使用率负相关；降低更保守，适合先做稳定性验证。",
+    ),
+    "model.codebook.health.usage_profit_alignment_temperature": _config_doc(
+        "设置基于 z_e 与 codebook 距离计算 soft assignment 的 softmax 温度。",
+        "增大使软分配更平滑、梯度覆盖更多 code；减小更接近 hard assignment 但信号更尖锐。",
     ),
     "model.codebook.health.dead_code_patience": _config_doc(
         "定义 code 连续未使用多少 epoch 后视为 dead code。",
@@ -930,6 +952,14 @@ PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
     "training.epochs": _config_doc(
         "设置最大训练 epoch 数。",
         "增大给模型更多收敛时间但可能过拟合；减小适合快速验证。",
+    ),
+    "training.pretrain_epochs": _config_doc(
+        "设置 Phase A 跳过 VQ 的重构预训练 epoch 数。",
+        "增大可让 encoder 初始化 codebook 前学到更稳定表示，但会增加训练时间；严格复现论文公式时自动设为 0。",
+    ),
+    "training.pretrain_lr": _config_doc(
+        "可选设置 Phase A 预训练学习率；为空时复用 training.lr。",
+        "单独降低可让预训练更稳；为空保持训练阶段学习率一致，减少调参维度。",
     ),
     "training.seed": _config_doc(
         "固定采样、初始化和训练随机性，保证实验可复现。",
@@ -1086,6 +1116,7 @@ def apply_paper_strict_overrides(config: Phase1Config) -> Phase1Config:
         health=replace(
             config.model.codebook.health,
             usage_regularization_weight=0.0,
+            usage_profit_alignment_weight=0.0,
             dead_code_restart=False,
         ),
     )
@@ -1096,7 +1127,9 @@ def apply_paper_strict_overrides(config: Phase1Config) -> Phase1Config:
     )
     new_model = replace(
         config.model,
+        beta0=0.25,
         codebook=new_codebook,
         encoder_input=new_encoder_input,
     )
-    return replace(config, model=new_model)
+    new_training = replace(config.training, pretrain_epochs=0)
+    return replace(config, model=new_model, training=new_training)

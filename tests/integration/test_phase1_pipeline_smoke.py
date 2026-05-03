@@ -148,6 +148,7 @@ def test_pipeline_smoke_writes_required_artifacts(smoke_artifacts):
         a.horizon_labels_train,
         a.horizon_labels_val,
         a.horizon_labels_test,
+        a.state_normalizer_json,
         a.best_vq_model,
         a.last_vq_model,
         a.encoder_pt,

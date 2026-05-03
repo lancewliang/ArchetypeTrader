@@ -21,6 +21,7 @@ import numpy as np
 
 from src.config.phase2_config import Phase2Config
 from src.data.phase2_horizon_index import Phase2HorizonEntry
+from src.data.state_normalizer import StateNormalizer
 from src.trading.cost_model import ExecutionBook
 from src.trading.env import HorizonInputs
 from src.trading.reward_alignment import RewardAlignment
@@ -69,12 +70,16 @@ class Phase2Dataset:
         self._alignment = RewardAlignment(
             reward_alignment or self._resolve_reward_alignment()
         )
+        self._state_normalizer = self._load_state_normalizer()
 
         # 预提取 numpy 数组以避免逐行 polars 查询
         import polars as pl
         if isinstance(frame, pl.DataFrame):
             self._validate_inputs(frame)
-            self._feature_matrix = frame.select(self._feature_columns).to_numpy().astype("float32")
+            feature_matrix = frame.select(self._feature_columns).to_numpy().astype("float32")
+            if self._state_normalizer is not None:
+                feature_matrix = self._state_normalizer.transform_array(feature_matrix)
+            self._feature_matrix = feature_matrix.astype("float32")
             self._close = frame[self._price_column].to_numpy().astype("float32")
             self._num_rows = frame.height
             # 盘口
@@ -111,6 +116,22 @@ class Phase2Dataset:
                 self._mark = self._close.copy()
         else:
             raise TypeError("frame 必须是 polars.DataFrame")
+
+    def _load_state_normalizer(self) -> Optional[StateNormalizer]:
+        """Load Phase I state normalizer when present.
+
+        Older Phase I fixtures did not write this file, so missing normalizer is
+        tolerated for backward-compatible tests and legacy artifacts.
+        """
+        path = self.config.phase1_dir() / "state_normalizer.json"
+        if not path.exists():
+            return None
+        normalizer = StateNormalizer.load_json(path)
+        if list(normalizer.stats.feature_columns) != list(self._feature_columns):
+            raise ValueError(
+                "state_normalizer feature_columns 与 input_schema 不一致"
+            )
+        return normalizer
 
     def _validate_inputs(self, frame) -> None:
         """构造阶段做防御性校验，避免训练中途暴露难定位错误。"""
