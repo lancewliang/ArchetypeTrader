@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--test-file", required=True, help="测试数据 feather 路径")
     p.add_argument("--checkpoint", required=True, help="best_selector.pt 路径")
     p.add_argument("--artifact-root", default="artifacts")
+    p.add_argument("--max-position", type=int, default=1)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--stochastic-seeds", nargs="*", type=int, default=None,
                     help="stochastic seed pack（仅诊断）")
@@ -76,6 +77,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         phase2_batch_id=args.phase2_batch_id,
         test_file=args.test_file,
         artifact_root=args.artifact_root,
+        max_position=args.max_position,
         seed=args.seed,
     )
 

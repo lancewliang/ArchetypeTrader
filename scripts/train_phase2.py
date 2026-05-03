@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rollout-length", type=int, default=128)
     p.add_argument("--update-epochs", type=int, default=4)
     p.add_argument("--minibatch-size", type=int, default=256)
+    p.add_argument("--max-position", type=int, default=1)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda")
     # KL/demo 消融
@@ -91,6 +92,7 @@ def build_config(args: argparse.Namespace) -> Phase2Config:
         total_timesteps=args.total_timesteps,
         num_envs=args.num_envs,
         rollout_length=args.rollout_length,
+        max_position=args.max_position,
         seed=args.seed,
         device=args.device,
         allow_phase1_hindsight_warning=args.allow_phase1_hindsight_warning,
