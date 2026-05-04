@@ -23,11 +23,11 @@ def _book(mark: float, depth: float = 100.0, spread_bps: float = 1.0) -> Executi
     )
 
 
-def _make_record(prices, books, sample_id="r0"):
+def _make_record(prices, books, sample_id="r0", start_index=0):
     return HorizonRecord(
         sample_id=sample_id,
-        start_index=0,
-        end_index=len(books) - 1,
+        start_index=start_index,
+        end_index=start_index + len(books) - 1,
         pair="TEST",
         split="train",
         strata_label="up|low|mixed",
@@ -115,3 +115,44 @@ def test_only_warns_when_fail_when_exceeded_false():
     horizons, stats = gen.generate([record])
     assert horizons  # 不抛错
     assert stats.dataset_reject_rate > 0.0
+
+
+def test_parallel_generate_matches_serial_order_and_stats():
+    cm = LobDepthCostModel(commission_rate=0.0001)
+    planner = SingleTradeDPPlanner(
+        cost_model=cm,
+        reward_alignment=RewardAlignment("paper_formula"),
+    )
+    health = RejectTransitionHealthConfig(fail_when_exceeded=False)
+    serial = Phase1DemoGenerator(planner=planner, health=health)
+    parallel = Phase1DemoGenerator(
+        planner=planner,
+        health=health,
+        max_workers=2,
+        worker_chunksize=1,
+        parallel_min_horizons=1,
+    )
+
+    def records():
+        out = []
+        for i in range(8):
+            prices = [100.0 + i * 0.1 + j * 0.2 for j in range(9)]
+            books = [_book(p, depth=100.0) for p in prices[:-1]]
+            out.append(_make_record(prices, books, sample_id=f"r{i}", start_index=i))
+        return out
+
+    serial_records, serial_stats = serial.generate(records())
+    parallel_records, parallel_stats = parallel.generate(records())
+
+    assert [rec.sample_id for rec in parallel_records] == [
+        rec.sample_id for rec in serial_records
+    ]
+    assert [rec.actions for rec in parallel_records] == [
+        rec.actions for rec in serial_records
+    ]
+    assert [rec.rewards for rec in parallel_records] == [
+        rec.rewards for rec in serial_records
+    ]
+    assert parallel_stats.per_horizon_reject_count == serial_stats.per_horizon_reject_count
+    assert parallel_stats.per_horizon_reject_rate == serial_stats.per_horizon_reject_rate
+    assert parallel_stats.reject_by_action_pair == serial_stats.reject_by_action_pair

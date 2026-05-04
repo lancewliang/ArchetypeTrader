@@ -12,6 +12,9 @@ import math
 from dataclasses import asdict, dataclass
 from typing import List, Literal, Optional, Sequence
 
+import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
+
 
 @dataclass(frozen=True)
 class WindowIndexEntry:
@@ -97,6 +100,176 @@ def _compute_past_stats(close: Sequence[float], start: int, lookback: int):
     return past_ret, past_vol, _classify_draw(max_up, max_down)
 
 
+def _rolling_all_positive(close: np.ndarray, window_size: int) -> np.ndarray:
+    positive = (close > 0).astype(np.int64)
+    prefix = np.concatenate(([0], np.cumsum(positive, dtype=np.int64)))
+    counts = prefix[window_size:] - prefix[:-window_size]
+    return counts == window_size
+
+
+def _windowed_sample_volatility(
+    returns: np.ndarray,
+    *,
+    window_size: int,
+    n_windows: int,
+) -> np.ndarray:
+    if n_windows <= 0:
+        return np.asarray([], dtype=np.float64)
+    if window_size <= 1:
+        return np.zeros(n_windows, dtype=np.float64)
+
+    prefix_sum = np.concatenate(([0.0], np.cumsum(returns, dtype=np.float64)))
+    prefix_sq = np.concatenate(([0.0], np.cumsum(returns * returns, dtype=np.float64)))
+    sums = prefix_sum[window_size : window_size + n_windows] - prefix_sum[:n_windows]
+    sums_sq = prefix_sq[window_size : window_size + n_windows] - prefix_sq[:n_windows]
+    n = float(window_size)
+    denom = max(window_size - 1, 1)
+    var = (sums_sq - (sums * sums) / n) / denom
+    return np.sqrt(np.maximum(var, 0.0))
+
+
+def _classify_draw_arrays(max_up: np.ndarray, max_down: np.ndarray) -> np.ndarray:
+    labels = np.full(max_up.shape, "mixed", dtype="<U8")
+    labels[max_up > 1.5 * max_down] = "upward"
+    labels[max_down > 1.5 * max_up] = "downward"
+    flat = (max_up <= 0.0) & (max_down <= 0.0)
+    labels[flat] = "mixed"
+    return labels
+
+
+def _rolling_draw_patterns(
+    close: np.ndarray,
+    *,
+    window_size: int,
+    n_windows: int,
+    valid_windows: np.ndarray,
+) -> np.ndarray:
+    labels = np.full(n_windows, "mixed", dtype="<U8")
+    if n_windows <= 0 or window_size <= 0 or not bool(np.any(valid_windows)):
+        return labels
+
+    windows_view = sliding_window_view(close, window_shape=window_size)[:n_windows]
+    # Keep temporary arrays bounded for large prospective lookbacks.
+    chunk_size = max(512, min(n_windows, max(1, 8_000_000 // window_size)))
+    for chunk_start in range(0, n_windows, chunk_size):
+        chunk_end = min(n_windows, chunk_start + chunk_size)
+        valid = valid_windows[chunk_start:chunk_end]
+        if not bool(np.any(valid)):
+            continue
+        windows = windows_view[chunk_start:chunk_end][valid].astype(
+            np.float64, copy=False
+        )
+        trough = np.minimum.accumulate(windows, axis=1)
+        peak = np.maximum.accumulate(windows, axis=1)
+        max_up = np.max(
+            (windows - trough) / np.maximum(trough, 1.0e-12),
+            axis=1,
+        )
+        max_down = np.max(
+            (peak - windows) / np.maximum(peak, 1.0e-12),
+            axis=1,
+        )
+        labels_chunk = labels[chunk_start:chunk_end]
+        labels_chunk[valid] = _classify_draw_arrays(max_up, max_down)
+        labels[chunk_start:chunk_end] = labels_chunk
+    return labels
+
+
+def _vectorized_window_stats(
+    close: np.ndarray,
+    *,
+    horizon: int,
+    n_candidates: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if n_candidates <= 0:
+        empty_f = np.asarray([], dtype=np.float64)
+        return empty_f, empty_f, np.asarray([], dtype="<U8")
+
+    window_size = horizon + 1
+    valid = _rolling_all_positive(close, window_size)[:n_candidates]
+    start_prices = close[:n_candidates]
+    end_prices = close[horizon : horizon + n_candidates]
+    horizon_return = np.full(n_candidates, np.nan, dtype=np.float64)
+    horizon_return[valid] = (end_prices[valid] - start_prices[valid]) / start_prices[valid]
+
+    if horizon > 1:
+        returns = np.divide(
+            close[1:] - close[:-1],
+            close[:-1],
+            out=np.zeros(len(close) - 1, dtype=np.float64),
+            where=close[:-1] > 0,
+        )
+        realized_vol = _windowed_sample_volatility(
+            returns,
+            window_size=horizon - 1,
+            n_windows=n_candidates,
+        )
+    else:
+        realized_vol = np.zeros(n_candidates, dtype=np.float64)
+    realized_vol = np.where(valid, realized_vol, np.nan)
+
+    draw_pattern = _rolling_draw_patterns(
+        close,
+        window_size=window_size,
+        n_windows=n_candidates,
+        valid_windows=valid,
+    )
+    return horizon_return, realized_vol, draw_pattern
+
+
+def _vectorized_past_stats(
+    close: np.ndarray,
+    *,
+    lookback: int,
+    n_candidates: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    past_ret = np.full(n_candidates, np.nan, dtype=np.float64)
+    past_vol = np.full(n_candidates, np.nan, dtype=np.float64)
+    past_draw = np.full(n_candidates, "mixed", dtype="<U8")
+    if n_candidates <= 0:
+        return past_ret, past_vol, past_draw
+    if lookback < 0:
+        raise ValueError(f"prospective_lookback_minutes 必须 >= 0, got {lookback}")
+
+    window_size = lookback + 1
+    n_past_windows = max(0, n_candidates - lookback)
+    if n_past_windows <= 0:
+        return past_ret, past_vol, past_draw
+
+    valid = _rolling_all_positive(close, window_size)[:n_past_windows]
+    starts = np.arange(lookback, n_candidates, dtype=np.int64)
+    start_prices = close[:n_past_windows]
+    end_prices = close[lookback:n_candidates]
+    values = np.full(n_past_windows, np.nan, dtype=np.float64)
+    values[valid] = (end_prices[valid] - start_prices[valid]) / start_prices[valid]
+    past_ret[starts] = values
+
+    if lookback > 0:
+        returns = np.divide(
+            close[1:] - close[:-1],
+            close[:-1],
+            out=np.zeros(len(close) - 1, dtype=np.float64),
+            where=close[:-1] > 0,
+        )
+        vol_values = _windowed_sample_volatility(
+            returns,
+            window_size=lookback,
+            n_windows=n_past_windows,
+        )
+    else:
+        vol_values = np.zeros(n_past_windows, dtype=np.float64)
+    past_vol[starts] = np.where(valid, vol_values, np.nan)
+
+    draw_values = _rolling_draw_patterns(
+        close,
+        window_size=window_size,
+        n_windows=n_past_windows,
+        valid_windows=valid,
+    )
+    past_draw[starts] = draw_values
+    return past_ret, past_vol, past_draw
+
+
 class SlidingWindowIndexer:
     """枚举所有候选 horizon。
 
@@ -163,12 +336,27 @@ class SlidingWindowIndexer:
         if "close" not in frame.columns:
             raise ValueError("frame 必须包含 close 列")
 
-        close = frame["close"].to_numpy()
+        close = frame["close"].to_numpy().astype(np.float64, copy=False)
         num_rows = len(close)
         n_candidates = self.num_candidates(num_rows)
         h = self.horizon
         # 超 lookback 时 past 统计为 NaN，但仍保留窗口（采样阶段会丢弃 NaN strata）。
         lookback = self.prospective_lookback_minutes
+        horizon_returns, realized_vols, draw_patterns = _vectorized_window_stats(
+            close,
+            horizon=h,
+            n_candidates=n_candidates,
+        )
+        if stratification_mode == "prospective_past":
+            past_returns, past_vols, past_draw_patterns = _vectorized_past_stats(
+                close,
+                lookback=lookback,
+                n_candidates=n_candidates,
+            )
+        else:
+            past_returns = np.full(n_candidates, np.nan, dtype=np.float64)
+            past_vols = np.full(n_candidates, np.nan, dtype=np.float64)
+            past_draw_patterns = np.full(n_candidates, "mixed", dtype="<U8")
 
         entries: List[WindowIndexEntry] = []
         for start in range(n_candidates):
@@ -180,28 +368,18 @@ class SlidingWindowIndexer:
                 last_exec = window_end + 1
                 last_markout = window_end + 2
 
-            horizon_return, realized_vol, draw_pattern, _, _ = _compute_window_stats(
-                close, start, h
-            )
-            if stratification_mode == "prospective_past":
-                past_ret, past_vol, past_draw = _compute_past_stats(close, start, lookback)
-            else:
-                past_ret = float("nan")
-                past_vol = float("nan")
-                past_draw = "mixed"
-
             entries.append(
                 WindowIndexEntry(
                     window_start=start,
                     window_end=window_end,
                     last_execution_row=last_exec,
                     last_markout_row=last_markout,
-                    horizon_return=horizon_return,
-                    realized_volatility=realized_vol,
-                    draw_pattern=draw_pattern,
-                    past_return=past_ret,
-                    past_realized_volatility=past_vol,
-                    past_draw_pattern=past_draw,
+                    horizon_return=float(horizon_returns[start]),
+                    realized_volatility=float(realized_vols[start]),
+                    draw_pattern=str(draw_patterns[start]),
+                    past_return=float(past_returns[start]),
+                    past_realized_volatility=float(past_vols[start]),
+                    past_draw_pattern=str(past_draw_patterns[start]),
                 )
             )
         return entries
@@ -210,4 +388,19 @@ class SlidingWindowIndexer:
         """把索引项转为 polars DataFrame，便于写 ``window_index_*.feather``。"""
         import polars as pl
 
-        return pl.DataFrame([e.to_dict() for e in entries])
+        return pl.DataFrame(
+            {
+                "window_start": [e.window_start for e in entries],
+                "window_end": [e.window_end for e in entries],
+                "last_execution_row": [e.last_execution_row for e in entries],
+                "last_markout_row": [e.last_markout_row for e in entries],
+                "horizon_return": [e.horizon_return for e in entries],
+                "realized_volatility": [e.realized_volatility for e in entries],
+                "draw_pattern": [e.draw_pattern for e in entries],
+                "past_return": [e.past_return for e in entries],
+                "past_realized_volatility": [
+                    e.past_realized_volatility for e in entries
+                ],
+                "past_draw_pattern": [e.past_draw_pattern for e in entries],
+            }
+        )

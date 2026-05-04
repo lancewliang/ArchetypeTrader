@@ -95,8 +95,8 @@ class TimeDistributionSamplingConfig:
 @dataclass(frozen=True)
 class EvalLabelingConfig:
     """Eval split 的 label 生成契约。"""
-    val_mode: Literal["all_eligible"] = "all_eligible"
-    test_mode: Literal["all_eligible"] = "all_eligible"
+    val_mode: Literal["horizon_stride", "all_eligible"] = "horizon_stride"
+    test_mode: Literal["horizon_stride", "all_eligible"] = "horizon_stride"
     apply_sampling: bool = False
     apply_augmentation: bool = False
 
@@ -377,6 +377,8 @@ class Phase1DataProcessConfig:
         default_factory=DataAugmentationConfig
     )
     dp: DPConfig = field(default_factory=DPConfig)
+    dp_workers: int = 0  # 0=auto; large datasets use available CPU cores
+    dp_worker_chunksize: int = 32
     seed: int = 42
     allow_missing_prospective_diagnostic: bool = False
     risk_acknowledged_by: Optional[str] = None

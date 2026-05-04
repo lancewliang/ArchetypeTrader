@@ -98,7 +98,7 @@ def test_phase1_data_processor_writes_val_and_test_teacher(tmp_path):
         assert "rewards" in teacher.columns
 
 
-def test_phase1_data_processor_labels_eval_splits_all_boundary_eligible(tmp_path):
+def test_phase1_data_processor_labels_eval_splits_by_horizon_stride(tmp_path):
     config = build_data_process_config(_args(tmp_path))
     manifest_path = Phase1DataProcessor(config).run()
     import polars as pl
@@ -113,10 +113,12 @@ def test_phase1_data_processor_labels_eval_splits_all_boundary_eligible(tmp_path
             manifest_path.parent / split_payload["dp_teacher_path"]
         )
         eligible_count = window_index.filter(pl.col("is_boundary_eligible")).height
-        assert teacher.height == eligible_count
-        assert split_payload["num_labeled_windows"] == eligible_count
-        assert split_payload["labeling_mode"] == "all_eligible"
+        expected_count = eligible_count // config.horizon
+        assert teacher.height == expected_count
+        assert split_payload["num_labeled_windows"] == expected_count
+        assert split_payload["labeling_mode"] == "horizon_stride"
         assert split_payload["sampling_applied"] is False
+        assert window_index.filter(pl.col("is_sampled")).height == expected_count
 
 
 def test_phase1_data_processor_records_train_sample_source(tmp_path):
