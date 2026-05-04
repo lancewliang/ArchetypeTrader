@@ -39,6 +39,15 @@ REQUIRED_REPORT_KEYS = (
     "best_checkpoint_path",
     "selection_metric",
     "composite_score_sensitivity",
+    "best_checkpoint_signoff",
+    "phase1_leakage_signoff",
+    "phase1_checkpoint_eligible_for_phase2",
+    "signoff_scope",
+    "signoff_status",
+    "signoff_blocked_reason",
+    "signoff_blocking_reasons",
+    "signoff_warning_reasons",
+    "phase2_required_controls",
 )
 
 

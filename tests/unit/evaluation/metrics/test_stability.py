@@ -27,6 +27,18 @@ def test_matched_stability_higher_than_raw_when_swap():
     assert matched > raw
 
 
+def test_matched_stability_uses_global_assignment():
+    """全局匹配应避免贪心先拿最近 pair 后留下更差总成本。"""
+    best_codes = [0, 1]
+    last_codes = [1, 0]
+    best_cb = [[0.1, 0.0], [0.0, 0.2]]
+    last_cb = [[0.0, 0.0], [0.2, 0.0]]
+
+    matched = matched_epoch_code_stability(best_codes, last_codes, best_cb, last_cb)
+
+    assert matched == 1.0
+
+
 def test_codebook_displacement_zero_when_unchanged():
     cb = [[1.0, 2.0], [3.0, 4.0]]
     out = codebook_displacement(cb, cb)

@@ -399,6 +399,49 @@ def test_sampling_leakage_diagnostics_missing_prospective_report_no_throw(tmp_pa
     assert payload["signoff_blocked_reason"] == "missing_prospective_report"
 
 
+def test_signoff_diagnostics_warns_for_low_horizon_boundary_consistency():
+    trainer = Phase1Trainer(
+        _config(stratification=StratificationConfig(mode="prospective_past"))
+    )
+
+    payload = trainer._build_signoff_diagnostics(
+        report_summary={"horizon_boundary_position_consistency": 0.04},
+        leakage_payload={
+            "hindsight_bias_warning": "not_applicable",
+            "signoff_blocked_reason": "",
+        },
+    )
+
+    assert payload["signoff_status"] == "passed_with_warnings"
+    assert payload["best_checkpoint_signoff"] is False
+    assert payload["phase1_checkpoint_eligible_for_phase2"] is True
+    assert payload["phase1_leakage_signoff"] is True
+    assert payload["phase2_required_controls"] == [
+        "inherit_initial_position_and_charge_boundary_turnover_cost"
+    ]
+    assert any(
+        "horizon_boundary_position_consistency" in reason
+        for reason in payload["signoff_warning_reasons"]
+    )
+
+
+def test_signoff_diagnostics_blocks_leakage_failure(tmp_path):
+    trainer = Phase1Trainer(_config(artifact_root=str(tmp_path)))
+
+    payload = trainer._build_signoff_diagnostics(
+        report_summary={"horizon_boundary_position_consistency": 1.0},
+        leakage_payload={
+            "hindsight_bias_warning": "missing_prospective_report",
+            "signoff_blocked_reason": "missing_prospective_report",
+        },
+    )
+
+    assert payload["signoff_status"] == "blocked"
+    assert payload["best_checkpoint_signoff"] is False
+    assert payload["phase1_checkpoint_eligible_for_phase2"] is False
+    assert payload["signoff_blocking_reasons"] == ["missing_prospective_report"]
+
+
 def _minimal_manifest(tmp_path, *, pair: str = "TEST", create_artifacts: bool = True):
     manifest_dir = tmp_path / "processed"
     manifest_dir.mkdir(parents=True)

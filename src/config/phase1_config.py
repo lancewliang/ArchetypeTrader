@@ -288,6 +288,9 @@ class BehaviorGuardrailConfig:
     min_inter_code_action_diversity: float = 0.15
     min_decoder_sensitivity_to_code: float = 0.05
     min_epoch_code_stability: float = 0.8
+    # Phase I 只能诊断跨 horizon 持仓衔接风险；低于该值写 sign-off warning，
+    # 但不拒绝 best checkpoint。Phase II 必须继承 initial_position 并扣边界成本。
+    min_horizon_boundary_position_consistency_warning: float = 0.20
 
 
 @dataclass(frozen=True)

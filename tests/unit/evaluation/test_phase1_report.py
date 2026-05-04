@@ -42,6 +42,15 @@ def _make_summary(extra: dict | None = None):
         "best_checkpoint_path": "best_vq_model.pt",
         "selection_metric": "phase1_composite_score",
         "composite_score_sensitivity": "composite_score_sensitivity.json",
+        "best_checkpoint_signoff": True,
+        "phase1_leakage_signoff": True,
+        "phase1_checkpoint_eligible_for_phase2": True,
+        "signoff_scope": "phase1_checkpoint_selection_and_no_leakage",
+        "signoff_status": "passed",
+        "signoff_blocked_reason": "",
+        "signoff_blocking_reasons": [],
+        "signoff_warning_reasons": [],
+        "phase2_required_controls": [],
     }
     if extra:
         summary.update(extra)
@@ -55,6 +64,9 @@ def test_required_keys_include_high_risk_fixes():
         "dataset_reject_rate",
         "composite_score_sensitivity",
         "prospective_diagnostic_required",
+        "signoff_status",
+        "signoff_warning_reasons",
+        "phase1_checkpoint_eligible_for_phase2",
     }
     assert must_have.issubset(keys)
 

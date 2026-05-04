@@ -23,7 +23,7 @@ def matched_epoch_code_stability(
     best_codebook: Sequence[Sequence[float]],
     last_codebook: Sequence[Sequence[float]],
 ) -> float:
-    """先用 codebook 距离做 Hungarian-like matching，再算一致率。
+    """先用 codebook 距离做 Hungarian matching，再算一致率。
 
     用途
     ----
@@ -32,33 +32,15 @@ def matched_epoch_code_stability(
 
     实现
     ----
-    简化版贪心匹配: 反复挑选 cost 最小的 (best, last) 对，直到匹配满 K。
-    K 通常 ≤ 16，性能完全够用；不用 scipy linear_sum_assignment 减少依赖。
+    使用最小成本二分图匹配求全局最优 code-id 对齐；K 通常较小，不引入
+    scipy 依赖。
     """
-    K = len(best_codebook)
+    K = min(len(best_codebook), len(last_codebook))
     if K == 0 or not best_code_ids:
         return 0.0
     # cost[i][j] = ||best[i] - last[j]||
     cost = [[_l2(best_codebook[i], last_codebook[j]) for j in range(K)] for i in range(K)]
-    # 贪心匹配
-    used_last = set()
-    mapping: Dict[int, int] = {}
-    for _ in range(K):
-        best_pair = None
-        best_val = float("inf")
-        for i in range(K):
-            if i in mapping:
-                continue
-            for j in range(K):
-                if j in used_last:
-                    continue
-                if cost[i][j] < best_val:
-                    best_val = cost[i][j]
-                    best_pair = (i, j)
-        if best_pair is None:
-            break
-        mapping[best_pair[0]] = best_pair[1]
-        used_last.add(best_pair[1])
+    mapping = _hungarian_assignment(cost)
 
     # 应用 mapping: best 的 code i → last 的 code mapping[i]
     matches = sum(
@@ -67,6 +49,62 @@ def matched_epoch_code_stability(
         if mapping.get(int(a), -1) == int(b)
     )
     return matches / len(best_code_ids)
+
+
+def _hungarian_assignment(cost: Sequence[Sequence[float]]) -> Dict[int, int]:
+    """返回 ``row -> col`` 的最小成本一对一匹配。"""
+    n = len(cost)
+    if n == 0:
+        return {}
+
+    u = [0.0] * (n + 1)
+    v = [0.0] * (n + 1)
+    p = [0] * (n + 1)
+    way = [0] * (n + 1)
+
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = [float("inf")] * (n + 1)
+        used = [False] * (n + 1)
+        way = [0] * (n + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = float("inf")
+            j1 = 0
+            for j in range(1, n + 1):
+                if used[j]:
+                    continue
+                cur = cost[i0 - 1][j - 1] - u[i0] - v[j]
+                if cur < minv[j]:
+                    minv[j] = cur
+                    way[j] = j0
+                if minv[j] < delta:
+                    delta = minv[j]
+                    j1 = j
+            for j in range(n + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+
+        while True:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+            if j0 == 0:
+                break
+
+    assignment = [0] * n
+    for j in range(1, n + 1):
+        if p[j] != 0:
+            assignment[p[j] - 1] = j - 1
+    return {i: assignment[i] for i in range(n)}
 
 
 def codebook_displacement(

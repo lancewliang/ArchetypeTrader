@@ -488,20 +488,20 @@ class Phase1Trainer:
         report_summary["hindsight_vs_prospective_metric_delta"] = leakage_payload.get(
             "hindsight_vs_prospective_metric_delta", {}
         )
-        report_summary["best_checkpoint_signoff"] = (
-            leakage_payload["hindsight_bias_warning"]
-            in {"ok", "not_required", "not_applicable"}
-            and not self.config.local_smoke_relaxed_guardrails
+        signoff_payload = self._build_signoff_diagnostics(
+            report_summary=report_summary,
+            leakage_payload=leakage_payload,
         )
-        signoff_blocked_reason = leakage_payload.get("signoff_blocked_reason", "")
-        if self.config.local_smoke_relaxed_guardrails and not signoff_blocked_reason:
-            signoff_blocked_reason = "local_smoke_relaxed_guardrails"
-        report_summary["signoff_blocked_reason"] = signoff_blocked_reason
+        report_summary.update(signoff_payload)
+        signoff_blocked_reason = signoff_payload["signoff_blocked_reason"]
         writer.write_final_report(report_summary)
         self._logger.info(
-            "phase1_report_updated 说明=Phase I 报告已更新 leakage 诊断 signoff=%s blocked_reason=%s",
+            "phase1_report_updated 说明=Phase I 报告已更新 sign-off 诊断 status=%s best_checkpoint_signoff=%s phase2_eligible=%s blocked_reason=%s warnings=%s",
+            report_summary.get("signoff_status"),
             report_summary.get("best_checkpoint_signoff"),
+            report_summary.get("phase1_checkpoint_eligible_for_phase2"),
             report_summary.get("signoff_blocked_reason"),
+            report_summary.get("signoff_warning_reasons"),
         )
 
         if self._best_epoch_diagnostics:
@@ -1174,7 +1174,7 @@ class Phase1Trainer:
                 )
             if should_evaluate:
                 self._logger.info(
-                    "phase1_epoch_result 说明=单个 epoch 训练完成 epoch=%d full_validation=%s decision=%s score=%.6f code_usage_ratio=%s val_return_capture_ratio=%s val_sharpe_ratio=%s restarts=%d reasons=%s",
+                    "phase1_epoch_result 说明=单个 epoch 训练完成 epoch=%d full_validation=%s decision=%s score=%.6f code_usage_ratio=%s val_return_capture_ratio=%s val_sharpe_ratio=%s epoch_code_stability=%s epoch_code_stability_matched=%s restarts=%d reasons=%s",
                     epoch,
                     full_val,
                     verdict.decision,
@@ -1182,6 +1182,8 @@ class Phase1Trainer:
                     metrics_for_select.get("code_usage_ratio"),
                     metrics_for_select.get("val_return_capture_ratio"),
                     metrics_for_select.get("val_sharpe_ratio"),
+                    metrics_for_select.get("epoch_code_stability"),
+                    metrics_for_select.get("epoch_code_stability_matched"),
                     len(restarted_code_ids),
                     ",".join(verdict.reasons),
                 )
@@ -1498,10 +1500,86 @@ class Phase1Trainer:
         summary["dead_code_restarts"] = len(self._dead_code_restart_events)
         summary["dead_code_restart_events"] = list(self._dead_code_restart_events)
         summary["composite_score_sensitivity"] = "composite_score_sensitivity.json"
+        summary.setdefault("best_checkpoint_signoff", False)
+        summary.setdefault("phase1_leakage_signoff", False)
+        summary.setdefault("phase1_checkpoint_eligible_for_phase2", False)
+        summary.setdefault("signoff_scope", "phase1_checkpoint_selection_and_no_leakage")
+        summary.setdefault("signoff_status", "pending")
+        summary.setdefault("signoff_blocked_reason", "")
+        summary.setdefault("signoff_blocking_reasons", [])
+        summary.setdefault("signoff_warning_reasons", [])
+        summary.setdefault("phase2_required_controls", [])
         return summary
 
     def _hindsight_warning_triggered(self, summary: dict) -> bool:
         return summary.get("hindsight_bias_warning") == "exceeded"
+
+    def _build_signoff_diagnostics(
+        self,
+        *,
+        report_summary: dict,
+        leakage_payload: dict,
+    ) -> dict:
+        """把 Phase I sign-off 拆成阻塞、警告和 Phase II 可用性。
+
+        ``horizon_boundary_position_consistency`` 是 Phase II 衔接风险诊断：
+        低值不说明 Phase I checkpoint 无效，但必须显式提醒 Phase II 继承持仓并
+        扣除边界换仓成本，避免 ``best_checkpoint_signoff=True`` 被误读为全绿。
+        """
+        blocking_reasons: List[str] = []
+        warning_reasons: List[str] = []
+        phase2_required_controls: List[str] = []
+
+        leakage_warning = leakage_payload.get("hindsight_bias_warning", "ok")
+        leakage_blocker = leakage_payload.get("signoff_blocked_reason", "")
+        phase1_leakage_signoff = leakage_warning in {
+            "ok",
+            "not_required",
+            "not_applicable",
+        }
+        if leakage_blocker:
+            blocking_reasons.append(str(leakage_blocker))
+        if self.config.local_smoke_relaxed_guardrails:
+            blocking_reasons.append("local_smoke_relaxed_guardrails")
+
+        boundary_value = report_summary.get("horizon_boundary_position_consistency")
+        boundary_threshold = (
+            self.config.selection_policy.behavior
+            .min_horizon_boundary_position_consistency_warning
+        )
+        if boundary_value is not None:
+            try:
+                boundary_float = float(boundary_value)
+            except (TypeError, ValueError):
+                boundary_float = None
+            if boundary_float is not None and boundary_float < boundary_threshold:
+                warning_reasons.append(
+                    "horizon_boundary_position_consistency="
+                    f"{boundary_float:.3f} < {boundary_threshold:.3f}; "
+                    "Phase II must inherit initial_position and charge boundary turnover cost"
+                )
+                phase2_required_controls.append(
+                    "inherit_initial_position_and_charge_boundary_turnover_cost"
+                )
+
+        if blocking_reasons:
+            status = "blocked"
+        elif warning_reasons:
+            status = "passed_with_warnings"
+        else:
+            status = "passed"
+
+        return {
+            "best_checkpoint_signoff": status == "passed",
+            "phase1_leakage_signoff": phase1_leakage_signoff,
+            "phase1_checkpoint_eligible_for_phase2": not blocking_reasons,
+            "signoff_scope": "phase1_checkpoint_selection_and_no_leakage",
+            "signoff_status": status,
+            "signoff_blocked_reason": ";".join(blocking_reasons),
+            "signoff_blocking_reasons": blocking_reasons,
+            "signoff_warning_reasons": warning_reasons,
+            "phase2_required_controls": phase2_required_controls,
+        }
 
     def _build_sampling_leakage_diagnostics(self, report_summary: dict) -> dict:
         """读取 prospective 对照 report 并计算 hindsight/prospective 指标差异。"""

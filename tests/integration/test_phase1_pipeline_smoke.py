@@ -172,6 +172,9 @@ def test_phase1_report_required_keys(smoke_artifacts):
         "prospective_diagnostic_required",
         "stratification_mode",
         "training_config_hash",
+        "signoff_status",
+        "signoff_warning_reasons",
+        "phase1_checkpoint_eligible_for_phase2",
     }
     assert must_have.issubset(payload.keys())
 
