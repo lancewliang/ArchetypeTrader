@@ -284,13 +284,24 @@ class Phase2Trainer:
                 max_position=self.config.max_position,
             )
 
-        # 9. 构造 HorizonEnv (multi-env)
+        # 9. 构造 HorizonEnv / process worker specs (multi-env)
         factory = HorizonFactory(self.config, train_dataset, frozen_policy, trading_env_factory)
-        envs, shard_infos = factory.create_envs()
+        worker_specs = []
+        if self.config.rollout_collection.mode == "process":
+            envs = []
+            worker_specs, shard_infos = factory.create_worker_specs(
+                phase1_decoder_path=p1_dir / "decoder.pt",
+                phase1_codebook_path=p1_dir / "codebook.pt",
+                cost_config=cost_cfg,
+                reward_alignment_name=reward_alignment_name,
+            )
+        else:
+            envs, shard_infos = factory.create_envs()
         env_shards_path = factory.write_shards(shard_infos, artifacts_dir / "phase2_env_shards.feather")
         self._logger.info(
-            "Phase II 训练环境已准备：环境数=%d，分片数=%d，分片文件=%s",
-            len(envs),
+            "Phase II 训练环境已准备：环境数=%d，worker specs=%d，分片数=%d，分片文件=%s",
+            len(envs) if envs else len(worker_specs),
+            len(worker_specs),
             len(shard_infos),
             env_shards_path,
         )
@@ -343,8 +354,23 @@ class Phase2Trainer:
         )
         schedule_mgr = ScheduleManager(self.config, optimizer, num_updates)
 
-        ppo_trainer = PPOTrainer(self.config, actor_critic, envs, schedule_mgr)
+        ppo_trainer = PPOTrainer(
+            self.config,
+            actor_critic,
+            envs,
+            schedule_mgr,
+            worker_specs=worker_specs,
+        )
         ppo_trainer.setup(optimizer=optimizer)
+        rollout_collection_info = ppo_trainer.rollout_collection_info()
+        self._logger.info(
+            "Phase II rollout 采样器已准备：模式=%s，worker数=%s，启动方式=%s，worker设备=%s，数据共享=%s",
+            rollout_collection_info.get("mode"),
+            rollout_collection_info.get("max_workers"),
+            rollout_collection_info.get("process_start_method"),
+            rollout_collection_info.get("worker_device"),
+            rollout_collection_info.get("shared_dataset_mode"),
+        )
 
         # Checkpoint + selection policy
         ckpt_mgr = Phase2CheckpointManager(artifacts_dir)
@@ -405,6 +431,12 @@ class Phase2Trainer:
                 "rollout_done_count": stats.rollout_done_count,
                 "rollout_truncated_count": stats.rollout_truncated_count,
                 "rollout_bootstrap_count": stats.rollout_bootstrap_count,
+                "rollout_collect_seconds": stats.rollout_collect_seconds,
+                "rollout_policy_forward_seconds": stats.rollout_policy_forward_seconds,
+                "rollout_env_step_seconds": stats.rollout_env_step_seconds,
+                "rollout_ipc_wait_seconds": stats.rollout_ipc_wait_seconds,
+                "rollout_worker_startup_seconds": stats.rollout_worker_startup_seconds,
+                "rollout_samples_per_second": stats.rollout_samples_per_second,
                 "kl_demo_dominance_ratio": stats.kl_demo_dominance_ratio,
             })
 
@@ -699,6 +731,25 @@ class Phase2Trainer:
                 "mode": self.config.env_shards.mode,
                 "shard_count": len(shard_infos),
             },
+            "rollout_collection": {
+                "mode": self.config.rollout_collection.mode,
+                "max_workers": rollout_collection_info.get("max_workers"),
+                "process_start_method": rollout_collection_info.get("process_start_method"),
+                "worker_device": rollout_collection_info.get("worker_device"),
+                "shared_dataset_mode": rollout_collection_info.get("shared_dataset_mode"),
+                "last_collect_seconds": (
+                    self._rollout_stats[-1].get("rollout_collect_seconds", 0.0)
+                    if self._rollout_stats else 0.0
+                ),
+                "last_ipc_wait_seconds": (
+                    self._rollout_stats[-1].get("rollout_ipc_wait_seconds", 0.0)
+                    if self._rollout_stats else 0.0
+                ),
+                "last_samples_per_second": (
+                    self._rollout_stats[-1].get("rollout_samples_per_second", 0.0)
+                    if self._rollout_stats else 0.0
+                ),
+            },
             "reward_scaling": {
                 "method": self.config.reward_scaling.method,
                 "clip_range": self.config.reward_scaling.clip_range,
@@ -775,6 +826,7 @@ class Phase2Trainer:
         )
 
         self._logger.info("Phase II 训练完成：产物目录=%s", artifacts_dir)
+        ppo_trainer.close()
         return Phase2TrainerArtifacts(
             artifacts_dir=artifacts_dir,
             phase2_config_yaml=config_yaml,

@@ -36,6 +36,25 @@ class TestPhase1FrozenPolicy:
         with pytest.raises(RuntimeError):
             policy.decode_step(torch.zeros(3))
 
+    def test_spawn_worker_policy_has_independent_streaming_state(self):
+        """worker policy 共享冻结权重但不共享 recurrent runtime state。"""
+        policy = _policy()
+        worker_a = policy.spawn_worker_policy()
+        worker_b = policy.spawn_worker_policy()
+
+        assert worker_a is not worker_b
+        assert worker_a.decoder is policy.decoder
+        worker_a.reset(code_id=0)
+        out_a = worker_a.decode_step(torch.zeros(3))
+
+        worker_b.reset(code_id=1)
+        out_b = worker_b.decode_step(torch.ones(3))
+
+        assert out_a.recurrent_state is not worker_b._recurrent_state
+        assert out_b.recurrent_state is worker_b._recurrent_state
+        assert worker_a._code_id == 0
+        assert worker_b._code_id == 1
+
     def test_modifying_future_state_does_not_change_past_logits(self):
         """批量诊断 decode 保持因果性: 修改未来 state 不影响过去 logits。"""
         policy = _policy()

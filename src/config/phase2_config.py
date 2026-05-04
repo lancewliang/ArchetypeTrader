@@ -224,6 +224,20 @@ class EnvShardsConfig:
 
 
 @dataclass(frozen=True)
+class RolloutCollectionConfig:
+    """PPO rollout 采样执行后端配置。"""
+    mode: Literal["serial", "thread", "process"] = "serial"
+    max_workers: Optional[int] = None
+    fail_fast: bool = True
+    process_start_method: Literal["spawn", "forkserver"] = "spawn"
+    worker_device: str = "cpu"
+    worker_startup_timeout_seconds: float = 60.0
+    worker_step_timeout_seconds: Optional[float] = None
+    restart_failed_workers: bool = False
+    shared_dataset_mode: Literal["pickle", "memmap"] = "pickle"
+
+
+@dataclass(frozen=True)
 class StateDimBreakdownConfig:
     """selector state 维度审计配置。"""
     enabled: bool = True
@@ -376,6 +390,9 @@ class Phase2Config:
         default_factory=DeploymentLadderConfig
     )
     env_shards: EnvShardsConfig = field(default_factory=EnvShardsConfig)
+    rollout_collection: RolloutCollectionConfig = field(
+        default_factory=RolloutCollectionConfig
+    )
     state_dim_breakdown: StateDimBreakdownConfig = field(
         default_factory=StateDimBreakdownConfig
     )
@@ -421,6 +438,7 @@ class Phase2Config:
             "resume": ResumeConfig,
             "deployment_ladder": DeploymentLadderConfig,
             "env_shards": EnvShardsConfig,
+            "rollout_collection": RolloutCollectionConfig,
             "state_dim_breakdown": StateDimBreakdownConfig,
             "live_risk_controls": LiveRiskControlsConfig,
             "distribution_shift": DistributionShiftConfig,
@@ -575,6 +593,46 @@ PHASE2_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
     "rollout_length": _config_doc(
         "每个环境在一次 PPO update 前连续采样的步数，单次更新样本量为 num_envs * rollout_length。",
         "增大梯度更稳定但反馈更慢、显存更高；减小更新更频繁但方差更大。若训练震荡可增大，若迭代太慢可减小。",
+    ),
+    "rollout_collection": _config_doc(
+        "配置 PPO rollout 采样后端，控制 env.step 是串行、线程还是多进程执行。",
+        "serial 最易复现；process 用于 CPU-bound env.step 吞吐；thread 仅保留作诊断后端。",
+    ),
+    "rollout_collection.mode": _config_doc(
+        "选择 rollout 采样模式：serial 串行，thread 线程，process 常驻子进程 actor。",
+        "正式对比实验应固定；排查问题时切回 serial，追求采样吞吐时优先试 process。",
+    ),
+    "rollout_collection.max_workers": _config_doc(
+        "并行采样 worker 数量；process 模式第一版要求与实际 env shard 数一致，空值表示每个 env 一个 worker。",
+        "增大 num_envs/worker 可提高吞吐但占更多 CPU/RAM；过大可能因 IPC 和调度开销变慢。",
+    ),
+    "rollout_collection.fail_fast": _config_doc(
+        "并行采样任一 env step 异常时是否立即取消剩余任务并失败。",
+        "正式训练应保持 true 以避免部分 rollout 静默进入 buffer；false 仅适合调试异常聚合。",
+    ),
+    "rollout_collection.process_start_method": _config_doc(
+        "process 模式下 multiprocessing 的启动方式。",
+        "spawn 更安全，避免 CUDA/fork 隐患；forkserver 可在 Linux 上降低部分启动开销但需单独验证。",
+    ),
+    "rollout_collection.worker_device": _config_doc(
+        "process worker 内 Phase I frozen policy 推理设备。",
+        "默认 cpu，避免多个 worker 争用训练 GPU；只有明确验证 GPU worker 安全且更快时才调整。",
+    ),
+    "rollout_collection.worker_startup_timeout_seconds": _config_doc(
+        "process worker 启动和首次 reset 的超时时间。",
+        "增大可容忍大数据 pickle 或慢启动；减小能更快暴露卡死 worker。",
+    ),
+    "rollout_collection.worker_step_timeout_seconds": _config_doc(
+        "process worker 单次 step 等待超时；None 表示不设每步超时。",
+        "设置后可避免训练永久卡住；过小会误杀较慢 horizon。",
+    ),
+    "rollout_collection.restart_failed_workers": _config_doc(
+        "process worker 失败后是否尝试重启；第一版实现保持 false。",
+        "true 会增加恢复复杂度，正式启用前必须验证 checkpoint/env state 一致性。",
+    ),
+    "rollout_collection.shared_dataset_mode": _config_doc(
+        "process worker 获取训练数据的方式，pickle 为首版实现，memmap 预留给大数据优化。",
+        "pickle 简单但每个 worker 复制内存；memmap 可降内存但需要额外文件生命周期管理。",
     ),
     "seed": _config_doc(
         "固定环境分片、初始化和训练随机性，保证实验可复现。",

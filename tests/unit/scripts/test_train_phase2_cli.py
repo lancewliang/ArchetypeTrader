@@ -73,3 +73,28 @@ def test_train_phase2_cli_can_override_gradient_safety_threshold(tmp_path):
     config = build_config(args)
 
     assert config.numerical_safety.max_gradient_norm == 2500.0
+
+
+def test_train_phase2_cli_can_enable_process_rollout(tmp_path):
+    args = build_parser().parse_args(
+        _required_args(
+            tmp_path,
+            "--rollout-collection-mode",
+            "process",
+            "--rollout-workers",
+            "8",
+            "--rollout-worker-device",
+            "cpu",
+            "--rollout-process-start-method",
+            "spawn",
+            "--rollout-worker-step-timeout-seconds",
+            "120",
+        )
+    )
+    config = build_config(args)
+
+    assert config.rollout_collection.mode == "process"
+    assert config.rollout_collection.max_workers == 8
+    assert config.rollout_collection.worker_device == "cpu"
+    assert config.rollout_collection.process_start_method == "spawn"
+    assert config.rollout_collection.worker_step_timeout_seconds == 120.0

@@ -16,6 +16,7 @@ from src.config.phase2_config import (
     Phase2Config,
     Phase2SelectionPolicyConfig,
     PPOConfig,
+    RolloutCollectionConfig,
     RollingValidationConfig,
     SelectorNetworkConfig,
 )
@@ -248,7 +249,12 @@ def write_market_splits(base_dir: Path) -> tuple[Path, Path, Path]:
     return paths
 
 
-def run_smoke_phase2_training(tmp_path: Path, *, phase2_batch_id: str = "smoke_phase2") -> Phase2TrainerArtifacts:
+def run_smoke_phase2_training(
+    tmp_path: Path,
+    *,
+    phase2_batch_id: str = "smoke_phase2",
+    rollout_collection_mode: str = "serial",
+) -> Phase2TrainerArtifacts:
     """Run a tiny real Phase II training flow and return artifacts."""
     train, val, _test = write_market_splits(Path(tmp_path) / "market")
     config = make_config(
@@ -263,5 +269,12 @@ def run_smoke_phase2_training(tmp_path: Path, *, phase2_batch_id: str = "smoke_p
         config,
         train_file=str(train),
         val_file=str(val),
+        rollout_collection=RolloutCollectionConfig(
+            mode=rollout_collection_mode,
+            max_workers=2 if rollout_collection_mode == "thread" else None,
+            fail_fast=True,
+            worker_startup_timeout_seconds=20.0,
+            worker_step_timeout_seconds=20.0,
+        ),
     )
     return Phase2Trainer(config).run()

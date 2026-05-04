@@ -6,7 +6,11 @@ from dataclasses import replace
 import pytest
 import torch
 
-from src.config.phase2_config import NumericalSafetyConfig, RewardScalingConfig
+from src.config.phase2_config import (
+    NumericalSafetyConfig,
+    RewardScalingConfig,
+    RolloutCollectionConfig,
+)
 from src.rl.ppo_trainer import NumericalSafetyError, PPOTrainer
 from src.rl.scheduling import ScheduleManager
 from src.trading.horizon_factory import HorizonFactory
@@ -42,6 +46,88 @@ class TestPPOTrainer:
         stats = trainer.collect_and_update()
         assert isinstance(stats.policy_loss, float)
         assert stats.rollout_truncated_count >= 1
+        assert stats.rollout_collect_seconds > 0.0
+        assert stats.rollout_samples_per_second > 0.0
+
+    def test_threaded_rollout_update_runs(self, tmp_path):
+        """thread rollout 采样器可完成 rollout -> update。"""
+        config = make_config(
+            tmp_path,
+            horizon=4,
+            num_envs=2,
+            rollout_length=2,
+            total_timesteps=4,
+        )
+        config = replace(
+            config,
+            rollout_collection=RolloutCollectionConfig(
+                mode="thread",
+                max_workers=2,
+                fail_fast=True,
+            ),
+        )
+        dataset = make_dataset(config, count=4, labeled=True)
+        factory = HorizonFactory(config, dataset, make_frozen_policy(), make_trading_env)
+        envs, _shards = factory.create_envs()
+        actor_critic = make_actor_critic(state_dim=dataset.state_spec().total_dim)
+        optimizer = torch.optim.Adam(actor_critic.selector.parameters(), lr=config.ppo.lr)
+        schedule = ScheduleManager(config, optimizer, total_updates=2)
+        trainer = PPOTrainer(config, actor_critic, envs, schedule)
+        trainer.setup(optimizer)
+
+        stats = trainer.collect_and_update()
+
+        assert isinstance(stats.policy_loss, float)
+        assert stats.rollout_samples_per_second > 0.0
+        assert trainer.rollout_collection_info()["max_workers"] == 2
+
+    def test_process_rollout_update_runs_and_checkpoint_state_roundtrips(self, tmp_path):
+        """process rollout 采样器可完成 update，并通过 worker state checkpoint。"""
+        config = make_config(
+            tmp_path,
+            horizon=4,
+            num_envs=2,
+            rollout_length=2,
+            total_timesteps=4,
+        )
+        config = replace(
+            config,
+            rollout_collection=RolloutCollectionConfig(
+                mode="process",
+                max_workers=2,
+                fail_fast=True,
+                worker_startup_timeout_seconds=20.0,
+                worker_step_timeout_seconds=20.0,
+            ),
+        )
+        dataset = make_dataset(config, count=4, labeled=True)
+        factory = HorizonFactory(config, dataset, make_frozen_policy(), make_trading_env)
+        worker_specs, _shards = factory.create_worker_specs(
+            phase1_decoder_path=config.phase1_dir() / "decoder.pt",
+            phase1_codebook_path=config.phase1_dir() / "codebook.pt",
+            cost_config={"commission_rate": 0.0, "book_levels": 5},
+            reward_alignment_name="paper_formula",
+        )
+        actor_critic = make_actor_critic(state_dim=dataset.state_spec().total_dim)
+        optimizer = torch.optim.Adam(actor_critic.selector.parameters(), lr=config.ppo.lr)
+        schedule = ScheduleManager(config, optimizer, total_updates=2)
+        trainer = PPOTrainer(
+            config,
+            actor_critic,
+            [],
+            schedule,
+            worker_specs=worker_specs,
+        )
+        trainer.setup(optimizer)
+        try:
+            stats = trainer.collect_and_update()
+            assert isinstance(stats.policy_loss, float)
+            assert stats.rollout_samples_per_second > 0.0
+            state = trainer.get_state()
+            assert len(state["env_states"]) == 2
+            trainer.load_state(state)
+        finally:
+            trainer.close()
 
     def test_approx_kl_early_stop(self, tmp_path):
         """approx_kl > target_kl 时 early stop。"""

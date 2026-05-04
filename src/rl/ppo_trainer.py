@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import random as _random
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -25,7 +25,12 @@ import torch
 from src.config.phase2_config import Phase2Config
 from src.rl.actor_critic import ActorCritic
 from src.rl.ppo_loss import PPOLoss, PPOLossOutput
-from src.rl.rollout_buffer import RolloutBuffer, RolloutSample
+from src.rl.rollout_buffer import RolloutBuffer
+from src.rl.rollout_sampler import (
+    BaseRolloutSampler,
+    RolloutTimingStats,
+    make_rollout_sampler,
+)
 from src.rl.scheduling import ScheduleManager
 from src.trading.horizon_env import HorizonEnv
 from src.evaluation.metrics.policy_health import (
@@ -58,6 +63,12 @@ class PPOUpdateStats:
     rollout_truncated_count: float = 0.0
     rollout_bootstrap_count: float = 0.0
     kl_demo_dominance_ratio: float = 0.0
+    rollout_collect_seconds: float = 0.0
+    rollout_policy_forward_seconds: float = 0.0
+    rollout_env_step_seconds: float = 0.0
+    rollout_ipc_wait_seconds: float = 0.0
+    rollout_worker_startup_seconds: float = 0.0
+    rollout_samples_per_second: float = 0.0
 
 
 class PPOTrainer:
@@ -77,18 +88,29 @@ class PPOTrainer:
         actor_critic: ActorCritic,
         envs: List[HorizonEnv],
         schedule_manager: ScheduleManager,
+        worker_specs: Optional[Sequence[Any]] = None,
     ) -> None:
         self.config = config
         self.actor_critic = actor_critic
         self.envs = envs
+        self.worker_specs = list(worker_specs or [])
         self.schedule_manager = schedule_manager
         self._buffer: Optional[RolloutBuffer] = None
         self._loss_fn: Optional[PPOLoss] = None
         self._optimizer: Optional[torch.optim.Optimizer] = None
+        self._sampler: Optional[BaseRolloutSampler] = None
         self._update_count: int = 0
         self._device = config.device
+        self._num_envs = (
+            len(self.envs)
+            if self.envs
+            else len(self.worker_specs)
+        )
+        if self._num_envs <= 0:
+            self._num_envs = int(config.num_envs)
         # 当前每个 env 的 obs
-        self._current_obs: List[Optional[np.ndarray]] = [None] * len(envs)
+        self._current_obs: List[Optional[np.ndarray]] = [None] * self._num_envs
+        self._last_rollout_timing = RolloutTimingStats()
 
     def setup(self, optimizer: Optional[torch.optim.Optimizer] = None) -> None:
         """初始化 buffer / loss_fn / optimizer。
@@ -104,7 +126,7 @@ class PPOTrainer:
                 "请关闭该配置并使用 reward_scaling。"
             )
         self._buffer = RolloutBuffer(
-            num_envs=self.config.num_envs,
+            num_envs=self._num_envs,
             rollout_length=self.config.rollout_length,
             gamma=self.config.ppo.gamma,
             gae_lambda=self.config.ppo.gae_lambda,
@@ -126,10 +148,15 @@ class PPOTrainer:
                 self.actor_critic.selector.parameters(),
                 lr=self.config.ppo.lr,
             )
-        # 初始化 env obs
-        for i, env in enumerate(self.envs):
-            obs = env.reset()
-            self._current_obs[i] = obs
+        self._sampler = make_rollout_sampler(
+            self.config,
+            self.actor_critic,
+            self.envs,
+            self._device,
+            self._scale_reward,
+            worker_specs=self.worker_specs,
+        )
+        self._sampler.reset_all(self._current_obs)
 
     def collect_rollout(self) -> None:
         """收集一次完整 rollout（rollout_length 步）。
@@ -138,59 +165,13 @@ class PPOTrainer:
         然后 env.step() 执行，将结果存入 buffer。
         """
         assert self._buffer is not None
+        assert self._sampler is not None
         self._buffer.reset()
         self.actor_critic.selector.eval()
-
-        for step in range(self.config.rollout_length):
-            samples: List[RolloutSample] = []
-            # 构建 obs batch
-            obs_batch = np.array(self._current_obs, dtype=np.float32)
-            obs_tensor = torch.tensor(obs_batch, dtype=torch.float32, device=self._device)
-
-            with torch.no_grad():
-                act_out = self.actor_critic.act(obs_tensor, deterministic=False)
-
-            actions = act_out.action.cpu().tolist()
-            log_probs = act_out.log_prob.cpu().tolist()
-            values = act_out.value.cpu().tolist()
-
-            for env_idx, env in enumerate(self.envs):
-                action = actions[env_idx]
-
-                # 在 step 之前记录当前 horizon 的 label 信息。
-                kl_label, is_labeled = env.current_label_info()
-
-                next_obs, reward, done, env_truncated, info = env.step(action)
-                truncated = bool(env_truncated or (step == self.config.rollout_length - 1 and not done))
-
-                # reward scaling
-                reward_raw = reward
-                reward_scaled, reward_was_clipped = self._scale_reward(reward)
-
-                samples.append(RolloutSample(
-                    obs=self._current_obs[env_idx],
-                    env_id=env_idx,
-                    action=action,
-                    log_prob=log_probs[env_idx],
-                    value=values[env_idx],
-                    reward=reward_scaled,
-                    reward_raw=reward_raw,
-                    done=done,
-                    truncated=truncated,
-                    reward_was_clipped=reward_was_clipped,
-                    kl_label=kl_label,
-                    is_labeled=is_labeled,
-                    info_cost_paid=info.cost_paid if info else 0.0,
-                    info_boundary_cost=info.boundary_cost if info else 0.0,
-                    info_chosen_code=action,
-                ))
-
-                if done:
-                    self._current_obs[env_idx] = env.reset()
-                else:
-                    self._current_obs[env_idx] = next_obs
-
-            self._buffer.add(samples)
+        self._last_rollout_timing = self._sampler.collect(
+            self._buffer,
+            self._current_obs,
+        )
 
     def _scale_reward(self, reward: float) -> Tuple[float, bool]:
         """应用 reward scaling。"""
@@ -247,6 +228,18 @@ class PPOTrainer:
         stats.rollout_done_count = buffer_stats.get("rollout_done_count", 0.0)
         stats.rollout_truncated_count = buffer_stats.get("rollout_truncated_count", 0.0)
         stats.rollout_bootstrap_count = buffer_stats.get("rollout_bootstrap_count", 0.0)
+        stats.rollout_collect_seconds = self._last_rollout_timing.collect_seconds
+        stats.rollout_policy_forward_seconds = (
+            self._last_rollout_timing.policy_forward_seconds
+        )
+        stats.rollout_env_step_seconds = self._last_rollout_timing.env_step_seconds
+        stats.rollout_ipc_wait_seconds = self._last_rollout_timing.ipc_wait_seconds
+        stats.rollout_worker_startup_seconds = (
+            self._last_rollout_timing.worker_startup_seconds
+        )
+        stats.rollout_samples_per_second = (
+            self._last_rollout_timing.samples_per_second
+        )
 
         vr = self._buffer.flat_values_returns()
         stats.explained_variance = compute_explained_variance(
@@ -361,6 +354,22 @@ class PPOTrainer:
         self.collect_rollout()
         return self.update()
 
+    def rollout_collection_info(self) -> Dict[str, Any]:
+        """Return configured rollout collection backend details for logging."""
+        max_workers = getattr(self._sampler, "max_workers", None)
+        return {
+            "mode": self.config.rollout_collection.mode,
+            "max_workers": max_workers,
+            "process_start_method": self.config.rollout_collection.process_start_method,
+            "worker_device": self.config.rollout_collection.worker_device,
+            "shared_dataset_mode": self.config.rollout_collection.shared_dataset_mode,
+        }
+
+    def close(self) -> None:
+        """Release rollout sampler resources."""
+        if self._sampler is not None:
+            self._sampler.close()
+
     def _check_numerical_safety(self, loss: torch.Tensor) -> None:
         """检查 tensor 非 finite 和 gradient 爆炸。
 
@@ -437,16 +446,8 @@ class PPOTrainer:
         }
         if self._optimizer is not None:
             state["optimizer_state"] = self._optimizer.state_dict()
-        # env cursors
-        env_states = []
-        for env in self.envs:
-            env_states.append({
-                "cursor": env.cursor,
-                "prev_terminal_position": env.prev_terminal_position,
-                "cumulative_loss": env.cumulative_loss,
-                "consecutive_losses": env.consecutive_losses,
-            })
-        state["env_states"] = env_states
+        if self._sampler is not None:
+            state["env_states"] = self._sampler.get_env_states()
         return state
 
     def load_state(self, state: Dict[str, Any]) -> None:
@@ -468,12 +469,11 @@ class PPOTrainer:
             if torch.cuda.is_available() and rng.get("torch_cuda"):
                 torch.cuda.set_rng_state_all(rng["torch_cuda"])
         if "env_states" in state:
-            for env_idx, (env, es) in enumerate(zip(self.envs, state["env_states"])):
-                obs = env.restore_state(
-                    cursor=es.get("cursor", 0),
-                    prev_terminal_position=es.get("prev_terminal_position", 0),
-                    cumulative_loss=es.get("cumulative_loss", 0.0),
-                    consecutive_losses=es.get("consecutive_losses", 0),
-                )
-                if env_idx < len(self._current_obs):
-                    self._current_obs[env_idx] = obs
+            assert self._sampler is not None
+            self._sampler.restore_env_states(state["env_states"], self._current_obs)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

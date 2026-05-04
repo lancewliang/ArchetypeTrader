@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+import polars as pl
 import pytest
 
 from tests.phase2_test_utils import run_smoke_phase2_training
@@ -11,6 +12,24 @@ from tests.phase2_test_utils import run_smoke_phase2_training
 @pytest.fixture(scope="module")
 def smoke_artifacts(tmp_path_factory):
     return run_smoke_phase2_training(tmp_path_factory.mktemp("phase2_smoke"))
+
+
+@pytest.fixture(scope="module")
+def threaded_smoke_artifacts(tmp_path_factory):
+    return run_smoke_phase2_training(
+        tmp_path_factory.mktemp("phase2_threaded_smoke"),
+        phase2_batch_id="smoke_phase2_threaded",
+        rollout_collection_mode="thread",
+    )
+
+
+@pytest.fixture(scope="module")
+def process_smoke_artifacts(tmp_path_factory):
+    return run_smoke_phase2_training(
+        tmp_path_factory.mktemp("phase2_process_smoke"),
+        phase2_batch_id="smoke_phase2_process",
+        rollout_collection_mode="process",
+    )
 
 
 class TestPhase2PipelineSmoke:
@@ -59,3 +78,29 @@ class TestPhase2PipelineSmoke:
         assert not (
             smoke_artifacts.artifacts_dir / "phase2_per_horizon_records_test.feather"
         ).exists()
+
+    @pytest.mark.integration
+    def test_threaded_rollout_pipeline_smoke(self, threaded_smoke_artifacts):
+        """thread rollout 模式可跑完整 Phase II smoke pipeline。"""
+        assert threaded_smoke_artifacts.phase2_report.exists()
+        stats = pl.read_ipc(threaded_smoke_artifacts.rollout_stats)
+        assert "rollout_collect_seconds" in stats.columns
+        assert "rollout_samples_per_second" in stats.columns
+        assert stats["rollout_samples_per_second"].max() > 0.0
+        payload = json.loads(
+            threaded_smoke_artifacts.phase2_report.read_text(encoding="utf-8")
+        )
+        assert payload["rollout_collection"]["mode"] == "thread"
+
+    @pytest.mark.integration
+    def test_process_rollout_pipeline_smoke(self, process_smoke_artifacts):
+        """process rollout 模式可跑完整 Phase II smoke pipeline。"""
+        assert process_smoke_artifacts.phase2_report.exists()
+        stats = pl.read_ipc(process_smoke_artifacts.rollout_stats)
+        assert "rollout_ipc_wait_seconds" in stats.columns
+        assert "rollout_worker_startup_seconds" in stats.columns
+        assert stats["rollout_samples_per_second"].max() > 0.0
+        payload = json.loads(
+            process_smoke_artifacts.phase2_report.read_text(encoding="utf-8")
+        )
+        assert payload["rollout_collection"]["mode"] == "process"

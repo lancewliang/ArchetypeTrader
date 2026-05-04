@@ -25,6 +25,7 @@ from src.config.phase2_config import (  # noqa: E402
     Phase1ArtifactsConfig,
     Phase2Config,
     PPOConfig,
+    RolloutCollectionConfig,
 )
 from src.trainers.phase2_trainer import Phase2FatalError, Phase2Trainer  # noqa: E402
 
@@ -64,6 +65,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda")
+    # rollout collection
+    p.add_argument(
+        "--rollout-collection-mode",
+        choices=["serial", "thread", "process"],
+        default="serial",
+        help="rollout 采样后端；process 使用常驻子进程并行 env.step",
+    )
+    p.add_argument(
+        "--rollout-workers",
+        type=int,
+        default=None,
+        help="rollout worker 数；process 模式下默认每个 env 一个 worker",
+    )
+    p.add_argument(
+        "--rollout-worker-device",
+        default="cpu",
+        help="process worker 内 Phase I frozen policy 推理设备，默认 cpu",
+    )
+    p.add_argument(
+        "--rollout-process-start-method",
+        choices=["spawn", "forkserver"],
+        default="spawn",
+        help="process rollout worker 启动方式",
+    )
+    p.add_argument(
+        "--rollout-worker-step-timeout-seconds",
+        type=float,
+        default=None,
+        help="process worker 单步超时；默认不设置",
+    )
+    p.add_argument(
+        "--rollout-worker-startup-timeout-seconds",
+        type=float,
+        default=60.0,
+        help="process worker 启动/reset 超时",
+    )
     # KL/demo 消融
     p.add_argument("--kl-demo-coef", type=float, default=None,
                     help="覆盖 PPO 配置中的 kl_demo_coef")
@@ -119,6 +156,14 @@ def build_config(args: argparse.Namespace) -> Phase2Config:
         paper_strict_reproduction=args.paper_strict_reproduction,
         resume_from=args.resume_from,
         ppo=ppo,
+        rollout_collection=RolloutCollectionConfig(
+            mode=args.rollout_collection_mode,
+            max_workers=args.rollout_workers,
+            worker_device=args.rollout_worker_device,
+            process_start_method=args.rollout_process_start_method,
+            worker_step_timeout_seconds=args.rollout_worker_step_timeout_seconds,
+            worker_startup_timeout_seconds=args.rollout_worker_startup_timeout_seconds,
+        ),
         phase1_artifacts=Phase1ArtifactsConfig(
             artifact_root=args.artifact_root,
             pair=args.pair,

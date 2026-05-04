@@ -74,6 +74,19 @@ class Phase1FrozenPolicy:
 
         self._validate_causal_structure()
 
+    def spawn_worker_policy(self) -> "Phase1FrozenPolicy":
+        """Create an env-local wrapper with independent streaming state.
+
+        The decoder and codebook are frozen, so worker policies may share those
+        tensors. Runtime fields such as ``_recurrent_state`` and ``_code_id``
+        must remain per-env to avoid cross-env leakage during parallel rollout.
+        """
+        return Phase1FrozenPolicy(
+            decoder=self.decoder,
+            codebook=self._codebook,
+            device=self.device,
+        )
+
     @classmethod
     def load(
         cls,

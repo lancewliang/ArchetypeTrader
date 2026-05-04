@@ -19,6 +19,7 @@ from src.config.phase2_config import (
     ResumeConfig,
     RewardNormalizationConfig,
     RewardScalingConfig,
+    RolloutCollectionConfig,
     RollingValidationConfig,
     SelectorNetworkConfig,
     StateDimBreakdownConfig,
@@ -38,6 +39,7 @@ _NESTED_CONFIG_TYPES = {
     "resume": ResumeConfig,
     "deployment_ladder": DeploymentLadderConfig,
     "env_shards": EnvShardsConfig,
+    "rollout_collection": RolloutCollectionConfig,
     "state_dim_breakdown": StateDimBreakdownConfig,
     "live_risk_controls": LiveRiskControlsConfig,
     "distribution_shift": DistributionShiftConfig,
@@ -67,3 +69,26 @@ def test_phase2_config_field_docs_explain_why_and_tuning_effect():
     for path, doc in PHASE2_CONFIG_FIELD_DOCS.items():
         assert doc["why"].strip(), path
         assert doc["tuning_effect"].strip(), path
+
+
+def test_phase2_config_from_dict_rollout_collection_defaults_and_explicit_values():
+    default_config = Phase2Config.from_dict({})
+    assert default_config.rollout_collection.mode == "serial"
+
+    threaded_config = Phase2Config.from_dict({
+        "rollout_collection": {
+            "mode": "process",
+            "max_workers": 2,
+            "fail_fast": False,
+            "process_start_method": "spawn",
+            "worker_device": "cpu",
+            "worker_startup_timeout_seconds": 15.0,
+            "worker_step_timeout_seconds": 5.0,
+            "restart_failed_workers": False,
+            "shared_dataset_mode": "pickle",
+        }
+    })
+    assert threaded_config.rollout_collection.mode == "process"
+    assert threaded_config.rollout_collection.max_workers == 2
+    assert threaded_config.rollout_collection.fail_fast is False
+    assert threaded_config.rollout_collection.worker_step_timeout_seconds == 5.0
