@@ -362,6 +362,7 @@ class Phase2Config:
     checkpoint_every_updates: Optional[int] = None
     allow_phase1_hindsight_warning: bool = False
     paper_strict_reproduction: bool = False
+    phase1_label_source: Literal["default", "full_time"] = "default"
     resume_from: Optional[str] = None
 
     phase1_artifacts: Phase1ArtifactsConfig = field(
@@ -661,6 +662,10 @@ PHASE2_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
     "paper_strict_reproduction": _config_doc(
         "启用论文严格复现覆盖项，关闭部分工程增强以靠近论文主路径。",
         "true 提升论文可比性但稳定性可能下降；工程训练和生产候选通常保持 false。",
+    ),
+    "phase1_label_source": _config_doc(
+        "选择 Phase II train split 使用默认 sampled labels 还是 Phase I 导出的 full-time train labels。",
+        "full_time 可提升连续时间训练的 label 覆盖；若对应文件缺失会 fail-fast，避免静默退回稀疏标签。",
     ),
     "resume_from": _config_doc(
         "指定从某个 Phase II checkpoint 恢复训练的路径。",

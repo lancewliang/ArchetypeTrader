@@ -188,14 +188,19 @@ class Phase2Trainer:
         p1_dir = self.config.phase1_dir()
         train_labels = None
         val_labels = None
-        if (p1_dir / "horizon_labels_train.feather").exists():
-            train_labels = read_ipc(p1_dir / "horizon_labels_train.feather")
-        if (p1_dir / "horizon_labels_val.feather").exists():
-            val_labels = read_ipc(p1_dir / "horizon_labels_val.feather")
+        train_label_path = self._phase1_label_path(p1_dir, "train")
+        val_label_path = self._phase1_label_path(p1_dir, "val")
+        if train_label_path.exists():
+            train_labels = read_ipc(train_label_path)
+        if val_label_path.exists():
+            val_labels = read_ipc(val_label_path)
         self._logger.info(
-            "Phase I 标签已加载：训练标签数=%s，验证标签数=%s",
+            "Phase I 标签已加载：source=%s 训练标签数=%s，验证标签数=%s train_path=%s val_path=%s",
+            self.config.phase1_label_source,
             getattr(train_labels, "height", 0) if train_labels is not None else 0,
             getattr(val_labels, "height", 0) if val_labels is not None else 0,
+            train_label_path,
+            val_label_path,
         )
 
         train_entries = indexer.build_index(frames["train"], "train", horizon, train_labels)
@@ -219,13 +224,13 @@ class Phase2Trainer:
 
         # 5. Join labels
         label_loader = Phase2LabelLoader(self.config)
-        if (p1_dir / "horizon_labels_train.feather").exists():
+        if train_label_path.exists():
             train_entries = label_loader.load_and_join(
-                train_entries, "train", p1_dir / "horizon_labels_train.feather"
+                train_entries, "train", train_label_path
             )
-        if (p1_dir / "horizon_labels_val.feather").exists():
+        if val_label_path.exists():
             val_entries = label_loader.load_and_join(
-                val_entries, "val", p1_dir / "horizon_labels_val.feather"
+                val_entries, "val", val_label_path
             )
         self._logger.info(
             "Phase II 标签已合并：训练已标注=%d/%d，验证已标注=%d/%d",
@@ -850,6 +855,17 @@ class Phase2Trainer:
                 "Phase II reward_normalization 尚未实现 running_mean_std；"
                 "请关闭 reward_normalization 并使用 reward_scaling。"
             )
+
+    def _phase1_label_path(self, p1_dir: Path, split: str) -> Path:
+        if split == "train" and self.config.phase1_label_source == "full_time":
+            path = p1_dir / "horizon_labels_full_time_train.feather"
+            if not path.exists():
+                raise Phase2FatalError(
+                    "phase1_label_source=full_time 但缺少 "
+                    f"{path}; 请使用支持 full-time label export 的 Phase I 批次。"
+                )
+            return path
+        return p1_dir / f"horizon_labels_{split}.feather"
 
     def _unmasked_diagnostic_probe(
         self,

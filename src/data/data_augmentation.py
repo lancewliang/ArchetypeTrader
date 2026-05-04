@@ -90,6 +90,7 @@ class TemporalContrastiveBuilder:
                 last_execution_row=new_start + h - 1 + (lookahead - 1),
                 last_markout_row=new_start + h - 1 + lookahead,
                 strata_label=original.strata_label,
+                sample_source=original.sample_source,
             )
             built = builder.build(train_frame, [sh_record], pair=pair, split="train")
             if not built:

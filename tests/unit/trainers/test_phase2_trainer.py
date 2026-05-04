@@ -9,7 +9,7 @@ import torch
 from scripts.train_phase2 import run_kl_demo_ablation
 from src.config.phase2_config import SelectorNetworkConfig
 from src.models.archetype_selector import ArchetypeSelector
-from src.trainers.phase2_trainer import Phase2Trainer
+from src.trainers.phase2_trainer import Phase2FatalError, Phase2Trainer
 from tests.phase2_test_utils import (
     make_config,
     make_dataset,
@@ -92,3 +92,16 @@ class TestPhase2Trainer:
         assert probe["sample_count"] == 3
         assert probe["probe_pick_count"] == 3
         assert probe["probe_pick_rate"] == 1.0
+
+    def test_full_time_label_source_requires_exported_train_labels(self, tmp_path):
+        config = make_config(tmp_path)
+        config = config.__class__.from_dict(
+            {**config.to_dict(), "phase1_label_source": "full_time"}
+        )
+
+        try:
+            Phase2Trainer(config)._phase1_label_path(config.phase1_dir(), "train")
+        except Phase2FatalError as exc:
+            assert "horizon_labels_full_time_train.feather" in str(exc)
+        else:  # pragma: no cover
+            raise AssertionError("expected full_time label source to fail-fast")

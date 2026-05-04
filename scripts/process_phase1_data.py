@@ -12,7 +12,7 @@ import json
 import logging
 import random
 import sys
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -28,10 +28,12 @@ from src.config.phase1_config import (  # noqa: E402
     CostConfig,
     DPConfig,
     DataAugmentationConfig,
+    EvalLabelingConfig,
+    NoTradeControlConfig,
     Phase1DataProcessConfig,
     SamplingHealthConfig,
     StratificationConfig,
-    TrainingConfig,
+    TimeDistributionSamplingConfig,
 )
 from src.data.data_augmentation import TemporalContrastiveBuilder  # noqa: E402
 from src.data.demo_store import Phase1DemoStore  # noqa: E402
@@ -49,8 +51,9 @@ from src.data.phase1_processed_store import (  # noqa: E402
 from src.data.sampling_health import SamplingHealthChecker, SamplingHealthError  # noqa: E402
 from src.data.schema import InputSchemaValidator  # noqa: E402
 from src.data.stratified_sampler import StratifiedWindowSampler  # noqa: E402
+from src.data.stratified_sampler import SampledHorizon  # noqa: E402
 from src.data.window_indexer import SlidingWindowIndexer, WindowIndexEntry  # noqa: E402
-from src.planners.demo_generator import Phase1DemoGenerator  # noqa: E402
+from src.planners.demo_generator import Phase1DemoGenerator, RejectStats  # noqa: E402
 from src.planners.single_trade_dp import SingleTradeDPPlanner  # noqa: E402
 from src.trading.cost_model import LobDepthCostModel  # noqa: E402
 from src.trading.reward_alignment import RewardAlignment  # noqa: E402
@@ -143,6 +146,15 @@ def build_data_process_config(args: argparse.Namespace) -> Phase1DataProcessConf
             next_row_split_boundary_embargo=0,
             warn_only=True,
         )
+    no_trade_control = NoTradeControlConfig()
+    if args.local_smoke_relaxed_guardrails:
+        no_trade_control = replace(
+            no_trade_control,
+            max_no_trade_ratio=1.0,
+            min_no_trade_ratio=0.0,
+            min_low_opportunity_ratio=0.0,
+            flat_low_vol_max_ratio=1.0,
+        )
     return Phase1DataProcessConfig(
         pair=args.pair,
         data_batch_id=args.data_batch_id,
@@ -157,6 +169,9 @@ def build_data_process_config(args: argparse.Namespace) -> Phase1DataProcessConf
         sampling_strategy=args.sampling_strategy,
         stratification=strat,
         sampling_health=sampling_health,
+        no_trade_control=no_trade_control,
+        time_distribution_sampling=TimeDistributionSamplingConfig(),
+        eval_labeling=EvalLabelingConfig(),
         data_augmentation=DataAugmentationConfig(),
         dp=dp,
         seed=args.seed,
@@ -190,6 +205,22 @@ def assert_prospective_diagnostic(args: argparse.Namespace) -> None:
 
 class Phase1FatalError(RuntimeError):
     pass
+
+
+@dataclass
+class SplitHorizonBuildResult:
+    horizons: List[Any]
+    window_index_path: Path
+    all_entries: List[WindowIndexEntry]
+    eligible_entries: List[WindowIndexEntry]
+    sampled_horizons: List[SampledHorizon]
+    full_time_pool_entries: List[WindowIndexEntry]
+    strata_by_start: Dict[int, str]
+    num_eligible_windows: int
+    sampling_applied: bool
+    labeling_mode: str
+    sample_source_counts: Dict[str, int]
+    sampling_health_warnings: List[str]
 
 
 class Phase1DataProcessor:
@@ -239,17 +270,23 @@ class Phase1DataProcessor:
                           schema_path, schema_hash)
 
         self._logger.info("正在构建时间窗口 split=train")
-        train_horizons, train_window_path = self._build_horizons_for_split(
+        train_result = self._build_horizons_for_split(
             "train", frames["train"], schema, artifacts_dir
         )
+        train_horizons = train_result.horizons
+        train_window_path = train_result.window_index_path
         self._logger.info("正在构建时间窗口 split=val")
-        val_horizons, val_window_path = self._build_horizons_for_split(
+        val_result = self._build_horizons_for_split(
             "val", frames["val"], schema, artifacts_dir
         )
+        val_horizons = val_result.horizons
+        val_window_path = val_result.window_index_path
         self._logger.info("正在构建时间窗口 split=test")
-        test_horizons, test_window_path = self._build_horizons_for_split(
+        test_result = self._build_horizons_for_split(
             "test", frames["test"], schema, artifacts_dir
         )
+        test_horizons = test_result.horizons
+        test_window_path = test_result.window_index_path
 
         if self.config.data_augmentation.temporal_contrastive.enabled:
             self._logger.info("数据增强功能已启用 时间对比学习")
@@ -276,6 +313,13 @@ class Phase1DataProcessor:
         train_horizons, train_reject = _generate_demos(self.config, train_horizons)
         self._logger.info("演示样本生成完成 split=train 接受=%d 拒绝率=%.4f",
                           len(train_horizons), train_reject.dataset_reject_rate)
+        train_horizons, train_reject, train_coverage = self._ensure_train_min_coverage(
+            train_horizons,
+            train_reject,
+            train_result,
+            frames["train"],
+            schema,
+        )
         _log_reward_distribution(self._logger, train_horizons, "train")
 
         self._logger.info("正在生成演示样本 split=val num_horizons=%d", len(val_horizons))
@@ -311,6 +355,11 @@ class Phase1DataProcessor:
                 "sampling_strategy": self.config.sampling_strategy,
                 "stratification": asdict(self.config.stratification),
                 "sampling_health": asdict(self.config.sampling_health),
+                "no_trade_control": asdict(self.config.no_trade_control),
+                "time_distribution_sampling": asdict(
+                    self.config.time_distribution_sampling
+                ),
+                "eval_labeling": asdict(self.config.eval_labeling),
                 "data_augmentation": asdict(self.config.data_augmentation),
                 "seed": self.config.seed,
             }
@@ -344,12 +393,12 @@ class Phase1DataProcessor:
         self._logger.info("正在保存产物文件")
         store = Phase1ProcessedStore(artifacts_dir)
         split_records = {
-            "train": (train_horizons, train_window_path, train_reject),
-            "val": (val_horizons, val_window_path, val_reject),
-            "test": (test_horizons, test_window_path, test_reject),
+            "train": (train_horizons, train_window_path, train_reject, train_result),
+            "val": (val_horizons, val_window_path, val_reject, val_result),
+            "test": (test_horizons, test_window_path, test_reject, test_result),
         }
         split_payload = {}
-        for split, (records, window_path, reject_stats) in split_records.items():
+        for split, (records, window_path, reject_stats, build_result) in split_records.items():
             self._logger.info("正在保存分集产物 split=%s num_records=%d", split, len(records))
             sampled_path = store.save_sampled_horizons(
                 split,
@@ -372,7 +421,19 @@ class Phase1DataProcessor:
                 "dp_teacher_path": _relative_to_artifact(teacher_path, artifacts_dir),
                 "reject_stats_path": _relative_to_artifact(reject_path, artifacts_dir),
                 "num_horizons": len(records),
+                "num_eligible_windows": build_result.num_eligible_windows,
+                "num_labeled_windows": len(records),
+                "labeling_mode": build_result.labeling_mode,
+                "sampling_applied": build_result.sampling_applied,
+                "augmentation_applied": bool(
+                    split == "train"
+                    and self.config.data_augmentation.temporal_contrastive.enabled
+                ),
+                "sample_source_counts": _sample_source_counts(records),
+                "sampling_health_warnings": build_result.sampling_health_warnings,
             }
+            if split == "train":
+                split_payload[split]["coverage_after_dp"] = train_coverage
 
         self._logger.info("正在保存演示存储 train=%d val=%d test=%d",
                           len(train_horizons), len(val_horizons), len(test_horizons))
@@ -415,7 +476,7 @@ class Phase1DataProcessor:
         frame,
         schema,
         artifacts_dir: Path,
-    ):
+    ) -> SplitHorizonBuildResult:
         indexer = SlidingWindowIndexer(
             horizon=self.config.horizon,
             reward_alignment=self.config.dp.cost_config.reward_alignment,
@@ -447,27 +508,45 @@ class Phase1DataProcessor:
             num_samples,
         )
 
-        sampler = StratifiedWindowSampler(
-            strategy=self.config.sampling_strategy,
-            min_gap_between_samples=self.config.sampling_health.min_gap_between_samples,
-            flat_low_vol_max_ratio=self.config.sampling_health.flat_low_vol_max_ratio,
-            allow_overlap_relaxation=self.config.sampling_health.allow_overlap_relaxation,
-            seed=self.config.seed
-            + (1 if split == "val" else 2 if split == "test" else 0),
-        )
         prospective = self.config.stratification.mode == "prospective_past"
         labels = [
             StratifiedWindowSampler.assign_strata(e, prospective=prospective)
             for e in entries
         ]
-        sampled = sampler.sample(entries, num_samples=num_samples, strata_labels=labels)
-        effective_min_gap = sampler.last_effective_min_gap_between_samples
-        overlap_relaxation_applied = sampler.last_overlap_relaxation_applied
+        strata_by_start = {
+            entry.window_start: label for entry, label in zip(entries, labels)
+        }
+        sampling_health_warnings: List[str] = []
+        full_time_pool_entries: List[WindowIndexEntry] = []
+        effective_min_gap = self.config.sampling_health.min_gap_between_samples
+        overlap_relaxation_applied = False
+        sampling_applied = split == "train"
+        labeling_mode = "sampled_train" if split == "train" else "all_eligible"
+
+        if split == "train":
+            sampled, full_time_pool_entries, effective_min_gap, overlap_relaxation_applied = (
+                self._sample_train_windows(entries, labels, num_samples)
+            )
+        else:
+            sampled = _sampled_from_entries(
+                entries,
+                labels,
+                source="eval_all_eligible",
+            )
+            if self.config.eval_labeling.apply_sampling:
+                raise Phase1FatalError(
+                    "eval_labeling.apply_sampling=True 与 all_eligible 契约冲突。"
+                )
+            if self.config.eval_labeling.apply_augmentation:
+                raise Phase1FatalError(
+                    "eval_labeling.apply_augmentation=True 与 all_eligible 契约冲突。"
+                )
         self._logger.info(
-            "窗口采样完成 split=%s 采样=%d 独立层=%d 实际最小间隔=%d 重叠放宽=%s",
+            "窗口采样/标注集合完成 split=%s horizons=%d 独立层=%d 模式=%s 实际最小间隔=%d 重叠放宽=%s",
             split,
             len(sampled),
             len({s.strata_label for s in sampled}),
+            labeling_mode,
             effective_min_gap,
             overlap_relaxation_applied,
         )
@@ -488,6 +567,7 @@ class Phase1DataProcessor:
                 split_boundaries={"train_end_row": frame.height - 1},
                 strata_labels=[s.strata_label for s in sampled],
             )
+            sampling_health_warnings = list(report.sampling_health_warnings)
             self._logger.info(
                 "采样健康检查通过 split=%s 重叠率=%.6f 最小间隔=%s 低波动占比=%.6f 警告=%d",
                 split,
@@ -500,6 +580,9 @@ class Phase1DataProcessor:
         index_frame = indexer.to_frame(all_entries)
         sampled_starts = {s.window_start for s in sampled}
         eligible_starts = {e.window_start for e in entries}
+        source_by_start = {s.window_start: s.sample_source for s in sampled}
+        import polars as pl
+
         index_frame = index_frame.with_columns(
             [
                 (index_frame["window_start"].is_in(list(eligible_starts))).alias(
@@ -510,6 +593,16 @@ class Phase1DataProcessor:
                 ),
             ]
         )
+        if sampled:
+            source_frame = pl.DataFrame(
+                {
+                    "window_start": list(source_by_start.keys()),
+                    "sample_source": list(source_by_start.values()),
+                }
+            )
+            index_frame = index_frame.join(source_frame, on="window_start", how="left")
+        else:
+            index_frame = index_frame.with_columns(pl.lit(None).alias("sample_source"))
         path = write_ipc(index_frame, artifacts_dir / f"window_index_{split}.feather")
 
         builder = HorizonBuilder(
@@ -522,7 +615,299 @@ class Phase1DataProcessor:
             len(horizons),
             path,
         )
-        return horizons, path
+        return SplitHorizonBuildResult(
+            horizons=horizons,
+            window_index_path=path,
+            all_entries=all_entries,
+            eligible_entries=entries,
+            sampled_horizons=sampled,
+            full_time_pool_entries=full_time_pool_entries,
+            strata_by_start=strata_by_start,
+            num_eligible_windows=len(entries),
+            sampling_applied=sampling_applied,
+            labeling_mode=labeling_mode,
+            sample_source_counts=_sample_source_counts(horizons),
+            sampling_health_warnings=sampling_health_warnings,
+        )
+
+    def _sample_train_windows(
+        self,
+        entries: List[WindowIndexEntry],
+        labels: List[str],
+        num_samples: int,
+    ) -> Tuple[List[SampledHorizon], List[WindowIndexEntry], int, bool]:
+        if not self.config.time_distribution_sampling.enabled:
+            sampler = StratifiedWindowSampler(
+                strategy=self.config.sampling_strategy,
+                min_gap_between_samples=self.config.sampling_health.min_gap_between_samples,
+                flat_low_vol_max_ratio=self.config.sampling_health.flat_low_vol_max_ratio,
+                allow_overlap_relaxation=self.config.sampling_health.allow_overlap_relaxation,
+                seed=self.config.seed,
+            )
+            sampled = sampler.sample(
+                entries, num_samples=num_samples, strata_labels=labels
+            )
+            for item in sampled:
+                object.__setattr__(item, "sample_source", "opportunity")
+            return (
+                sampled,
+                [],
+                sampler.last_effective_min_gap_between_samples,
+                sampler.last_overlap_relaxation_applied,
+            )
+
+        full_time_pool = _full_time_pool_entries(
+            entries,
+            horizon=self.config.horizon,
+            mode=self.config.time_distribution_sampling.full_time_mode,
+            stride=self.config.time_distribution_sampling.full_time_stride,
+        )
+        full_time_quota = int(
+            np.ceil(num_samples * self.config.time_distribution_sampling.min_train_ratio)
+        )
+        full_time_quota = min(full_time_quota, len(full_time_pool), num_samples)
+        full_time_selected = _take_evenly_spaced(full_time_pool, full_time_quota)
+        labels_by_start = {
+            entry.window_start: label for entry, label in zip(entries, labels)
+        }
+        full_time_sampled = _sampled_from_entries(
+            full_time_selected,
+            [labels_by_start[e.window_start] for e in full_time_selected],
+            source="full_time",
+        )
+
+        selected_starts = [s.window_start for s in full_time_sampled]
+        opportunity_entries, opportunity_labels = _filter_entries_away_from_starts(
+            entries,
+            labels,
+            selected_starts,
+            min_gap=self.config.sampling_health.min_gap_between_samples,
+        )
+        opportunity_quota = max(0, num_samples - len(full_time_sampled))
+        opportunity_sampled: List[SampledHorizon] = []
+        effective_min_gap = self.config.sampling_health.min_gap_between_samples
+        overlap_relaxation_applied = False
+        if opportunity_quota > 0 and opportunity_entries:
+            sampler = StratifiedWindowSampler(
+                strategy=self.config.sampling_strategy,
+                min_gap_between_samples=self.config.sampling_health.min_gap_between_samples,
+                flat_low_vol_max_ratio=self.config.sampling_health.flat_low_vol_max_ratio,
+                allow_overlap_relaxation=self.config.sampling_health.allow_overlap_relaxation,
+                seed=self.config.seed,
+            )
+            opportunity_quota = min(opportunity_quota, len(opportunity_entries))
+            opportunity_sampled = sampler.sample(
+                opportunity_entries,
+                num_samples=opportunity_quota,
+                strata_labels=opportunity_labels,
+            )
+            for item in opportunity_sampled:
+                object.__setattr__(item, "sample_source", "opportunity")
+            effective_min_gap = sampler.last_effective_min_gap_between_samples
+            overlap_relaxation_applied = sampler.last_overlap_relaxation_applied
+
+        sampled = _merge_sampled_sources(full_time_sampled, opportunity_sampled)
+        if len(sampled) < num_samples:
+            shortfall = num_samples - len(sampled)
+            spare_entries, spare_labels = _filter_entries_away_from_starts(
+                entries,
+                labels,
+                [s.window_start for s in sampled],
+                min_gap=max(1, effective_min_gap),
+            )
+            spare_pairs = _take_evenly_spaced(
+                list(zip(spare_entries, spare_labels)), shortfall
+            )
+            extra = _sampled_from_entries(
+                [pair[0] for pair in spare_pairs],
+                [pair[1] for pair in spare_pairs],
+                source="opportunity",
+            )
+            sampled = _merge_sampled_sources(sampled, extra)
+
+        full_time_ratio = (
+            sum(1 for s in sampled if s.sample_source in {"full_time", "both"})
+            / max(len(sampled), 1)
+        )
+        if full_time_ratio + 1e-12 < self.config.time_distribution_sampling.min_train_ratio:
+            self._logger.warning(
+                "full_time_sample_ratio_below_target split=train ratio=%.6f target=%.6f pool=%d num_samples=%d",
+                full_time_ratio,
+                self.config.time_distribution_sampling.min_train_ratio,
+                len(full_time_pool),
+                num_samples,
+            )
+        return sampled[:num_samples], full_time_pool, effective_min_gap, overlap_relaxation_applied
+
+    def _ensure_train_min_coverage(
+        self,
+        train_horizons: List[Any],
+        train_reject: RejectStats,
+        train_result: SplitHorizonBuildResult,
+        train_frame,
+        schema,
+    ) -> Tuple[List[Any], RejectStats, Dict[str, Any]]:
+        control = self.config.no_trade_control
+        initial = _coverage_stats(
+            train_horizons,
+            low_opportunity_return_quantile=control.low_opportunity_return_quantile,
+            min_profit_gate=control.min_profit_gate,
+        )
+        report: Dict[str, Any] = {
+            "initial_no_trade_ratio": initial["no_trade_ratio"],
+            "initial_low_opportunity_ratio": initial["low_opportunity_ratio"],
+            "final_no_trade_ratio": initial["no_trade_ratio"],
+            "final_low_opportunity_ratio": initial["low_opportunity_ratio"],
+            "low_opportunity_return_threshold": initial["low_opportunity_threshold"],
+            "backfill_candidates": 0,
+            "backfill_selected": 0,
+            "replaced_opportunity": 0,
+            "warnings": [],
+        }
+        target_count = len(train_horizons)
+        if target_count == 0:
+            return train_horizons, train_reject, report
+        required_no_trade = int(np.ceil(target_count * control.min_no_trade_ratio))
+        required_low = int(np.ceil(target_count * control.min_low_opportunity_ratio))
+        current_no_trade = int(initial["no_trade_count"])
+        current_low = int(initial["low_opportunity_count"])
+        if (
+            current_no_trade >= required_no_trade
+            and current_low >= required_low
+        ):
+            return train_horizons, train_reject, report
+        if not control.resample_when_below_min:
+            report["warnings"].append("resample_when_below_min=false")
+            return train_horizons, train_reject, report
+
+        used_starts = {rec.start_index for rec in train_horizons}
+        candidate_entries = [
+            entry
+            for entry in train_result.full_time_pool_entries
+            if entry.window_start not in used_starts
+        ]
+        candidate_labels = [
+            train_result.strata_by_start[entry.window_start]
+            for entry in candidate_entries
+        ]
+        candidate_entries, candidate_labels = _filter_entries_away_from_starts(
+            candidate_entries,
+            candidate_labels,
+            [rec.start_index for rec in train_horizons],
+            min_gap=self.config.sampling_health.min_gap_between_samples,
+        )
+        report["backfill_candidates"] = len(candidate_entries)
+        if not candidate_entries:
+            report["warnings"].append("no_unused_full_time_candidates_available")
+            self._logger.warning(
+                "no_trade_low_opportunity_backfill_unavailable no_trade=%.6f/%.6f low=%.6f/%.6f",
+                initial["no_trade_ratio"],
+                control.min_no_trade_ratio,
+                initial["low_opportunity_ratio"],
+                control.min_low_opportunity_ratio,
+            )
+            return train_horizons, train_reject, report
+
+        builder = HorizonBuilder(
+            self.config.horizon, schema, self.config.dp.cost_config.reward_alignment
+        )
+        candidate_sampled = _sampled_from_entries(
+            candidate_entries,
+            candidate_labels,
+            source="full_time",
+        )
+        candidate_horizons = builder.build(
+            train_frame, candidate_sampled, pair=self.config.pair, split="train"
+        )
+        candidate_horizons, candidate_reject = _generate_demos(
+            self.config, candidate_horizons
+        )
+
+        low_threshold = float(initial["low_opportunity_threshold"])
+        selected: List[Any] = []
+        selected_ids = set()
+
+        def select_record(rec: Any) -> None:
+            selected.append(rec)
+            selected_ids.add(rec.sample_id)
+
+        missing_no_trade = max(0, required_no_trade - current_no_trade)
+        for rec in candidate_horizons:
+            if missing_no_trade <= 0:
+                break
+            if _is_no_trade_record(rec):
+                select_record(rec)
+                missing_no_trade -= 1
+
+        selected_low_count = sum(
+            1 for rec in selected if _is_low_opportunity_record(rec, low_threshold)
+        )
+        missing_low = max(0, required_low - current_low - selected_low_count)
+        for rec in candidate_horizons:
+            if missing_low <= 0:
+                break
+            if rec.sample_id in selected_ids:
+                continue
+            if _is_low_opportunity_record(rec, low_threshold):
+                select_record(rec)
+                missing_low -= 1
+
+        if not selected:
+            report["warnings"].append("full_time_candidates_did_not_improve_coverage")
+            return train_horizons, train_reject, report
+
+        removable = _rank_replacement_candidates(train_horizons, low_threshold)
+        if len(removable) < len(selected):
+            report["warnings"].append(
+                f"insufficient_replacement_candidates={len(removable)}<{len(selected)}"
+            )
+            selected = selected[: len(removable)]
+        if not selected:
+            return train_horizons, train_reject, report
+
+        remove_ids = {rec.sample_id for rec in removable[: len(selected)]}
+        final_horizons = [
+            rec for rec in train_horizons if rec.sample_id not in remove_ids
+        ] + selected
+        final_horizons.sort(key=lambda rec: rec.start_index)
+        merged_reject = _reject_stats_for_final_records(
+            final_horizons,
+            train_horizons,
+            train_reject,
+            candidate_horizons,
+            candidate_reject,
+        )
+        final = _coverage_stats(
+            final_horizons,
+            low_opportunity_return_quantile=control.low_opportunity_return_quantile,
+            min_profit_gate=control.min_profit_gate,
+        )
+        report.update(
+            {
+                "final_no_trade_ratio": final["no_trade_ratio"],
+                "final_low_opportunity_ratio": final["low_opportunity_ratio"],
+                "low_opportunity_return_threshold": final["low_opportunity_threshold"],
+                "backfill_selected": len(selected),
+                "replaced_opportunity": len(remove_ids),
+            }
+        )
+        if final["no_trade_ratio"] + 1e-12 < control.min_no_trade_ratio:
+            report["warnings"].append("min_no_trade_ratio_not_met_after_backfill")
+        if final["low_opportunity_ratio"] + 1e-12 < control.min_low_opportunity_ratio:
+            report["warnings"].append(
+                "min_low_opportunity_ratio_not_met_after_backfill"
+            )
+        self._logger.info(
+            "no_trade_low_opportunity_backfill_done initial_no_trade=%.6f final_no_trade=%.6f initial_low=%.6f final_low=%.6f selected=%d replaced=%d warnings=%s",
+            initial["no_trade_ratio"],
+            final["no_trade_ratio"],
+            initial["low_opportunity_ratio"],
+            final["low_opportunity_ratio"],
+            len(selected),
+            len(remove_ids),
+            report["warnings"],
+        )
+        return final_horizons, merged_reject, report
 
 
 def _seed_everything(seed: int) -> None:
@@ -602,7 +987,233 @@ def _num_samples_for_split(
 ) -> int:
     if split == "train":
         return min(config.num_demos, num_entries)
-    return min(num_entries, min(64, max(1, config.num_demos // 16)))
+    return num_entries
+
+
+def _full_time_pool_entries(
+    entries: Sequence[WindowIndexEntry],
+    *,
+    horizon: int,
+    mode: str,
+    stride: int,
+) -> List[WindowIndexEntry]:
+    if mode == "non_overlap":
+        step = horizon
+    elif mode == "stride":
+        step = max(1, int(stride))
+    else:
+        raise ValueError(f"非法 full_time_mode: {mode}")
+    return [entry for entry in entries if entry.window_start % step == 0]
+
+
+def _take_evenly_spaced(items: Sequence[Any], count: int) -> List[Any]:
+    if count <= 0 or not items:
+        return []
+    if count >= len(items):
+        return list(items)
+    if count == 1:
+        return [items[0]]
+    positions = np.linspace(0, len(items) - 1, num=count)
+    indices = []
+    seen = set()
+    for pos in positions:
+        idx = int(round(float(pos)))
+        if idx not in seen:
+            indices.append(idx)
+            seen.add(idx)
+    idx = 0
+    while len(indices) < count and idx < len(items):
+        if idx not in seen:
+            indices.append(idx)
+            seen.add(idx)
+        idx += 1
+    indices.sort()
+    return [items[idx] for idx in indices[:count]]
+
+
+def _sampled_from_entries(
+    entries: Sequence[WindowIndexEntry],
+    labels: Sequence[str],
+    *,
+    source: str,
+) -> List[SampledHorizon]:
+    out: List[SampledHorizon] = []
+    for entry, label in zip(entries, labels):
+        out.append(
+            SampledHorizon(
+                sample_id=_sample_id_for_entry(entry),
+                window_start=entry.window_start,
+                window_end=entry.window_end,
+                last_execution_row=entry.last_execution_row,
+                last_markout_row=entry.last_markout_row,
+                strata_label=label,
+                sample_source=source,
+            )
+        )
+    return out
+
+
+def _sample_id_for_entry(entry: WindowIndexEntry) -> str:
+    return f"s_{entry.window_start:08d}_{entry.window_start:06d}"
+
+
+def _filter_entries_away_from_starts(
+    entries: Sequence[WindowIndexEntry],
+    labels: Sequence[str],
+    starts: Sequence[int],
+    *,
+    min_gap: int,
+) -> Tuple[List[WindowIndexEntry], List[str]]:
+    if not starts or min_gap <= 0:
+        return list(entries), list(labels)
+    blocked = set()
+    for start in starts:
+        blocked.update(range(int(start) - min_gap + 1, int(start) + min_gap))
+    kept_entries: List[WindowIndexEntry] = []
+    kept_labels: List[str] = []
+    for entry, label in zip(entries, labels):
+        if entry.window_start in blocked:
+            continue
+        kept_entries.append(entry)
+        kept_labels.append(label)
+    return kept_entries, kept_labels
+
+
+def _merge_sampled_sources(
+    primary: Sequence[SampledHorizon],
+    secondary: Sequence[SampledHorizon],
+) -> List[SampledHorizon]:
+    by_start: Dict[int, SampledHorizon] = {}
+    for item in list(primary) + list(secondary):
+        existing = by_start.get(item.window_start)
+        if existing is None:
+            by_start[item.window_start] = item
+            continue
+        source = (
+            existing.sample_source
+            if existing.sample_source == item.sample_source
+            else "both"
+        )
+        by_start[item.window_start] = SampledHorizon(
+            sample_id=existing.sample_id,
+            window_start=existing.window_start,
+            window_end=existing.window_end,
+            last_execution_row=existing.last_execution_row,
+            last_markout_row=existing.last_markout_row,
+            strata_label=existing.strata_label,
+            sample_source=source,
+        )
+    return [by_start[start] for start in sorted(by_start)]
+
+
+def _sample_source_counts(records: Sequence[Any]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for rec in records:
+        source = getattr(rec, "sample_source", "unknown") or "unknown"
+        counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
+def _coverage_stats(
+    records: Sequence[Any],
+    *,
+    low_opportunity_return_quantile: float,
+    min_profit_gate: float,
+) -> Dict[str, Any]:
+    returns = [float(sum(rec.rewards or [])) for rec in records]
+    if returns:
+        q = float(
+            np.quantile(
+                returns,
+                min(max(float(low_opportunity_return_quantile), 0.0), 1.0),
+            )
+        )
+        low_threshold = max(q, float(min_profit_gate))
+    else:
+        low_threshold = float(min_profit_gate)
+    no_trade = sum(1 for rec in records if _is_no_trade_record(rec))
+    low = sum(
+        1 for rec in records if _is_low_opportunity_record(rec, low_threshold)
+    )
+    total = len(records)
+    return {
+        "total": total,
+        "no_trade_count": no_trade,
+        "no_trade_ratio": no_trade / max(total, 1),
+        "low_opportunity_count": low,
+        "low_opportunity_ratio": low / max(total, 1),
+        "low_opportunity_threshold": low_threshold,
+    }
+
+
+def _is_no_trade_record(rec: Any) -> bool:
+    actions = list(rec.actions or [])
+    return bool(actions) and all(int(action) == 1 for action in actions)
+
+
+def _is_low_opportunity_record(rec: Any, threshold: float) -> bool:
+    return float(sum(rec.rewards or [])) <= threshold
+
+
+def _rank_replacement_candidates(
+    records: Sequence[Any],
+    low_threshold: float,
+) -> List[Any]:
+    def priority(rec: Any) -> Tuple[int, int, float]:
+        source = getattr(rec, "sample_source", "")
+        is_full_time = source in {"full_time", "both"}
+        is_low = _is_low_opportunity_record(rec, low_threshold)
+        is_no_trade = _is_no_trade_record(rec)
+        return (
+            1 if is_full_time else 0,
+            1 if (is_low or is_no_trade) else 0,
+            -float(sum(rec.rewards or [])),
+        )
+
+    return sorted(records, key=priority)
+
+
+def _reject_stats_for_final_records(
+    final_records: Sequence[Any],
+    original_records: Sequence[Any],
+    original_stats: RejectStats,
+    candidate_records: Sequence[Any],
+    candidate_stats: RejectStats,
+) -> RejectStats:
+    counts_by_id: Dict[str, int] = {}
+    rates_by_id: Dict[str, float] = {}
+    for records, stats in (
+        (original_records, original_stats),
+        (candidate_records, candidate_stats),
+    ):
+        counts = list(stats.per_horizon_reject_count or [])
+        rates = list(stats.per_horizon_reject_rate or [])
+        for idx, rec in enumerate(records):
+            counts_by_id[rec.sample_id] = int(counts[idx]) if idx < len(counts) else 0
+            rates_by_id[rec.sample_id] = float(rates[idx]) if idx < len(rates) else 0.0
+    final_counts = [counts_by_id.get(rec.sample_id, 0) for rec in final_records]
+    final_rates = [rates_by_id.get(rec.sample_id, 0.0) for rec in final_records]
+    worst = sorted(
+        (
+            {
+                "sample_id": rec.sample_id,
+                "rate": rates_by_id.get(rec.sample_id, 0.0),
+                "rejected": counts_by_id.get(rec.sample_id, 0),
+                "window_start": rec.start_index,
+                "strata": rec.strata_label,
+            }
+            for rec in final_records
+        ),
+        key=lambda item: item["rate"],
+        reverse=True,
+    )[:10]
+    return RejectStats(
+        dataset_reject_rate=sum(final_rates) / max(len(final_rates), 1),
+        per_horizon_reject_count=final_counts,
+        per_horizon_reject_rate=final_rates,
+        worst_reject_horizons=worst,
+        reject_by_action_pair={},
+    )
 
 
 def _check_overlap_health_feasibility(

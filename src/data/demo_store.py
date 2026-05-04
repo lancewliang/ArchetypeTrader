@@ -33,6 +33,7 @@ class HorizonLabel:
     demo_return: float
     num_switches: int
     is_no_trade: bool
+    sample_source: str = "unknown"
 
 
 class Phase1DemoStore:
@@ -77,6 +78,7 @@ class Phase1DemoStore:
                     "last_execution_row": d.last_execution_row,
                     "last_markout_row": d.last_markout_row,
                     "strata_label": d.strata_label,
+                    "sample_source": d.sample_source,
                     "is_augmented": d.is_augmented,
                     "augmentation_type": d.augmentation_type,
                     "states": d.states,
@@ -139,6 +141,7 @@ class Phase1DemoStore:
                     pair=row["pair"],
                     split=row["split"],
                     strata_label=row["strata_label"],
+                    sample_source=row.get("sample_source") or "opportunity",
                     states=row["states"],
                     prices=row["prices"],
                     execution_books=books,
@@ -184,6 +187,7 @@ class Phase1DemoStore:
                     demo_return=row["demo_return"],
                     num_switches=row["num_switches"],
                     is_no_trade=row["is_no_trade"],
+                    sample_source=row.get("sample_source") or "unknown",
                 )
             )
         return out

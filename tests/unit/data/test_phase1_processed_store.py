@@ -139,6 +139,7 @@ def test_processed_store_saves_and_loads_records(tmp_path):
     assert {r.sample_id for r in loaded} == {"a", "b"}
     assert loaded[0].actions is not None
     assert loaded[0].rewards is not None
+    assert loaded[0].sample_source == "opportunity"
     assert len(loaded[0].execution_books) == 4
 
 

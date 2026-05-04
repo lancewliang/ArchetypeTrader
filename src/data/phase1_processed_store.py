@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -32,6 +33,14 @@ class Phase1SplitArtifact:
     dp_teacher_path: str
     num_horizons: int
     reject_stats_path: str = ""
+    num_eligible_windows: int = 0
+    num_labeled_windows: int = 0
+    labeling_mode: str = ""
+    sampling_applied: bool = True
+    augmentation_applied: bool = False
+    sample_source_counts: Dict[str, int] = field(default_factory=dict)
+    sampling_health_warnings: List[str] = field(default_factory=list)
+    coverage_after_dp: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, split: str, payload: Mapping[str, Any]) -> "Phase1SplitArtifact":
@@ -42,6 +51,14 @@ class Phase1SplitArtifact:
             dp_teacher_path=str(payload.get("dp_teacher_path", "")),
             num_horizons=int(payload.get("num_horizons", 0)),
             reject_stats_path=str(payload.get("reject_stats_path", "")),
+            num_eligible_windows=int(payload.get("num_eligible_windows", 0)),
+            num_labeled_windows=int(payload.get("num_labeled_windows", 0)),
+            labeling_mode=str(payload.get("labeling_mode", "")),
+            sampling_applied=bool(payload.get("sampling_applied", True)),
+            augmentation_applied=bool(payload.get("augmentation_applied", False)),
+            sample_source_counts=dict(payload.get("sample_source_counts", {})),
+            sampling_health_warnings=list(payload.get("sampling_health_warnings", [])),
+            coverage_after_dp=dict(payload.get("coverage_after_dp", {})),
         )
 
     def to_dict(self) -> dict:
@@ -53,6 +70,20 @@ class Phase1SplitArtifact:
         }
         if self.reject_stats_path:
             payload["reject_stats_path"] = self.reject_stats_path
+        if self.num_eligible_windows:
+            payload["num_eligible_windows"] = self.num_eligible_windows
+        if self.num_labeled_windows:
+            payload["num_labeled_windows"] = self.num_labeled_windows
+        if self.labeling_mode:
+            payload["labeling_mode"] = self.labeling_mode
+        payload["sampling_applied"] = self.sampling_applied
+        payload["augmentation_applied"] = self.augmentation_applied
+        if self.sample_source_counts:
+            payload["sample_source_counts"] = self.sample_source_counts
+        if self.sampling_health_warnings:
+            payload["sampling_health_warnings"] = self.sampling_health_warnings
+        if self.coverage_after_dp:
+            payload["coverage_after_dp"] = self.coverage_after_dp
         return payload
 
 
@@ -172,6 +203,7 @@ class Phase1ProcessedStore:
                     "last_execution_row": rec.last_execution_row,
                     "last_markout_row": rec.last_markout_row,
                     "strata_label": rec.strata_label,
+                    "sample_source": rec.sample_source,
                     "states": rec.states,
                     "prices": rec.prices,
                     "execution_books": json.dumps(
@@ -212,6 +244,7 @@ class Phase1ProcessedStore:
                     "sample_id": rec.sample_id,
                     "pair": rec.pair,
                     "split": rec.split,
+                    "sample_source": rec.sample_source,
                     "actions": actions,
                     "rewards": rewards,
                     "teacher_return": float(sum(rewards)),
@@ -383,6 +416,7 @@ class Phase1ProcessedStore:
                     pair=row["pair"],
                     split=row["split"],
                     strata_label=row["strata_label"],
+                    sample_source=row.get("sample_source") or "opportunity",
                     states=row["states"],
                     prices=row["prices"],
                     execution_books=[

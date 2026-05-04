@@ -27,6 +27,7 @@ class SampledHorizon:
     last_execution_row: int
     last_markout_row: int
     strata_label: str
+    sample_source: str = "opportunity"
 
 
 SamplingStrategy = Literal["stratified_uniform", "stratified_proportional"]

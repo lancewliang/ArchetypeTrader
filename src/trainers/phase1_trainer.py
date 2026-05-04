@@ -52,6 +52,14 @@ class Phase1FatalError(RuntimeError):
 _AMP_SAFE_INPUT_ABS_MAX = 1.0e4
 
 
+def _label_coverage_from_manifest_split(split_payload: Dict[str, Any]) -> float:
+    eligible = int(split_payload.get("num_eligible_windows", 0) or 0)
+    labeled = int(split_payload.get("num_labeled_windows", 0) or 0)
+    if eligible <= 0:
+        return 0.0
+    return labeled / eligible
+
+
 @dataclass
 class TrainerArtifacts:
     artifacts_dir: Path
@@ -258,6 +266,10 @@ class Phase1Trainer:
             "data_process_hash": manifest.data_process_hash,
             "dp_teacher_hash": manifest.dp_teacher_hash,
             "feature_provenance_hash": file_sha256_short(feature_provenance_path),
+            "split_artifacts": {
+                split: artifact.to_dict()
+                for split, artifact in manifest.splits.items()
+            },
         }
         self._logger.info(
             "phase1_processed_data_loaded 说明=已从 manifest 加载固化训练数据 train=%d val=%d test=%d schema_hash=%s data_process_hash=%s dp_teacher_hash=%s",
@@ -392,17 +404,30 @@ class Phase1Trainer:
             )
         best_state = ckpt.load(ckpt.best_path)
         self._reload_state(model, best_state)
+        horizon_label_inputs = {
+            "train": train_horizons,
+            "val": val_horizons,
+            "test": test_horizons,
+        }
+        full_time_train_horizons = [
+            rec
+            for rec in train_horizons
+            if rec.sample_source in {"full_time", "both"}
+        ]
+        if full_time_train_horizons:
+            horizon_label_inputs["full_time_train"] = full_time_train_horizons
         labels_paths = self._export_horizon_labels(
             model,
             store=store,
-            horizons_by_split={"train": train_horizons, "val": val_horizons, "test": test_horizons},
+            horizons_by_split=horizon_label_inputs,
             normalizer=norm,
         )
         self._logger.info(
-            "phase1_horizon_labels_exported 说明=各 split 的 horizon code label 已导出 train=%s val=%s test=%s",
+            "phase1_horizon_labels_exported 说明=各 split 的 horizon code label 已导出 train=%s val=%s test=%s full_time_train=%s",
             labels_paths["train"],
             labels_paths["val"],
             labels_paths["test"],
+            labels_paths.get("full_time_train", ""),
         )
 
         # 10. 导出 Phase II/III 产物
@@ -504,7 +529,11 @@ class Phase1Trainer:
             artifacts_dir,
         )
 
-        if signoff_blocked_reason and not self.config.allow_missing_prospective_diagnostic:
+        if (
+            signoff_blocked_reason
+            and not self.config.allow_missing_prospective_diagnostic
+            and not self.config.local_smoke_relaxed_guardrails
+        ):
             raise Phase1FatalError(
                 f"Phase I 训练完成但 sign-off 被阻塞: {signoff_blocked_reason}; "
                 "report 已写入，但主实验不可 sign-off。"
@@ -1220,6 +1249,7 @@ class Phase1Trainer:
                         demo_return=float(demo_return),
                         num_switches=int(num_switches),
                         is_no_trade=bool(is_no_trade),
+                        sample_source=rec.sample_source,
                     )
                 )
             out[split] = store.save_labels(labels, split)
@@ -1349,6 +1379,28 @@ class Phase1Trainer:
         summary["feature_provenance_hash"] = self._processed_data_metadata.get(
             "feature_provenance_hash", ""
         )
+        split_artifacts = self._processed_data_metadata.get("split_artifacts", {})
+        train_split = split_artifacts.get("train", {}) if isinstance(split_artifacts, dict) else {}
+        val_split = split_artifacts.get("val", {}) if isinstance(split_artifacts, dict) else {}
+        test_split = split_artifacts.get("test", {}) if isinstance(split_artifacts, dict) else {}
+        source_counts = dict(train_split.get("sample_source_counts", {}))
+        train_count = max(int(train_split.get("num_horizons", 0) or 0), 1)
+        full_time_count = int(source_counts.get("full_time", 0)) + int(
+            source_counts.get("both", 0)
+        )
+        opportunity_count = int(source_counts.get("opportunity", 0)) + int(
+            source_counts.get("both", 0)
+        )
+        coverage_after_dp = dict(train_split.get("coverage_after_dp", {}))
+        summary["full_time_training_enabled"] = full_time_count > 0
+        summary["full_time_sample_ratio"] = full_time_count / train_count
+        summary["opportunity_sample_ratio"] = opportunity_count / train_count
+        summary["low_opportunity_ratio"] = float(
+            coverage_after_dp.get("final_low_opportunity_ratio", 0.0)
+        )
+        summary["full_time_label_coverage_train"] = summary["full_time_sample_ratio"]
+        summary["label_coverage_val"] = _label_coverage_from_manifest_split(val_split)
+        summary["label_coverage_test"] = _label_coverage_from_manifest_split(test_split)
         summary["reward_normalization_resolved"] = norm_dict.get("method", "")
         summary["reward_norm_clip_ratio"] = norm_dict.get("clip_ratio", 0.0)
         summary["state_normalization_resolved"] = state_norm_dict.get("method", "")

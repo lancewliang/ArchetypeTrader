@@ -32,6 +32,7 @@ class HorizonRecord:
     rewards: Optional[list] = None     # [h]，DP 后填充
     is_augmented: bool = False
     augmentation_type: str = "none"
+    sample_source: str = "opportunity"
 
 
 # 五档键名常量（与 schema 模块一致；这里复用避免散落）。
@@ -148,6 +149,7 @@ class HorizonBuilder:
                     execution_books=books,
                     last_execution_row=sh.last_execution_row,
                     last_markout_row=sh.last_markout_row,
+                    sample_source=sh.sample_source,
                 )
             )
         return records

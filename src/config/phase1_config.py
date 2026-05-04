@@ -71,11 +71,34 @@ class SamplingHealthConfig:
 class NoTradeControlConfig:
     """No-trade 样本处理。"""
     keep_no_trade: bool = True
-    max_no_trade_ratio: float = 0.25
+    max_no_trade_ratio: float = 0.35
+    min_no_trade_ratio: float = 0.10
+    min_low_opportunity_ratio: float = 0.25
+    low_opportunity_return_quantile: float = 0.30
     min_profit_gate: float = 0.0
     cap_flat_low_vol_strata: bool = True
     flat_low_vol_max_ratio: float = 0.15
     resample_when_exceeded: bool = True
+    resample_when_below_min: bool = True
+
+
+@dataclass(frozen=True)
+class TimeDistributionSamplingConfig:
+    """Train split 的完整时间分布采样配置。"""
+    enabled: bool = True
+    full_time_mode: Literal["non_overlap", "stride"] = "stride"
+    full_time_stride: int = 36
+    min_train_ratio: float = 0.40
+    label_export_enabled: bool = True
+
+
+@dataclass(frozen=True)
+class EvalLabelingConfig:
+    """Eval split 的 label 生成契约。"""
+    val_mode: Literal["all_eligible"] = "all_eligible"
+    test_mode: Literal["all_eligible"] = "all_eligible"
+    apply_sampling: bool = False
+    apply_augmentation: bool = False
 
 
 @dataclass(frozen=True)
@@ -343,6 +366,13 @@ class Phase1DataProcessConfig:
     ] = "stratified_uniform"
     stratification: StratificationConfig = field(default_factory=StratificationConfig)
     sampling_health: SamplingHealthConfig = field(default_factory=SamplingHealthConfig)
+    no_trade_control: NoTradeControlConfig = field(
+        default_factory=NoTradeControlConfig
+    )
+    time_distribution_sampling: TimeDistributionSamplingConfig = field(
+        default_factory=TimeDistributionSamplingConfig
+    )
+    eval_labeling: EvalLabelingConfig = field(default_factory=EvalLabelingConfig)
     data_augmentation: DataAugmentationConfig = field(
         default_factory=DataAugmentationConfig
     )

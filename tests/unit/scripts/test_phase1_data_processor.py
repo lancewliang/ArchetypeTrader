@@ -98,6 +98,41 @@ def test_phase1_data_processor_writes_val_and_test_teacher(tmp_path):
         assert "rewards" in teacher.columns
 
 
+def test_phase1_data_processor_labels_eval_splits_all_boundary_eligible(tmp_path):
+    config = build_data_process_config(_args(tmp_path))
+    manifest_path = Phase1DataProcessor(config).run()
+    import polars as pl
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for split in ("val", "test"):
+        split_payload = manifest["splits"][split]
+        window_index = pl.read_ipc(
+            manifest_path.parent / split_payload["window_index_path"]
+        )
+        teacher = pl.read_ipc(
+            manifest_path.parent / split_payload["dp_teacher_path"]
+        )
+        eligible_count = window_index.filter(pl.col("is_boundary_eligible")).height
+        assert teacher.height == eligible_count
+        assert split_payload["num_labeled_windows"] == eligible_count
+        assert split_payload["labeling_mode"] == "all_eligible"
+        assert split_payload["sampling_applied"] is False
+
+
+def test_phase1_data_processor_records_train_sample_source(tmp_path):
+    config = build_data_process_config(_args(tmp_path))
+    manifest_path = Phase1DataProcessor(config).run()
+    import polars as pl
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    split_payload = manifest["splits"]["train"]
+    sampled = pl.read_ipc(manifest_path.parent / split_payload["sampled_horizons_path"])
+    assert "sample_source" in sampled.columns
+    assert "full_time" in set(sampled["sample_source"].to_list())
+    assert split_payload["sample_source_counts"]["full_time"] >= 1
+    assert "coverage_after_dp" in split_payload
+
+
 def test_phase1_data_processor_preserves_deterministic_sample_ids(tmp_path):
     first = build_data_process_config(_args(tmp_path, data_batch_id="p1"))
     second = build_data_process_config(_args(tmp_path, data_batch_id="p2"))

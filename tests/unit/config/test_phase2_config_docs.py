@@ -74,6 +74,7 @@ def test_phase2_config_field_docs_explain_why_and_tuning_effect():
 def test_phase2_config_from_dict_rollout_collection_defaults_and_explicit_values():
     default_config = Phase2Config.from_dict({})
     assert default_config.rollout_collection.mode == "serial"
+    assert default_config.phase1_label_source == "default"
 
     threaded_config = Phase2Config.from_dict({
         "rollout_collection": {
