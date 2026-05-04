@@ -13,7 +13,9 @@ import math
 import random
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Sequence, Set
+from typing import Dict, List, Literal, Sequence
+
+import numpy as np
 
 from .window_indexer import WindowIndexEntry
 
@@ -346,6 +348,53 @@ class StratifiedWindowSampler:
     def assign_strata(entry: WindowIndexEntry, prospective: bool) -> str:
         return _strata_from_entry(entry, prospective)
 
+    @staticmethod
+    def assign_strata_batch(
+        entries: Sequence[WindowIndexEntry], prospective: bool
+    ) -> List[str]:
+        """批量构造 strata label，数值分桶走 numpy，字符串拼接保持确定性。"""
+        if len(entries) == 0:
+            return []
+        if prospective:
+            returns = np.fromiter(
+                (float(entry.past_return) for entry in entries),
+                dtype=np.float64,
+                count=len(entries),
+            )
+            vols = np.fromiter(
+                (float(entry.past_realized_volatility) for entry in entries),
+                dtype=np.float64,
+                count=len(entries),
+            )
+            patterns = [entry.past_draw_pattern for entry in entries]
+        else:
+            returns = np.fromiter(
+                (float(entry.horizon_return) for entry in entries),
+                dtype=np.float64,
+                count=len(entries),
+            )
+            vols = np.fromiter(
+                (float(entry.realized_volatility) for entry in entries),
+                dtype=np.float64,
+                count=len(entries),
+            )
+            patterns = [entry.draw_pattern for entry in entries]
+
+        ret_bins = np.full(len(entries), "flat", dtype=object)
+        ret_bins[returns > 0.002] = "up"
+        ret_bins[returns < -0.002] = "down"
+        ret_bins[np.isnan(returns)] = "unknown"
+
+        vol_bins = np.full(len(entries), "mid", dtype=object)
+        vol_bins[vols > 0.0015] = "high"
+        vol_bins[vols < 0.0005] = "low"
+        vol_bins[np.isnan(vols)] = "unknown"
+
+        return [
+            f"{ret_bin}|{vol_bin}|{pattern}"
+            for ret_bin, vol_bin, pattern in zip(ret_bins, vol_bins, patterns)
+        ]
+
     # ---------- 私有 ----------
 
     @staticmethod
@@ -362,22 +411,87 @@ class StratifiedWindowSampler:
         """
         if min_gap <= 0:
             return list(candidate_indices[:quota])
+        if quota <= 0 or len(candidate_indices) == 0:
+            return []
+
+        candidate_arr = np.asarray(candidate_indices, dtype=np.int64)
+        candidate_starts = np.fromiter(
+            (int(entries[int(idx)].window_start) for idx in candidate_arr),
+            dtype=np.int64,
+            count=len(candidate_arr),
+        )
+        if candidate_starts.size == 0:
+            return []
+
+        start_min = int(candidate_starts.min())
+        start_max = int(candidate_starts.max())
+        span = start_max - start_min + 1
+        # 对常见的连续滑窗 start 使用 numpy 布尔区间；跨度异常大时避免大内存。
+        if span <= 10_000_000:
+            blocked = np.zeros(span, dtype=np.bool_)
+            existing = (
+                np.asarray(chosen_starts, dtype=np.int64)
+                if chosen_starts is not None
+                else np.asarray([], dtype=np.int64)
+            )
+            if existing.size:
+                lows = np.clip(existing - min_gap + 1, start_min, start_max + 1)
+                highs = np.clip(existing + min_gap, start_min, start_max + 1)
+                delta = np.zeros(span + 1, dtype=np.int32)
+                np.add.at(delta, lows - start_min, 1)
+                np.add.at(delta, highs - start_min, -1)
+                blocked = np.cumsum(delta[:-1]) > 0
+
+            picked: List[int] = []
+            for idx, start in zip(candidate_arr, candidate_starts):
+                if len(picked) >= quota:
+                    break
+                pos = int(start - start_min)
+                if blocked[pos]:
+                    continue
+                picked.append(int(idx))
+                lo = max(int(start - min_gap + 1), start_min) - start_min
+                hi = min(int(start + min_gap), start_max + 1) - start_min
+                blocked[lo:hi] = True
+            return picked
+
+        return StratifiedWindowSampler._pick_with_gap_searchsorted(
+            candidate_arr,
+            candidate_starts,
+            quota=quota,
+            min_gap=min_gap,
+            chosen_starts=chosen_starts,
+        )
+
+    @staticmethod
+    def _pick_with_gap_searchsorted(
+        candidate_arr: np.ndarray,
+        candidate_starts: np.ndarray,
+        *,
+        quota: int,
+        min_gap: int,
+        chosen_starts: Sequence[int] | None = None,
+    ) -> List[int]:
+        """大跨度 start 的低内存 fallback。"""
+        selected = np.sort(
+            np.asarray(chosen_starts, dtype=np.int64)
+            if chosen_starts is not None
+            else np.asarray([], dtype=np.int64)
+        )
         picked: List[int] = []
-        blocked_starts: Set[int] = set()
-
-        def block_around(start: int) -> None:
-            blocked_starts.update(range(start - min_gap + 1, start + min_gap))
-
-        for start in chosen_starts or []:
-            block_around(start)
-        for idx in candidate_indices:
-            if quota <= 0:
+        for idx, start in zip(candidate_arr, candidate_starts):
+            if len(picked) >= quota:
                 break
-            start = entries[idx].window_start
-            if start not in blocked_starts:
-                picked.append(idx)
-                block_around(start)
-                quota -= 1
+            if selected.size:
+                pos = int(np.searchsorted(selected, start))
+                left_ok = pos == 0 or start - selected[pos - 1] >= min_gap
+                right_ok = pos == selected.size or selected[pos] - start >= min_gap
+                if not (left_ok and right_ok):
+                    continue
+                selected = np.insert(selected, pos, start)
+            else:
+                selected = np.asarray([start], dtype=np.int64)
+            picked.append(int(idx))
         return picked
 
     @staticmethod

@@ -509,10 +509,9 @@ class Phase1DataProcessor:
         )
 
         prospective = self.config.stratification.mode == "prospective_past"
-        labels = [
-            StratifiedWindowSampler.assign_strata(e, prospective=prospective)
-            for e in entries
-        ]
+        labels = StratifiedWindowSampler.assign_strata_batch(
+            entries, prospective=prospective
+        )
         strata_by_start = {
             entry.window_start: label for entry, label in zip(entries, labels)
         }
@@ -1003,32 +1002,33 @@ def _full_time_pool_entries(
         step = max(1, int(stride))
     else:
         raise ValueError(f"非法 full_time_mode: {mode}")
-    return [entry for entry in entries if entry.window_start % step == 0]
+    if len(entries) == 0:
+        return []
+    starts = np.fromiter(
+        (int(entry.window_start) for entry in entries),
+        dtype=np.int64,
+        count=len(entries),
+    )
+    keep = starts % step == 0
+    return [entry for entry, flag in zip(entries, keep) if bool(flag)]
 
 
 def _take_evenly_spaced(items: Sequence[Any], count: int) -> List[Any]:
-    if count <= 0 or not items:
+    if count <= 0 or len(items) == 0:
         return []
     if count >= len(items):
         return list(items)
     if count == 1:
         return [items[0]]
-    positions = np.linspace(0, len(items) - 1, num=count)
-    indices = []
-    seen = set()
-    for pos in positions:
-        idx = int(round(float(pos)))
-        if idx not in seen:
-            indices.append(idx)
-            seen.add(idx)
-    idx = 0
-    while len(indices) < count and idx < len(items):
-        if idx not in seen:
-            indices.append(idx)
-            seen.add(idx)
-        idx += 1
-    indices.sort()
-    return [items[idx] for idx in indices[:count]]
+    indices = np.unique(
+        np.rint(np.linspace(0, len(items) - 1, num=count)).astype(np.int64)
+    )
+    if indices.size < count:
+        extras = np.setdiff1d(
+            np.arange(len(items), dtype=np.int64), indices, assume_unique=True
+        )
+        indices = np.sort(np.concatenate([indices, extras[: count - indices.size]]))
+    return [items[int(idx)] for idx in indices[:count]]
 
 
 def _sampled_from_entries(
@@ -1064,18 +1064,30 @@ def _filter_entries_away_from_starts(
     *,
     min_gap: int,
 ) -> Tuple[List[WindowIndexEntry], List[str]]:
-    if not starts or min_gap <= 0:
+    if len(starts) == 0 or min_gap <= 0:
         return list(entries), list(labels)
-    blocked = set()
-    for start in starts:
-        blocked.update(range(int(start) - min_gap + 1, int(start) + min_gap))
-    kept_entries: List[WindowIndexEntry] = []
-    kept_labels: List[str] = []
-    for entry, label in zip(entries, labels):
-        if entry.window_start in blocked:
-            continue
-        kept_entries.append(entry)
-        kept_labels.append(label)
+    if len(entries) == 0:
+        return [], []
+    anchor_starts = np.unique(np.asarray(starts, dtype=np.int64))
+    entry_starts = np.fromiter(
+        (int(entry.window_start) for entry in entries),
+        dtype=np.int64,
+        count=len(entries),
+    )
+    positions = np.searchsorted(anchor_starts, entry_starts)
+    left_ok = np.ones(len(entries), dtype=np.bool_)
+    has_left = positions > 0
+    left_ok[has_left] = (
+        entry_starts[has_left] - anchor_starts[positions[has_left] - 1] >= min_gap
+    )
+    right_ok = np.ones(len(entries), dtype=np.bool_)
+    has_right = positions < anchor_starts.size
+    right_ok[has_right] = (
+        anchor_starts[positions[has_right]] - entry_starts[has_right] >= min_gap
+    )
+    keep = left_ok & right_ok
+    kept_entries = [entry for entry, flag in zip(entries, keep) if bool(flag)]
+    kept_labels = [label for label, flag in zip(labels, keep) if bool(flag)]
     return kept_entries, kept_labels
 
 
@@ -1120,8 +1132,12 @@ def _coverage_stats(
     low_opportunity_return_quantile: float,
     min_profit_gate: float,
 ) -> Dict[str, Any]:
-    returns = [float(sum(rec.rewards or [])) for rec in records]
-    if returns:
+    if len(records) > 0:
+        returns = np.fromiter(
+            (float(np.sum(rec.rewards or [], dtype=np.float64)) for rec in records),
+            dtype=np.float64,
+            count=len(records),
+        )
         q = float(
             np.quantile(
                 returns,
@@ -1130,11 +1146,10 @@ def _coverage_stats(
         )
         low_threshold = max(q, float(min_profit_gate))
     else:
+        returns = np.asarray([], dtype=np.float64)
         low_threshold = float(min_profit_gate)
     no_trade = sum(1 for rec in records if _is_no_trade_record(rec))
-    low = sum(
-        1 for rec in records if _is_low_opportunity_record(rec, low_threshold)
-    )
+    low = int(np.count_nonzero(returns <= low_threshold)) if returns.size else 0
     total = len(records)
     return {
         "total": total,
