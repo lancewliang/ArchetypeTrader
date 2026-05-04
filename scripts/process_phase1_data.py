@@ -7,6 +7,7 @@ instead of re-reading raw market data or re-running DP.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import logging
@@ -326,24 +327,14 @@ class Phase1DataProcessor:
         self._logger.info("Schema验证完成 schema_path=%s schema_hash=%s",
                           schema_path, schema_hash)
 
+        # 分阶段构建和生成，避免同时持有所有 split 的 horizons
+        # Phase 1: 构建并处理 train
         self._logger.info("正在构建时间窗口 split=train")
         train_result = self._build_horizons_for_split(
             "train", frames["train"], schema, artifacts_dir
         )
         train_horizons = train_result.horizons
         train_window_path = train_result.window_index_path
-        self._logger.info("正在构建时间窗口 split=val")
-        val_result = self._build_horizons_for_split(
-            "val", frames["val"], schema, artifacts_dir
-        )
-        val_horizons = val_result.horizons
-        val_window_path = val_result.window_index_path
-        self._logger.info("正在构建时间窗口 split=test")
-        test_result = self._build_horizons_for_split(
-            "test", frames["test"], schema, artifacts_dir
-        )
-        test_horizons = test_result.horizons
-        test_window_path = test_result.window_index_path
 
         if self.config.data_augmentation.temporal_contrastive.enabled:
             self._logger.info("数据增强功能已启用 时间对比学习")
@@ -384,6 +375,18 @@ class Phase1DataProcessor:
         )
         _log_reward_distribution(self._logger, train_horizons, "train")
 
+        # 释放 train_frame 内存（后续不再需要）
+        del frames["train"]
+        gc.collect()
+
+        # Phase 2: 构建并处理 val
+        self._logger.info("正在构建时间窗口 split=val")
+        val_result = self._build_horizons_for_split(
+            "val", frames["val"], schema, artifacts_dir
+        )
+        val_horizons = val_result.horizons
+        val_window_path = val_result.window_index_path
+
         self._logger.info(
             "正在生成演示样本 split=val num_horizons=%d dp_workers=%s chunksize=%d",
             len(val_horizons),
@@ -395,6 +398,18 @@ class Phase1DataProcessor:
                           len(val_horizons), val_reject.dataset_reject_rate)
         _log_reward_distribution(self._logger, val_horizons, "val")
 
+        # 释放 val_frame 内存
+        del frames["val"]
+        gc.collect()
+
+        # Phase 3: 构建并处理 test
+        self._logger.info("正在构建时间窗口 split=test")
+        test_result = self._build_horizons_for_split(
+            "test", frames["test"], schema, artifacts_dir
+        )
+        test_horizons = test_result.horizons
+        test_window_path = test_result.window_index_path
+
         self._logger.info(
             "正在生成演示样本 split=test num_horizons=%d dp_workers=%s chunksize=%d",
             len(test_horizons),
@@ -405,6 +420,10 @@ class Phase1DataProcessor:
         self._logger.info("演示样本生成完成 split=test 接受=%d 拒绝率=%.4f",
                           len(test_horizons), test_reject.dataset_reject_rate)
         _log_reward_distribution(self._logger, test_horizons, "test")
+
+        # 释放 test_frame 内存
+        del frames["test"]
+        gc.collect()
 
         self._logger.info("正在计算数据哈希")
         input_file_audit = {
@@ -513,6 +532,11 @@ class Phase1DataProcessor:
         demo_store.save_demos(train_horizons, split="train")
         demo_store.save_demos(val_horizons, split="val")
         demo_store.save_demos(test_horizons, split="test")
+
+        # 所有数据保存完成后，释放 val/test 内存（train 在函数返回后自然释放）
+        self._logger.info("演示存储保存完成，释放 val/test 内存")
+        del val_horizons, test_horizons
+        gc.collect()
 
         self._logger.info("正在写入清单文件")
         manifest = {
