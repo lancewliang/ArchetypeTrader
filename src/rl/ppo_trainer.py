@@ -415,7 +415,7 @@ class PPOTrainer:
         if threshold > 0 and total_norm > threshold:
             self._export_debug_snapshot("gradient_explosion")
             raise NumericalSafetyError(
-                f"gradient norm {total_norm:.6f} exceeds safety threshold {threshold:.6f}"
+                f"pre-clip gradient norm {total_norm:.6f} exceeds safety threshold {threshold:.6f}"
             )
 
     def get_state(self) -> Dict[str, Any]:

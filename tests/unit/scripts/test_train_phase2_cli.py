@@ -64,3 +64,12 @@ def test_train_phase2_cli_test_file_does_not_enter_config(tmp_path):
     config = build_config(args)
 
     assert config.test_file == ""
+
+
+def test_train_phase2_cli_can_override_gradient_safety_threshold(tmp_path):
+    args = build_parser().parse_args(
+        _required_args(tmp_path, "--gradient-safety-max-norm", "2500")
+    )
+    config = build_config(args)
+
+    assert config.numerical_safety.max_gradient_norm == 2500.0

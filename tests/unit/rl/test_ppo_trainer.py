@@ -99,3 +99,12 @@ class TestPPOTrainer:
             break
         with pytest.raises(NumericalSafetyError):
             trainer._check_gradient_safety()
+
+    def test_default_gradient_safety_allows_pre_clip_spike(self, tmp_path):
+        """默认 safety 阈值允许有限的裁剪前梯度尖峰。"""
+        trainer = _trainer(tmp_path)
+        for param in trainer.actor_critic.selector.parameters():
+            param.grad = torch.zeros_like(param)
+            param.grad.view(-1)[0] = 101.0
+            break
+        trainer._check_gradient_safety()

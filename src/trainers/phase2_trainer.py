@@ -132,7 +132,7 @@ class Phase2Trainer:
             log_path,
         )
         self._validate_unsupported_features()
-        self._logger.info("Phase II 未支持功能检查通过")
+        self._logger.info("Phase II 未支持功能配置检查通过")
 
         artifacts_dir = self.config.artifacts_dir()
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -140,7 +140,7 @@ class Phase2Trainer:
 
         # 0. Seed
         self._seed_everything()
-        self._logger.info("Phase II 随机种子已设置：seed=%s", self.config.seed)
+        self._logger.info("Phase II 随机种子已设置：随机种子=%s", self.config.seed)
 
         # 1. 校验 Phase I 产物
         validator = Phase1ArtifactValidator(self.config)
@@ -170,7 +170,7 @@ class Phase2Trainer:
         }
         input_schema = read_json(self.config.phase1_dir() / "input_schema.json")
         self._logger.info(
-            "Phase II 市场数据已加载：训练行数=%s，验证行数=%s，schema 特征数=%s",
+            "Phase II 市场数据已加载：训练行数=%s，验证行数=%s，输入特征数=%s",
             getattr(frames["train"], "height", None),
             getattr(frames["val"], "height", None),
             len(input_schema.get("feature_columns", [])) if isinstance(input_schema, dict) else None,
@@ -201,7 +201,8 @@ class Phase2Trainer:
         train_entries = indexer.build_index(frames["train"], "train", horizon, train_labels)
         val_entries = indexer.build_index(frames["val"], "val", horizon, val_labels)
         self._logger.info(
-            "Phase II horizon index 已生成：训练=%d，验证=%d，horizon=%d",
+            "Phase II 时间窗索引已生成：模式=%s，训练条目=%d，验证条目=%d，时间窗=%d",
+             self.config.horizon_schedule.mode,
             len(train_entries),
             len(val_entries),
             horizon,
@@ -210,7 +211,8 @@ class Phase2Trainer:
         hi_train_path = indexer.write_index(train_entries, artifacts_dir / "phase2_horizon_index_train.feather")
         hi_val_path = indexer.write_index(val_entries, artifacts_dir / "phase2_horizon_index_val.feather")
         self._logger.info(
-            "Phase II horizon index 已写入：训练路径=%s，验证路径=%s",
+            "Phase II 时间窗索引已写入：训练路径=%s，验证路径=%s",
+           
             hi_train_path,
             hi_val_path,
         )
@@ -257,7 +259,7 @@ class Phase2Trainer:
             device=self.config.device,
         )
         self._logger.info(
-            "Phase I 冻结策略已加载：code 数=%d，设备=%s",
+            "Phase I 冻结策略已加载：原型代码数=%d，设备=%s",
             frozen_policy.num_codes,
             self.config.device,
         )
@@ -325,7 +327,7 @@ class Phase2Trainer:
             dead_code_mask_list,
         )
         self._logger.info(
-            "Phase II selector 已准备：状态维度=%d，code 数=%d，死代码掩码数=%d，无掩码探针命中率=%.6f",
+            "Phase II 选择器已准备：状态维度=%d，原型代码数=%d，死代码掩码数=%d，无掩码探针命中率=%.6f",
             state_spec.total_dim,
             num_codes,
             sum(1 for flag in dead_code_mask_list if flag),
@@ -352,7 +354,7 @@ class Phase2Trainer:
         resume_audit = self._maybe_resume(ppo_trainer, ckpt_mgr)
         start_update = int(resume_audit.get("restored_update_count", 0))
         self._logger.info(
-            "Phase II 训练准备完成：更新总数=%d，起始更新=%d，rollout 长度=%d，环境数=%d，恢复来源=%s",
+            "Phase II 训练准备完成：更新总数=%d，起始更新=%d，采样长度=%d，环境数=%d，恢复来源=%s",
             num_updates,
             start_update,
             self.config.rollout_length,
@@ -521,7 +523,7 @@ class Phase2Trainer:
         # 写 rollout stats
         rollout_stats_path = writer.write_rollout_stats(self._rollout_stats)
         self._logger.info(
-            "Phase II rollout 统计已写入：路径=%s，行数=%d",
+            "Phase II 采样统计已写入：路径=%s，行数=%d",
             rollout_stats_path,
             len(self._rollout_stats),
         )
@@ -530,9 +532,9 @@ class Phase2Trainer:
         if ckpt_mgr.best_path.exists():
             best_state = ckpt_mgr.load(ckpt_mgr.best_path)
             selector.load_state_dict(best_state["model_state"])
-            self._logger.info("Phase II 最优 checkpoint 已加载：路径=%s", ckpt_mgr.best_path)
+            self._logger.info("Phase II 最优检查点已加载：路径=%s", ckpt_mgr.best_path)
         else:
-            self._logger.info("Phase II 最优 checkpoint 不存在：路径=%s", ckpt_mgr.best_path)
+            self._logger.info("Phase II 最优检查点不存在：路径=%s", ckpt_mgr.best_path)
 
         # Per-horizon records
         train_runner = Phase2BacktestRunner(
@@ -541,7 +543,7 @@ class Phase2Trainer:
         train_records = train_runner.run_walk_forward("train", deterministic=True)
         val_records = val_runner.run_walk_forward("val", deterministic=True)
         self._logger.info(
-            "Phase II walk-forward 回测完成：训练记录数=%d，验证记录数=%d",
+            "Phase II 滚动前向回测完成：训练记录数=%d，验证记录数=%d",
             len(train_records),
             len(val_records),
         )
@@ -552,7 +554,7 @@ class Phase2Trainer:
         phr_train = writer.write_per_horizon_records(train_rec_dicts, "train")
         phr_val = writer.write_per_horizon_records(val_rec_dicts, "val")
         self._logger.info(
-            "Phase II per-horizon 记录已写入：训练路径=%s，验证路径=%s",
+            "Phase II 逐时间窗记录已写入：训练路径=%s，验证路径=%s",
             phr_train,
             phr_val,
         )
@@ -632,7 +634,7 @@ class Phase2Trainer:
             "reason": "test_not_loaded_in_phase2_training",
         }
         self._logger.info(
-            "Phase II 诊断完成：标签覆盖率=%.6f，OOD 警告数=%d，压力场景数=%d",
+            "Phase II 诊断完成：标签覆盖率=%.6f，分布外警告数=%d，压力场景数=%d",
             train_coverage.coverage_ratio,
             distribution_summary["warning_count"],
             len(execution_stress_summary.get("scenarios", [])),

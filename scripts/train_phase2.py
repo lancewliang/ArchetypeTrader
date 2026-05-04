@@ -51,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--update-epochs", type=int, default=4)
     p.add_argument("--minibatch-size", type=int, default=256)
     p.add_argument(
+        "--gradient-safety-max-norm",
+        type=float,
+        default=None,
+        help="覆盖 numerical_safety.max_gradient_norm；这是梯度裁剪前的爆炸阈值",
+    )
+    p.add_argument(
         "--max-position",
         type=int,
         default=None,
@@ -119,6 +125,14 @@ def build_config(args: argparse.Namespace) -> Phase2Config:
             phase1_batch_id=args.phase1_batch_id,
         ),
     )
+    if args.gradient_safety_max_norm is not None:
+        config = replace(
+            config,
+            numerical_safety=replace(
+                config.numerical_safety,
+                max_gradient_norm=args.gradient_safety_max_norm,
+            ),
+        )
     if config.paper_strict_reproduction:
         config = config.apply_paper_strict_overrides()
     return config
