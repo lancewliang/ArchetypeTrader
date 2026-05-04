@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,8 +19,12 @@ from src.config.phase1_config import (
     TrainingConfig,
     apply_paper_strict_overrides,
 )
+from src.data.dataset import Phase1DemoDataset
 from src.data.demo_store import Phase1DemoStore
 from src.data.horizon_builder import HorizonRecord
+from src.evaluation.phase1_evaluator import EpochMetrics
+from src.trainers.phase1_checkpoint import Phase1CheckpointManager
+from src.trainers.phase1_selection_policy import Phase1SelectionPolicy, SelectionHistory
 from src.trainers.phase1_trainer import Phase1FatalError, Phase1Trainer
 
 
@@ -50,6 +55,167 @@ def test_effective_pretrain_epochs_clamps_to_leave_phase_b():
         _config(training=TrainingConfig(epochs=2, pretrain_epochs=10, device="cpu"))
     )
     assert trainer._effective_pretrain_epochs() == 1
+
+
+def test_phase_a_end_triggers_full_baseline_validation():
+    assert Phase1Trainer._is_phase_a_baseline_validation(
+        epoch=14,
+        is_phase_a=True,
+        effective_pretrain_epochs=15,
+    )
+    assert not Phase1Trainer._is_phase_a_baseline_validation(
+        epoch=13,
+        is_phase_a=True,
+        effective_pretrain_epochs=15,
+    )
+    assert not Phase1Trainer._is_phase_a_baseline_validation(
+        epoch=15,
+        is_phase_a=False,
+        effective_pretrain_epochs=15,
+    )
+    assert Phase1Trainer._is_full_validation_epoch(
+        epoch=14,
+        phase_a_baseline_validation=True,
+        full_validation_every_epochs=999,
+    )
+
+
+def test_train_loop_runs_phase_a_baseline_before_phase_b_validation(tmp_path):
+    torch = pytest.importorskip("torch")
+
+    class TinyQuantizer:
+        num_codes = 2
+
+        def __init__(self):
+            self.codebook = torch.ones(2, 2)
+
+        def update_codebook(self, z_e, code_id):
+            return None
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(0.0))
+            self.quantizer = TinyQuantizer()
+
+        def _outputs(self, states, actions, *, with_codes: bool):
+            batch_size, horizon = actions.shape
+            logits = self.weight.expand(batch_size, horizon, 3)
+            z_e = (self.weight + 1.0).expand(batch_size, 2)
+            code_id = (
+                torch.arange(batch_size, device=states.device) % 2
+                if with_codes
+                else None
+            )
+            return SimpleNamespace(
+                action_logits=logits,
+                z_e=z_e,
+                z_q_no_grad=z_e,
+                code_id=code_id,
+            )
+
+        def forward_pretrain(self, states, actions, rewards):
+            return self._outputs(states, actions, with_codes=False)
+
+        def forward(self, states, actions, rewards):
+            return self._outputs(states, actions, with_codes=True)
+
+    class TinyLoss:
+        def _loss(self, action_logits):
+            total = action_logits.mean()
+            zero = total * 0.0
+            return SimpleNamespace(
+                total=total,
+                reconstruction=total,
+                commitment=zero,
+                usage=None,
+                alignment=None,
+            )
+
+        def forward_pretrain(self, *, action_logits, target_actions):
+            return self._loss(action_logits)
+
+        def __call__(self, **kwargs):
+            return self._loss(kwargs["action_logits"])
+
+    class RecordingEvaluator:
+        def __init__(self):
+            self.calls = []
+
+        def evaluate_epoch(self, *, epoch, model, val_data, val_records, full_validation):
+            self.calls.append((epoch, full_validation))
+            stability_measured = len(self.calls) > 1
+            metrics = {
+                "code_usage_ratio": 1.0,
+                "val_max_drawdown": 0.01,
+                "val_sharpe_ratio": 1.0,
+                "inter_code_action_diversity": 1.0,
+                "decoder_sensitivity_to_code": 1.0,
+                "epoch_code_stability_measured": stability_measured,
+                "epoch_code_stability": 0.9,
+                "val_dp_teacher_profitable_ratio": 1.0,
+                "switch_point_recall": 1.0,
+                "switch_direction_accuracy": 1.0,
+                "val_weighted_reconstruction_accuracy": 1.0,
+                "val_return_capture_ratio": 1.0,
+            }
+            return EpochMetrics(
+                epoch=epoch,
+                metrics=metrics,
+                diagnostics={"call_count": len(self.calls)},
+            )
+
+    def record(idx: int) -> HorizonRecord:
+        return HorizonRecord(
+            sample_id=f"r{idx}",
+            start_index=idx,
+            end_index=idx + 2,
+            pair="TEST",
+            split="train",
+            strata_label="flat|low|mixed",
+            states=[[0.1, 0.2], [0.2, 0.3]],
+            prices=[100.0, 100.1, 100.2],
+            execution_books=[],
+            actions=[0, 2],
+            rewards=[0.1, -0.1],
+        )
+
+    records = [record(i) for i in range(4)]
+    config = _config(
+        artifact_root=str(tmp_path),
+        model=ModelConfig(
+            codebook=CodebookConfig(
+                init_method="random_normal",
+                health=CodebookHealthConfig(dead_code_restart=False),
+            )
+        ),
+        training=TrainingConfig(
+            epochs=5,
+            pretrain_epochs=2,
+            batch_size=2,
+            device="cpu",
+            mixed_precision=False,
+            save_every=10,
+        ),
+    )
+    trainer = Phase1Trainer(config)
+    model = TinyModel()
+    evaluator = RecordingEvaluator()
+    history = trainer._train_loop(
+        model=model,
+        loss_fn=TinyLoss(),
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+        train_dataset=Phase1DemoDataset(records),
+        evaluator=evaluator,
+        val_dataset=Phase1DemoDataset(records),
+        val_records=records,
+        checkpoint=Phase1CheckpointManager(tmp_path / "phase1"),
+        policy=Phase1SelectionPolicy(config.selection_policy),
+        history=SelectionHistory(),
+    )
+
+    assert evaluator.calls == [(1, True), (4, True)]
+    assert history.best_epoch == 4
 
 
 def test_build_training_components_wires_alignment_weight(tmp_path):

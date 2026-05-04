@@ -9,7 +9,7 @@ from src.config.phase1_config import (
     SelectionPolicyConfig,
     TeacherQualityGuardrailConfig,
 )
-from src.trainers.selection_policy import (
+from src.trainers.phase1_selection_policy import (
     Phase1SelectionPolicy,
     SelectionHistory,
 )
@@ -37,6 +37,7 @@ def _good_metrics(extra: dict | None = None):
         "val_sharpe_ratio": 1.0,
         "inter_code_action_diversity": 0.5,
         "decoder_sensitivity_to_code": 0.5,
+        "epoch_code_stability_measured": True,
         "epoch_code_stability": 0.9,
         "val_dp_teacher_profitable_ratio": 0.5,
         "switch_point_recall": 0.7,
@@ -90,6 +91,38 @@ def test_block_when_code_stability_low():
     metrics = _good_metrics({"epoch_code_stability": 0.5})
     verdict = policy.evaluate(metrics, SelectionHistory())
     assert verdict.decision == "reject"
+
+
+def test_prefers_matched_code_stability_when_available():
+    policy = _policy()
+    metrics = _good_metrics({
+        "epoch_code_stability": 0.1,
+        "epoch_code_stability_matched": 0.9,
+    })
+    verdict = policy.evaluate(metrics, SelectionHistory())
+    assert verdict.decision == "promote_to_best"
+
+
+def test_block_when_matched_code_stability_low():
+    policy = _policy()
+    metrics = _good_metrics({
+        "epoch_code_stability": 0.9,
+        "epoch_code_stability_matched": 0.5,
+    })
+    verdict = policy.evaluate(metrics, SelectionHistory())
+    assert verdict.decision == "reject"
+    assert any("epoch_code_stability_matched=0.500" in r for r in verdict.reasons)
+
+
+def test_block_when_code_stability_unmeasured():
+    policy = _policy()
+    metrics = _good_metrics({
+        "epoch_code_stability_measured": False,
+        "epoch_code_stability": 1.0,
+    })
+    verdict = policy.evaluate(metrics, SelectionHistory())
+    assert verdict.decision == "reject"
+    assert any("epoch_code_stability_measured=false" in r for r in verdict.reasons)
 
 
 def test_warn_when_teacher_quality_low():

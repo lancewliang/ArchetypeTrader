@@ -441,7 +441,7 @@ artifacts/FU/batch_002_prospective_strata/phase1/phase1_report.json;
 /home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python -m pytest \
   tests/unit/evaluation/metrics/test_risk.py \
   tests/unit/evaluation/test_phase1_evaluator.py \
-  tests/unit/trainers/test_selection_policy.py \
+  tests/unit/trainers/test_phase1_selection_policy.py \
   tests/unit/trainers/test_phase1_trainer.py \
   tests/integration/test_phase1_pipeline_smoke.py \
   tests/integration/test_phase1_data_process_then_train.py

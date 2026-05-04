@@ -84,7 +84,7 @@ def _make_smoke_config(tmp_path: Path, manifest: Path) -> Phase1Config:
     )
     model = ModelConfig(hidden_dim=16, code_dim=4, num_codes=4, encoder_input=enc, codebook=cb)
     training = TrainingConfig(
-        batch_size=4, lr=1e-3, epochs=2, seed=7, device="cpu",
+        batch_size=4, lr=1e-3, epochs=6, pretrain_epochs=0, seed=7, device="cpu",
         save_every=1, full_validation_every_epochs=1, fast_val_probe_size=8,
     )
     selection = SelectionPolicyConfig(

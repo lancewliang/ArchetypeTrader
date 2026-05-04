@@ -13,7 +13,7 @@ from src.trainers.phase1_checkpoint import (
     Phase1FatalCollapse,
     file_sha256,
 )
-from src.trainers.selection_policy import SelectionVerdict
+from src.trainers.phase1_selection_policy import SelectionVerdict
 
 
 def _state():

@@ -1,4 +1,4 @@
-"""Best checkpoint 选择策略 + guardrail（从 checkpoint manager 抽出）.
+"""Phase I best checkpoint 选择策略 + guardrail（从 checkpoint manager 抽出）.
 
 设计文档锚点: §4.15。
 """
@@ -149,20 +149,35 @@ class Phase1SelectionPolicy:
 
     def should_block_due_to_behavior(self, metrics: dict) -> Tuple[bool, Optional[str]]:
         """``inter_code_action_diversity`` / ``decoder_sensitivity_to_code`` /
-        ``epoch_code_stability`` 任一低于阈值即阻止 best。
+        epoch 稳定性任一低于阈值即阻止 best；若稳定性尚未被实际测量
+        （例如首次 VQ full validation），同样阻止 best。
+
+        若 evaluator 提供 ``epoch_code_stability_matched``，guardrail 优先使用
+        matched 一致率，避免纯 code-id 交换被误判为真实标签漂移；历史 metrics
+        没有该字段时回退到原始 ``epoch_code_stability``。
 
         语义: codebook 在 latent space 看似分开，但 decoder 对 ``z_q`` 不敏感时，
         不同 archetype 实际产生几乎相同的 actions——这种 checkpoint 不能 sign-off。
         """
         diversity = float(metrics.get("inter_code_action_diversity", 1.0))
         sensitivity = float(metrics.get("decoder_sensitivity_to_code", 1.0))
-        stability = float(metrics.get("epoch_code_stability", 1.0))
+        stability_measured = bool(metrics.get("epoch_code_stability_measured", True))
+        stability_key = (
+            "epoch_code_stability_matched"
+            if "epoch_code_stability_matched" in metrics
+            else "epoch_code_stability"
+        )
+        stability = float(
+            metrics.get(stability_key, metrics.get("epoch_code_stability", 1.0))
+        )
         if diversity < self.config.behavior.min_inter_code_action_diversity:
             return True, f"inter_code_action_diversity={diversity:.3f} < {self.config.behavior.min_inter_code_action_diversity}"
         if sensitivity < self.config.behavior.min_decoder_sensitivity_to_code:
             return True, f"decoder_sensitivity_to_code={sensitivity:.3f} < {self.config.behavior.min_decoder_sensitivity_to_code}"
+        if not stability_measured:
+            return True, "epoch_code_stability_measured=false; wait_for_next_full_validation"
         if stability < self.config.behavior.min_epoch_code_stability:
-            return True, f"epoch_code_stability={stability:.3f} < {self.config.behavior.min_epoch_code_stability}"
+            return True, f"{stability_key}={stability:.3f} < {self.config.behavior.min_epoch_code_stability}"
         return False, None
 
     def should_block_due_to_teacher_quality(self, metrics: dict) -> Tuple[bool, Optional[str]]:

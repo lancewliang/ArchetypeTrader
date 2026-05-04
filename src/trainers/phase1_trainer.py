@@ -38,7 +38,7 @@ from src.utils.feather_io import read_json
 from src.utils.run_logging import configure_run_logger
 
 from .phase1_checkpoint import Phase1CheckpointManager, Phase1FatalCollapse
-from .selection_policy import (
+from .phase1_selection_policy import (
     Phase1SelectionPolicy,
     SelectionHistory,
     SelectionVerdict,
@@ -674,6 +674,31 @@ class Phase1Trainer:
         for group in optimizer.param_groups:
             group["lr"] = float(lr)
 
+    @staticmethod
+    def _is_phase_a_baseline_validation(
+        *,
+        epoch: int,
+        is_phase_a: bool,
+        effective_pretrain_epochs: int,
+    ) -> bool:
+        """Phase A 结束后跑一次 full validation，给 code stability 建基线。"""
+        return (
+            is_phase_a
+            and effective_pretrain_epochs > 0
+            and epoch + 1 == effective_pretrain_epochs
+        )
+
+    @staticmethod
+    def _is_full_validation_epoch(
+        *,
+        epoch: int,
+        phase_a_baseline_validation: bool,
+        full_validation_every_epochs: int,
+    ) -> bool:
+        if phase_a_baseline_validation:
+            return True
+        return (epoch + 1) % max(full_validation_every_epochs, 1) == 0
+
     def _batch_amp_enabled(
         self,
         *,
@@ -844,8 +869,9 @@ class Phase1Trainer:
            - ``quantizer.update_codebook(z_e.detach(), code_id)``: EMA 模式下更新
              codebook；gradient 模式 no-op。
         2. ``checkpoint.save_last`` + ``save_periodic``。
-        3. 调 ``evaluator.evaluate_epoch`` 拿 metrics（按 ``full_validation_every_epochs``
-           决定 fast probe 还是 full）。
+        3. 调 ``evaluator.evaluate_epoch`` 拿 metrics；Phase A 结束后先跑一次
+           full validation 作为 stability 基线，之后按
+           ``full_validation_every_epochs`` 决定 fast probe 还是 full。
         4. 注入 ``_consecutive_collapse_epochs`` / ``_consecutive_collapse_limit``
            供 selection_policy 判定 fatal。
         5. ``policy.evaluate(metrics, history)`` → verdict。
@@ -1007,15 +1033,24 @@ class Phase1Trainer:
             if self._scheduler is not None and not is_phase_a:
                 self._scheduler.step()
 
-            # 每 5 轮进行一次评估、诊断和 checkpoint 保存；Phase A 不参与选择。
+            # 每 5 轮进行一次评估、诊断和 checkpoint 保存；Phase A 结束时
+            # 额外跑一次只建 stability 基线的 full validation，不参与 best 选择。
             evaluation_interval = 5
-            should_evaluate = (not is_phase_a) and (
+            phase_a_baseline_validation = self._is_phase_a_baseline_validation(
+                epoch=epoch,
+                is_phase_a=is_phase_a,
+                effective_pretrain_epochs=effective_pretrain_epochs,
+            )
+            scheduled_phase_b_validation = (not is_phase_a) and (
                 (epoch + 1) % evaluation_interval == 0
                 or epoch == self.config.training.epochs - 1
             )
+            should_evaluate = (
+                phase_a_baseline_validation or scheduled_phase_b_validation
+            )
 
             restarted_code_ids = []
-            if should_evaluate:
+            if scheduled_phase_b_validation:
                 restarted_code_ids = self._maybe_restart_dead_codes(
                     model=model,
                     train_dataset=train_dataset,
@@ -1030,7 +1065,13 @@ class Phase1Trainer:
             metrics_for_select: Dict[str, Any] = {"epoch": epoch}
 
             if should_evaluate:
-                full_val = (epoch + 1) % max(self.config.training.full_validation_every_epochs, 1) == 0
+                full_val = self._is_full_validation_epoch(
+                    epoch=epoch,
+                    phase_a_baseline_validation=phase_a_baseline_validation,
+                    full_validation_every_epochs=(
+                        self.config.training.full_validation_every_epochs
+                    ),
+                )
                 ep_metrics = evaluator.evaluate_epoch(
                     epoch=epoch,
                     model=model,
@@ -1044,28 +1085,67 @@ class Phase1Trainer:
                         "val_weighted_reconstruction_accuracy"
                     ]
 
-                metrics_for_select["_dead_code_restart_triggered"] = bool(restarted_code_ids)
-                metrics_for_select["_dead_code_restart_cooldown_epochs"] = (
-                    self.config.model.codebook.health.restart_cooldown_epochs
-                )
-                metrics_for_select["dead_code_restarts"] = len(restarted_code_ids)
-                metrics_for_select["dead_code_restart_events"] = restart_events
-                metrics_for_select["_consecutive_collapse_epochs"] = (
-                    history.consecutive_collapse_epochs + (
-                        1 if metrics_for_select.get("code_usage_ratio", 1.0) < self.config.selection_policy.min_code_usage_ratio else 0
+                if phase_a_baseline_validation:
+                    metrics_for_select["_phase_a_baseline_validation"] = True
+                    score, debug = policy.compute_composite_score(metrics_for_select)
+                    verdict = SelectionVerdict(
+                        decision="skipped",
+                        reasons=["phase_a_baseline_validation"],
+                        composite_score=score,
+                        composite_score_debug=debug,
                     )
-                )
-                metrics_for_select["_consecutive_collapse_limit"] = self.config.model.codebook.health.consecutive_collapse_epoch_limit
+                    metrics_for_select["phase1_composite_score"] = (
+                        verdict.composite_score
+                    )
+                    metrics_for_select["phase1_composite_score_debug"] = (
+                        verdict.composite_score_debug
+                    )
+                    checkpoint.save_last(state, metrics_for_select, epoch)
+                else:
+                    metrics_for_select["_dead_code_restart_triggered"] = bool(
+                        restarted_code_ids
+                    )
+                    metrics_for_select["_dead_code_restart_cooldown_epochs"] = (
+                        self.config.model.codebook.health.restart_cooldown_epochs
+                    )
+                    metrics_for_select["dead_code_restarts"] = len(
+                        restarted_code_ids
+                    )
+                    metrics_for_select["dead_code_restart_events"] = restart_events
+                    metrics_for_select["_consecutive_collapse_epochs"] = (
+                        history.consecutive_collapse_epochs + (
+                            1
+                            if metrics_for_select.get("code_usage_ratio", 1.0)
+                            < self.config.selection_policy.min_code_usage_ratio
+                            else 0
+                        )
+                    )
+                    metrics_for_select["_consecutive_collapse_limit"] = (
+                        self.config.model.codebook.health.consecutive_collapse_epoch_limit
+                    )
 
-                verdict = policy.evaluate(metrics_for_select, history)
-                metrics_for_select["phase1_composite_score"] = verdict.composite_score
-                metrics_for_select["phase1_composite_score_debug"] = verdict.composite_score_debug
-                checkpoint.save_last(state, metrics_for_select, epoch)
-                checkpoint.save_periodic(state, metrics_for_select, epoch, self.config.training.save_every)
-                checkpoint.commit_verdict(state, metrics_for_select, verdict, epoch)
-                if verdict.decision == "promote_to_best":
-                    self._best_epoch_diagnostics = dict(ep_metrics.diagnostics)
-                history = policy.update_history(history, metrics_for_select, verdict)
+                    verdict = policy.evaluate(metrics_for_select, history)
+                    metrics_for_select["phase1_composite_score"] = (
+                        verdict.composite_score
+                    )
+                    metrics_for_select["phase1_composite_score_debug"] = (
+                        verdict.composite_score_debug
+                    )
+                    checkpoint.save_last(state, metrics_for_select, epoch)
+                    checkpoint.save_periodic(
+                        state,
+                        metrics_for_select,
+                        epoch,
+                        self.config.training.save_every,
+                    )
+                    checkpoint.commit_verdict(
+                        state, metrics_for_select, verdict, epoch
+                    )
+                    if verdict.decision == "promote_to_best":
+                        self._best_epoch_diagnostics = dict(ep_metrics.diagnostics)
+                    history = policy.update_history(
+                        history, metrics_for_select, verdict
+                    )
             else:
                 # 非评估轮次:不保存 checkpoint,不进行评估和诊断
                 verdict = SelectionVerdict(decision="skipped", reasons=["skipped_evaluation"], composite_score=0.0, composite_score_debug={})

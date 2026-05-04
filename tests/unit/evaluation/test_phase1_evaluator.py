@@ -98,13 +98,41 @@ def test_evaluate_epoch_returns_required_metric_keys():
         "horizon_boundary_turnover_cost",
         "horizon_boundary_position_consistency",
         "dp_teacher_return_distribution",
+        "epoch_code_stability_measured",
         "epoch_code_stability",
+        "epoch_code_stability_matched",
         "per_code_switch_point_distribution",
     }
     assert required.issubset(out.metrics.keys())
+    assert out.metrics["epoch_code_stability_measured"] is False
+    assert out.metrics["epoch_code_stability_matched"] == 1.0
     assert out.metrics["val_risk_capital_base"] > 90.0
     assert "action" in out.diagnostics
     assert "horizon_boundary" in out.diagnostics
+
+
+def test_evaluate_epoch_marks_code_stability_measured_after_first_probe():
+    evaluator = _make_evaluator()
+    model = _make_model()
+    records = [_record(f"r{i}") for i in range(4)]
+    val_dataset = Phase1DemoDataset(records=records)
+    first = evaluator.evaluate_epoch(
+        epoch=0,
+        model=model,
+        val_data=val_dataset,
+        val_records=records,
+        full_validation=True,
+    )
+    second = evaluator.evaluate_epoch(
+        epoch=1,
+        model=model,
+        val_data=val_dataset,
+        val_records=records,
+        full_validation=True,
+    )
+    assert first.metrics["epoch_code_stability_measured"] is False
+    assert second.metrics["epoch_code_stability_measured"] is True
+    assert "epoch_code_stability_matched" in second.metrics
 
 
 def test_fast_probe_uses_subset():

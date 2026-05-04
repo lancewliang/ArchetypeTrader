@@ -252,7 +252,7 @@ class ModelConfig:
     hidden_dim: int = 128
     code_dim: int = 16
     num_codes: int = 10
-    beta0: float = 0.25
+    beta0: float = 0.5
     encoder_input: EncoderInputConfig = field(default_factory=EncoderInputConfig)
     codebook: CodebookConfig = field(default_factory=CodebookConfig)
 

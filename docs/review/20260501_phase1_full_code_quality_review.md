@@ -257,7 +257,7 @@ best_epoch=history.best_epoch or 0
 
 **位置**:
 
-- `src/trainers/selection_policy.py:77-82`
+- `src/trainers/phase1_selection_policy.py:77-82`
 - `src/trainers/phase1_trainer.py:678-681`
 - `src/trainers/phase1_trainer.py:779-789`
 - `src/trainers/phase1_trainer.py:791-817`
@@ -343,7 +343,7 @@ prospective 设计表中 past return 是 `(close[t] - close[t-L]) / close[t-L]`�
 
 - `src/models/vector_quantizer.py:228-267`
 - `src/trainers/phase1_trainer.py:637-682`
-- `src/trainers/selection_policy.py:84-98`
+- `src/trainers/phase1_selection_policy.py:84-98`
 
 **现象**:
 

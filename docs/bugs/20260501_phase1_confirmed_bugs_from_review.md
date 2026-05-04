@@ -195,7 +195,7 @@ final report 的 `best_epoch` 可能始终为 0，checkpoint 审计不可信。
 
 **位置**:
 
-- `src/trainers/selection_policy.py`
+- `src/trainers/phase1_selection_policy.py`
 - `src/trainers/phase1_trainer.py`
 
 **为什么是 bug**:
@@ -257,7 +257,7 @@ prospective unknown 桶是否默认过滤更偏策略/设计取舍，需单独�
 
 - `src/models/vector_quantizer.py`
 - `src/trainers/phase1_trainer.py`
-- `src/trainers/selection_policy.py`
+- `src/trainers/phase1_selection_policy.py`
 
 **为什么是 bug**:
 

@@ -267,7 +267,7 @@ sampling_health:
 
 - 合并 `src/envs/` 与 `src/trading/`，统一为 `src/trading/`，env、cost、reward 对齐放在同一边界内。
 - `src/evaluation/` 引入 `metrics/` 与 `diagnostics/` 子包，减少顶层文件数并按职责分组。
-- 新增 `src/trainers/selection_policy.py`，把 best checkpoint 选择规则、guardrail 与拒绝原因从 `phase1_checkpoint.py` 抽离，让 checkpoint manager 只做 IO。
+- 新增 `src/trainers/phase1_selection_policy.py`，把 best checkpoint 选择规则、guardrail 与拒绝原因从 `phase1_checkpoint.py` 抽离，让 checkpoint manager 只做 IO。
 - `src/utils/io.py` 改名为 `feather_io.py`，明确职责，避免成为通用杂货抽屉。
 
 ```text
@@ -295,7 +295,7 @@ src/models/vq_losses.py
 
 src/trainers/phase1_trainer.py
 src/trainers/phase1_checkpoint.py
-src/trainers/selection_policy.py
+src/trainers/phase1_selection_policy.py
 
 src/trading/env.py
 src/trading/cost_model.py
@@ -643,6 +643,8 @@ teacher_quality_guardrails:
 
 若 `inter_code_action_diversity` 或 `decoder_sensitivity_to_code` 低于阈值，说明 codebook 虽然可能在 latent space 中分开，但 decoder 行为没有充分利用 code，应在 `phase1_report.json` 中写入 warning。若 `val_dp_teacher_profitable_ratio` 很低，则 `val_return_capture_ratio` 不应单独解读为学生学得好，因为老师本身没有足够高质量的可交易收益。
 
+`epoch_code_stability` 只有在当前 full validation 能与上一轮同长度 code assignment 对齐比较时才视为已测量。首次进入 VQ 阶段后的 full validation 没有上一轮 code assignment，必须写出 `epoch_code_stability_measured=false`，并由 behavior guardrail 阻止其成为 best；至少等下一次可测量的 full validation 后，才允许按 `epoch_code_stability >= selection_policy.behavior.min_epoch_code_stability` 参与 best 选择。
+
 Online-style replay 规则:
 
 1. 对每个 validation horizon，先用同一套 Single-trade DP 和 `cost_config` 离线生成 teacher action 与 `dp_teacher_net_return`。
@@ -979,10 +981,10 @@ class Phase1CheckpointManager:
 
 边界约束:
 
-- 不直接判断 `code_usage_ratio`、`val_max_drawdown` 等业务阈值；这些规则全部进入 `selection_policy.py`。
+- 不直接判断 `code_usage_ratio`、`val_max_drawdown` 等业务阈值；这些规则全部进入 `phase1_selection_policy.py`。
 - 不写 `phase1_report.json`，只维护 `checkpoint_manifest.json`。
 
-### 4.15 `src/trainers/selection_policy.py`
+### 4.15 `src/trainers/phase1_selection_policy.py`
 
 职责:
 
@@ -1035,7 +1037,7 @@ class Phase1ReportWriter:
 边界约束:
 
 - `phase1_report.py` 只负责序列化和 schema 校验，不重新计算指标。
-- `phase1_checkpoint.py` 负责 checkpoint manifest，`selection_policy.py` 决定 best checkpoint，`phase1_report.py` 引用两者但不参与决策。
+- `phase1_checkpoint.py` 负责 checkpoint manifest，`phase1_selection_policy.py` 决定 best checkpoint，`phase1_report.py` 引用两者但不参与决策。
 
 ### 4.17 `src/utils/feather_io.py`
 

@@ -106,7 +106,8 @@ def _train_config(tmp_path: Path, manifest: Path) -> Phase1Config:
     training = TrainingConfig(
         batch_size=4,
         lr=1e-3,
-        epochs=1,
+        epochs=6,
+        pretrain_epochs=0,
         seed=7,
         device="cpu",
         save_every=1,

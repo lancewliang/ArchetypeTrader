@@ -400,7 +400,7 @@ pytest tests/unit/evaluation/test_phase1_evaluator.py
 
 ```text
 src/trainers/phase1_checkpoint.py
-src/trainers/selection_policy.py
+src/trainers/phase1_selection_policy.py
 src/evaluation/phase1_report.py
 src/trainers/phase1_trainer.py
 ```
@@ -431,7 +431,7 @@ src/trainers/phase1_trainer.py
 
 ```bash
 pytest tests/unit/trainers/test_phase1_checkpoint.py
-pytest tests/unit/trainers/test_selection_policy.py
+pytest tests/unit/trainers/test_phase1_selection_policy.py
 pytest tests/unit/evaluation/test_phase1_report.py
 pytest tests/unit/trainers/test_phase1_trainer.py
 ```
@@ -675,11 +675,12 @@ pytest tests/integration/test_phase1_pipeline_smoke.py
 - 接收 `promote_to_best` verdict 时升级 best；接收 `reject` 时不动 best。
 - manifest 写入 verdict、reasons 与文件 hash。
 
-`tests/unit/trainers/test_selection_policy.py`
+`tests/unit/trainers/test_phase1_selection_policy.py`
 
 - `code_usage_ratio < min_code_usage_ratio` 时返回 `reject`，原因含 `codebook_collapse`。
 - `val_max_drawdown` 超阈时返回 `reject`，原因含 `risk_guardrail`。
 - `inter_code_action_diversity` 不足时 `behavior_guardrails` 触发 `reject`。
+- `epoch_code_stability_measured=false` 时 `behavior_guardrails` 触发 `reject`，避免首次 VQ full validation 因稳定性不可测而成为 best。
 - `dead_code_restart` 冷却期内不允许 promote。
 - `consecutive_collapse_epoch_limit` 命中时返回 `fatal`，由 trainer 转换为非零退出码。
 

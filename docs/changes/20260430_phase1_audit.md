@@ -225,7 +225,7 @@ if self._t >= len(self._horizon.execution_books):
 
 ### 4.2 `selection_policy.evaluate` 冷却期占位 `* 0`
 
-**位置**: `src/trainers/selection_policy.py`
+**位置**: `src/trainers/phase1_selection_policy.py`
 
 **问题**:
 ```python
@@ -309,7 +309,7 @@ src/evaluation/phase1_evaluator.py      # reward_normalizer 参数
 src/evaluation/phase1_replay.py         # 第一段 horizon 末仓位预计算
 src/trading/env.py                      # _t 越界防御
 src/trainers/phase1_trainer.py          # 移除 in-place 归一化、_seed_everything、no_trade_ratio、normalizer 透传
-src/trainers/selection_policy.py        # 清理冷却期占位 + import
+src/trainers/phase1_selection_policy.py        # 清理冷却期占位 + import
 src/config/phase1_config.py             # 清理 from_dict 内部 _build dead code
 ```
 

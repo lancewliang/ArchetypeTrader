@@ -10,7 +10,7 @@ import pytest
 from src.config.phase1_config import (
     SelectionPolicyConfig,
 )
-from src.trainers.selection_policy import (
+from src.trainers.phase1_selection_policy import (
     Phase1SelectionPolicy,
     SelectionHistory,
 )

@@ -194,8 +194,8 @@ encoder_path, decoder_path, codebook_path = self._export_phase2_artifacts(
 
 **源码证据**:
 
-- [selection_policy.py:L77](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trainers/selection_policy.py#L77): `score, debug = self.compute_composite_score(metrics)` — 计算了 composite score
-- [selection_policy.py:L80](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trainers/selection_policy.py#L80): `composite_score=score` — 存入 verdict，但**不写入 `metrics_for_select`**
+- [phase1_selection_policy.py:L77](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trainers/phase1_selection_policy.py#L77): `score, debug = self.compute_composite_score(metrics)` — 计算了 composite score
+- [phase1_selection_policy.py:L80](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trainers/phase1_selection_policy.py#L80): `composite_score=score` — 存入 verdict，但**不写入 `metrics_for_select`**
 - [phase1_trainer.py:L679](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trainers/phase1_trainer.py#L679): `checkpoint.save_last(state, ep_metrics.metrics, epoch)` — 保存的是 `ep_metrics.metrics`，不含 composite score
 - [phase1_trainer.py:L811](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trainers/phase1_trainer.py#L811): `summary.setdefault("phase1_composite_score", 0.0)` — `_latest_metrics()` 读 epoch_metrics JSON 不含该 key → 默认 0.0
 
@@ -261,7 +261,7 @@ checker.check(
 **源码证据**:
 
 - [vector_quantizer.py:L228-L267](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/models/vector_quantizer.py#L228-L267): `restart_dead_codes()` 已完整实现
-- [selection_policy.py:L84-L97](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trainers/selection_policy.py#L84-L97): cooldown 逻辑已预留，等 `_dead_code_restart_triggered` 字段
+- [phase1_selection_policy.py:L84-L97](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trainers/phase1_selection_policy.py#L84-L97): cooldown 逻辑已预留，等 `_dead_code_restart_triggered` 字段
 - [phase1_trainer.py:L637-L682](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/trainers/phase1_trainer.py#L637-L682): train loop 中**没有任何调用** `restart_dead_codes()`
 - 配置默认 `dead_code_restart=True` ([phase1_config.py:L201](file:///home/lanceliang/opt/aiwork/lance/ArchetypeTrader/src/config/phase1_config.py#L201))
 

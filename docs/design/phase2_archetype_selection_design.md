@@ -792,7 +792,7 @@ def make_horizon_env(
 
 ### 4.12 `src/trainers/phase2_selection_policy.py`
 
-仿 Phase I `selection_policy.py`，集中:
+仿 Phase I `phase1_selection_policy.py`，集中:
 
 - `phase2_composite_score` 加权计算；
 - 风险 guardrail（`max_drawdown / min_sharpe / max_turnover_ratio`）；

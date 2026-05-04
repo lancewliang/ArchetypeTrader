@@ -50,6 +50,7 @@ from .phase1_metrics import (
     code_usage_ratio,
     codebook_perplexity,
     epoch_code_stability,
+    matched_epoch_code_stability,
     reconstruction_accuracy,
     return_capture_ratio,
     regret_to_dp,
@@ -216,12 +217,32 @@ class Phase1Evaluator:
         codebook_list = model.quantizer.codebook.detach().cpu().tolist()
         out.metrics["inter_code_distance"] = inter_code_distance(codebook_list)
         out.metrics["silhouette_score"] = latent_silhouette_score(z_e_tensor, all_code_ids)
-        if self._previous_code_ids is not None and len(self._previous_code_ids) == len(all_code_ids):
+        stability_measured = (
+            self._previous_code_ids is not None
+            and len(self._previous_code_ids) == len(all_code_ids)
+        )
+        out.metrics["epoch_code_stability_measured"] = stability_measured
+        if stability_measured:
             out.metrics["epoch_code_stability"] = epoch_code_stability(
                 self._previous_code_ids, all_code_ids
             )
+            if (
+                self._previous_codebook is not None
+                and len(self._previous_codebook) == len(codebook_list)
+            ):
+                out.metrics["epoch_code_stability_matched"] = matched_epoch_code_stability(
+                    self._previous_code_ids,
+                    all_code_ids,
+                    self._previous_codebook,
+                    codebook_list,
+                )
+            else:
+                out.metrics["epoch_code_stability_matched"] = out.metrics[
+                    "epoch_code_stability"
+                ]
         else:
             out.metrics["epoch_code_stability"] = 1.0
+            out.metrics["epoch_code_stability_matched"] = 1.0
         displacement = (
             codebook_displacement(codebook_list, self._previous_codebook)
             if self._previous_codebook is not None
@@ -411,7 +432,9 @@ class Phase1Evaluator:
                 "horizon_boundary_position_consistency": out.metrics["horizon_boundary_position_consistency"],
             },
             "code_stability": {
+                "epoch_code_stability_measured": out.metrics["epoch_code_stability_measured"],
                 "epoch_code_stability": out.metrics["epoch_code_stability"],
+                "epoch_code_stability_matched": out.metrics["epoch_code_stability_matched"],
                 "codebook_displacement": displacement,
                 "codebook_displacement_mean": out.metrics["codebook_displacement_mean"],
                 "codebook_displacement_max": out.metrics["codebook_displacement_max"],
