@@ -125,6 +125,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="仅用于本地小样本 smoke: 放宽采样 guardrail，生产实验不要使用。",
     )
+    p.add_argument(
+        "--min-no-trade-ratio",
+        type=float,
+        default=None,
+        help="覆盖 no_trade 样本最小比例要求 (默认 0.10)。",
+    )
+    p.add_argument(
+        "--min-low-opportunity-ratio",
+        type=float,
+        default=None,
+        help="覆盖低机会样本最小比例要求 (默认 0.25)。",
+    )
     return p
 
 
@@ -170,14 +182,20 @@ def build_data_process_config(args: argparse.Namespace) -> Phase1DataProcessConf
             warn_only=True,
         )
     no_trade_control = NoTradeControlConfig()
+    nt_overrides = {}
+    if args.min_no_trade_ratio is not None:
+        nt_overrides["min_no_trade_ratio"] = args.min_no_trade_ratio
+    if args.min_low_opportunity_ratio is not None:
+        nt_overrides["min_low_opportunity_ratio"] = args.min_low_opportunity_ratio
     if args.local_smoke_relaxed_guardrails:
-        no_trade_control = replace(
-            no_trade_control,
-            max_no_trade_ratio=1.0,
-            min_no_trade_ratio=0.0,
-            min_low_opportunity_ratio=0.0,
-            flat_low_vol_max_ratio=1.0,
-        )
+        nt_overrides.update({
+            "max_no_trade_ratio": 1.0,
+            "min_no_trade_ratio": 0.0,
+            "min_low_opportunity_ratio": 0.0,
+            "flat_low_vol_max_ratio": 1.0,
+        })
+    if nt_overrides:
+        no_trade_control = replace(no_trade_control, **nt_overrides)
     return Phase1DataProcessConfig(
         pair=args.pair,
         data_batch_id=args.data_batch_id,
