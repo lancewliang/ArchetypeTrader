@@ -23,14 +23,12 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from src.config.phase2_config import Phase2Config
-from src.data.market_reader import MarketFileReader
 from src.data.phase2_dataset import Phase2Dataset
 from src.data.phase2_horizon_index import (
     Phase1ArtifactValidator,
     Phase2HorizonIndexer,
 )
 from src.data.phase2_label_loader import Phase2LabelLoader
-from src.data.schema import InputSchemaValidator
 from src.evaluation.phase2_evaluator import Phase2Evaluator
 from src.evaluation.phase2_distribution_shift import Phase2DistributionShiftMonitor
 from src.evaluation.phase2_execution_stress import (
@@ -161,94 +159,83 @@ class Phase2Trainer:
             self.config.config_hash(),
         )
 
-        # 3. 读取数据与 schema。训练阶段只允许读取 train/val；
-        # test 留给 scripts/backtest_phase2.py 的独立评估路径。
-        reader = MarketFileReader()
-        frames = {
-            "train": reader.read(self.config.train_file),
-            "val": reader.read(self.config.val_file),
-        }
-        input_schema = read_json(self.config.phase1_dir() / "input_schema.json")
+        # 3. 读取 Phase I 预计算的非重叠 horizon 记录。
+        # 直接使用 Phase I 已生成的 non_overlap_horizons_{train,val}.feather，
+        # 无需读取原始 market frame，也无需重新生成 horizon index。
+        reward_alignment_name = val_result.resolved_reward_alignment
+        p1_dir = self.config.phase1_dir()
+        input_schema = read_json(p1_dir / "input_schema.json")
+
+        from src.data.phase1_processed_store import Phase1ProcessedStore
+        processed_store = Phase1ProcessedStore(p1_dir)
+        manifest_path = p1_dir / "data_process_manifest.json"
+
+        p1_train_records = processed_store.load_non_overlap_records(manifest_path, "train")
+        p1_val_records = processed_store.load_non_overlap_records(manifest_path, "val")
         self._logger.info(
-            "Phase II 市场数据已加载：训练行数=%s，验证行数=%s，输入特征数=%s",
-            getattr(frames["train"], "height", None),
-            getattr(frames["val"], "height", None),
+            "Phase I 非重叠 horizon 记录已加载：训练记录数=%d，验证记录数=%d，输入特征数=%s",
+            len(p1_train_records),
+            len(p1_val_records),
             len(input_schema.get("feature_columns", [])) if isinstance(input_schema, dict) else None,
         )
 
-        # 4. 生成 horizon index
-        reward_alignment_name = val_result.resolved_reward_alignment
-        indexer = Phase2HorizonIndexer(
-            self.config,
-            reward_alignment=reward_alignment_name,
-        )
-        horizon = self.config.horizon
-
-        # 加载 Phase I labels (仅 train/val)
-        p1_dir = self.config.phase1_dir()
-        train_labels = None
-        val_labels = None
+        # 4. 加载 Phase I labels 并 join code_label 到 horizon entries
         train_label_path = self._phase1_label_path(p1_dir, "train")
         val_label_path = self._phase1_label_path(p1_dir, "val")
-        if train_label_path.exists():
-            train_labels = read_ipc(train_label_path)
-        if val_label_path.exists():
-            val_labels = read_ipc(val_label_path)
+        train_labels_df = read_ipc(train_label_path) if train_label_path.exists() else None
+        val_labels_df = read_ipc(val_label_path) if val_label_path.exists() else None
         self._logger.info(
             "Phase I 标签已加载：source=%s 训练标签数=%s，验证标签数=%s train_path=%s val_path=%s",
             self.config.phase1_label_source,
-            getattr(train_labels, "height", 0) if train_labels is not None else 0,
-            getattr(val_labels, "height", 0) if val_labels is not None else 0,
+            getattr(train_labels_df, "height", 0) if train_labels_df is not None else 0,
+            getattr(val_labels_df, "height", 0) if val_labels_df is not None else 0,
             train_label_path,
             val_label_path,
         )
 
-        train_entries = indexer.build_index(frames["train"], "train", horizon, train_labels)
-        val_entries = indexer.build_index(frames["val"], "val", horizon, val_labels)
-        self._logger.info(
-            "Phase II 时间窗索引已生成：模式=%s，训练条目=%d，验证条目=%d，时间窗=%d",
-             self.config.horizon_schedule.mode,
-            len(train_entries),
-            len(val_entries),
-            horizon,
+        # 5. 构造 datasets（使用 Phase I 预计算记录，无需原始 market frame）
+        train_dataset = Phase2Dataset.from_phase1_records(
+            p1_train_records, input_schema, self.config,
+            reward_alignment=reward_alignment_name,
+        )
+        val_dataset = Phase2Dataset.from_phase1_records(
+            p1_val_records, input_schema, self.config,
+            reward_alignment=reward_alignment_name,
         )
 
-        hi_train_path = indexer.write_index(train_entries, artifacts_dir / "phase2_horizon_index_train.feather")
-        hi_val_path = indexer.write_index(val_entries, artifacts_dir / "phase2_horizon_index_val.feather")
+        # Join labels 到 dataset 的 horizon entries
+        label_loader = Phase2LabelLoader(self.config)
+        if train_label_path.exists():
+            train_dataset.horizon_entries = label_loader.load_and_join(
+                train_dataset.horizon_entries, "train", train_label_path
+            )
+        if val_label_path.exists():
+            val_dataset.horizon_entries = label_loader.load_and_join(
+                val_dataset.horizon_entries, "val", val_label_path
+            )
+
+        train_entries = train_dataset.horizon_entries
+        val_entries = val_dataset.horizon_entries
+
+        # 写入 horizon index（供诊断和审计使用）
+        indexer = Phase2HorizonIndexer(self.config, reward_alignment=reward_alignment_name)
+        hi_train_path = indexer.write_index(
+            train_entries, artifacts_dir / "phase2_horizon_index_train.feather"
+        )
+        hi_val_path = indexer.write_index(
+            val_entries, artifacts_dir / "phase2_horizon_index_val.feather"
+        )
         self._logger.info(
             "Phase II 时间窗索引已写入：训练路径=%s，验证路径=%s",
-           
             hi_train_path,
             hi_val_path,
         )
-
-        # 5. Join labels
-        label_loader = Phase2LabelLoader(self.config)
-        if train_label_path.exists():
-            train_entries = label_loader.load_and_join(
-                train_entries, "train", train_label_path
-            )
-        if val_label_path.exists():
-            val_entries = label_loader.load_and_join(
-                val_entries, "val", val_label_path
-            )
         self._logger.info(
             "Phase II 标签已合并：训练已标注=%d/%d，验证已标注=%d/%d",
             sum(1 for entry in train_entries if entry.is_labeled),
             len(train_entries),
             sum(1 for entry in val_entries if entry.is_labeled),
             len(val_entries),
-        )
-
-        # 6. 构造 datasets
-        # 使用 train frame 构造 train dataset
-        train_dataset = Phase2Dataset(
-            frames["train"], train_entries, input_schema, self.config,
-            reward_alignment=reward_alignment_name,
-        )
-        val_dataset = Phase2Dataset(
-            frames["val"], val_entries, input_schema, self.config,
-            reward_alignment=reward_alignment_name,
         )
         self._logger.info(
             "Phase II 数据集已准备：训练=%d，验证=%d，奖励对齐方式=%s",
@@ -495,8 +482,13 @@ class Phase2Trainer:
                     )
                 ckpt_mgr.commit_verdict(state, verdict, update_idx, eval_metrics)
                 history = policy.update_history(history, eval_metrics, verdict)
+                selector_label_accuracy = (
+                    f"{float(eval_metrics.get('selector_label_accuracy', 0.0)):.6f}"
+                    if float(eval_metrics.get("selector_labeled_count", 0.0)) > 0.0
+                    else "n/a"
+                )
                 self._logger.info(
-                    "Phase II 评估结果：更新=%d，决策=%s，综合分=%.6f，验证净收益=%s，夏普=%s，近似 KL=%.6f，平均奖励=%.6f，原因=%s",
+                    "Phase II 评估结果：更新=%d，决策=%s，综合分=%.6f，验证净收益=%s，夏普=%s，近似 KL=%.6f，平均奖励=%.6f，selector主导率=%.6f，selector熵=%.6f，selector_top1_margin=%.6f，selector_label_acc=%s，原因=%s",
                     update_idx,
                     verdict.decision,
                     float(eval_metrics.get("phase2_composite_score", 0.0)),
@@ -504,6 +496,10 @@ class Phase2Trainer:
                     eval_metrics.get("sharpe_ratio"),
                     stats.approx_kl,
                     stats.reward_mean,
+                    float(eval_metrics.get("selector_argmax_dominance_ratio", 0.0)),
+                    float(eval_metrics.get("selector_entropy_mean", 0.0)),
+                    float(eval_metrics.get("selector_top1_margin_mean", 0.0)),
+                    selector_label_accuracy,
                     ",".join(verdict.reasons),
                 )
 
@@ -628,6 +624,16 @@ class Phase2Trainer:
             dead_code_mask_list,
             metric_weights=self.config.selection_policy.metric_weights,
         )
+        val_metrics.update(
+            evaluator.compute_selector_diagnostics(
+                split="val",
+                records=val_records,
+            )
+        )
+        selector_diagnostics_val = self._selector_diagnostics_summary(
+            val_metrics,
+            num_codes,
+        )
 
         # Baselines
         val_baselines = val_runner.run_baselines("val")
@@ -707,8 +713,8 @@ class Phase2Trainer:
             "phase1_label_source": self.config.phase1_label_source,
             "phase1_train_label_path": str(train_label_path),
             "phase1_train_label_count": (
-                int(getattr(train_labels, "height", 0))
-                if train_labels is not None
+                int(getattr(train_labels_df, "height", 0))
+                if train_labels_df is not None
                 else 0
             ),
             "phase1_label_coverage_on_phase2_index": train_coverage.coverage_ratio,
@@ -720,6 +726,7 @@ class Phase2Trainer:
             "ood_warning_count": distribution_summary["warning_count"],
             "distribution_shift_warning_count": distribution_summary["warning_count"],
             "val_metrics": {k: v for k, v in val_metrics.items() if isinstance(v, (int, float, str, bool))},
+            "selector_diagnostics_val": selector_diagnostics_val,
             "test_metrics": {},
             "horizon_schedule": {
                 "mode": self.config.horizon_schedule.mode,
@@ -865,18 +872,6 @@ class Phase2Trainer:
             )
 
     def _phase1_label_path(self, p1_dir: Path, split: str) -> Path:
-        if split == "train" and self.config.phase1_label_source == "full_time":
-            path = p1_dir / "sampled_horizon_labels_full_time_train.feather"
-            if not path.exists():
-                legacy = p1_dir / "horizon_labels_full_time_train.feather"
-                if legacy.exists():
-                    path = legacy
-            if not path.exists():
-                raise Phase2FatalError(
-                    "phase1_label_source=full_time 但缺少 "
-                    f"{path}; 请使用支持 full-time label export 的 Phase I 批次。"
-                )
-            return path
         no_path = p1_dir / f"non_overlap_horizon_labels_{split}.feather"
         if no_path.exists():
             return no_path
@@ -932,6 +927,42 @@ class Phase2Trainer:
             "probe_pick_count": probe_pick_count,
             "probe_pick_rate": probe_pick_count / sample_count,
             "picked_codes": [int(action) for action in actions],
+        }
+
+    @staticmethod
+    def _selector_diagnostics_summary(
+        metrics: Dict[str, Any],
+        num_codes: int,
+    ) -> Dict[str, Any]:
+        """Build a compact report-friendly selector diagnostics payload."""
+        return {
+            "sample_count": int(float(metrics.get("selector_sample_count", 0.0))),
+            "labeled_count": int(float(metrics.get("selector_labeled_count", 0.0))),
+            "label_accuracy": float(metrics.get("selector_label_accuracy", 0.0)),
+            "argmax_dominance_code": int(
+                float(metrics.get("selector_argmax_dominance_code", -1.0))
+            ),
+            "argmax_dominance_ratio": float(
+                metrics.get("selector_argmax_dominance_ratio", 0.0)
+            ),
+            "entropy_mean": float(metrics.get("selector_entropy_mean", 0.0)),
+            "top1_prob_mean": float(metrics.get("selector_top1_prob_mean", 0.0)),
+            "top2_prob_mean": float(metrics.get("selector_top2_prob_mean", 0.0)),
+            "top1_margin_mean": float(
+                metrics.get("selector_top1_margin_mean", 0.0)
+            ),
+            "argmax_counts": [
+                int(float(metrics.get(f"selector_argmax_count_code_{idx}", 0.0)))
+                for idx in range(num_codes)
+            ],
+            "label_counts": [
+                int(float(metrics.get(f"selector_label_count_code_{idx}", 0.0)))
+                for idx in range(num_codes)
+            ],
+            "mean_probs": [
+                float(metrics.get(f"selector_mean_prob_code_{idx}", 0.0))
+                for idx in range(num_codes)
+            ],
         }
 
     def _history_from_manifest(

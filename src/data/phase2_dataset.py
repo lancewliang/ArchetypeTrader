@@ -4,6 +4,7 @@
 
 职责:
 - 将 horizon index + 原始 market frame 适配为 state 读取接口。
+- 支持从 Phase I 预计算的非重叠 horizon 记录直接构造，无需读取原始 market frame。
 - 不重写 HorizonBuilder 逻辑；若需要 HorizonInputs，必须函数级复用 Phase I 切片协议。
 - 不调用 DP。
 
@@ -20,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 
 from src.config.phase2_config import Phase2Config
+from src.data.horizon_builder import HorizonRecord
 from src.data.phase2_horizon_index import Phase2HorizonEntry
 from src.data.state_normalizer import StateNormalizer
 from src.trading.cost_model import ExecutionBook
@@ -47,8 +49,13 @@ class Phase2Dataset:
     不继承 torch.utils.data.Dataset，因为 HorizonEnv 直接按 index 读取，
     不走 DataLoader。
 
+    支持两种构造方式:
+    1. 从原始 market frame + horizon entries 构造（传统方式）。
+    2. 从 Phase I 预计算的非重叠 horizon 记录构造（from_phase1_records），
+       无需读取原始 market frame，直接使用 Phase I 已生成的 states/prices/execution_books。
+
     边界:
-    - 不读取原始文件（由调用方传入 frame）。
+    - 不读取原始文件（由调用方传入 frame 或 records）。
     - 不调用 DP。
     - 不重写 Phase I horizon slicing 语义。
     """
@@ -66,13 +73,12 @@ class Phase2Dataset:
         self._feature_columns: List[str] = input_schema.get("feature_columns", [])
         self._price_column: str = input_schema.get("price_column", "close")
         self._horizon = config.horizon
-        # reward_alignment 由 trainer/validator 解析后传入；保留 fallback 兼容单测。
         self._alignment = RewardAlignment(
             reward_alignment or self._resolve_reward_alignment()
         )
         self._state_normalizer = self._load_state_normalizer()
+        self._precomputed = False
 
-        # 预提取 numpy 数组以避免逐行 polars 查询
         import polars as pl
         if isinstance(frame, pl.DataFrame):
             self._validate_inputs(frame)
@@ -82,7 +88,6 @@ class Phase2Dataset:
             self._feature_matrix = feature_matrix.astype("float32")
             self._close = frame[self._price_column].to_numpy().astype("float32")
             self._num_rows = frame.height
-            # 盘口
             self._ask_p = [
                 frame[f"ask{i}_price"].to_numpy().astype("float32")
                 if f"ask{i}_price" in frame.columns
@@ -107,7 +112,6 @@ class Phase2Dataset:
                 else np.zeros(frame.height, dtype="float32")
                 for i in range(1, 6)
             ]
-            # mark price
             if "ask1_price" in frame.columns and "bid1_price" in frame.columns:
                 mark = (self._ask_p[0] + self._bid_p[0]) / 2.0
                 invalid = (self._ask_p[0] <= 0) | (self._bid_p[0] <= 0)
@@ -116,6 +120,78 @@ class Phase2Dataset:
                 self._mark = self._close.copy()
         else:
             raise TypeError("frame 必须是 polars.DataFrame")
+
+    @classmethod
+    def from_phase1_records(
+        cls,
+        records: List[HorizonRecord],
+        input_schema: Dict[str, Any],
+        config: Phase2Config,
+        reward_alignment: Optional[str] = None,
+    ) -> "Phase2Dataset":
+        """从 Phase I 预计算的非重叠 horizon 记录构造数据集。
+
+        直接使用 Phase I 已生成的 states/prices/execution_books，
+        无需读取原始 market frame，也无需重新生成 horizon index。
+
+        Parameters
+        ----------
+        records : Phase I 非重叠 horizon 记录列表（含 states/prices/execution_books）。
+        input_schema : 输入特征 schema（含 feature_columns）。
+        config : Phase2Config。
+        reward_alignment : 奖励对齐方式。
+
+        Returns
+        -------
+        Phase2Dataset : 使用预计算数据构造的数据集实例。
+        """
+        obj = cls.__new__(cls)
+        obj.config = config
+        obj._feature_columns = input_schema.get("feature_columns", [])
+        obj._price_column = input_schema.get("price_column", "close")
+        obj._horizon = config.horizon
+        obj._alignment = RewardAlignment(
+            reward_alignment or obj._resolve_reward_alignment()
+        )
+        obj._state_normalizer = obj._load_state_normalizer()
+        obj._precomputed = True
+
+        horizon_entries: List[Phase2HorizonEntry] = []
+        precomputed_states: List[np.ndarray] = []
+        precomputed_prices: List[List[float]] = []
+        precomputed_books: List[List[ExecutionBook]] = []
+
+        for idx, rec in enumerate(records):
+            entry = Phase2HorizonEntry(
+                sample_id=f"p2_{rec.split}_{idx:06d}",
+                horizon_start=rec.start_index,
+                horizon_end=rec.end_index,
+                split=rec.split,
+                is_gap=False,
+                gap_bars=0,
+                max_timestamp_gap_minutes=0.0,
+                last_execution_row=rec.last_execution_row,
+                last_markout_row=rec.last_markout_row,
+                phase1_sample_id=rec.sample_id,
+                code_label=None,
+                is_labeled=False,
+                prev_terminal_position=None,
+                timestamp_start=None,
+            )
+            horizon_entries.append(entry)
+
+            state_arr = np.array(rec.states, dtype=np.float32)
+            if obj._state_normalizer is not None:
+                state_arr = obj._state_normalizer.transform_array(state_arr).astype("float32")
+            precomputed_states.append(state_arr)
+            precomputed_prices.append(list(rec.prices))
+            precomputed_books.append(list(rec.execution_books))
+
+        obj.horizon_entries = horizon_entries
+        obj._precomputed_states = precomputed_states
+        obj._precomputed_prices = precomputed_prices
+        obj._precomputed_books = precomputed_books
+        return obj
 
     def _load_state_normalizer(self) -> Optional[StateNormalizer]:
         """Load Phase I state normalizer when present.
@@ -185,13 +261,14 @@ class Phase2Dataset:
 
         返回 feature vector，可选拼接 prev_terminal_position 编码。
         """
-        entry = self.horizon_entries[idx]
-        start = entry.horizon_start
-        # selector state = horizon 起点的 feature vector
-        features = self._feature_matrix[start, :].copy()
+        if self._precomputed:
+            features = self._precomputed_states[idx][0, :].copy()
+        else:
+            entry = self.horizon_entries[idx]
+            start = entry.horizon_start
+            features = self._feature_matrix[start, :].copy()
 
         if self.config.horizon_schedule.position_continuity:
-            # 拼接 prev_terminal_position 的 scaled encoding
             pos_enc = np.array(
                 [float(prev_terminal_position) / max(self.config.max_position, 1)],
                 dtype="float32",
@@ -203,7 +280,19 @@ class Phase2Dataset:
         """获取第 idx 个 horizon 的 HorizonInputs（prices + execution_books）。
 
         复用 Phase I 的 HorizonBuilder 切片协议。
+        预计算模式下直接使用 Phase I 已生成的 prices 和 execution_books，
+        不支持 execution_lag_offset（仅用于 backtest 诊断路径）。
         """
+        if self._precomputed:
+            if execution_lag_offset != 0:
+                raise NotImplementedError(
+                    "预计算模式不支持 execution_lag_offset；"
+                    "请使用 frame-based 数据集进行 lag 诊断。"
+                )
+            prices = list(self._precomputed_prices[idx])
+            books = list(self._precomputed_books[idx])
+            return HorizonInputs(prices=prices, execution_books=books)
+
         entry = self.horizon_entries[idx]
         start = entry.horizon_start
         h = self._horizon
@@ -243,6 +332,8 @@ class Phase2Dataset:
 
         用于 Phase1FrozenPolicy.decode_step() 的逐步输入。
         """
+        if self._precomputed:
+            return self._precomputed_states[idx].copy()
         entry = self.horizon_entries[idx]
         start = entry.horizon_start
         h = self._horizon

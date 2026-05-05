@@ -308,6 +308,13 @@ class Phase1Trainer:
         state_test_diag = state_norm.transform_records(test_horizons)
         if full_time_train_horizons:
             state_norm.transform_records(full_time_train_horizons)
+        non_overlap_state_diag: Dict[str, Any] = {}
+        if non_overlap_train_horizons:
+            non_overlap_state_diag = {
+                "train": state_norm.transform_records(non_overlap_train_horizons),
+                "val": state_norm.transform_records(non_overlap_val_horizons),
+                "test": state_norm.transform_records(non_overlap_test_horizons),
+            }
         self._logger.info(
             "phase1_state_normalizer_fit 说明=状态特征归一化器已用训练集拟合 path=%s method=%s feature_dim=%d clip=%.2f train_max_abs_before=%.6e train_max_abs_after=%.6e val_max_abs_before=%.6e val_max_abs_after=%.6e test_max_abs_before=%.6e test_max_abs_after=%.6e log_transform_columns=%d fallback_to_standard_count=%d",
             state_norm_path,
@@ -323,6 +330,16 @@ class Phase1Trainer:
             sum(1 for kind in state_norm.stats.transform_kinds if kind == "signed_log1p"),
             state_norm.stats.fallback_to_standard_count,
         )
+        if non_overlap_state_diag:
+            self._logger.info(
+                "phase1_non_overlap_state_normalizer_applied 说明=非重叠 Phase II 标签来源已应用同一状态归一化 train_count=%d train_max_abs_after=%.6e val_count=%d val_max_abs_after=%.6e test_count=%d test_max_abs_after=%.6e",
+                int(non_overlap_state_diag["train"].get("count", 0)),
+                float(non_overlap_state_diag["train"].get("max_abs_after", 0.0)),
+                int(non_overlap_state_diag["val"].get("count", 0)),
+                float(non_overlap_state_diag["val"].get("max_abs_after", 0.0)),
+                int(non_overlap_state_diag["test"].get("count", 0)),
+                float(non_overlap_state_diag["test"].get("max_abs_after", 0.0)),
+            )
 
         norm = RewardNormalizer(self.config.model.encoder_input)
         flat_rewards = [v for rec in train_horizons for v in (rec.rewards or [])]

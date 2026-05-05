@@ -127,14 +127,122 @@ def write_phase1_artifacts(
         "code_usage": {"counts": [10] * num_codes},
     }
     (p1_dir / "phase1_report.json").write_text(json.dumps(report), encoding="utf-8")
+    schema_hash = "test_schema_hash"
+    data_process_hash = "test_data_process_hash"
+    dp_teacher_hash = "test_dp_teacher_hash"
+    splits_payload = {}
     for split, count in [("train", 8), ("val", 4), ("test", 4)]:
+        horizon_rows = []
+        teacher_rows = []
+        label_rows = []
+        for i in range(count):
+            start_idx = i * horizon
+            prices = [100.0 + start_idx + t for t in range(horizon + 1)]
+            books = [
+                {
+                    "ask_prices": [prices[t] + 0.01 * level for level in range(1, 6)],
+                    "ask_sizes": [100.0] * 5,
+                    "bid_prices": [prices[t] - 0.01 * level for level in range(1, 6)],
+                    "bid_sizes": [100.0] * 5,
+                    "mark_price": prices[t],
+                }
+                for t in range(horizon)
+            ]
+            actions = [2 if t < horizon // 2 else 1 for t in range(horizon)]
+            rewards = [0.1 for _ in range(horizon)]
+            sample_id = f"p1_{split}_{i}"
+            horizon_rows.append(
+                {
+                    "sample_id": sample_id,
+                    "pair": pair,
+                    "split": split,
+                    "start_index": start_idx,
+                    "end_index": start_idx + horizon - 1,
+                    "last_execution_row": start_idx + horizon - 1,
+                    "last_markout_row": start_idx + horizon,
+                    "strata_label": "test",
+                    "sample_source": "non_overlap",
+                    "states": [
+                        [
+                            float(i),
+                            float(t) / max(horizon, 1),
+                            float((i + t) % 3),
+                        ]
+                        for t in range(horizon)
+                    ],
+                    "prices": prices,
+                    "execution_books": json.dumps(books, separators=(",", ":")),
+                    "is_augmented": False,
+                    "augmentation_type": "none",
+                    "_schema_hash": schema_hash,
+                    "_data_process_hash": data_process_hash,
+                }
+            )
+            teacher_rows.append(
+                {
+                    "sample_id": sample_id,
+                    "pair": pair,
+                    "split": split,
+                    "sample_source": "non_overlap",
+                    "actions": actions,
+                    "rewards": rewards,
+                    "teacher_return": float(sum(rewards)),
+                    "num_switches": 1,
+                    "is_no_trade": False,
+                    "reject_transition_count": 0,
+                    "reject_transition_rate": 0.0,
+                    "_schema_hash": schema_hash,
+                    "_data_process_hash": data_process_hash,
+                    "_dp_teacher_hash": dp_teacher_hash,
+                }
+            )
+            label_rows.append(
+                {
+                    "sample_id": sample_id,
+                    "start_index": start_idx,
+                    "code_label": i % num_codes,
+                }
+            )
+        horizons_path = p1_dir / f"non_overlap_horizons_{split}.feather"
+        teacher_path = p1_dir / f"non_overlap_dp_teacher_{split}.feather"
+        pl.DataFrame(horizon_rows).write_ipc(horizons_path)
+        pl.DataFrame(teacher_rows).write_ipc(teacher_path)
+        pl.DataFrame(horizon_rows).write_ipc(p1_dir / f"sampled_horizons_{split}.feather")
+        pl.DataFrame(teacher_rows).write_ipc(p1_dir / f"sampled_dp_teacher_{split}.feather")
         pl.DataFrame(
-            {
-                "sample_id": [f"p1_{split}_{i}" for i in range(count)],
-                "start_index": [i * horizon for i in range(count)],
-                "code_label": [i % num_codes for i in range(count)],
-            }
+            label_rows
         ).write_ipc(p1_dir / f"non_overlap_horizon_labels_{split}.feather")
+        splits_payload[split] = {
+            "window_index_path": f"window_index_{split}.feather",
+            "sampled_horizons_path": f"sampled_horizons_{split}.feather",
+            "dp_teacher_path": f"sampled_dp_teacher_{split}.feather",
+            "num_horizons": count,
+            "non_overlap_horizons_path": horizons_path.name,
+            "non_overlap_dp_teacher_path": teacher_path.name,
+            "non_overlap_num_horizons": count,
+        }
+        pl.DataFrame({"sample_id": [row["sample_id"] for row in horizon_rows]}).write_ipc(
+            p1_dir / f"window_index_{split}.feather"
+        )
+    manifest = {
+        "version": 2,
+        "phase": "phase1_data_process",
+        "pair": pair,
+        "data_batch_id": "test_batch",
+        "artifact_dir": str(p1_dir),
+        "created_at": "test",
+        "input_files": {},
+        "input_schema_path": "input_schema.json",
+        "schema_hash": schema_hash,
+        "data_process_hash": data_process_hash,
+        "dp_teacher_hash": dp_teacher_hash,
+        "feature_source": {},
+        "splits": splits_payload,
+    }
+    (p1_dir / "data_process_manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
     return p1_dir
 
 

@@ -18,6 +18,10 @@ class TestPhase2Evaluator:
         result = evaluator.evaluate_val_fast(update_idx=7)
         assert len(result.per_horizon_records) == 2
         assert result.metrics["update_idx"] == 7
+        assert result.metrics["selector_sample_count"] == 2
+        assert result.metrics["selector_argmax_count_code_2"] == 2
+        assert "selector_entropy_mean" in result.metrics
+        assert "selector_top1_margin_mean" in result.metrics
 
     def test_walk_forward_returns_metrics_and_baselines(self, tmp_path):
         """完整 walk-forward 返回 metrics 和 baseline。"""

@@ -82,6 +82,13 @@ class Phase2Evaluator:
             self.dead_code_mask,
             metric_weights=self.config.selection_policy.metric_weights,
         )
+        metrics.update(
+            self.compute_selector_diagnostics(
+                split="val",
+                records=records,
+                entry_indices=entry_indices,
+            )
+        )
         metrics["update_idx"] = update_idx
 
         warnings: List[str] = []
@@ -126,6 +133,12 @@ class Phase2Evaluator:
             self.num_codes,
             self.dead_code_mask,
             metric_weights=self.config.selection_policy.metric_weights,
+        )
+        metrics.update(
+            self.compute_selector_diagnostics(
+                split=split,
+                records=records,
+            )
         )
 
         # 运行 baselines
@@ -252,6 +265,145 @@ class Phase2Evaluator:
             "original_code": r.original_code,
             "throttled_code": r.throttled_code,
         }
+
+    def compute_selector_diagnostics(
+        self,
+        split: str,
+        records: List[Phase2HorizonReplayRecord],
+        entry_indices: Optional[List[int]] = None,
+    ) -> Dict[str, float]:
+        """计算 selector logits/probability 诊断。
+
+        诊断与 walk-forward replay 使用同一批 horizon，并按 replay 后的
+        ``final_position`` 重建下一条 horizon 的 ``prev_terminal_position``。
+        """
+        if not records:
+            return self._empty_selector_diagnostics()
+
+        import torch
+
+        runner = self.backtest_runner
+        actor_critic = runner.actor_critic
+        dataset = runner.dataset
+        resolved_entries = runner._resolve_walk_forward_entries(split, entry_indices)
+        index_by_sample_id = {
+            entry.sample_id: actual_idx for actual_idx, entry in resolved_entries
+        }
+
+        obs_rows = []
+        labels: List[Optional[int]] = []
+        prev_position = 0
+        for record in records:
+            actual_idx = index_by_sample_id.get(record.sample_id)
+            if actual_idx is None:
+                continue
+            obs_prev_position = (
+                prev_position
+                if self.config.horizon_schedule.position_continuity
+                else 0
+            )
+            obs_rows.append(dataset.get_selector_state(actual_idx, obs_prev_position))
+            entry = dataset.horizon_entries[actual_idx]
+            if entry.is_labeled and entry.code_label is not None:
+                labels.append(int(entry.code_label))
+            else:
+                labels.append(None)
+            prev_position = int(record.final_position)
+
+        if not obs_rows:
+            return self._empty_selector_diagnostics()
+
+        import numpy as np
+        selector = actor_critic.selector
+        device = next(selector.parameters()).device
+        was_training = selector.training
+        selector.eval()
+        obs_tensor = torch.tensor(
+            np.asarray(obs_rows, dtype=np.float32),
+            dtype=torch.float32,
+            device=device,
+        )
+        with torch.no_grad():
+            logits, _ = selector(obs_tensor)
+            logits = actor_critic._mask_logits(logits)
+            probs = torch.softmax(logits, dim=-1)
+            actions = logits.argmax(dim=-1)
+            entropy = -(probs * torch.log(probs.clamp_min(1.0e-12))).sum(dim=-1)
+            top_k = min(2, logits.shape[-1])
+            top_values = torch.topk(probs, top_k, dim=-1).values
+        if was_training:
+            selector.train()
+
+        action_values = [int(v) for v in actions.detach().cpu().tolist()]
+        counts = [0 for _ in range(self.num_codes)]
+        for action in action_values:
+            if 0 <= action < self.num_codes:
+                counts[action] += 1
+
+        labeled_count = 0
+        correct_count = 0
+        label_counts = [0 for _ in range(self.num_codes)]
+        for action, label in zip(action_values, labels):
+            if label is None or not (0 <= label < self.num_codes):
+                continue
+            labeled_count += 1
+            label_counts[label] += 1
+            if action == label:
+                correct_count += 1
+
+        sample_count = len(action_values)
+        dominance_count = max(counts) if counts else 0
+        dominance_code = counts.index(dominance_count) if counts else -1
+        mean_probs = probs.mean(dim=0).detach().cpu().tolist()
+        top1_prob = top_values[:, 0]
+        top2_prob = (
+            top_values[:, 1]
+            if top_k > 1
+            else torch.zeros_like(top1_prob)
+        )
+
+        out: Dict[str, float] = {
+            "selector_sample_count": float(sample_count),
+            "selector_labeled_count": float(labeled_count),
+            "selector_label_accuracy": (
+                float(correct_count / labeled_count) if labeled_count else 0.0
+            ),
+            "selector_argmax_dominance_code": float(dominance_code),
+            "selector_argmax_dominance_count": float(dominance_count),
+            "selector_argmax_dominance_ratio": float(
+                dominance_count / max(sample_count, 1)
+            ),
+            "selector_entropy_mean": float(entropy.mean().item()),
+            "selector_top1_prob_mean": float(top1_prob.mean().item()),
+            "selector_top2_prob_mean": float(top2_prob.mean().item()),
+            "selector_top1_margin_mean": float((top1_prob - top2_prob).mean().item()),
+        }
+        for idx in range(self.num_codes):
+            out[f"selector_argmax_count_code_{idx}"] = float(counts[idx])
+            out[f"selector_label_count_code_{idx}"] = float(label_counts[idx])
+            out[f"selector_mean_prob_code_{idx}"] = (
+                float(mean_probs[idx]) if idx < len(mean_probs) else 0.0
+            )
+        return out
+
+    def _empty_selector_diagnostics(self) -> Dict[str, float]:
+        out: Dict[str, float] = {
+            "selector_sample_count": 0.0,
+            "selector_labeled_count": 0.0,
+            "selector_label_accuracy": 0.0,
+            "selector_argmax_dominance_code": -1.0,
+            "selector_argmax_dominance_count": 0.0,
+            "selector_argmax_dominance_ratio": 0.0,
+            "selector_entropy_mean": 0.0,
+            "selector_top1_prob_mean": 0.0,
+            "selector_top2_prob_mean": 0.0,
+            "selector_top1_margin_mean": 0.0,
+        }
+        for idx in range(self.num_codes):
+            out[f"selector_argmax_count_code_{idx}"] = 0.0
+            out[f"selector_label_count_code_{idx}"] = 0.0
+            out[f"selector_mean_prob_code_{idx}"] = 0.0
+        return out
 
     @staticmethod
     def _aggregate_fold_metrics(
