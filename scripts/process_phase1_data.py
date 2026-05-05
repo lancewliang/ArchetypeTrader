@@ -11,7 +11,6 @@ import gc
 import hashlib
 import json
 import logging
-import random
 import sys
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -60,6 +59,7 @@ from src.trading.cost_model import LobDepthCostModel  # noqa: E402
 from src.trading.reward_alignment import RewardAlignment  # noqa: E402
 from src.utils.feather_io import write_ipc  # noqa: E402
 from src.utils.run_logging import configure_run_logger  # noqa: E402
+from src.utils.seed_init import seed_everything  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -316,7 +316,7 @@ class Phase1DataProcessor:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         self._logger.info("产物目录已创建 dir=%s", artifacts_dir)
 
-        _seed_everything(self.config.seed)
+        seed_everything(self.config.seed)
         self._logger.info("随机种子已设置 seed=%d", self.config.seed)
 
         self._logger.info("正在检查前瞻诊断配置 mode=%s diagnostic_batch_id=%s",
@@ -1342,15 +1342,6 @@ class Phase1DataProcessor:
             report["warnings"],
         )
         return final_horizons, merged_reject, report
-
-
-def _seed_everything(seed: int) -> None:
-    """固定 Python、NumPy 和 Torch 随机源以保证数据产物可复现。"""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def _check_prospective_diagnostic(config: Phase1DataProcessConfig) -> None:

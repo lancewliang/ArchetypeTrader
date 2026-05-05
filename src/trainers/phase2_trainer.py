@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import logging
-import random as _random
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -62,6 +61,7 @@ from src.trainers.phase2_selection_policy import (
 from src.trainers.phase2_dead_code import build_dead_code_mask
 from src.utils.feather_io import read_ipc, read_json
 from src.utils.run_logging import configure_run_logger
+from src.utils.seed_init import seed_everything
 
 
 class Phase2FatalError(RuntimeError):
@@ -139,7 +139,7 @@ class Phase2Trainer:
         self._logger.info("Phase II 产物目录已准备：路径=%s", artifacts_dir)
 
         # 0. Seed
-        self._seed_everything()
+        seed_everything(self.config.seed)
         self._logger.info("Phase II 随机种子已设置：随机种子=%s", self.config.seed)
 
         # 1. 校验 Phase I 产物
@@ -1130,16 +1130,3 @@ class Phase2Trainer:
             "selector_latency": result.selector_latency,
             "worst_scenario": worst,
         }
-
-    def _seed_everything(self) -> None:
-        """统一设置全局 seed（镜像 Phase1Trainer._seed_everything）。"""
-        seed = self.config.seed
-        _random.seed(seed)
-        np.random.seed(seed)
-        try:
-            import torch
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
-        except ImportError:
-            pass

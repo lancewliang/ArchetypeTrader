@@ -134,7 +134,7 @@ def write_phase1_artifacts(
                 "start_index": [i * horizon for i in range(count)],
                 "code_label": [i % num_codes for i in range(count)],
             }
-        ).write_ipc(p1_dir / f"sampled_horizon_labels_{split}.feather")
+        ).write_ipc(p1_dir / f"non_overlap_horizon_labels_{split}.feather")
     return p1_dir
 
 

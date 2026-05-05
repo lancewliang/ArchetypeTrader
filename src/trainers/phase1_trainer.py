@@ -37,6 +37,7 @@ from src.trading.reward_alignment import RewardAlignment
 from src.utils.feather_io import atomic_write_json
 from src.utils.feather_io import read_json
 from src.utils.run_logging import configure_run_logger
+from src.utils.seed_init import seed_everything
 
 from .phase1_checkpoint import Phase1CheckpointManager, Phase1FatalCollapse
 from .phase1_selection_policy import (
@@ -135,29 +136,6 @@ class Phase1Trainer:
 
     # ---------- 入口 ----------
 
-    def _seed_everything(self) -> None:
-        """统一设置 random / numpy / torch 全局 seed。
-
-        是设计 §6.9 / §9 reproducibility 的最低要求；在 ``run()`` 入口调用。
-        ``torch.use_deterministic_algorithms`` 可选；为兼容 cuDNN 不强制开启，
-        若需要严格复现可由调用方在 trainer 之外另设。
-        """
-        seed = self.config.training.seed
-        import random as _random
-        _random.seed(seed)
-        try:
-            import numpy as np
-            np.random.seed(seed)
-        except ImportError:
-            pass
-        try:
-            import torch
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
-        except ImportError:
-            pass
-
     def run(self) -> TrainerArtifacts:
         """完整主流程。
 
@@ -213,7 +191,7 @@ class Phase1Trainer:
         )
 
         # 0a. 设置全局 seed（最早进行，覆盖后续所有 sampler/torch 操作）。
-        self._seed_everything()
+        seed_everything(self.config.training.seed)
         self._logger.info(
             "phase1_seed_set 说明=随机种子已设置 seed=%s",
             self.config.training.seed,
