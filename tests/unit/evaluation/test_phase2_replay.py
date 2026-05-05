@@ -1,6 +1,11 @@
 """Phase II replay 单元测试。"""
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
+
+from src.config.phase2_config import RewardScalingConfig
 from src.evaluation.phase2_replay import (
     Phase2BacktestRunner,
     Phase2TestLabelLeakageError,
@@ -104,3 +109,39 @@ class TestPhase2BacktestRunner:
         assert no_lag
         assert lagged
         assert no_lag[0].cost_paid != lagged[0].cost_paid
+
+    def test_reward_scaled_uses_phase2_reward_scaling_config(self, tmp_path):
+        """回测记录中的 reward_scaled 与 PPO reward_scaling 配置同口径。"""
+        runner = _runner(tmp_path)
+        raw_records = runner.run_walk_forward("val", deterministic=True)
+        assert raw_records
+
+        raw_config = replace(
+            runner.config,
+            reward_scaling=RewardScalingConfig(method="raw", clip_range=0.05),
+        )
+        raw_runner = Phase2BacktestRunner(
+            raw_config,
+            runner.actor_critic,
+            runner.frozen_policy,
+            runner.dataset,
+            runner.trading_env_factory,
+        )
+        clipped_records = raw_runner.run_walk_forward("val", deterministic=True)
+        assert clipped_records[0].reward_scaled == pytest.approx(0.05)
+
+        divided_config = replace(
+            runner.config,
+            reward_scaling=RewardScalingConfig(method="divide_by_horizon", clip_range=None),
+        )
+        divided_runner = Phase2BacktestRunner(
+            divided_config,
+            runner.actor_critic,
+            runner.frozen_policy,
+            runner.dataset,
+            runner.trading_env_factory,
+        )
+        divided_records = divided_runner.run_walk_forward("val", deterministic=True)
+        assert divided_records[0].reward_scaled == pytest.approx(
+            divided_records[0].reward_raw / max(divided_config.horizon, 1)
+        )

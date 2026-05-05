@@ -371,6 +371,52 @@ class Phase2Trainer:
 
         resume_audit = self._maybe_resume(ppo_trainer, ckpt_mgr)
         start_update = int(resume_audit.get("restored_update_count", 0))
+        selector_prelearn_stats: Dict[str, Any]
+        if start_update == 0 and not self.config.resume_from:
+            selector_prelearn_stats = self._prelearn_selector_from_kl_labels(
+                selector=selector,
+                optimizer=optimizer,
+                dataset=train_dataset,
+                dead_code_mask=dead_code_mask,
+                num_codes=num_codes,
+            )
+        else:
+            selector_prelearn_stats = {
+                "enabled": False,
+                "reason": "resume_checkpoint_restored" if self.config.resume_from else "not_started",
+                "restored_update_count": start_update,
+            }
+        if selector_prelearn_stats.get("enabled"):
+            self._logger.info(
+                "Phase II selector KL/demo 预学习完成：标签数=%d，增强样本=%d，epoch=%d，loss=%.6f，label_acc=%.6f，主导率=%.6f",
+                int(selector_prelearn_stats.get("labeled_count", 0)),
+                int(selector_prelearn_stats.get("augmented_sample_count", 0)),
+                int(selector_prelearn_stats.get("epochs", 0)),
+                float(selector_prelearn_stats.get("final_loss", 0.0)),
+                float(selector_prelearn_stats.get("label_accuracy", 0.0)),
+                float(selector_prelearn_stats.get("argmax_dominance_ratio", 0.0)),
+            )
+        else:
+            self._logger.info(
+                "Phase II selector KL/demo 预学习跳过：原因=%s",
+                selector_prelearn_stats.get("reason", "unknown"),
+            )
+        selector_pre_ppo_diagnostics = self._selector_pre_ppo_diagnostics(
+            selector=selector,
+            actor_critic=actor_critic,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            num_codes=num_codes,
+        )
+        train_flat_diag = selector_pre_ppo_diagnostics.get("train_flat", {})
+        val_flat_diag = selector_pre_ppo_diagnostics.get("val_flat", {})
+        self._logger.info(
+            "Phase II selector PPO前诊断：train_label_acc=%.6f，train主导率=%.6f，val_label_acc=%.6f，val主导率=%.6f",
+            float(train_flat_diag.get("label_accuracy", 0.0)),
+            float(train_flat_diag.get("argmax_dominance_ratio", 0.0)),
+            float(val_flat_diag.get("label_accuracy", 0.0)),
+            float(val_flat_diag.get("argmax_dominance_ratio", 0.0)),
+        )
         self._logger.info(
             "Phase II 训练准备完成：更新总数=%d，起始更新=%d，采样长度=%d，环境数=%d，恢复来源=%s",
             num_updates,
@@ -818,6 +864,8 @@ class Phase2Trainer:
                 ),
             },
             "kl_demo_dominance_ratio": kl_dominance_summary,
+            "selector_prelearn": selector_prelearn_stats,
+            "selector_pre_ppo_diagnostics": selector_pre_ppo_diagnostics,
             "entropy_schedule": {
                 "entropy_min_coef": self.config.ppo.entropy_min_coef,
                 "last_entropy_coef": (
@@ -872,6 +920,18 @@ class Phase2Trainer:
             )
 
     def _phase1_label_path(self, p1_dir: Path, split: str) -> Path:
+        if self.config.phase1_label_source == "full_time" and split == "train":
+            sampled_full_time = p1_dir / "sampled_horizon_labels_full_time_train.feather"
+            if sampled_full_time.exists():
+                return sampled_full_time
+            legacy_full_time = p1_dir / "horizon_labels_full_time_train.feather"
+            if legacy_full_time.exists():
+                return legacy_full_time
+            raise Phase2FatalError(
+                "phase1_label_source=full_time 需要 "
+                "horizon_labels_full_time_train.feather "
+                "或 sampled_horizon_labels_full_time_train.feather"
+            )
         no_path = p1_dir / f"non_overlap_horizon_labels_{split}.feather"
         if no_path.exists():
             return no_path
@@ -927,6 +987,303 @@ class Phase2Trainer:
             "probe_pick_count": probe_pick_count,
             "probe_pick_rate": probe_pick_count / sample_count,
             "picked_codes": [int(action) for action in actions],
+        }
+
+    def _prelearn_selector_from_kl_labels(
+        self,
+        *,
+        selector: ArchetypeSelector,
+        optimizer: Any,
+        dataset: Phase2Dataset,
+        dead_code_mask: Optional[Any],
+        num_codes: int,
+    ) -> Dict[str, Any]:
+        """Bootstrap selector with the existing Phase I KL/demo labels.
+
+        This reuses ``ppo.kl_demo_coef`` semantics: when KL/demo regularization is
+        active, the selector receives a small supervised initialization before PPO
+        so deterministic argmax cannot turn near-uniform logits into a one-code
+        policy at the first validation checkpoint.
+        """
+        if float(self.config.ppo.kl_demo_coef) <= 0.0:
+            return {"enabled": False, "reason": "kl_demo_coef<=0"}
+
+        labeled: List[tuple[int, int]] = []
+        dead_label_count = 0
+        dead_mask_list: List[bool] = []
+        if dead_code_mask is not None:
+            dead_mask_list = [bool(v) for v in dead_code_mask.detach().cpu().tolist()]
+
+        for idx, entry in enumerate(dataset.horizon_entries):
+            if not entry.is_labeled or entry.code_label is None:
+                continue
+            label = int(entry.code_label)
+            if label < 0 or label >= num_codes:
+                continue
+            if label < len(dead_mask_list) and dead_mask_list[label]:
+                dead_label_count += 1
+                continue
+            labeled.append((idx, label))
+
+        if not labeled:
+            return {
+                "enabled": False,
+                "reason": "no_usable_kl_labels",
+                "dead_label_count": dead_label_count,
+            }
+
+        import torch
+        import torch.nn.functional as F
+
+        device = next(selector.parameters()).device
+        prev_positions = [0]
+        if self.config.horizon_schedule.position_continuity and self.config.max_position > 0:
+            prev_positions = [-self.config.max_position, 0, self.config.max_position]
+
+        obs_rows: List[np.ndarray] = []
+        labels: List[int] = []
+        for prev_position in prev_positions:
+            for idx, label in labeled:
+                obs_rows.append(dataset.get_selector_state(idx, prev_position))
+                labels.append(label)
+
+        obs = torch.tensor(
+            np.asarray(obs_rows, dtype=np.float32),
+            dtype=torch.float32,
+            device=device,
+        )
+        targets = torch.tensor(labels, dtype=torch.long, device=device)
+        sample_count = int(targets.numel())
+        batch_size = min(
+            max(int(self.config.ppo.minibatch_size or sample_count), 1),
+            sample_count,
+        )
+        epochs = max(int(self.config.ppo.update_epochs), 1)
+
+        counts = torch.bincount(targets, minlength=num_codes).float()
+        present = counts > 0
+        class_weights = torch.zeros(num_codes, dtype=torch.float32, device=device)
+        if present.any():
+            class_weights[present] = (
+                float(sample_count)
+                / (present.float().sum().to(device) * counts[present].to(device))
+            )
+
+        mask_tensor = None
+        if dead_code_mask is not None:
+            mask_tensor = dead_code_mask.to(device=device)
+
+        was_training = selector.training
+        selector.train()
+        final_loss = 0.0
+        for _epoch in range(epochs):
+            permutation = torch.randperm(sample_count, device=device)
+            for start in range(0, sample_count, batch_size):
+                mb_idx = permutation[start:start + batch_size]
+                logits, _value = selector(obs[mb_idx])
+                if mask_tensor is not None:
+                    logits = ArchetypeSelector.apply_dead_code_mask(logits, mask_tensor)
+                loss = F.cross_entropy(
+                    logits,
+                    targets[mb_idx],
+                    weight=class_weights,
+                    label_smoothing=float(self.config.ppo.kl_demo_label_smoothing),
+                )
+                loss = loss * float(self.config.ppo.kl_demo_coef)
+                optimizer.zero_grad()
+                loss.backward()
+                if self.config.ppo.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        selector.parameters(),
+                        self.config.ppo.max_grad_norm,
+                    )
+                optimizer.step()
+                final_loss = float(loss.detach().item())
+
+        selector.eval()
+        with torch.no_grad():
+            logits, _value = selector(obs)
+            if mask_tensor is not None:
+                logits = ArchetypeSelector.apply_dead_code_mask(logits, mask_tensor)
+            probs = torch.softmax(logits, dim=-1)
+            actions = logits.argmax(dim=-1)
+            correct = (actions == targets).float().mean().item()
+            entropy = -(probs * torch.log(probs.clamp_min(1.0e-12))).sum(dim=-1)
+            argmax_counts = torch.bincount(actions, minlength=num_codes).cpu().tolist()
+        if was_training:
+            selector.train()
+
+        dominance_count = max(argmax_counts) if argmax_counts else 0
+        return {
+            "enabled": True,
+            "labeled_count": len(labeled),
+            "dead_label_count": dead_label_count,
+            "position_augments": len(prev_positions),
+            "augmented_sample_count": sample_count,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "final_loss": final_loss,
+            "label_accuracy": float(correct),
+            "entropy_mean": float(entropy.mean().item()),
+            "argmax_dominance_ratio": float(dominance_count / max(sample_count, 1)),
+            "argmax_counts": [int(v) for v in argmax_counts],
+            "class_counts": [int(v) for v in counts.detach().cpu().tolist()],
+            "class_balanced": True,
+        }
+
+    def _selector_pre_ppo_diagnostics(
+        self,
+        *,
+        selector: ArchetypeSelector,
+        actor_critic: ActorCritic,
+        train_dataset: Phase2Dataset,
+        val_dataset: Phase2Dataset,
+        num_codes: int,
+    ) -> Dict[str, Any]:
+        """Capture selector label diagnostics before the first PPO rollout."""
+        flat_positions = [0]
+        out: Dict[str, Any] = {
+            "train_flat": self._selector_label_diagnostics_from_dataset(
+                selector=selector,
+                actor_critic=actor_critic,
+                dataset=train_dataset,
+                num_codes=num_codes,
+                prev_positions=flat_positions,
+            ),
+            "val_flat": self._selector_label_diagnostics_from_dataset(
+                selector=selector,
+                actor_critic=actor_critic,
+                dataset=val_dataset,
+                num_codes=num_codes,
+                prev_positions=flat_positions,
+            ),
+        }
+        if self.config.horizon_schedule.position_continuity and self.config.max_position > 0:
+            augmented_positions = [
+                -self.config.max_position,
+                0,
+                self.config.max_position,
+            ]
+            out["train_position_augmented"] = self._selector_label_diagnostics_from_dataset(
+                selector=selector,
+                actor_critic=actor_critic,
+                dataset=train_dataset,
+                num_codes=num_codes,
+                prev_positions=augmented_positions,
+            )
+            out["val_position_augmented"] = self._selector_label_diagnostics_from_dataset(
+                selector=selector,
+                actor_critic=actor_critic,
+                dataset=val_dataset,
+                num_codes=num_codes,
+                prev_positions=augmented_positions,
+            )
+        return out
+
+    def _selector_label_diagnostics_from_dataset(
+        self,
+        *,
+        selector: ArchetypeSelector,
+        actor_critic: ActorCritic,
+        dataset: Phase2Dataset,
+        num_codes: int,
+        prev_positions: List[int],
+    ) -> Dict[str, Any]:
+        """Compute direct selector-vs-label diagnostics for fixed prev positions."""
+        labeled: List[tuple[int, int]] = []
+        dead_label_count = 0
+        dead_code_mask = actor_critic.dead_code_mask
+        dead_mask_list: List[bool] = []
+        if dead_code_mask is not None:
+            dead_mask_list = [bool(v) for v in dead_code_mask.detach().cpu().tolist()]
+
+        for idx, entry in enumerate(dataset.horizon_entries):
+            if not entry.is_labeled or entry.code_label is None:
+                continue
+            label = int(entry.code_label)
+            if label < 0 or label >= num_codes:
+                continue
+            if label < len(dead_mask_list) and dead_mask_list[label]:
+                dead_label_count += 1
+                continue
+            labeled.append((idx, label))
+
+        if not labeled:
+            return {
+                "enabled": False,
+                "reason": "no_usable_kl_labels",
+                "dead_label_count": dead_label_count,
+                "sample_count": 0,
+                "labeled_count": 0,
+                "label_accuracy": 0.0,
+                "argmax_dominance_code": -1,
+                "argmax_dominance_ratio": 0.0,
+                "entropy_mean": 0.0,
+                "top1_margin_mean": 0.0,
+                "argmax_counts": [0 for _ in range(num_codes)],
+                "label_counts": [0 for _ in range(num_codes)],
+                "mean_probs": [0.0 for _ in range(num_codes)],
+            }
+
+        import torch
+
+        obs_rows: List[np.ndarray] = []
+        labels: List[int] = []
+        for prev_position in prev_positions:
+            for idx, label in labeled:
+                obs_rows.append(dataset.get_selector_state(idx, prev_position))
+                labels.append(label)
+
+        device = next(selector.parameters()).device
+        obs = torch.tensor(
+            np.asarray(obs_rows, dtype=np.float32),
+            dtype=torch.float32,
+            device=device,
+        )
+        targets = torch.tensor(labels, dtype=torch.long, device=device)
+
+        was_training = selector.training
+        selector.eval()
+        with torch.no_grad():
+            logits, _value = selector(obs)
+            logits = actor_critic._mask_logits(logits)
+            probs = torch.softmax(logits, dim=-1)
+            actions = logits.argmax(dim=-1)
+            correct = (actions == targets).float().mean().item()
+            entropy = -(probs * torch.log(probs.clamp_min(1.0e-12))).sum(dim=-1)
+            top_k = min(2, logits.shape[-1])
+            top_values = torch.topk(probs, top_k, dim=-1).values
+            top1_prob = top_values[:, 0]
+            top2_prob = (
+                top_values[:, 1]
+                if top_k > 1
+                else torch.zeros_like(top1_prob)
+            )
+            argmax_counts = torch.bincount(actions, minlength=num_codes).cpu().tolist()
+            label_counts = torch.bincount(targets, minlength=num_codes).cpu().tolist()
+            mean_probs = probs.mean(dim=0).detach().cpu().tolist()
+        if was_training:
+            selector.train()
+
+        sample_count = int(targets.numel())
+        dominance_count = max(argmax_counts) if argmax_counts else 0
+        dominance_code = argmax_counts.index(dominance_count) if argmax_counts else -1
+        return {
+            "enabled": True,
+            "dead_label_count": dead_label_count,
+            "position_augments": len(prev_positions),
+            "sample_count": sample_count,
+            "labeled_count": len(labeled),
+            "label_accuracy": float(correct),
+            "argmax_dominance_code": int(dominance_code),
+            "argmax_dominance_ratio": float(dominance_count / max(sample_count, 1)),
+            "entropy_mean": float(entropy.mean().item()),
+            "top1_prob_mean": float(top1_prob.mean().item()),
+            "top2_prob_mean": float(top2_prob.mean().item()),
+            "top1_margin_mean": float((top1_prob - top2_prob).mean().item()),
+            "argmax_counts": [int(v) for v in argmax_counts],
+            "label_counts": [int(v) for v in label_counts],
+            "mean_probs": [float(v) for v in mean_probs],
         }
 
     @staticmethod

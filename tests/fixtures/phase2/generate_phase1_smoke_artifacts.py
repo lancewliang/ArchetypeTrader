@@ -10,6 +10,7 @@ artifacts/TEST/smoke_phase1/phase1/
   sampled_horizon_labels_val.feather
   sampled_horizon_labels_test.feather
   input_schema.json
+  state_normalizer.json
   reward_normalizer.json
   feature_provenance.json
   phase1_config.yaml
@@ -82,7 +83,23 @@ def generate_smoke_phase1_artifacts(output_dir: Path) -> None:
     with open(output_dir / "input_schema.json", "w") as f:
         json.dump(schema, f, indent=2)
 
-    # 6. reward_normalizer.json
+    # 6. state_normalizer.json
+    state_norm = {
+        "method": "train_state_robust_v1",
+        "feature_columns": schema["feature_columns"],
+        "transform_kinds": ["identity"] * len(schema["feature_columns"]),
+        "center": [0.0] * len(schema["feature_columns"]),
+        "scale": [1.0] * len(schema["feature_columns"]),
+        "clip_value": 8.0,
+        "scale_floor": 1.0e-6,
+        "max_abs_before": 1.0,
+        "max_abs_after_fit": 1.0,
+        "fallback_to_standard_count": 0,
+    }
+    with open(output_dir / "state_normalizer.json", "w") as f:
+        json.dump(state_norm, f, indent=2)
+
+    # 7. reward_normalizer.json
     norm = {
         "method": "train_reward_robust",
         "center": 0.0,
@@ -94,7 +111,7 @@ def generate_smoke_phase1_artifacts(output_dir: Path) -> None:
     with open(output_dir / "reward_normalizer.json", "w") as f:
         json.dump(norm, f, indent=2)
 
-    # 7. feature_provenance.json
+    # 8. feature_provenance.json
     provenance = {
         "feature_columns": {
             "feature_return_1": {
@@ -126,7 +143,7 @@ def generate_smoke_phase1_artifacts(output_dir: Path) -> None:
     with open(output_dir / "feature_provenance.json", "w") as f:
         json.dump(provenance, f, indent=2)
 
-    # 8. phase1_config.yaml
+    # 9. phase1_config.yaml
     p1_config = {
         "pair": "TEST",
         "train_batch_id": "smoke_phase1",
@@ -152,7 +169,7 @@ def generate_smoke_phase1_artifacts(output_dir: Path) -> None:
     with open(output_dir / "phase1_config.yaml", "w") as f:
         yaml.safe_dump(p1_config, f)
 
-    # 9. phase1_report.json
+    # 10. phase1_report.json
     report = {
         "fatal_collapse": False,
         "code_assignment_drift_warning": False,
@@ -181,7 +198,7 @@ def generate_smoke_phase1_artifacts(output_dir: Path) -> None:
     with open(output_dir / "phase1_report.json", "w") as f:
         json.dump(report, f, indent=2)
 
-    # 10. checkpoint_manifest.json
+    # 11. checkpoint_manifest.json
     manifest = [{
         "epoch": 10,
         "path": str(output_dir / "best_vq_model.pt"),

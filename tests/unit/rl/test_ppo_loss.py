@@ -78,6 +78,44 @@ class TestPPOLoss:
         )
         assert out.kl_demo_loss.item() > 0  # 有 labeled 样本
 
+    def test_kl_demo_uses_class_balanced_ce(self):
+        """kl_demo_loss 对 labeled minibatch 内的 code 做 class-balanced CE。"""
+        loss_fn = PPOLoss(
+            clip_ratio=0.2,
+            value_coef=0.5,
+            entropy_coef=0.01,
+            kl_demo_coef=0.1,
+            num_codes=2,
+        )
+        batch = 4
+        logits = torch.tensor(
+            [
+                [3.0, 0.0],
+                [3.0, 0.0],
+                [3.0, 0.0],
+                [3.0, 0.0],
+            ]
+        )
+        kl_label = torch.tensor([0, 0, 0, 1])
+        is_labeled = torch.tensor([True, True, True, True])
+
+        out = loss_fn.compute(
+            torch.zeros(batch), torch.zeros(batch),
+            torch.zeros(batch), torch.zeros(batch),
+            torch.zeros(batch), torch.ones(batch),
+            kl_label=kl_label, is_labeled=is_labeled, logits=logits,
+        )
+
+        weights = torch.tensor([2.0 / 3.0, 2.0])
+        expected = torch.nn.functional.cross_entropy(
+            logits,
+            kl_label,
+            weight=weights,
+        )
+        unweighted = torch.nn.functional.cross_entropy(logits, kl_label)
+        assert out.kl_demo_loss.item() == pytest.approx(expected.item())
+        assert out.kl_demo_loss.item() > unweighted.item()
+
     def test_masked_kl_label_zero(self, loss_fn):
         """全部 is_labeled=false 时 kl_demo_loss=0。"""
         batch = 4

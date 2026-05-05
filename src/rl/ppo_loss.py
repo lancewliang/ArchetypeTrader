@@ -7,6 +7,7 @@
 - value_loss: clipped value loss。
 - entropy_bonus: 鼓励探索。
 - kl_demo_loss: 只在 is_labeled=true 上生效；masked dead code 样本 loss=0。
+  labeled minibatch 内使用 class-balanced CE，避免高频 code 主导 selector。
 - approx_kl: 用于 early stop 判断。
 
 关键约束:
@@ -123,7 +124,7 @@ class PPOLoss:
         # 3. Entropy bonus
         entropy_loss = -entropy.mean()
 
-        # 4. KL demo loss (cross-entropy with Phase I code_label)
+        # 4. KL demo loss (class-balanced cross-entropy with Phase I code_label)
         kl_demo_loss = torch.tensor(0.0, device=log_prob.device)
         if (
             self.kl_demo_coef > 0
@@ -132,6 +133,8 @@ class PPOLoss:
             and logits is not None
         ):
             labeled_mask = is_labeled.bool().clone()
+            valid_label_mask = (kl_label >= 0) & (kl_label < int(self.num_codes))
+            labeled_mask = labeled_mask & valid_label_mask
             # 排除 dead code 指向的 label: 若 kl_label 指向 masked code，该样本 KL 置零
             if dead_code_mask is not None:
                 for i in range(labeled_mask.shape[0]):
@@ -143,9 +146,15 @@ class PPOLoss:
             if labeled_mask.any():
                 labeled_logits = logits[labeled_mask]
                 labeled_targets = kl_label[labeled_mask]
+                class_weights = self._class_balanced_weights(
+                    labeled_targets,
+                    num_codes=int(logits.shape[-1]),
+                    device=logits.device,
+                )
                 kl_demo_loss = F.cross_entropy(
                     labeled_logits,
                     labeled_targets,
+                    weight=class_weights,
                     label_smoothing=float(self.kl_demo_label_smoothing),
                 )
 
@@ -177,3 +186,21 @@ class PPOLoss:
             approx_kl=approx_kl,
             clip_fraction=clip_fraction,
         )
+
+    @staticmethod
+    def _class_balanced_weights(
+        targets: torch.Tensor,
+        *,
+        num_codes: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Return inverse-frequency class weights for labels present in a minibatch."""
+        counts = torch.bincount(targets, minlength=num_codes).float().to(device)
+        present = counts > 0
+        weights = torch.zeros(num_codes, dtype=torch.float32, device=device)
+        if present.any():
+            weights[present] = (
+                float(targets.numel())
+                / (present.float().sum() * counts[present])
+            )
+        return weights

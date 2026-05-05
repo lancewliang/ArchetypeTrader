@@ -102,6 +102,21 @@ def write_phase1_artifacts(
     torch.save(decoder.state_dict(), p1_dir / "decoder.pt")
     torch.save(torch.randn(num_codes, code_dim) * 0.05, p1_dir / "codebook.pt")
     (p1_dir / "input_schema.json").write_text(json.dumps(input_schema()), encoding="utf-8")
+    state_normalizer = {
+        "method": "train_state_robust_v1",
+        "feature_columns": list(FEATURE_COLUMNS),
+        "transform_kinds": ["identity"] * len(FEATURE_COLUMNS),
+        "center": [0.0] * len(FEATURE_COLUMNS),
+        "scale": [1.0] * len(FEATURE_COLUMNS),
+        "clip_value": 8.0,
+        "scale_floor": 1.0e-6,
+        "max_abs_before": 1.0,
+        "max_abs_after_fit": 1.0,
+        "fallback_to_standard_count": 0,
+    }
+    (p1_dir / "state_normalizer.json").write_text(
+        json.dumps(state_normalizer), encoding="utf-8"
+    )
     (p1_dir / "feature_provenance.json").write_text("{}", encoding="utf-8")
     (p1_dir / "checkpoint_manifest.json").write_text("[]", encoding="utf-8")
     phase1_config = {

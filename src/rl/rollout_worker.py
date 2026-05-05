@@ -12,6 +12,7 @@ import torch
 
 from src.config.phase2_config import Phase2Config
 from src.models.phase1_frozen_policy import Phase1FrozenPolicy
+from src.rl.reward_scaling import scale_phase2_reward
 from src.rl.rollout_buffer import RolloutSample
 from src.trading.cost_model import LobDepthCostModel
 from src.trading.env import TradingEnv
@@ -210,16 +211,7 @@ def _step_env(
 
 
 def _scale_reward(config: Phase2Config, reward: float) -> tuple[float, bool]:
-    method = config.reward_scaling.method
-    if method == "divide_by_horizon":
-        scaled = reward / max(config.horizon, 1)
-    else:
-        scaled = reward
-    clip_range = config.reward_scaling.clip_range
-    if clip_range is None:
-        return float(scaled), False
-    clipped = float(np.clip(scaled, -float(clip_range), float(clip_range)))
-    return clipped, bool(clipped != scaled)
+    return scale_phase2_reward(config, reward)
 
 
 def _env_state(env: HorizonEnv) -> Dict[str, Any]:

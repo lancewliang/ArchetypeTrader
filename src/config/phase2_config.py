@@ -40,6 +40,7 @@ class Phase1ArtifactsConfig:
         "decoder.pt",
         "codebook.pt",
         "input_schema.json",
+        "state_normalizer.json",
         "phase1_report.json",
         "phase1_config.yaml",
         "feature_provenance.json",

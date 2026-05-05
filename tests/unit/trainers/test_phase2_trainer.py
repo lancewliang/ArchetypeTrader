@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
+import numpy as np
 import polars as pl
 import torch
 
 from scripts.train_phase2 import run_kl_demo_ablation
-from src.config.phase2_config import SelectorNetworkConfig
+from src.config.phase2_config import PPOConfig, SelectorNetworkConfig
 from src.models.archetype_selector import ArchetypeSelector
 from src.trainers.phase2_trainer import Phase2FatalError, Phase2Trainer
 from tests.phase2_test_utils import (
     make_config,
     make_dataset,
+    make_entries,
     run_smoke_phase2_training,
     write_market_splits,
 )
@@ -29,6 +32,7 @@ class TestPhase2Trainer:
         report = json.loads(artifacts.phase2_report.read_text(encoding="utf-8"))
         assert "unmasked_diagnostic_probe" in report
         assert "probe_pick_rate" in report
+        assert "selector_pre_ppo_diagnostics" in report
 
     def test_per_horizon_records_exported(self, tmp_path):
         """训练结束后导出 per-horizon records。"""
@@ -92,6 +96,53 @@ class TestPhase2Trainer:
         assert probe["sample_count"] == 3
         assert probe["probe_pick_count"] == 3
         assert probe["probe_pick_rate"] == 1.0
+
+    def test_selector_kl_label_prelearn_prevents_single_code_collapse(self, tmp_path):
+        """KL/demo 预学习让初始 selector 学到多 code 标签映射。"""
+        config = make_config(tmp_path)
+        config = replace(
+            config,
+            ppo=PPOConfig(
+                update_epochs=50,
+                minibatch_size=9,
+                lr=0.05,
+                target_kl=None,
+            ),
+            selector_network=SelectorNetworkConfig(hidden_dims=[16], use_layer_norm=False),
+        )
+
+        class LabelStateDataset:
+            horizon_entries = make_entries(30, horizon=4, labeled=True)
+
+            def get_selector_state(self, idx: int, prev_terminal_position: int = 0):
+                label = int(self.horizon_entries[idx].code_label)
+                return np.array(
+                    [
+                        1.0 if label == 0 else 0.0,
+                        1.0 if label == 1 else 0.0,
+                        1.0 if label == 2 else 0.0,
+                        float(prev_terminal_position),
+                    ],
+                    dtype=np.float32,
+                )
+
+        selector = ArchetypeSelector(
+            state_dim=4,
+            num_codes=3,
+            config=config.selector_network,
+        )
+        optimizer = torch.optim.Adam(selector.parameters(), lr=config.ppo.lr)
+        stats = Phase2Trainer(config)._prelearn_selector_from_kl_labels(
+            selector=selector,
+            optimizer=optimizer,
+            dataset=LabelStateDataset(),
+            dead_code_mask=None,
+            num_codes=3,
+        )
+
+        assert stats["enabled"] is True
+        assert stats["label_accuracy"] > 0.8
+        assert stats["argmax_dominance_ratio"] < 0.8
 
     def test_full_time_label_source_requires_exported_train_labels(self, tmp_path):
         config = make_config(tmp_path)

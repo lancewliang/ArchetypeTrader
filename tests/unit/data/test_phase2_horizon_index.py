@@ -58,6 +58,18 @@ def _make_config(tmp_path, horizon=8, mode="non_overlap", stride=1, exclude_gap=
         "feature_columns": ["feature_return_1", "feature_vol_4", "feature_momentum_8"],
         "price_column": "close",
     }))
+    (p1_dir / "state_normalizer.json").write_text(json.dumps({
+        "method": "train_state_robust_v1",
+        "feature_columns": ["feature_return_1", "feature_vol_4", "feature_momentum_8"],
+        "transform_kinds": ["identity", "identity", "identity"],
+        "center": [0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0],
+        "clip_value": 8.0,
+        "scale_floor": 1.0e-6,
+        "max_abs_before": 1.0,
+        "max_abs_after_fit": 1.0,
+        "fallback_to_standard_count": 0,
+    }))
     (p1_dir / "phase1_report.json").write_text(json.dumps({
         "fatal_collapse": False,
         "code_assignment_drift_warning": False,
@@ -161,6 +173,14 @@ class TestPhase2HorizonIndexer:
         assert result.valid is True
         assert result.no_leakage_signoff is False
         assert result.no_leakage_signoff_blockers
+
+    def test_missing_state_normalizer_rejects(self, tmp_path):
+        """Phase II 必须拒绝缺少 Phase I state normalizer 的产物。"""
+        config = _make_config(tmp_path, horizon=8)
+        (config.phase1_dir() / "state_normalizer.json").unlink()
+
+        with pytest.raises(Phase1ArtifactValidationError):
+            Phase1ArtifactValidator(config).validate()
 
     def test_gap_bars_uses_bar_units_when_gap_check_disabled(self, tmp_path):
         """gap_bars 记录 bar 数，不把分钟阈值和 bar 阈值混用。"""

@@ -26,6 +26,7 @@ from src.data.phase2_dataset import Phase2Dataset
 from src.evaluation.phase2_online_action_throttle import Phase2OnlineActionThrottle
 from src.models.phase1_frozen_policy import Phase1FrozenPolicy
 from src.rl.actor_critic import ActorCritic
+from src.rl.reward_scaling import scale_phase2_reward
 from src.trading.env import HorizonInputs, TradingEnv
 
 
@@ -197,6 +198,7 @@ class Phase2BacktestRunner:
                 consecutive_losses += 1
             else:
                 consecutive_losses = 0
+            reward_scaled, _ = scale_phase2_reward(self.config, horizon_reward)
 
             records.append(Phase2HorizonReplayRecord(
                 sample_id=entry.sample_id,
@@ -204,7 +206,7 @@ class Phase2BacktestRunner:
                 chosen_code=chosen_code,
                 final_position=final_position,
                 reward_raw=horizon_reward,
-                reward_scaled=horizon_reward / max(h, 1),
+                reward_scaled=reward_scaled,
                 boundary_cost=boundary_cost,
                 cost_paid=cost_paid,
                 risk_triggered=risk_triggered,
@@ -358,6 +360,7 @@ class Phase2BacktestRunner:
             cost_paid = sum(info.fee + info.slippage for info in infos)
             final_position = infos[-1].filled_position if infos else init_pos
             prev_pos = final_position
+            reward_scaled, _ = scale_phase2_reward(self.config, horizon_reward)
 
             records.append(Phase2HorizonReplayRecord(
                 sample_id=entry.sample_id,
@@ -365,7 +368,7 @@ class Phase2BacktestRunner:
                 chosen_code=chosen_code,
                 final_position=final_position,
                 reward_raw=horizon_reward,
-                reward_scaled=horizon_reward / max(h, 1),
+                reward_scaled=reward_scaled,
                 boundary_cost=(infos[0].fee + infos[0].slippage) if infos else 0.0,
                 cost_paid=cost_paid,
                 risk_reason=baseline_name,
@@ -401,6 +404,7 @@ class Phase2BacktestRunner:
             cost_paid = sum(info.fee + info.slippage for info in infos)
             final_position = infos[-1].filled_position if infos else init_pos
             prev_pos = final_position
+            reward_scaled, _ = scale_phase2_reward(self.config, horizon_reward)
 
             records.append(Phase2HorizonReplayRecord(
                 sample_id=entry.sample_id,
@@ -408,7 +412,7 @@ class Phase2BacktestRunner:
                 chosen_code=chosen_code,
                 final_position=final_position,
                 reward_raw=horizon_reward,
-                reward_scaled=horizon_reward / max(self.config.horizon, 1),
+                reward_scaled=reward_scaled,
                 boundary_cost=(infos[0].fee + infos[0].slippage) if infos else 0.0,
                 cost_paid=cost_paid,
                 risk_reason=baseline_name,

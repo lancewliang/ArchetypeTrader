@@ -31,6 +31,7 @@ from src.rl.rollout_sampler import (
     RolloutTimingStats,
     make_rollout_sampler,
 )
+from src.rl.reward_scaling import scale_phase2_reward
 from src.rl.scheduling import ScheduleManager
 from src.trading.horizon_env import HorizonEnv
 from src.evaluation.metrics.policy_health import (
@@ -175,16 +176,7 @@ class PPOTrainer:
 
     def _scale_reward(self, reward: float) -> Tuple[float, bool]:
         """应用 reward scaling。"""
-        method = self.config.reward_scaling.method
-        if method == "divide_by_horizon":
-            scaled = reward / max(self.config.horizon, 1)
-        else:
-            scaled = reward
-        clip_range = self.config.reward_scaling.clip_range
-        if clip_range is None:
-            return float(scaled), False
-        clipped = float(np.clip(scaled, -float(clip_range), float(clip_range)))
-        return clipped, bool(clipped != scaled)
+        return scale_phase2_reward(self.config, reward)
 
     def update(self) -> PPOUpdateStats:
         """执行一次 PPO update。

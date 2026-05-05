@@ -96,14 +96,15 @@ class Phase1ArtifactValidator:
                     continue
                 errors.append(f"缺少必要文件: {fpath}")
 
+        state_norm_path = phase1_dir / "state_normalizer.json"
+        if not state_norm_path.exists() and not any(
+            str(state_norm_path) in err for err in errors
+        ):
+            errors.append(f"缺少必要文件: {state_norm_path}")
+
         if errors:
             raise Phase1ArtifactValidationError(
                 f"Phase I 产物校验失败: {errors}"
-            )
-        state_norm_path = phase1_dir / "state_normalizer.json"
-        if not state_norm_path.exists():
-            warnings.append(
-                f"Phase I 缺少 state_normalizer.json，Phase II 将使用原始 state features: {state_norm_path}"
             )
 
         # 2. 读取 phase1_report.json
