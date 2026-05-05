@@ -348,32 +348,33 @@ class Phase1DataProcessor:
         # 分阶段构建和生成，避免同时持有所有 split 的 horizons
         # Phase 1: 构建并处理 train
         self._logger.info("正在构建时间窗口 split=train")
-        train_result = self._build_horizons_for_split(
+        train_result = self._build_sampled_horizons_for_split(
             "train", frames["train"], schema, artifacts_dir
         )
         train_horizons = train_result.horizons
         train_window_path = train_result.window_index_path
 
-        if self.config.data_augmentation.temporal_contrastive.enabled:
-            self._logger.info("数据增强功能已启用 时间对比学习")
-            tc = self.config.data_augmentation.temporal_contrastive
-            builder = HorizonBuilder(
-                self.config.horizon,
-                schema,
-                self.config.dp.cost_config.reward_alignment,
-            )
-            shifted, _pairs = TemporalContrastiveBuilder(
-                shift_bars=tc.shift_bars,
-                pair_ratio=tc.pair_ratio,
-                max_pairs=tc.max_pairs,
-                require_same_strata=tc.require_same_strata,
-                seed=self.config.seed,
-            ).build_pairs(train_horizons, frames["train"], builder, pair=self.config.pair)
-            train_horizons = list(train_horizons) + list(shifted)
-            self._logger.info("数据增强已应用 原始=%d 增强=%d 总计=%d",
-                              len(train_horizons) - len(shifted), len(shifted), len(train_horizons))
-        else:
-            self._logger.info("数据增强功能未启用")
+        # if self.config.data_augmentation.temporal_contrastive.enabled:
+        #     self._logger.info("数据增强功能已启用 时间对比学习")
+        #     tc = self.config.data_augmentation.temporal_contrastive
+        #     builder = HorizonBuilder(
+        #         self.config.horizon,
+        #         schema,
+        #         self.config.dp.cost_config.reward_alignment,
+        #     )
+        #     shifted, _pairs = TemporalContrastiveBuilder(
+        #         shift_bars=tc.shift_bars,
+        #         pair_ratio=tc.pair_ratio,
+        #         max_pairs=tc.max_pairs,
+        #         require_same_strata=tc.require_same_strata,
+        #         seed=self.config.seed,
+        #     ).build_pairs(train_horizons, frames["train"], builder, pair=self.config.pair)
+        #     train_horizons = list(train_horizons) + list(shifted)
+        #     self._logger.info("数据增强已应用 原始=%d 增强=%d 总计=%d",
+        #                       len(train_horizons) - len(shifted), len(shifted), len(train_horizons))
+        # else:
+        
+        self._logger.info("数据增强功能未启用")
 
         self._logger.info(
             "正在生成演示样本 split=train num_horizons=%d dp_workers=%s chunksize=%d",
@@ -399,7 +400,7 @@ class Phase1DataProcessor:
 
         # Phase 2: 构建并处理 val
         self._logger.info("正在构建时间窗口 split=val")
-        val_result = self._build_horizons_for_split(
+        val_result = self._build_eval_horizons_for_split(
             "val", frames["val"], schema, artifacts_dir
         )
         val_horizons = val_result.horizons
@@ -422,7 +423,7 @@ class Phase1DataProcessor:
 
         # Phase 3: 构建并处理 test
         self._logger.info("正在构建时间窗口 split=test")
-        test_result = self._build_horizons_for_split(
+        test_result = self._build_eval_horizons_for_split(
             "test", frames["test"], schema, artifacts_dir
         )
         test_horizons = test_result.horizons
@@ -547,6 +548,7 @@ class Phase1DataProcessor:
         self._logger.info("正在保存演示存储 train=%d val=%d test=%d",
                           len(train_horizons), len(val_horizons), len(test_horizons))
         demo_store = Phase1DemoStore(artifacts_dir, data_process_hash, schema_hash)
+        #demos 数据预处理阶段 + 训练阶段（审计用途）
         demo_store.save_demos(train_horizons, split="train")
         demo_store.save_demos(val_horizons, split="val")
         demo_store.save_demos(test_horizons, split="test")
@@ -583,27 +585,6 @@ class Phase1DataProcessor:
         manifest_path = store.write_manifest(manifest)
         self._logger.info("Phase1运行完成 manifest_path=%s", manifest_path)
         return manifest_path
-
-    def _build_horizons_for_split(
-        self,
-        split: str,
-        frame,
-        schema,
-        artifacts_dir: Path,
-    ) -> SplitHorizonBuildResult:
-        """按 split 路由到采样构建或全量标注构建。
-
-        train 需要受 ``num_demos``、min-gap 和覆盖策略约束；val/test 的职责是
-        按 eval labeling 契约生成评估 label。保留这个薄路由能让调用方不关心
-        两种契约的内部差异。
-        """
-        if split == "train":
-            return self._build_sampled_horizons_for_split(
-                split, frame, schema, artifacts_dir
-            )
-        return self._build_eval_horizons_for_split(
-            split, frame, schema, artifacts_dir
-        )
 
     def _prepare_window_index_context(
         self,

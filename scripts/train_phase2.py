@@ -98,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--rollout-worker-startup-timeout-seconds",
         type=float,
-        default=60.0,
+        default=360.0,
         help="process worker 启动/reset 超时",
     )
     # KL/demo 消融
