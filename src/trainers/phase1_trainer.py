@@ -255,7 +255,21 @@ class Phase1Trainer:
         train_horizons = processed_store.load_records(manifest, "train")
         val_horizons = processed_store.load_records(manifest, "val")
         test_horizons = processed_store.load_records(manifest, "test")
+
+        non_overlap_train_horizons = []
+        non_overlap_val_horizons = []
+        non_overlap_test_horizons = []
         train_artifact = manifest.splits["train"]
+        if train_artifact.non_overlap_horizons_path:
+            non_overlap_train_horizons = processed_store.load_non_overlap_records(
+                manifest, "train"
+            )
+            non_overlap_val_horizons = processed_store.load_non_overlap_records(
+                manifest, "val"
+            )
+            non_overlap_test_horizons = processed_store.load_non_overlap_records(
+                manifest, "test"
+            )
         full_time_train_horizons = []
         if (
             train_artifact.full_time_sampled_horizons_path
@@ -436,6 +450,10 @@ class Phase1Trainer:
         }
         if full_time_train_horizons:
             horizon_label_inputs["full_time_train"] = full_time_train_horizons
+        if non_overlap_train_horizons:
+            horizon_label_inputs["non_overlap_train"] = non_overlap_train_horizons
+            horizon_label_inputs["non_overlap_val"] = non_overlap_val_horizons
+            horizon_label_inputs["non_overlap_test"] = non_overlap_test_horizons
         labels_paths = self._export_horizon_labels(
             model,
             store=store,
@@ -1263,10 +1281,12 @@ class Phase1Trainer:
 
         - 用 best checkpoint（``run`` 在调用本方法前会 reload best state）。
         - 把每条 horizon 的 ``code_label / demo_return / num_switches / is_no_trade``
-          打包成 ``HorizonLabel`` 写入 ``horizon_labels_{split}.feather``。
+          打包成 ``HorizonLabel`` 写入对应的 feather 文件。
         - encoder 输入的 rewards 必须经 ``normalizer.transform``（保证与训练同分布）；
           ``demo_return`` 仍用原始 rec.rewards，反映真实 DP 收益。
         - 这是 Phase II selector 的 KL/demo regularization 标签来源。
+        - ``non_overlap_*`` split 使用 ``save_non_overlap_labels``，
+          其他 split 使用 ``save_labels``。
         """
         try:
             import torch
@@ -1278,8 +1298,13 @@ class Phase1Trainer:
         model.eval()
         for split, recs in horizons_by_split.items():
             labels: List[HorizonLabel] = []
+            is_non_overlap = split.startswith("non_overlap_")
+            label_split = split.replace("non_overlap_", "", 1) if is_non_overlap else split
             if not recs:
-                out[split] = store.save_labels(labels, split)
+                if is_non_overlap:
+                    out[split] = store.save_non_overlap_labels(labels, label_split)
+                else:
+                    out[split] = store.save_labels(labels, split)
                 continue
             code_id_values: List[int] = []
             with torch.no_grad():
@@ -1355,7 +1380,10 @@ class Phase1Trainer:
                         sample_source=rec.sample_source,
                     )
                 )
-            out[split] = store.save_labels(labels, split)
+            if is_non_overlap:
+                out[split] = store.save_non_overlap_labels(labels, label_split)
+            else:
+                out[split] = store.save_labels(labels, split)
         if was_training:
             model.train()
         return out

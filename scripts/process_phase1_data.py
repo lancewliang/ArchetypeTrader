@@ -432,6 +432,26 @@ class Phase1DataProcessor:
                 full_time_train_reject.dataset_reject_rate,
             )
 
+        self._logger.info("正在构建non-overlap时间窗口 split=train")
+        non_overlap_train_result = self._build_non_overlap_horizons_for_split(
+            "train", frames["train"], schema, artifacts_dir
+        )
+        non_overlap_train_horizons = non_overlap_train_result.horizons
+        self._logger.info(
+            "正在生成non-overlap演示样本 split=train num_horizons=%d dp_workers=%s chunksize=%d",
+            len(non_overlap_train_horizons),
+            self.config.dp_workers,
+            self.config.dp_worker_chunksize,
+        )
+        non_overlap_train_horizons, non_overlap_train_reject = _generate_demos(
+            self.config, non_overlap_train_horizons
+        )
+        self._logger.info(
+            "non-overlap演示样本生成完成 split=train 接受=%d 拒绝率=%.4f",
+            len(non_overlap_train_horizons),
+            non_overlap_train_reject.dataset_reject_rate,
+        )
+
         # 释放 train_frame 内存（后续不再需要）
         del frames["train"]
         gc.collect()
@@ -455,6 +475,26 @@ class Phase1DataProcessor:
                           len(val_horizons), val_reject.dataset_reject_rate)
         _log_reward_distribution(self._logger, val_horizons, "val")
 
+        self._logger.info("正在构建non-overlap时间窗口 split=val")
+        non_overlap_val_result = self._build_non_overlap_horizons_for_split(
+            "val", frames["val"], schema, artifacts_dir
+        )
+        non_overlap_val_horizons = non_overlap_val_result.horizons
+        self._logger.info(
+            "正在生成non-overlap演示样本 split=val num_horizons=%d dp_workers=%s chunksize=%d",
+            len(non_overlap_val_horizons),
+            self.config.dp_workers,
+            self.config.dp_worker_chunksize,
+        )
+        non_overlap_val_horizons, non_overlap_val_reject = _generate_demos(
+            self.config, non_overlap_val_horizons
+        )
+        self._logger.info(
+            "non-overlap演示样本生成完成 split=val 接受=%d 拒绝率=%.4f",
+            len(non_overlap_val_horizons),
+            non_overlap_val_reject.dataset_reject_rate,
+        )
+
         # 释放 val_frame 内存
         del frames["val"]
         gc.collect()
@@ -477,6 +517,26 @@ class Phase1DataProcessor:
         self._logger.info("演示样本生成完成 split=test 接受=%d 拒绝率=%.4f",
                           len(test_horizons), test_reject.dataset_reject_rate)
         _log_reward_distribution(self._logger, test_horizons, "test")
+
+        self._logger.info("正在构建non-overlap时间窗口 split=test")
+        non_overlap_test_result = self._build_non_overlap_horizons_for_split(
+            "test", frames["test"], schema, artifacts_dir
+        )
+        non_overlap_test_horizons = non_overlap_test_result.horizons
+        self._logger.info(
+            "正在生成non-overlap演示样本 split=test num_horizons=%d dp_workers=%s chunksize=%d",
+            len(non_overlap_test_horizons),
+            self.config.dp_workers,
+            self.config.dp_worker_chunksize,
+        )
+        non_overlap_test_horizons, non_overlap_test_reject = _generate_demos(
+            self.config, non_overlap_test_horizons
+        )
+        self._logger.info(
+            "non-overlap演示样本生成完成 split=test 接受=%d 拒绝率=%.4f",
+            len(non_overlap_test_horizons),
+            non_overlap_test_reject.dataset_reject_rate,
+        )
 
         # 释放 test_frame 内存
         del frames["test"]
@@ -545,6 +605,11 @@ class Phase1DataProcessor:
             "val": (val_horizons, val_window_path, val_reject, val_result),
             "test": (test_horizons, test_window_path, test_reject, test_result),
         }
+        non_overlap_records = {
+            "train": (non_overlap_train_horizons, non_overlap_train_reject),
+            "val": (non_overlap_val_horizons, non_overlap_val_reject),
+            "test": (non_overlap_test_horizons, non_overlap_test_reject),
+        }
         split_payload = {}
         for split, (records, window_path, reject_stats, build_result) in split_records.items():
             self._logger.info("正在保存分集产物 split=%s num_records=%d", split, len(records))
@@ -563,6 +628,23 @@ class Phase1DataProcessor:
                 dp_teacher_hash=dp_teacher_hash,
             )
             reject_path = store.save_reject_stats(split, reject_stats)
+
+            no_records, no_reject = non_overlap_records[split]
+            no_horizons_path = store.save_non_overlap_horizons(
+                split,
+                no_records,
+                schema_hash=schema_hash,
+                data_process_hash=data_process_hash,
+            )
+            no_teacher_path = store.save_non_overlap_dp_teacher(
+                split,
+                no_records,
+                no_reject,
+                schema_hash=schema_hash,
+                data_process_hash=data_process_hash,
+                dp_teacher_hash=dp_teacher_hash,
+            )
+
             split_payload[split] = {
                 "window_index_path": _relative_to_artifact(window_path, artifacts_dir),
                 "sampled_horizons_path": _relative_to_artifact(sampled_path, artifacts_dir),
@@ -579,6 +661,9 @@ class Phase1DataProcessor:
                 ),
                 "sample_source_counts": _sample_source_counts(records),
                 "sampling_health_warnings": build_result.sampling_health_warnings,
+                "non_overlap_horizons_path": _relative_to_artifact(no_horizons_path, artifacts_dir),
+                "non_overlap_dp_teacher_path": _relative_to_artifact(no_teacher_path, artifacts_dir),
+                "non_overlap_num_horizons": len(no_records),
             }
             if split == "train":
                 split_payload[split]["coverage_after_dp"] = train_coverage
@@ -610,19 +695,26 @@ class Phase1DataProcessor:
         self._logger.info("正在保存演示存储 train=%d val=%d test=%d",
                           len(train_horizons), len(val_horizons), len(test_horizons))
         demo_store = Phase1DemoStore(artifacts_dir, data_process_hash, schema_hash)
-        #demos 数据预处理阶段 + 训练阶段（审计用途）
         demo_store.save_demos(train_horizons, split="train")
         demo_store.save_demos(val_horizons, split="val")
         demo_store.save_demos(test_horizons, split="test")
 
+        self._logger.info("正在保存non-overlap演示存储 train=%d val=%d test=%d",
+                          len(non_overlap_train_horizons), len(non_overlap_val_horizons),
+                          len(non_overlap_test_horizons))
+        demo_store.save_non_overlap_demos(non_overlap_train_horizons, split="train")
+        demo_store.save_non_overlap_demos(non_overlap_val_horizons, split="val")
+        demo_store.save_non_overlap_demos(non_overlap_test_horizons, split="test")
+
         # 所有数据保存完成后，释放 val/test 内存（train 在函数返回后自然释放）
         self._logger.info("演示存储保存完成，释放 val/test 内存")
         del val_horizons, test_horizons
+        del non_overlap_train_horizons, non_overlap_val_horizons, non_overlap_test_horizons
         gc.collect()
 
         self._logger.info("正在写入清单文件")
         manifest = {
-            "version": 1,
+            "version": 2,
             "phase": "phase1_data_process",
             "pair": self.config.pair,
             "data_batch_id": self.config.data_batch_id,
@@ -821,6 +913,58 @@ class Phase1DataProcessor:
             labeling_mode,
             len(context.eligible_entries),
             self.config.horizon if labeling_mode == "horizon_stride" else 1,
+        )
+
+        return self._finalize_split_horizon_build(
+            split=split,
+            frame=frame,
+            schema=schema,
+            artifacts_dir=artifacts_dir,
+            context=context,
+            sampled=sampled,
+            full_time_pool_entries=[],
+            sampling_applied=False,
+            labeling_mode=labeling_mode,
+            sampling_health_warnings=[],
+        )
+
+    def _build_non_overlap_horizons_for_split(
+        self,
+        split: str,
+        frame,
+        schema,
+        artifacts_dir: Path,
+    ) -> SplitHorizonBuildResult:
+        """构建 non-overlap horizon 集合，供 Phase 2 使用。
+
+        以 horizon 为步长从 eligible 窗口中选取互不重叠的窗口，
+        保证相邻窗口的 window_start 间隔 >= horizon，无数据泄漏。
+        """
+        context = self._prepare_window_index_context(
+            split, frame, requires_sampling=False
+        )
+        non_overlap_entries = _full_time_pool_entries(
+            context.eligible_entries,
+            horizon=self.config.horizon,
+            mode="non_overlap",
+            stride=self.config.horizon,
+        )
+        non_overlap_labels = [
+            context.strata_by_start[entry.window_start]
+            for entry in non_overlap_entries
+        ]
+        sampled = _sampled_from_entries(
+            non_overlap_entries,
+            non_overlap_labels,
+            source="non_overlap",
+        )
+        labeling_mode = "non_overlap"
+        self._logger.info(
+            "non_overlap窗口选择完成 split=%s horizon窗口数=%d 分层标签数=%d 模式=%s",
+            split,
+            len(sampled),
+            len({s.strata_label for s in sampled}),
+            labeling_mode,
         )
 
         return self._finalize_split_horizon_build(

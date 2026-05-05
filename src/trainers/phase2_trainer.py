@@ -866,14 +866,27 @@ class Phase2Trainer:
 
     def _phase1_label_path(self, p1_dir: Path, split: str) -> Path:
         if split == "train" and self.config.phase1_label_source == "full_time":
-            path = p1_dir / "horizon_labels_full_time_train.feather"
+            path = p1_dir / "sampled_horizon_labels_full_time_train.feather"
+            if not path.exists():
+                legacy = p1_dir / "horizon_labels_full_time_train.feather"
+                if legacy.exists():
+                    path = legacy
             if not path.exists():
                 raise Phase2FatalError(
                     "phase1_label_source=full_time 但缺少 "
                     f"{path}; 请使用支持 full-time label export 的 Phase I 批次。"
                 )
             return path
-        return p1_dir / f"horizon_labels_{split}.feather"
+        no_path = p1_dir / f"non_overlap_horizon_labels_{split}.feather"
+        if no_path.exists():
+            return no_path
+        new_path = p1_dir / f"sampled_horizon_labels_{split}.feather"
+        if new_path.exists():
+            return new_path
+        legacy_path = p1_dir / f"horizon_labels_{split}.feather"
+        if legacy_path.exists():
+            return legacy_path
+        return new_path
 
     def _unmasked_diagnostic_probe(
         self,

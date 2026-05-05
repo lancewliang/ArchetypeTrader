@@ -448,15 +448,15 @@ def _minimal_manifest(tmp_path, *, pair: str = "TEST", create_artifacts: bool = 
     if create_artifacts:
         for name in (
             "sampled_horizons_train.feather",
-            "dp_teacher_train.feather",
+            "sampled_dp_teacher_train.feather",
             "sampled_horizons_val.feather",
-            "dp_teacher_val.feather",
+            "sampled_dp_teacher_val.feather",
             "sampled_horizons_test.feather",
-            "dp_teacher_test.feather",
+            "sampled_dp_teacher_test.feather",
         ):
             (manifest_dir / name).touch()
     payload = {
-        "version": 1,
+        "version": 2,
         "phase": "phase1_data_process",
         "pair": pair,
         "data_batch_id": "processed",
@@ -472,7 +472,7 @@ def _minimal_manifest(tmp_path, *, pair: str = "TEST", create_artifacts: bool = 
             split: {
                 "window_index_path": f"window_index_{split}.feather",
                 "sampled_horizons_path": f"sampled_horizons_{split}.feather",
-                "dp_teacher_path": f"dp_teacher_{split}.feather",
+                "dp_teacher_path": f"sampled_dp_teacher_{split}.feather",
                 "num_horizons": 0,
             }
             for split in ("train", "val", "test")

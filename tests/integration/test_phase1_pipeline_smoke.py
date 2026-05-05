@@ -149,8 +149,8 @@ def test_pipeline_smoke_writes_required_artifacts(smoke_artifacts):
         a.horizon_labels_val,
         a.horizon_labels_test,
         a.artifacts_dir / "sampled_horizons_full_time_train.feather",
-        a.artifacts_dir / "dp_teacher_full_time_train.feather",
-        a.artifacts_dir / "horizon_labels_full_time_train.feather",
+        a.artifacts_dir / "sampled_dp_teacher_full_time_train.feather",
+        a.artifacts_dir / "sampled_horizon_labels_full_time_train.feather",
         a.state_normalizer_json,
         a.best_vq_model,
         a.last_vq_model,
@@ -170,8 +170,8 @@ def test_pipeline_smoke_full_time_label_source_contract(smoke_artifacts):
 
     a = smoke_artifacts
     sampled = pl.read_ipc(a.artifacts_dir / "sampled_horizons_full_time_train.feather")
-    teacher = pl.read_ipc(a.artifacts_dir / "dp_teacher_full_time_train.feather")
-    labels = pl.read_ipc(a.artifacts_dir / "horizon_labels_full_time_train.feather")
+    teacher = pl.read_ipc(a.artifacts_dir / "sampled_dp_teacher_full_time_train.feather")
+    labels = pl.read_ipc(a.artifacts_dir / "sampled_horizon_labels_full_time_train.feather")
     train_labels = pl.read_ipc(a.horizon_labels_train)
 
     assert labels.height == sampled.height

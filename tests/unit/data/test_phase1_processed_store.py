@@ -54,7 +54,7 @@ def _manifest(tmp_path, *, schema_hash: str, data_hash: str, teacher_hash: str, 
     assert actual_schema_hash == schema_hash
     atomic_write_json(schema, tmp_path / "input_schema.json")
     payload = {
-        "version": 1,
+        "version": 2,
         "phase": "phase1_data_process",
         "pair": "TEST",
         "data_batch_id": "processed",
@@ -70,19 +70,19 @@ def _manifest(tmp_path, *, schema_hash: str, data_hash: str, teacher_hash: str, 
             "train": {
                 "window_index_path": "window_index_train.feather",
                 "sampled_horizons_path": "sampled_horizons_train.feather",
-                "dp_teacher_path": "dp_teacher_train.feather",
+                "dp_teacher_path": "sampled_dp_teacher_train.feather",
                 "num_horizons": n,
             },
             "val": {
                 "window_index_path": "window_index_val.feather",
                 "sampled_horizons_path": "sampled_horizons_train.feather",
-                "dp_teacher_path": "dp_teacher_train.feather",
+                "dp_teacher_path": "sampled_dp_teacher_train.feather",
                 "num_horizons": n,
             },
             "test": {
                 "window_index_path": "window_index_test.feather",
                 "sampled_horizons_path": "sampled_horizons_train.feather",
-                "dp_teacher_path": "dp_teacher_train.feather",
+                "dp_teacher_path": "sampled_dp_teacher_train.feather",
                 "num_horizons": n,
             },
         },
@@ -154,7 +154,7 @@ def test_processed_store_joins_teacher_by_sample_id(tmp_path):
 
 def test_processed_store_rejects_missing_teacher_sample(tmp_path):
     store, manifest = _write_valid_store(tmp_path, records=[_record("a"), _record("b")])
-    teacher = store.load_manifest(manifest).resolve("dp_teacher_train.feather")
+    teacher = store.load_manifest(manifest).resolve("sampled_dp_teacher_train.feather")
     import polars as pl
 
     frame = pl.read_ipc(teacher).filter(pl.col("sample_id") == "a")
@@ -166,7 +166,7 @@ def test_processed_store_rejects_missing_teacher_sample(tmp_path):
 
 def test_processed_store_rejects_extra_teacher_sample(tmp_path):
     store, manifest = _write_valid_store(tmp_path, records=[_record("a")])
-    teacher = store.load_manifest(manifest).resolve("dp_teacher_train.feather")
+    teacher = store.load_manifest(manifest).resolve("sampled_dp_teacher_train.feather")
     import polars as pl
 
     frame = pl.read_ipc(teacher)
@@ -233,7 +233,7 @@ def test_processed_store_loads_full_time_train_records(tmp_path):
         "sampled_horizons_full_time_train.feather"
     )
     payload["splits"]["train"]["full_time_dp_teacher_path"] = (
-        "dp_teacher_full_time_train.feather"
+        "sampled_dp_teacher_full_time_train.feather"
     )
     payload["splits"]["train"]["full_time_num_horizons"] = 1
     atomic_write_json(payload, manifest)

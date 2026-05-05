@@ -56,7 +56,7 @@ class Phase1DemoStore:
     # ---------- demos ----------
 
     def save_demos(self, demos: List[HorizonRecord], split: str = "train") -> Path:
-        """写 ``demos_{split}.feather``，包含 ``states / prices / actions / rewards / meta``。
+        """写 ``sampled_demos_{split}.feather``，包含 ``states / prices / actions / rewards / meta``。
 
         实现要点
         --------
@@ -94,11 +94,45 @@ class Phase1DemoStore:
                 }
             )
         frame = pl.DataFrame(rows)
-        target = self.artifacts_dir / f"demos_{split}.feather"
+        target = self.artifacts_dir / f"sampled_demos_{split}.feather"
         return feather_io.write_ipc(frame, target)
 
-    def load_demos(self, path: Optional[Path] = None) -> List[HorizonRecord]:
-        """读取 ``demos_train.feather`` 并校验 hash 一致。
+    def save_non_overlap_demos(self, demos: List[HorizonRecord], split: str) -> Path:
+        import polars as pl
+
+        rows = []
+        for d in demos:
+            rows.append(
+                {
+                    "sample_id": d.sample_id,
+                    "pair": d.pair,
+                    "split": d.split,
+                    "start_index": d.start_index,
+                    "end_index": d.end_index,
+                    "last_execution_row": d.last_execution_row,
+                    "last_markout_row": d.last_markout_row,
+                    "strata_label": d.strata_label,
+                    "sample_source": d.sample_source,
+                    "is_augmented": d.is_augmented,
+                    "augmentation_type": d.augmentation_type,
+                    "states": d.states,
+                    "prices": d.prices,
+                    "execution_books": json.dumps(
+                        [_execution_book_to_dict(book) for book in d.execution_books],
+                        separators=(",", ":"),
+                    ),
+                    "actions": d.actions if d.actions is not None else [],
+                    "rewards": d.rewards if d.rewards is not None else [],
+                    "_config_hash": self.config_hash,
+                    "_schema_hash": self.schema_hash,
+                }
+            )
+        frame = pl.DataFrame(rows)
+        target = self.artifacts_dir / f"non_overlap_demos_{split}.feather"
+        return feather_io.write_ipc(frame, target)
+
+    def load_demos(self, path: Optional[Path] = None, *, split: Optional[str] = None) -> List[HorizonRecord]:
+        """读取 ``sampled_demos_{split}.feather`` 并校验 hash 一致。
 
         Raises
         ------
@@ -109,7 +143,20 @@ class Phase1DemoStore:
         -----
         反序列化时会还原 ``execution_books``，保证 cache 可用于 replay / failure case。
         """
-        target = Path(path) if path else self.artifacts_dir / "demos_train.feather"
+        if path is not None:
+            target = Path(path)
+        elif split is not None:
+            target = self.artifacts_dir / f"sampled_demos_{split}.feather"
+            if not target.exists():
+                legacy = self.artifacts_dir / f"demos_{split}.feather"
+                if legacy.exists():
+                    target = legacy
+        else:
+            target = self.artifacts_dir / "sampled_demos_train.feather"
+            if not target.exists():
+                legacy = self.artifacts_dir / "demos_train.feather"
+                if legacy.exists():
+                    target = legacy
         frame = feather_io.read_ipc(target)
         if frame.height == 0:
             return []
@@ -159,16 +206,30 @@ class Phase1DemoStore:
         import polars as pl
 
         rows = [asdict(lab) for lab in labels]
-        # 添加 hash 字段便于审计
         for r in rows:
             r["_config_hash"] = self.config_hash
             r["_schema_hash"] = self.schema_hash
         frame = pl.DataFrame(rows)
-        target = self.artifacts_dir / f"horizon_labels_{split}.feather"
+        target = self.artifacts_dir / f"sampled_horizon_labels_{split}.feather"
+        return feather_io.write_ipc(frame, target)
+
+    def save_non_overlap_labels(self, labels: List[HorizonLabel], split: str) -> Path:
+        import polars as pl
+
+        rows = [asdict(lab) for lab in labels]
+        for r in rows:
+            r["_config_hash"] = self.config_hash
+            r["_schema_hash"] = self.schema_hash
+        frame = pl.DataFrame(rows)
+        target = self.artifacts_dir / f"non_overlap_horizon_labels_{split}.feather"
         return feather_io.write_ipc(frame, target)
 
     def load_labels(self, split: str) -> List[HorizonLabel]:
-        target = self.artifacts_dir / f"horizon_labels_{split}.feather"
+        target = self.artifacts_dir / f"sampled_horizon_labels_{split}.feather"
+        if not target.exists():
+            legacy = self.artifacts_dir / f"horizon_labels_{split}.feather"
+            if legacy.exists():
+                target = legacy
         frame = feather_io.read_ipc(target)
         out: List[HorizonLabel] = []
         for row in frame.iter_rows(named=True):

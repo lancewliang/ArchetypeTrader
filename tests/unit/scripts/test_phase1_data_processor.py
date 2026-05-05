@@ -137,7 +137,7 @@ def test_phase1_data_processor_records_train_sample_source(tmp_path):
         "sampled_horizons_full_time_train.feather"
     )
     assert split_payload["full_time_dp_teacher_path"] == (
-        "dp_teacher_full_time_train.feather"
+        "sampled_dp_teacher_full_time_train.feather"
     )
     full_time_sampled = pl.read_ipc(
         manifest_path.parent / split_payload["full_time_sampled_horizons_path"]

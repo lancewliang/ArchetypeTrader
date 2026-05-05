@@ -6,9 +6,9 @@
 artifacts/TEST/smoke_phase1/phase1/
   decoder.pt
   codebook.pt
-  horizon_labels_train.feather
-  horizon_labels_val.feather
-  horizon_labels_test.feather
+  sampled_horizon_labels_train.feather
+  sampled_horizon_labels_val.feather
+  sampled_horizon_labels_test.feather
   input_schema.json
   reward_normalizer.json
   feature_provenance.json
@@ -63,7 +63,7 @@ def generate_smoke_phase1_artifacts(output_dir: Path) -> None:
             "start_index": [i * horizon for i in range(n)],
             "code_label": [i % num_codes for i in range(n)],
         })
-        df.write_ipc(output_dir / f"horizon_labels_{split}.feather")
+        df.write_ipc(output_dir / f"sampled_horizon_labels_{split}.feather")
 
     # 5. input_schema.json
     schema = {

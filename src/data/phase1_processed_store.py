@@ -44,6 +44,9 @@ class Phase1SplitArtifact:
     full_time_sampled_horizons_path: str = ""
     full_time_dp_teacher_path: str = ""
     full_time_num_horizons: int = 0
+    non_overlap_horizons_path: str = ""
+    non_overlap_dp_teacher_path: str = ""
+    non_overlap_num_horizons: int = 0
 
     @classmethod
     def from_dict(cls, split: str, payload: Mapping[str, Any]) -> "Phase1SplitArtifact":
@@ -69,6 +72,13 @@ class Phase1SplitArtifact:
                 payload.get("full_time_dp_teacher_path", "")
             ),
             full_time_num_horizons=int(payload.get("full_time_num_horizons", 0)),
+            non_overlap_horizons_path=str(
+                payload.get("non_overlap_horizons_path", "")
+            ),
+            non_overlap_dp_teacher_path=str(
+                payload.get("non_overlap_dp_teacher_path", "")
+            ),
+            non_overlap_num_horizons=int(payload.get("non_overlap_num_horizons", 0)),
         )
 
     def to_dict(self) -> dict:
@@ -102,6 +112,12 @@ class Phase1SplitArtifact:
             payload["full_time_dp_teacher_path"] = self.full_time_dp_teacher_path
         if self.full_time_num_horizons:
             payload["full_time_num_horizons"] = self.full_time_num_horizons
+        if self.non_overlap_horizons_path:
+            payload["non_overlap_horizons_path"] = self.non_overlap_horizons_path
+        if self.non_overlap_dp_teacher_path:
+            payload["non_overlap_dp_teacher_path"] = self.non_overlap_dp_teacher_path
+        if self.non_overlap_num_horizons:
+            payload["non_overlap_num_horizons"] = self.non_overlap_num_horizons
         return payload
 
 
@@ -282,7 +298,7 @@ class Phase1ProcessedStore:
                 }
             )
         return feather_io.write_ipc(
-            pl.DataFrame(rows), self.artifact_dir / f"dp_teacher_{split}.feather"
+            pl.DataFrame(rows), self.artifact_dir / f"sampled_dp_teacher_{split}.feather"
         )
 
     def save_reject_stats(self, split: str, reject_stats: RejectStats) -> Path:
@@ -294,6 +310,92 @@ class Phase1ProcessedStore:
             "reject_by_action_pair": dict(reject_stats.reject_by_action_pair),
         }
         return atomic_write_json(payload, self.artifact_dir / f"reject_stats_{split}.json")
+
+    def save_non_overlap_horizons(
+        self,
+        split: str,
+        records: Sequence[HorizonRecord],
+        *,
+        schema_hash: str,
+        data_process_hash: str,
+    ) -> Path:
+        import polars as pl
+
+        rows = []
+        for rec in records:
+            rows.append(
+                {
+                    "sample_id": rec.sample_id,
+                    "pair": rec.pair,
+                    "split": rec.split,
+                    "start_index": rec.start_index,
+                    "end_index": rec.end_index,
+                    "last_execution_row": rec.last_execution_row,
+                    "last_markout_row": rec.last_markout_row,
+                    "strata_label": rec.strata_label,
+                    "sample_source": rec.sample_source,
+                    "states": rec.states,
+                    "prices": rec.prices,
+                    "execution_books": json.dumps(
+                        [_execution_book_to_dict(book) for book in rec.execution_books],
+                        separators=(",", ":"),
+                    ),
+                    "is_augmented": rec.is_augmented,
+                    "augmentation_type": rec.augmentation_type,
+                    "_schema_hash": schema_hash,
+                    "_data_process_hash": data_process_hash,
+                }
+            )
+        return feather_io.write_ipc(
+            pl.DataFrame(rows), self.artifact_dir / f"non_overlap_horizons_{split}.feather"
+        )
+
+    def save_non_overlap_dp_teacher(
+        self,
+        split: str,
+        records: Sequence[HorizonRecord],
+        reject_stats: RejectStats,
+        *,
+        schema_hash: str,
+        data_process_hash: str,
+        dp_teacher_hash: str,
+    ) -> Path:
+        import polars as pl
+
+        rows = []
+        counts = list(reject_stats.per_horizon_reject_count or [])
+        rates = list(reject_stats.per_horizon_reject_rate or [])
+        for idx, rec in enumerate(records):
+            actions = list(rec.actions or [])
+            rewards = list(rec.rewards or [])
+            switch_seq = actions[:-1] if len(actions) > 1 else actions
+            rows.append(
+                {
+                    "sample_id": rec.sample_id,
+                    "pair": rec.pair,
+                    "split": rec.split,
+                    "sample_source": rec.sample_source,
+                    "actions": actions,
+                    "rewards": rewards,
+                    "teacher_return": float(sum(rewards)),
+                    "num_switches": int(
+                        sum(
+                            1
+                            for pos in range(1, len(switch_seq))
+                            if switch_seq[pos] != switch_seq[pos - 1]
+                        )
+                    ),
+                    "is_no_trade": bool(actions and all(a == 1 for a in actions)),
+                    "reject_transition_count": int(counts[idx]) if idx < len(counts) else 0,
+                    "reject_transition_rate": float(rates[idx]) if idx < len(rates) else 0.0,
+                    "_schema_hash": schema_hash,
+                    "_data_process_hash": data_process_hash,
+                    "_dp_teacher_hash": dp_teacher_hash,
+                }
+            )
+        return feather_io.write_ipc(
+            pl.DataFrame(rows), self.artifact_dir / f"non_overlap_dp_teacher_{split}.feather"
+        )
 
     def write_manifest(self, payload: Mapping[str, Any]) -> Path:
         return atomic_write_json(dict(payload), self.artifact_dir / "data_process_manifest.json")
@@ -308,7 +410,7 @@ class Phase1ProcessedStore:
         return loaded
 
     def validate_manifest(self, manifest: Phase1DataProcessManifest) -> None:
-        if manifest.version != 1:
+        if manifest.version not in (1, 2):
             raise Phase1ProcessedStoreError(f"unsupported manifest version: {manifest.version}")
         if manifest.phase != "phase1_data_process":
             raise Phase1ProcessedStoreError(f"unexpected manifest phase: {manifest.phase}")
@@ -347,7 +449,12 @@ class Phase1ProcessedStore:
                 worst_reject_horizons=list(payload.get("worst_reject_horizons", [])),
                 reject_by_action_pair=dict(payload.get("reject_by_action_pair", {})),
             )
-        teacher = feather_io.read_ipc(manifest_obj.resolve(artifact.dp_teacher_path))
+        teacher_path = manifest_obj.resolve(artifact.dp_teacher_path)
+        if not teacher_path.exists():
+            fallback = teacher_path.parent / f"sampled_dp_teacher_{split}.feather"
+            if fallback.exists():
+                teacher_path = fallback
+        teacher = feather_io.read_ipc(teacher_path)
         rates = [float(v) for v in teacher.get_column("reject_transition_rate").to_list()]
         counts = [int(v) for v in teacher.get_column("reject_transition_count").to_list()]
         return RejectStats(
@@ -407,6 +514,44 @@ class Phase1ProcessedStore:
             raise Phase1ProcessedStoreError(
                 "train full_time_num_horizons mismatch: "
                 f"manifest={artifact.full_time_num_horizons} actual={len(records)}"
+            )
+        return records
+
+    def load_non_overlap_records(
+        self, manifest: Path | str | Phase1DataProcessManifest, split: str
+    ) -> List[HorizonRecord]:
+        manifest_obj = self.load_manifest(manifest)
+        if split not in manifest_obj.splits:
+            raise Phase1ProcessedStoreError(f"manifest does not contain split={split}")
+        artifact = manifest_obj.splits[split]
+        manifest_label = str(manifest_obj.manifest_path or manifest_obj.base_dir)
+        if not artifact.non_overlap_horizons_path:
+            raise Phase1ProcessedStoreError(
+                f"manifest {split} split missing non_overlap_horizons_path: "
+                f"{manifest_label}"
+            )
+        if not artifact.non_overlap_dp_teacher_path:
+            raise Phase1ProcessedStoreError(
+                f"manifest {split} split missing non_overlap_dp_teacher_path: "
+                f"{manifest_label}"
+            )
+        sampled_path = manifest_obj.resolve(artifact.non_overlap_horizons_path)
+        teacher_path = manifest_obj.resolve(artifact.non_overlap_dp_teacher_path)
+        if not sampled_path.exists():
+            raise FileNotFoundError(f"processed artifact missing: {sampled_path}")
+        if not teacher_path.exists():
+            raise FileNotFoundError(f"processed artifact missing: {teacher_path}")
+        sampled = self._load_sampled_horizons_from_path(
+            manifest_obj, split, sampled_path
+        )
+        teacher_rows = self._load_teacher_rows_from_path(
+            manifest_obj, split, teacher_path
+        )
+        records = self.join_horizons_with_teacher(sampled, teacher_rows)
+        if len(records) != artifact.non_overlap_num_horizons:
+            raise Phase1ProcessedStoreError(
+                f"{split} non_overlap_num_horizons mismatch: "
+                f"manifest={artifact.non_overlap_num_horizons} actual={len(records)}"
             )
         return records
 
@@ -500,6 +645,10 @@ class Phase1ProcessedStore:
         artifact: Phase1SplitArtifact,
     ) -> Dict[str, Mapping[str, Any]]:
         path = manifest.resolve(artifact.dp_teacher_path)
+        if not path.exists():
+            fallback = path.parent / f"sampled_dp_teacher_{split}.feather"
+            if fallback.exists():
+                path = fallback
         return self._load_teacher_rows_from_path(manifest, split, path)
 
     def _load_teacher_rows_from_path(
