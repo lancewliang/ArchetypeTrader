@@ -394,6 +394,44 @@ class Phase1DataProcessor:
         )
         _log_reward_distribution(self._logger, train_horizons, "train")
 
+        full_time_train_horizons: List[Any] = []
+        full_time_train_reject: RejectStats | None = None
+        if self.config.time_distribution_sampling.enabled:
+            full_time_labels = [
+                train_result.strata_by_start[entry.window_start]
+                for entry in train_result.full_time_pool_entries
+            ]
+            full_time_sampled = _sampled_from_entries(
+                train_result.full_time_pool_entries,
+                full_time_labels,
+                source="full_time",
+            )
+            full_time_builder = HorizonBuilder(
+                self.config.horizon,
+                schema,
+                self.config.dp.cost_config.reward_alignment,
+            )
+            full_time_train_horizons = full_time_builder.build(
+                frames["train"],
+                full_time_sampled,
+                pair=self.config.pair,
+                split="train",
+            )
+            self._logger.info(
+                "正在生成full-time train演示样本 num_horizons=%d dp_workers=%s chunksize=%d",
+                len(full_time_train_horizons),
+                self.config.dp_workers,
+                self.config.dp_worker_chunksize,
+            )
+            full_time_train_horizons, full_time_train_reject = _generate_demos(
+                self.config, full_time_train_horizons
+            )
+            self._logger.info(
+                "full-time train演示样本生成完成 接受=%d 拒绝率=%.4f",
+                len(full_time_train_horizons),
+                full_time_train_reject.dataset_reject_rate,
+            )
+
         # 释放 train_frame 内存（后续不再需要）
         del frames["train"]
         gc.collect()
@@ -544,6 +582,30 @@ class Phase1DataProcessor:
             }
             if split == "train":
                 split_payload[split]["coverage_after_dp"] = train_coverage
+                if full_time_train_reject is not None:
+                    full_time_sampled_path = store.save_sampled_horizons(
+                        "full_time_train",
+                        full_time_train_horizons,
+                        schema_hash=schema_hash,
+                        data_process_hash=data_process_hash,
+                    )
+                    full_time_teacher_path = store.save_dp_teacher(
+                        "full_time_train",
+                        full_time_train_horizons,
+                        full_time_train_reject,
+                        schema_hash=schema_hash,
+                        data_process_hash=data_process_hash,
+                        dp_teacher_hash=dp_teacher_hash,
+                    )
+                    split_payload[split]["full_time_sampled_horizons_path"] = (
+                        _relative_to_artifact(full_time_sampled_path, artifacts_dir)
+                    )
+                    split_payload[split]["full_time_dp_teacher_path"] = (
+                        _relative_to_artifact(full_time_teacher_path, artifacts_dir)
+                    )
+                    split_payload[split]["full_time_num_horizons"] = len(
+                        full_time_train_horizons
+                    )
 
         self._logger.info("正在保存演示存储 train=%d val=%d test=%d",
                           len(train_horizons), len(val_horizons), len(test_horizons))

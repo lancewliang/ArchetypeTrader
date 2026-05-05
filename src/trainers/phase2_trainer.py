@@ -704,6 +704,14 @@ class Phase2Trainer:
             "test_loaded_in_training": False,
             "training_splits": ["train", "val"],
             "backtest_required_for_test_metrics": True,
+            "phase1_label_source": self.config.phase1_label_source,
+            "phase1_train_label_path": str(train_label_path),
+            "phase1_train_label_count": (
+                int(getattr(train_labels, "height", 0))
+                if train_labels is not None
+                else 0
+            ),
+            "phase1_label_coverage_on_phase2_index": train_coverage.coverage_ratio,
             "kl_label_coverage_train": train_coverage.coverage_ratio,
             "kl_label_temporal_coverage": train_coverage.temporal_coverage_sequence,
             "equity_curve_summary": val_metrics.get("equity_curve_summary", {}),

@@ -41,6 +41,9 @@ class Phase1SplitArtifact:
     sample_source_counts: Dict[str, int] = field(default_factory=dict)
     sampling_health_warnings: List[str] = field(default_factory=list)
     coverage_after_dp: Dict[str, Any] = field(default_factory=dict)
+    full_time_sampled_horizons_path: str = ""
+    full_time_dp_teacher_path: str = ""
+    full_time_num_horizons: int = 0
 
     @classmethod
     def from_dict(cls, split: str, payload: Mapping[str, Any]) -> "Phase1SplitArtifact":
@@ -59,6 +62,13 @@ class Phase1SplitArtifact:
             sample_source_counts=dict(payload.get("sample_source_counts", {})),
             sampling_health_warnings=list(payload.get("sampling_health_warnings", [])),
             coverage_after_dp=dict(payload.get("coverage_after_dp", {})),
+            full_time_sampled_horizons_path=str(
+                payload.get("full_time_sampled_horizons_path", "")
+            ),
+            full_time_dp_teacher_path=str(
+                payload.get("full_time_dp_teacher_path", "")
+            ),
+            full_time_num_horizons=int(payload.get("full_time_num_horizons", 0)),
         )
 
     def to_dict(self) -> dict:
@@ -84,6 +94,14 @@ class Phase1SplitArtifact:
             payload["sampling_health_warnings"] = self.sampling_health_warnings
         if self.coverage_after_dp:
             payload["coverage_after_dp"] = self.coverage_after_dp
+        if self.full_time_sampled_horizons_path:
+            payload["full_time_sampled_horizons_path"] = (
+                self.full_time_sampled_horizons_path
+            )
+        if self.full_time_dp_teacher_path:
+            payload["full_time_dp_teacher_path"] = self.full_time_dp_teacher_path
+        if self.full_time_num_horizons:
+            payload["full_time_num_horizons"] = self.full_time_num_horizons
         return payload
 
 
@@ -354,6 +372,44 @@ class Phase1ProcessedStore:
             )
         return records
 
+    def load_full_time_train_records(
+        self, manifest: Path | str | Phase1DataProcessManifest
+    ) -> List[HorizonRecord]:
+        manifest_obj = self.load_manifest(manifest)
+        if "train" not in manifest_obj.splits:
+            raise Phase1ProcessedStoreError("manifest does not contain split=train")
+        artifact = manifest_obj.splits["train"]
+        manifest_label = str(manifest_obj.manifest_path or manifest_obj.base_dir)
+        if not artifact.full_time_sampled_horizons_path:
+            raise Phase1ProcessedStoreError(
+                "manifest train split missing full_time_sampled_horizons_path: "
+                f"{manifest_label}"
+            )
+        if not artifact.full_time_dp_teacher_path:
+            raise Phase1ProcessedStoreError(
+                "manifest train split missing full_time_dp_teacher_path: "
+                f"{manifest_label}"
+            )
+        sampled_path = manifest_obj.resolve(artifact.full_time_sampled_horizons_path)
+        teacher_path = manifest_obj.resolve(artifact.full_time_dp_teacher_path)
+        if not sampled_path.exists():
+            raise FileNotFoundError(f"processed artifact missing: {sampled_path}")
+        if not teacher_path.exists():
+            raise FileNotFoundError(f"processed artifact missing: {teacher_path}")
+        sampled = self._load_sampled_horizons_from_path(
+            manifest_obj, "train", sampled_path
+        )
+        teacher_rows = self._load_teacher_rows_from_path(
+            manifest_obj, "train", teacher_path
+        )
+        records = self.join_horizons_with_teacher(sampled, teacher_rows)
+        if len(records) != artifact.full_time_num_horizons:
+            raise Phase1ProcessedStoreError(
+                "train full_time_num_horizons mismatch: "
+                f"manifest={artifact.full_time_num_horizons} actual={len(records)}"
+            )
+        return records
+
     def join_horizons_with_teacher(
         self,
         sampled: Sequence[HorizonRecord],
@@ -397,6 +453,14 @@ class Phase1ProcessedStore:
         artifact: Phase1SplitArtifact,
     ) -> List[HorizonRecord]:
         path = manifest.resolve(artifact.sampled_horizons_path)
+        return self._load_sampled_horizons_from_path(manifest, split, path)
+
+    def _load_sampled_horizons_from_path(
+        self,
+        manifest: Phase1DataProcessManifest,
+        split: str,
+        path: Path,
+    ) -> List[HorizonRecord]:
         frame = feather_io.read_ipc(path)
         self._validate_unique(frame, "sampled_horizons", path)
         self._validate_column_value(frame, "pair", manifest.pair, path)
@@ -436,6 +500,14 @@ class Phase1ProcessedStore:
         artifact: Phase1SplitArtifact,
     ) -> Dict[str, Mapping[str, Any]]:
         path = manifest.resolve(artifact.dp_teacher_path)
+        return self._load_teacher_rows_from_path(manifest, split, path)
+
+    def _load_teacher_rows_from_path(
+        self,
+        manifest: Phase1DataProcessManifest,
+        split: str,
+        path: Path,
+    ) -> Dict[str, Mapping[str, Any]]:
         frame = feather_io.read_ipc(path)
         self._validate_unique(frame, "dp_teacher", path)
         self._validate_column_value(frame, "pair", manifest.pair, path)

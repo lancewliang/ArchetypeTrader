@@ -148,6 +148,8 @@ def test_pipeline_smoke_writes_required_artifacts(smoke_artifacts):
         a.horizon_labels_train,
         a.horizon_labels_val,
         a.horizon_labels_test,
+        a.artifacts_dir / "sampled_horizons_full_time_train.feather",
+        a.artifacts_dir / "dp_teacher_full_time_train.feather",
         a.artifacts_dir / "horizon_labels_full_time_train.feather",
         a.state_normalizer_json,
         a.best_vq_model,
@@ -161,6 +163,23 @@ def test_pipeline_smoke_writes_required_artifacts(smoke_artifacts):
         a.sampling_leakage_diagnostics_json,
     ]:
         assert path.exists(), f"missing artifact: {path}"
+
+
+def test_pipeline_smoke_full_time_label_source_contract(smoke_artifacts):
+    import polars as pl
+
+    a = smoke_artifacts
+    sampled = pl.read_ipc(a.artifacts_dir / "sampled_horizons_full_time_train.feather")
+    teacher = pl.read_ipc(a.artifacts_dir / "dp_teacher_full_time_train.feather")
+    labels = pl.read_ipc(a.artifacts_dir / "horizon_labels_full_time_train.feather")
+    train_labels = pl.read_ipc(a.horizon_labels_train)
+
+    assert labels.height == sampled.height
+    assert teacher.height == sampled.height
+    assert set(labels["sample_id"].to_list()) == set(sampled["sample_id"].to_list())
+    assert set(teacher["sample_id"].to_list()) == set(sampled["sample_id"].to_list())
+    assert set(sampled["sample_source"].to_list()) == {"full_time"}
+    assert train_labels.height != 0
 
 
 def test_phase1_report_required_keys(smoke_artifacts):

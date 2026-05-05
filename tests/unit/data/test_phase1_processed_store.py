@@ -201,3 +201,54 @@ def test_processed_store_rejects_action_reward_length_mismatch(tmp_path):
 
     with pytest.raises(Phase1ProcessedStoreError, match="length mismatch"):
         store.load_records(manifest, "train")
+
+
+def test_processed_store_loads_full_time_train_records(tmp_path):
+    store, manifest = _write_valid_store(tmp_path, records=[_record("a")])
+    full_time_records = [_record("ft_a")]
+    full_time_records[0].sample_source = "full_time"
+    schema_hash = store.load_manifest(manifest).schema_hash
+    data_hash = "datahash"
+    teacher_hash = "teacherhash"
+    store.save_sampled_horizons(
+        "full_time_train",
+        full_time_records,
+        schema_hash=schema_hash,
+        data_process_hash=data_hash,
+    )
+    store.save_dp_teacher(
+        "full_time_train",
+        full_time_records,
+        RejectStats(
+            dataset_reject_rate=0.0,
+            per_horizon_reject_count=[0],
+            per_horizon_reject_rate=[0.0],
+        ),
+        schema_hash=schema_hash,
+        data_process_hash=data_hash,
+        dp_teacher_hash=teacher_hash,
+    )
+    payload = read_json(manifest)
+    payload["splits"]["train"]["full_time_sampled_horizons_path"] = (
+        "sampled_horizons_full_time_train.feather"
+    )
+    payload["splits"]["train"]["full_time_dp_teacher_path"] = (
+        "dp_teacher_full_time_train.feather"
+    )
+    payload["splits"]["train"]["full_time_num_horizons"] = 1
+    atomic_write_json(payload, manifest)
+
+    loaded = store.load_full_time_train_records(manifest)
+
+    assert [rec.sample_id for rec in loaded] == ["ft_a"]
+    assert loaded[0].split == "train"
+    assert loaded[0].sample_source == "full_time"
+
+
+def test_processed_store_rejects_missing_full_time_manifest_fields(tmp_path):
+    store, manifest = _write_valid_store(tmp_path)
+
+    with pytest.raises(
+        Phase1ProcessedStoreError, match="full_time_sampled_horizons_path"
+    ):
+        store.load_full_time_train_records(manifest)

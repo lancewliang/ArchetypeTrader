@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -254,6 +255,23 @@ class Phase1Trainer:
         train_horizons = processed_store.load_records(manifest, "train")
         val_horizons = processed_store.load_records(manifest, "val")
         test_horizons = processed_store.load_records(manifest, "test")
+        train_artifact = manifest.splits["train"]
+        full_time_train_horizons = []
+        if (
+            train_artifact.full_time_sampled_horizons_path
+            or train_artifact.full_time_dp_teacher_path
+        ):
+            full_time_train_horizons = processed_store.load_full_time_train_records(
+                manifest
+            )
+            for source_ref in (
+                train_artifact.full_time_sampled_horizons_path,
+                train_artifact.full_time_dp_teacher_path,
+            ):
+                source_path = manifest.resolve(source_ref)
+                target_path = artifacts_dir / source_path.name
+                if source_path.exists() and source_path.resolve() != target_path.resolve():
+                    shutil.copy2(source_path, target_path)
         reject_stats = processed_store.load_reject_stats(manifest, "train")
         train_window_path = manifest.resolve(
             manifest.splits["train"].window_index_path
@@ -280,6 +298,11 @@ class Phase1Trainer:
             manifest.data_process_hash,
             manifest.dp_teacher_hash,
         )
+        if full_time_train_horizons:
+            self._logger.info(
+                "phase1_full_time_train_records_loaded 说明=已加载独立full-time train标签来源 count=%d source=independent_artifact",
+                len(full_time_train_horizons),
+            )
 
         state_norm = StateNormalizer.fit_records(
             train_horizons,
@@ -291,6 +314,8 @@ class Phase1Trainer:
         state_train_diag = state_norm.transform_records(train_horizons)
         state_val_diag = state_norm.transform_records(val_horizons)
         state_test_diag = state_norm.transform_records(test_horizons)
+        if full_time_train_horizons:
+            state_norm.transform_records(full_time_train_horizons)
         self._logger.info(
             "phase1_state_normalizer_fit 说明=状态特征归一化器已用训练集拟合 path=%s method=%s feature_dim=%d clip=%.2f train_max_abs_before=%.6e train_max_abs_after=%.6e val_max_abs_before=%.6e val_max_abs_after=%.6e test_max_abs_before=%.6e test_max_abs_after=%.6e log_transform_columns=%d fallback_to_standard_count=%d",
             state_norm_path,
@@ -409,11 +434,6 @@ class Phase1Trainer:
             "val": val_horizons,
             "test": test_horizons,
         }
-        full_time_train_horizons = [
-            rec
-            for rec in train_horizons
-            if rec.sample_source in {"full_time", "both"}
-        ]
         if full_time_train_horizons:
             horizon_label_inputs["full_time_train"] = full_time_train_horizons
         labels_paths = self._export_horizon_labels(
@@ -423,11 +443,12 @@ class Phase1Trainer:
             normalizer=norm,
         )
         self._logger.info(
-            "phase1_horizon_labels_exported 说明=各 split 的 horizon code label 已导出 train=%s val=%s test=%s full_time_train=%s",
+            "phase1_horizon_labels_exported 说明=各 split 的 horizon code label 已导出 train=%s val=%s test=%s full_time_train=%s full_time_label_source=%s",
             labels_paths["train"],
             labels_paths["val"],
             labels_paths["test"],
             labels_paths.get("full_time_train", ""),
+            "independent_artifact" if full_time_train_horizons else "none",
         )
 
         # 10. 导出 Phase II/III 产物
@@ -1474,13 +1495,25 @@ class Phase1Trainer:
             source_counts.get("both", 0)
         )
         coverage_after_dp = dict(train_split.get("coverage_after_dp", {}))
+        full_time_label_count = int(train_split.get("full_time_num_horizons", 0) or 0)
+        full_time_label_pool_count = full_time_label_count
         summary["full_time_training_enabled"] = full_time_count > 0
         summary["full_time_sample_ratio"] = full_time_count / train_count
         summary["opportunity_sample_ratio"] = opportunity_count / train_count
         summary["low_opportunity_ratio"] = float(
             coverage_after_dp.get("final_low_opportunity_ratio", 0.0)
         )
-        summary["full_time_label_coverage_train"] = summary["full_time_sample_ratio"]
+        summary["full_time_label_count_train"] = full_time_label_count
+        summary["full_time_label_pool_count_train"] = full_time_label_pool_count
+        summary["full_time_label_source_train"] = (
+            "independent_artifact" if full_time_label_count else "none"
+        )
+        summary["full_time_label_source_path_train"] = train_split.get(
+            "full_time_sampled_horizons_path", ""
+        )
+        summary["full_time_label_coverage_train"] = (
+            full_time_label_count / max(full_time_label_pool_count, 1)
+        )
         summary["label_coverage_val"] = _label_coverage_from_manifest_split(val_split)
         summary["label_coverage_test"] = _label_coverage_from_manifest_split(test_split)
         summary["reward_normalization_resolved"] = norm_dict.get("method", "")

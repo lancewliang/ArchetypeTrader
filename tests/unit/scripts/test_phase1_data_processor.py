@@ -133,6 +133,24 @@ def test_phase1_data_processor_records_train_sample_source(tmp_path):
     assert "full_time" in set(sampled["sample_source"].to_list())
     assert split_payload["sample_source_counts"]["full_time"] >= 1
     assert "coverage_after_dp" in split_payload
+    assert split_payload["full_time_sampled_horizons_path"] == (
+        "sampled_horizons_full_time_train.feather"
+    )
+    assert split_payload["full_time_dp_teacher_path"] == (
+        "dp_teacher_full_time_train.feather"
+    )
+    full_time_sampled = pl.read_ipc(
+        manifest_path.parent / split_payload["full_time_sampled_horizons_path"]
+    )
+    full_time_teacher = pl.read_ipc(
+        manifest_path.parent / split_payload["full_time_dp_teacher_path"]
+    )
+    assert full_time_sampled.height == split_payload["full_time_num_horizons"]
+    assert full_time_teacher.height == split_payload["full_time_num_horizons"]
+    assert set(full_time_sampled["sample_source"].to_list()) == {"full_time"}
+    assert set(full_time_sampled["sample_id"].to_list()) == set(
+        full_time_teacher["sample_id"].to_list()
+    )
 
 
 def test_phase1_data_processor_preserves_deterministic_sample_ids(tmp_path):
