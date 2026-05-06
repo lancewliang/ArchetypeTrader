@@ -147,17 +147,21 @@ def test_train_loop_runs_phase_a_baseline_before_phase_b_validation(tmp_path):
             stability_measured = len(self.calls) > 1
             metrics = {
                 "code_usage_ratio": 1.0,
-                "val_max_drawdown": 0.01,
-                "val_sharpe_ratio": 1.0,
+                "teacher_val_max_drawdown": 0.01,
+                "teacher_val_sharpe_ratio": 1.0,
                 "inter_code_action_diversity": 1.0,
                 "decoder_sensitivity_to_code": 1.0,
                 "epoch_code_stability_measured": stability_measured,
                 "epoch_code_stability": 0.9,
-                "val_dp_teacher_profitable_ratio": 1.0,
-                "switch_point_recall": 1.0,
-                "switch_direction_accuracy": 1.0,
-                "val_weighted_reconstruction_accuracy": 1.0,
-                "val_return_capture_ratio": 1.0,
+                "teacher_val_dp_teacher_profitable_ratio": 1.0,
+                "teacher_val_switch_point_recall": 1.0,
+                "teacher_val_switch_direction_accuracy": 1.0,
+                "teacher_val_weighted_reconstruction_accuracy": 1.0,
+                "teacher_val_return_capture_ratio": 1.0,
+                "online_validation_measured": True,
+                "online_val_return_capture_ratio": 1.0,
+                "online_val_sharpe_ratio": 1.0,
+                "online_val_max_drawdown": 0.01,
             }
             return EpochMetrics(
                 epoch=epoch,
@@ -346,9 +350,9 @@ def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):
     (diag_dir / "phase1_report.json").write_text(
         json.dumps(
             {
-                "val_return_capture_ratio": 0.10,
-                "val_sharpe_ratio": 0.20,
-                "val_max_drawdown": 0.05,
+                "teacher_val_return_capture_ratio": 0.10,
+                "teacher_val_sharpe_ratio": 0.20,
+                "teacher_val_max_drawdown": 0.05,
                 "code_usage_ratio": 0.80,
             }
         ),
@@ -360,9 +364,9 @@ def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):
             mode="hindsight_horizon",
             diagnostic_pair_batch_id="prospective",
             hindsight_vs_prospective_max_delta={
-                "val_return_capture_ratio": 0.20,
-                "val_sharpe_ratio": 0.50,
-                "val_max_drawdown": 0.10,
+                "teacher_val_return_capture_ratio": 0.20,
+                "teacher_val_sharpe_ratio": 0.50,
+                "teacher_val_max_drawdown": 0.10,
                 "code_usage_ratio": 0.10,
             },
         ),
@@ -370,14 +374,14 @@ def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):
     trainer = Phase1Trainer(config)
     payload = trainer._build_sampling_leakage_diagnostics(
         {
-            "val_return_capture_ratio": 0.50,
-            "val_sharpe_ratio": 0.20,
-            "val_max_drawdown": 0.05,
+            "teacher_val_return_capture_ratio": 0.50,
+            "teacher_val_sharpe_ratio": 0.20,
+            "teacher_val_max_drawdown": 0.05,
             "code_usage_ratio": 0.80,
         }
     )
     assert payload["hindsight_bias_warning"] == "exceeded"
-    assert payload["hindsight_vs_prospective_metric_delta"]["val_return_capture_ratio"]["exceeded"]
+    assert payload["hindsight_vs_prospective_metric_delta"]["teacher_val_return_capture_ratio"]["exceeded"]
 
 
 def test_sampling_leakage_diagnostics_missing_prospective_report_no_throw(tmp_path):
@@ -387,13 +391,13 @@ def test_sampling_leakage_diagnostics_missing_prospective_report_no_throw(tmp_pa
             mode="hindsight_horizon",
             diagnostic_pair_batch_id="nonexistent_batch",
             hindsight_vs_prospective_max_delta={
-                "val_return_capture_ratio": 0.20,
+                "teacher_val_return_capture_ratio": 0.20,
             },
         ),
     )
     trainer = Phase1Trainer(config)
     payload = trainer._build_sampling_leakage_diagnostics(
-        {"val_return_capture_ratio": 0.50}
+        {"teacher_val_return_capture_ratio": 0.50}
     )
     assert payload["hindsight_bias_warning"] == "missing_prospective_report"
     assert payload["signoff_blocked_reason"] == "missing_prospective_report"
@@ -576,6 +580,7 @@ def test_train_phase1_cli_local_smoke_relaxes_guardrails():
     config = build_config(args)
     assert config.selection_policy.min_code_usage_ratio == 0.0
     assert config.selection_policy.behavior.min_inter_code_action_diversity == 0.0
+    assert config.selection_policy.online_validation.require_for_best is False
     assert config.training.full_validation_every_epochs == 1
     assert config.local_smoke_relaxed_guardrails is True
 

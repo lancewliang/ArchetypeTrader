@@ -680,6 +680,7 @@ class Phase1Trainer:
             replay_evaluator=replay_eval,
             fast_probe_size=self.config.training.fast_val_probe_size,
             reward_normalizer=reward_normalizer,
+            online_validation_config=self.config.selection_policy.online_validation,
         )
         model.to(self._device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=self.config.training.lr)
@@ -1113,10 +1114,6 @@ class Phase1Trainer:
                     full_validation=full_val,
                 )
                 metrics_for_select.update(ep_metrics.metrics)
-                if "val_weighted_reconstruction_accuracy" in metrics_for_select:
-                    metrics_for_select["weighted_reconstruction_accuracy"] = metrics_for_select[
-                        "val_weighted_reconstruction_accuracy"
-                    ]
 
                 if phase_a_baseline_validation:
                     metrics_for_select["_phase_a_baseline_validation"] = True
@@ -1207,14 +1204,22 @@ class Phase1Trainer:
                 )
             if should_evaluate:
                 self._logger.info(
-                    "phase1_epoch_result 说明=单个 epoch 训练完成 epoch=%d full_validation=%s decision=%s score=%.6f code_usage_ratio=%s val_return_capture_ratio=%s val_sharpe_ratio=%s epoch_code_stability=%s epoch_code_stability_matched=%s restarts=%d reasons=%s",
+                    "phase1_epoch_result 说明=单个 epoch 训练完成 epoch=%d full_validation=%s decision=%s score=%.6f "
+                    "code_usage_ratio=%s "
+                    "teacher_val_return_capture_ratio=%s teacher_val_sharpe_ratio=%s "
+                    "online_validation_measured=%s online_val_return_capture_ratio=%s online_val_sharpe_ratio=%s online_val_max_drawdown=%s "
+                    "epoch_code_stability=%s epoch_code_stability_matched=%s restarts=%d reasons=%s",
                     epoch,
                     full_val,
                     verdict.decision,
                     verdict.composite_score,
                     metrics_for_select.get("code_usage_ratio"),
-                    metrics_for_select.get("val_return_capture_ratio"),
-                    metrics_for_select.get("val_sharpe_ratio"),
+                    metrics_for_select.get("teacher_val_return_capture_ratio"),
+                    metrics_for_select.get("teacher_val_sharpe_ratio"),
+                    metrics_for_select.get("online_validation_measured"),
+                    metrics_for_select.get("online_val_return_capture_ratio"),
+                    metrics_for_select.get("online_val_sharpe_ratio"),
+                    metrics_for_select.get("online_val_max_drawdown"),
                     metrics_for_select.get("epoch_code_stability"),
                     metrics_for_select.get("epoch_code_stability_matched"),
                     len(restarted_code_ids),
@@ -1468,17 +1473,12 @@ class Phase1Trainer:
         norm_dict = normalizer.to_dict() if normalizer.stats else {}
         state_norm_dict = state_normalizer.to_dict() if state_normalizer is not None else {}
         summary = dict(metrics)
-        if "val_weighted_reconstruction_accuracy" in summary:
-            summary.setdefault(
-                "weighted_reconstruction_accuracy",
-                summary["val_weighted_reconstruction_accuracy"],
-            )
-        summary.setdefault("reconstruction_accuracy", 0.0)
-        summary.setdefault("weighted_reconstruction_accuracy", 0.0)
-        summary.setdefault("non_flat_accuracy", 0.0)
+        summary.setdefault("teacher_val_reconstruction_accuracy", 0.0)
+        summary.setdefault("teacher_val_weighted_reconstruction_accuracy", 0.0)
+        summary.setdefault("teacher_val_non_flat_accuracy", 0.0)
         summary.setdefault("code_usage", {"used": 0, "K": self.config.model.num_codes})
         summary.setdefault("perplexity", 0.0)
-        summary.setdefault("single_trade_consistency_rate", 0.0)
+        summary.setdefault("teacher_val_single_trade_consistency_rate", 0.0)
         # 用 trainer 在 demo 生成后实际统计的 no_trade_ratio 覆盖默认。
         summary["no_trade_ratio"] = float(no_trade_ratio)
         summary["reward_alignment"] = cost.reward_alignment
@@ -1552,6 +1552,17 @@ class Phase1Trainer:
         summary["best_epoch"] = best_epoch
         summary["best_checkpoint_path"] = str(self.config.artifacts_dir() / "best_vq_model.pt")
         summary["selection_metric"] = self.config.selection_policy.selection_metric
+        online_cfg = self.config.selection_policy.online_validation
+        summary.setdefault("online_validation_measured", False)
+        summary.setdefault("online_code_prefix_steps", online_cfg.code_prefix_steps)
+        summary.setdefault("online_code_usage_ratio", 0.0)
+        summary.setdefault("online_val_student_net_return", 0.0)
+        summary.setdefault("online_val_return_capture_ratio", 0.0)
+        summary.setdefault("online_val_regret_to_dp", 0.0)
+        summary.setdefault("online_val_cost_paid", 0.0)
+        summary.setdefault("online_val_sharpe_ratio", 0.0)
+        summary.setdefault("online_val_max_drawdown", 0.0)
+        summary.setdefault("online_val_max_drawdown_abs", 0.0)
         summary["dead_code_restarts"] = len(self._dead_code_restart_events)
         summary["dead_code_restart_events"] = list(self._dead_code_restart_events)
         summary["composite_score_sensitivity"] = "composite_score_sensitivity.json"

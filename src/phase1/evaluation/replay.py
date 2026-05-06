@@ -128,6 +128,67 @@ class Phase1ReplayEvaluator:
             student_reject_count=rejected,
         )
 
+    def replay_student_online_sequence(
+        self,
+        ordered_horizons: Sequence[HorizonRecord],
+        decoder,
+        codebook,
+        code_ids: Sequence[int],
+    ) -> List[HorizonReplayRecord]:
+        """按时间顺序 replay student，并在 horizon 间继承仓位。
+
+        该路径用于 Phase I causal online validation：code_id 由 teacher-free
+        selector 给出，decoder 产生动作，env 逐 horizon reset 时继承上一段
+        末仓位，边界换仓成本由第一步 ``TradingEnv.step`` 自然扣除。
+        """
+        if len(ordered_horizons) != len(code_ids):
+            raise ValueError("ordered_horizons 与 code_ids 长度不一致")
+
+        try:
+            import torch
+        except ImportError:
+            raise RuntimeError("student online sequence replay 需要 torch")
+
+        records: List[HorizonReplayRecord] = []
+        prev_position = 0
+        cb_tensor = codebook
+        if not isinstance(cb_tensor, torch.Tensor):
+            cb_tensor = torch.tensor(cb_tensor, dtype=torch.float32)
+        _device = cb_tensor.device
+        decoder.eval()
+        for horizon, code_id in zip(ordered_horizons, code_ids):
+            states = torch.tensor(horizon.states, dtype=torch.float32).unsqueeze(0).to(_device)
+            z_q = cb_tensor[int(code_id)].unsqueeze(0)
+            with torch.no_grad():
+                logits = decoder(states, z_q)
+            actions = logits.argmax(dim=-1).squeeze(0).tolist()
+
+            env = self.env_factory()
+            env.reset(
+                HorizonInputs(
+                    prices=list(horizon.prices),
+                    execution_books=list(horizon.execution_books),
+                ),
+                initial_position=prev_position,
+            )
+            rewards, infos = env.replay(actions)
+            cost = sum(info.fee + info.slippage for info in infos)
+            rejected = sum(1 for info in infos if info.rejected)
+            if infos:
+                prev_position = infos[-1].filled_position
+            records.append(
+                HorizonReplayRecord(
+                    sample_id=horizon.sample_id,
+                    code_id=int(code_id),
+                    student_actions=list(actions),
+                    student_step_returns=list(rewards),
+                    student_net_return=sum(rewards),
+                    cost_paid=cost,
+                    student_reject_count=rejected,
+                )
+            )
+        return records
+
     # ---------- boundary ----------
 
     def evaluate_horizon_boundaries(

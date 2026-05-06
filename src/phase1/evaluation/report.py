@@ -13,12 +13,12 @@ from src.utils.feather_io import atomic_write_json
 
 # ``phase1_report.json`` 必填字段。新增指标时必须同步本列表。
 REQUIRED_REPORT_KEYS = (
-    "reconstruction_accuracy",
-    "weighted_reconstruction_accuracy",
-    "non_flat_accuracy",
+    "teacher_val_reconstruction_accuracy",
+    "teacher_val_weighted_reconstruction_accuracy",
+    "teacher_val_non_flat_accuracy",
     "code_usage",
     "perplexity",
-    "single_trade_consistency_rate",
+    "teacher_val_single_trade_consistency_rate",
     "no_trade_ratio",
     "reward_alignment",
     "reward_normalization_resolved",
@@ -38,6 +38,16 @@ REQUIRED_REPORT_KEYS = (
     "best_epoch",
     "best_checkpoint_path",
     "selection_metric",
+    "online_validation_measured",
+    "online_code_prefix_steps",
+    "online_code_usage_ratio",
+    "online_val_student_net_return",
+    "online_val_return_capture_ratio",
+    "online_val_regret_to_dp",
+    "online_val_cost_paid",
+    "online_val_sharpe_ratio",
+    "online_val_max_drawdown",
+    "online_val_max_drawdown_abs",
     "composite_score_sensitivity",
     "best_checkpoint_signoff",
     "phase1_leakage_signoff",
@@ -64,6 +74,7 @@ class ReportPaths:
     archetype_separation: Path
     archetype_behavior_diagnostics: Path
     horizon_boundary_diagnostics: Path
+    online_validation_diagnostics: Path
     code_stability_diagnostics: Path
     sampling_leakage_diagnostics: Path
     composite_score_sensitivity: Path
@@ -80,6 +91,7 @@ class ReportPaths:
             archetype_separation=artifacts_dir / "archetype_separation.json",
             archetype_behavior_diagnostics=artifacts_dir / "archetype_behavior_diagnostics.json",
             horizon_boundary_diagnostics=artifacts_dir / "horizon_boundary_diagnostics.json",
+            online_validation_diagnostics=artifacts_dir / "online_validation_diagnostics.json",
             code_stability_diagnostics=artifacts_dir / "code_stability_diagnostics.json",
             sampling_leakage_diagnostics=artifacts_dir / "sampling_leakage_diagnostics.json",
             composite_score_sensitivity=artifacts_dir / "composite_score_sensitivity.json",
@@ -133,6 +145,7 @@ class Phase1ReportWriter:
             "archetype_separation": self.paths.archetype_separation,
             "archetype_behavior": self.paths.archetype_behavior_diagnostics,
             "horizon_boundary": self.paths.horizon_boundary_diagnostics,
+            "online_validation": self.paths.online_validation_diagnostics,
             "code_stability": self.paths.code_stability_diagnostics,
             "sampling_leakage": self.paths.sampling_leakage_diagnostics,
             "composite_score_sensitivity": self.paths.composite_score_sensitivity,

@@ -16,12 +16,12 @@ from src.phase1.evaluation.report import (
 
 def _make_summary(extra: dict | None = None):
     summary = {
-        "reconstruction_accuracy": 0.5,
-        "weighted_reconstruction_accuracy": 0.5,
-        "non_flat_accuracy": 0.5,
+        "teacher_val_reconstruction_accuracy": 0.5,
+        "teacher_val_weighted_reconstruction_accuracy": 0.5,
+        "teacher_val_non_flat_accuracy": 0.5,
         "code_usage": {"used": 7, "K": 10},
         "perplexity": 5.0,
-        "single_trade_consistency_rate": 0.9,
+        "teacher_val_single_trade_consistency_rate": 0.9,
         "no_trade_ratio": 0.1,
         "reward_alignment": "paper_formula",
         "reward_normalization_resolved": "train_reward_robust",
@@ -41,6 +41,16 @@ def _make_summary(extra: dict | None = None):
         "best_epoch": 0,
         "best_checkpoint_path": "best_vq_model.pt",
         "selection_metric": "phase1_composite_score",
+        "online_validation_measured": True,
+        "online_code_prefix_steps": 1,
+        "online_code_usage_ratio": 0.8,
+        "online_val_student_net_return": 1.0,
+        "online_val_return_capture_ratio": 0.5,
+        "online_val_regret_to_dp": 1.0,
+        "online_val_cost_paid": 0.1,
+        "online_val_sharpe_ratio": 1.0,
+        "online_val_max_drawdown": 0.01,
+        "online_val_max_drawdown_abs": 0.1,
         "composite_score_sensitivity": "composite_score_sensitivity.json",
         "best_checkpoint_signoff": True,
         "phase1_leakage_signoff": True,
@@ -67,6 +77,8 @@ def test_required_keys_include_high_risk_fixes():
         "signoff_status",
         "signoff_warning_reasons",
         "phase1_checkpoint_eligible_for_phase2",
+        "online_val_return_capture_ratio",
+        "online_validation_measured",
     }
     assert must_have.issubset(keys)
 
@@ -75,7 +87,7 @@ def test_validate_schema_raises_when_missing(tmp_path):
     paths = ReportPaths.from_artifacts_dir(tmp_path)
     writer = Phase1ReportWriter(paths)
     with pytest.raises(ReportSchemaError):
-        writer.validate_schema({"reconstruction_accuracy": 0.0})
+        writer.validate_schema({"teacher_val_reconstruction_accuracy": 0.0})
 
 
 def test_write_final_report_round_trip(tmp_path):
@@ -97,5 +109,9 @@ def test_unknown_keys_tolerated(tmp_path):
 def test_write_diagnostics_writes_known_keys(tmp_path):
     paths = ReportPaths.from_artifacts_dir(tmp_path)
     writer = Phase1ReportWriter(paths)
-    written = writer.write_diagnostics({"action": {"a": 1}, "risk": {"b": 2}})
-    assert len(written) == 2
+    written = writer.write_diagnostics({
+        "action": {"a": 1},
+        "risk": {"b": 2},
+        "online_validation": {"c": 3},
+    })
+    assert len(written) == 3

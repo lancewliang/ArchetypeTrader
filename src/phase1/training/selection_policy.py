@@ -101,6 +101,7 @@ class Phase1SelectionPolicy:
             (self.should_block_due_to_codebook, "codebook_collapse"),
             (self.should_block_due_to_risk, "risk_guardrail"),
             (self.should_block_due_to_behavior, "behavior_guardrail"),
+            (self.should_block_due_to_online_validation, "online_validation_guardrail"),
         ):
             blocked, detail = check_fn(metrics)
             if blocked:
@@ -137,14 +138,13 @@ class Phase1SelectionPolicy:
         return False, None
 
     def should_block_due_to_risk(self, metrics: dict) -> Tuple[bool, Optional[str]]:
-        """``val_max_drawdown > risk.max_drawdown`` 或
-        ``val_sharpe_ratio < risk.min_sharpe_ratio`` 时阻止 best。"""
-        mdd = float(metrics.get("val_max_drawdown", 0.0))
-        sharpe = float(metrics.get("val_sharpe_ratio", 0.0))
+        """teacher-conditioned validation 风险指标未达标时阻止 best。"""
+        mdd = float(metrics.get("teacher_val_max_drawdown", 0.0))
+        sharpe = float(metrics.get("teacher_val_sharpe_ratio", 0.0))
         if mdd > self.config.risk.max_drawdown:
-            return True, f"val_max_drawdown={mdd:.3f} > {self.config.risk.max_drawdown}"
+            return True, f"teacher_val_max_drawdown={mdd:.3f} > {self.config.risk.max_drawdown}"
         if sharpe < self.config.risk.min_sharpe_ratio:
-            return True, f"val_sharpe_ratio={sharpe:.3f} < {self.config.risk.min_sharpe_ratio}"
+            return True, f"teacher_val_sharpe_ratio={sharpe:.3f} < {self.config.risk.min_sharpe_ratio}"
         return False, None
 
     def should_block_due_to_behavior(self, metrics: dict) -> Tuple[bool, Optional[str]]:
@@ -180,8 +180,34 @@ class Phase1SelectionPolicy:
             return True, f"{stability_key}={stability:.3f} < {self.config.behavior.min_epoch_code_stability}"
         return False, None
 
+    def should_block_due_to_online_validation(self, metrics: dict) -> Tuple[bool, Optional[str]]:
+        """teacher-free causal online validation 未通过时阻止 best。"""
+        cfg = self.config.online_validation
+        if not cfg.enabled or not cfg.require_for_best:
+            return False, None
+
+        measured = bool(metrics.get("online_validation_measured", False))
+        if not measured:
+            return True, "online_validation_measured=false"
+
+        capture = float(metrics.get("online_val_return_capture_ratio", 0.0))
+        sharpe = float(metrics.get("online_val_sharpe_ratio", 0.0))
+        mdd = float(metrics.get("online_val_max_drawdown", 0.0))
+        if capture < cfg.min_return_capture_ratio:
+            return True, (
+                f"online_val_return_capture_ratio={capture:.3f} "
+                f"< {cfg.min_return_capture_ratio}"
+            )
+        if sharpe < cfg.min_sharpe_ratio:
+            return True, (
+                f"online_val_sharpe_ratio={sharpe:.3f} < {cfg.min_sharpe_ratio}"
+            )
+        if mdd > cfg.max_drawdown:
+            return True, f"online_val_max_drawdown={mdd:.3f} > {cfg.max_drawdown}"
+        return False, None
+
     def should_block_due_to_teacher_quality(self, metrics: dict) -> Tuple[bool, Optional[str]]:
-        """``val_dp_teacher_profitable_ratio`` 低于阈值时返回 ``True``。
+        """teacher-conditioned DP teacher 盈利 horizon 比例低于阈值时返回 ``True``。
 
         Notes
         -----
@@ -191,9 +217,11 @@ class Phase1SelectionPolicy:
         guardrail 全部通过。如需严格阻塞，请把 ``evaluate`` 的处理逻辑改为
         ``reject``。
         """
-        ratio = float(metrics.get("val_dp_teacher_profitable_ratio", 1.0))
+        ratio = float(
+            metrics.get("teacher_val_dp_teacher_profitable_ratio", 1.0)
+        )
         if ratio < self.config.teacher.min_dp_teacher_profitable_ratio:
-            return True, f"val_dp_teacher_profitable_ratio={ratio:.3f} < {self.config.teacher.min_dp_teacher_profitable_ratio}"
+            return True, f"teacher_val_dp_teacher_profitable_ratio={ratio:.3f} < {self.config.teacher.min_dp_teacher_profitable_ratio}"
         return False, None
 
     # ---------- 历史维护 ----------

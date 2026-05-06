@@ -77,3 +77,25 @@ def test_boundary_replay_records_cost_when_misaligned():
     res = evaluator.evaluate_horizon_boundaries([rec_a, rec_b], [[1, 2, 2, 2], [1, 0, 0, 0]])
     # a 末仓 long → b 首步 flat 后再到 short → 必然有换仓成本
     assert res.horizon_boundary_turnover_cost > 0
+
+
+def test_online_sequence_replay_inherits_terminal_position():
+    class FixedDecoder(torch.nn.Module):
+        def forward(self, states, z_q):
+            logits = torch.zeros(states.shape[0], states.shape[1], 3, device=states.device)
+            logits[:, :, 2] = 1.0
+            return logits
+
+    evaluator = Phase1ReplayEvaluator(env_factory=_factory)
+    rec_a = _record("a")
+    rec_b = _record("b")
+    records = evaluator.replay_student_online_sequence(
+        [rec_a, rec_b],
+        FixedDecoder(),
+        torch.ones(1, 2),
+        [0, 0],
+    )
+    assert len(records) == 2
+    assert records[0].student_actions == [2, 2, 2, 2]
+    # 第二段首步从上一段 long 仓继承而来，不应重新从 flat 建仓。
+    assert records[1].cost_paid < records[0].cost_paid

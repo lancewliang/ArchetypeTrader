@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from src.phase1.config import (  # noqa: E402
     BehaviorGuardrailConfig,
+    CausalOnlineValidationConfig,
     CodebookConfig,
     CodebookHealthConfig,
     CostConfig,
@@ -151,6 +152,12 @@ def build_config(args: argparse.Namespace) -> Phase1Config:
                 min_inter_code_action_diversity=0.0,
                 min_decoder_sensitivity_to_code=0.0,
                 min_epoch_code_stability=0.0,
+            ),
+            online_validation=CausalOnlineValidationConfig(
+                require_for_best=False,
+                min_return_capture_ratio=-999.0,
+                min_sharpe_ratio=-999.0,
+                max_drawdown=10.0,
             ),
         )
         diagnostics = DiagnosticsConfig(

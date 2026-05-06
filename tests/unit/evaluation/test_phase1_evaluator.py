@@ -79,24 +79,31 @@ def test_evaluate_epoch_returns_required_metric_keys():
         full_validation=True,
     )
     required = {
-        "reconstruction_accuracy",
+        "teacher_val_reconstruction_accuracy",
         "code_usage_ratio",
         "perplexity",
-        "switch_point_recall",
-        "val_dp_teacher_net_return",
-        "val_student_online_net_return",
-        "val_return_capture_ratio",
-        "val_sharpe_ratio",
-        "val_risk_capital_base",
-        "val_max_drawdown",
-        "val_max_drawdown_abs",
-        "val_annual_return_ratio",
+        "teacher_val_switch_point_recall",
+        "teacher_val_dp_teacher_net_return",
+        "teacher_val_student_net_return",
+        "teacher_val_return_capture_ratio",
+        "teacher_val_sharpe_ratio",
+        "teacher_val_risk_capital_base",
+        "teacher_val_max_drawdown",
+        "teacher_val_max_drawdown_abs",
+        "teacher_val_annual_return_ratio",
         "inter_code_action_diversity",
         "decoder_sensitivity_to_code",
         "confusion_matrix",
         "action_precision_recall_per_class",
         "horizon_boundary_turnover_cost",
         "horizon_boundary_position_consistency",
+        "online_validation_measured",
+        "online_code_prefix_steps",
+        "online_code_usage_ratio",
+        "online_val_student_net_return",
+        "online_val_return_capture_ratio",
+        "online_val_sharpe_ratio",
+        "online_val_max_drawdown",
         "dp_teacher_return_distribution",
         "epoch_code_stability_measured",
         "epoch_code_stability",
@@ -106,8 +113,12 @@ def test_evaluate_epoch_returns_required_metric_keys():
     assert required.issubset(out.metrics.keys())
     assert out.metrics["epoch_code_stability_measured"] is False
     assert out.metrics["epoch_code_stability_matched"] == 1.0
-    assert out.metrics["val_risk_capital_base"] > 90.0
+    assert isinstance(out.metrics["teacher_val_return_capture_ratio"], float)
+    assert isinstance(out.metrics["teacher_val_sharpe_ratio"], float)
+    assert out.metrics["teacher_val_risk_capital_base"] > 90.0
+    assert out.metrics["online_validation_measured"] is True
     assert "action" in out.diagnostics
+    assert "online_validation" in out.diagnostics
     assert "horizon_boundary" in out.diagnostics
 
 
@@ -146,3 +157,4 @@ def test_fast_probe_uses_subset():
     )
     # per_horizon_replay_records 长度 == 2
     assert len(out.per_horizon_replay_records) == 2
+    assert out.metrics["online_validation_measured"] is False

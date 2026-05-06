@@ -32,6 +32,7 @@ from src.phase1.config import (  # noqa: E402
     ModelConfig,
     Phase1Config,
     BehaviorGuardrailConfig,
+    CausalOnlineValidationConfig,
     RiskGuardrailConfig,
     SelectionPolicyConfig,
     StratificationConfig,
@@ -95,6 +96,7 @@ def _make_smoke_config(tmp_path: Path, manifest: Path) -> Phase1Config:
             min_decoder_sensitivity_to_code=0.0,
             min_epoch_code_stability=0.0,
         ),
+        online_validation=CausalOnlineValidationConfig(require_for_best=False),
     )
     stratification = StratificationConfig(
         mode="hindsight_horizon",
@@ -124,9 +126,9 @@ def smoke_artifacts(tmp_path):
     (diagnostic_dir / "phase1_report.json").write_text(
         json.dumps(
             {
-                "val_return_capture_ratio": 0.0,
-                "val_sharpe_ratio": 0.0,
-                "val_max_drawdown": 0.0,
+                "teacher_val_return_capture_ratio": 0.0,
+                "teacher_val_sharpe_ratio": 0.0,
+                "teacher_val_max_drawdown": 0.0,
                 "code_usage_ratio": 1.0,
                 "phase1_composite_score": 0.0,
             }

@@ -189,9 +189,9 @@ def composite_score_sensitivity_across_epochs(
             key: best_payload.get(key)
             for key in (
                 "code_usage_ratio",
-                "val_return_capture_ratio",
-                "val_max_drawdown",
-                "val_sharpe_ratio",
+                "teacher_val_return_capture_ratio",
+                "teacher_val_max_drawdown",
+                "teacher_val_sharpe_ratio",
                 "phase1_composite_score",
             )
             if key in best_payload

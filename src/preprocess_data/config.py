@@ -23,9 +23,9 @@ class StratificationConfig:
     report_hindsight_bias_warning: bool = True
     hindsight_vs_prospective_max_delta: Dict[str, float] = field(
         default_factory=lambda: {
-            "val_return_capture_ratio": 0.20,
-            "val_sharpe_ratio": 0.50,
-            "val_max_drawdown": 0.10,
+            "teacher_val_return_capture_ratio": 0.20,
+            "teacher_val_sharpe_ratio": 0.50,
+            "teacher_val_max_drawdown": 0.10,
             "code_usage_ratio": 0.10,
         }
     )

@@ -5,6 +5,7 @@ import pytest
 
 from src.phase1.config import (
     BehaviorGuardrailConfig,
+    CausalOnlineValidationConfig,
     RiskGuardrailConfig,
     SelectionPolicyConfig,
     TeacherQualityGuardrailConfig,
@@ -25,6 +26,13 @@ def _policy() -> Phase1SelectionPolicy:
             min_epoch_code_stability=0.8,
         ),
         teacher=TeacherQualityGuardrailConfig(min_dp_teacher_profitable_ratio=0.3),
+        online_validation=CausalOnlineValidationConfig(
+            enabled=True,
+            require_for_best=True,
+            min_return_capture_ratio=0.0,
+            min_sharpe_ratio=0.0,
+            max_drawdown=0.2,
+        ),
     )
     return Phase1SelectionPolicy(cfg)
 
@@ -33,17 +41,21 @@ def _good_metrics(extra: dict | None = None):
     m = {
         "epoch": 1,
         "code_usage_ratio": 0.9,
-        "val_max_drawdown": 0.1,
-        "val_sharpe_ratio": 1.0,
+        "teacher_val_max_drawdown": 0.1,
+        "teacher_val_sharpe_ratio": 1.0,
         "inter_code_action_diversity": 0.5,
         "decoder_sensitivity_to_code": 0.5,
         "epoch_code_stability_measured": True,
         "epoch_code_stability": 0.9,
-        "val_dp_teacher_profitable_ratio": 0.5,
-        "switch_point_recall": 0.7,
-        "switch_direction_accuracy": 0.7,
-        "val_weighted_reconstruction_accuracy": 0.7,
-        "val_return_capture_ratio": 0.6,
+        "teacher_val_dp_teacher_profitable_ratio": 0.5,
+        "teacher_val_switch_point_recall": 0.7,
+        "teacher_val_switch_direction_accuracy": 0.7,
+        "teacher_val_weighted_reconstruction_accuracy": 0.7,
+        "teacher_val_return_capture_ratio": 0.6,
+        "online_validation_measured": True,
+        "online_val_return_capture_ratio": 0.4,
+        "online_val_sharpe_ratio": 1.0,
+        "online_val_max_drawdown": 0.1,
     }
     if extra:
         m.update(extra)
@@ -60,14 +72,14 @@ def test_block_when_code_usage_below_threshold():
 
 def test_block_when_drawdown_exceeds():
     policy = _policy()
-    metrics = _good_metrics({"val_max_drawdown": 0.3})
+    metrics = _good_metrics({"teacher_val_max_drawdown": 0.3})
     verdict = policy.evaluate(metrics, SelectionHistory())
     assert verdict.decision == "reject"
 
 
 def test_block_when_sharpe_below_threshold():
     policy = _policy()
-    metrics = _good_metrics({"val_sharpe_ratio": -0.1})
+    metrics = _good_metrics({"teacher_val_sharpe_ratio": -0.1})
     verdict = policy.evaluate(metrics, SelectionHistory())
     assert verdict.decision == "reject"
 
@@ -127,9 +139,25 @@ def test_block_when_code_stability_unmeasured():
 
 def test_warn_when_teacher_quality_low():
     policy = _policy()
-    metrics = _good_metrics({"val_dp_teacher_profitable_ratio": 0.1})
+    metrics = _good_metrics({"teacher_val_dp_teacher_profitable_ratio": 0.1})
     verdict = policy.evaluate(metrics, SelectionHistory())
     assert any("teacher_quality_warning" in r for r in verdict.reasons)
+
+
+def test_block_when_online_validation_missing():
+    policy = _policy()
+    metrics = _good_metrics({"online_validation_measured": False})
+    verdict = policy.evaluate(metrics, SelectionHistory())
+    assert verdict.decision == "reject"
+    assert any("online_validation_guardrail" in r for r in verdict.reasons)
+
+
+def test_block_when_online_validation_sharpe_low():
+    policy = _policy()
+    metrics = _good_metrics({"online_val_sharpe_ratio": -0.1})
+    verdict = policy.evaluate(metrics, SelectionHistory())
+    assert verdict.decision == "reject"
+    assert any("online_val_sharpe_ratio" in r for r in verdict.reasons)
 
 
 def test_promote_when_first_good_epoch():

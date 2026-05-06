@@ -2,6 +2,7 @@ from dataclasses import fields
 
 from src.phase1.config import (
     BehaviorGuardrailConfig,
+    CausalOnlineValidationConfig,
     CodebookConfig,
     CodebookHealthConfig,
     CodebookLocalOptimumEscapeConfig,
@@ -45,6 +46,7 @@ _NESTED_CONFIG_TYPES = {
     "selection_policy.risk": RiskGuardrailConfig,
     "selection_policy.behavior": BehaviorGuardrailConfig,
     "selection_policy.teacher": TeacherQualityGuardrailConfig,
+    "selection_policy.online_validation": CausalOnlineValidationConfig,
     "diagnostics": DiagnosticsConfig,
 }
 

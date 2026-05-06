@@ -123,8 +123,8 @@ def per_code_summary(
 
 @dataclass
 class TeacherQuality:
-    val_dp_teacher_sharpe: float
-    val_dp_teacher_profitable_ratio: float
+    teacher_val_dp_teacher_sharpe: float
+    teacher_val_dp_teacher_profitable_ratio: float
     return_distribution: Dict[str, float]
 
 
@@ -137,7 +137,7 @@ def dp_teacher_quality(
 
     用途
     ----
-    - 当 ``val_dp_teacher_profitable_ratio`` 过低时，``val_return_capture_ratio``
+    - 当 ``teacher_val_dp_teacher_profitable_ratio`` 过低时，``teacher_val_return_capture_ratio``
       不可单独解读为学生学得好（设计 §9.5 / §10）。
     - ``return_distribution`` 含 mean/min/p25/p50/p75/max，便于 audit 老师收益分布。
     """
@@ -159,7 +159,7 @@ def dp_teacher_quality(
     else:
         distribution = {"mean": 0.0, "min": 0.0, "p25": 0.0, "p50": 0.0, "p75": 0.0, "max": 0.0}
     return TeacherQuality(
-        val_dp_teacher_sharpe=sharpe,
-        val_dp_teacher_profitable_ratio=profitable_ratio,
+        teacher_val_dp_teacher_sharpe=sharpe,
+        teacher_val_dp_teacher_profitable_ratio=profitable_ratio,
         return_distribution=distribution,
     )

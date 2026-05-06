@@ -16,6 +16,7 @@ from scripts.pre_process_data import (  # noqa: E402
 )
 from src.phase1.config import (  # noqa: E402
     BehaviorGuardrailConfig,
+    CausalOnlineValidationConfig,
     CodebookConfig,
     CodebookHealthConfig,
     CostConfig,
@@ -122,6 +123,7 @@ def _train_config(tmp_path: Path, manifest: Path) -> Phase1Config:
             min_decoder_sensitivity_to_code=0.0,
             min_epoch_code_stability=0.0,
         ),
+        online_validation=CausalOnlineValidationConfig(require_for_best=False),
     )
     return Phase1Config(
         pair="TEST",

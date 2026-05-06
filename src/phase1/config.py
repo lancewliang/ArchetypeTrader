@@ -172,6 +172,18 @@ class TeacherQualityGuardrailConfig:
 
 
 @dataclass(frozen=True)
+class CausalOnlineValidationConfig:
+    """Phase I teacher-free causal replay guardrail."""
+
+    enabled: bool = True
+    require_for_best: bool = True
+    code_prefix_steps: int = 1
+    min_return_capture_ratio: float = 0.0
+    min_sharpe_ratio: float = 0.0
+    max_drawdown: float = 0.2
+
+
+@dataclass(frozen=True)
 class SelectionPolicyConfig:
     """Best checkpoint 选择策略。
 
@@ -182,11 +194,11 @@ class SelectionPolicyConfig:
     min_code_usage_ratio: float = 0.7
     metric_weights: Dict[str, float] = field(
         default_factory=lambda: {
-            "switch_point_recall": 0.30,
-            "switch_direction_accuracy": 0.20,
-            "val_weighted_reconstruction_accuracy": 0.20,
-            "val_return_capture_ratio": 0.20,
-            "val_sharpe_ratio": 0.10,
+            "teacher_val_switch_point_recall": 0.30,
+            "teacher_val_switch_direction_accuracy": 0.20,
+            "teacher_val_weighted_reconstruction_accuracy": 0.20,
+            "teacher_val_return_capture_ratio": 0.20,
+            "teacher_val_sharpe_ratio": 0.10,
         }
     )
     risk: RiskGuardrailConfig = field(default_factory=RiskGuardrailConfig)
@@ -194,14 +206,17 @@ class SelectionPolicyConfig:
     teacher: TeacherQualityGuardrailConfig = field(
         default_factory=TeacherQualityGuardrailConfig
     )
+    online_validation: CausalOnlineValidationConfig = field(
+        default_factory=CausalOnlineValidationConfig
+    )
     composite_score_sensitivity_perturbations: List[Dict[str, float]] = field(
         default_factory=lambda: [
-            {"switch_point_recall": +0.10},
-            {"switch_point_recall": -0.10},
-            {"val_return_capture_ratio": +0.10},
-            {"val_return_capture_ratio": -0.10},
-            {"val_sharpe_ratio": +0.05},
-            {"val_sharpe_ratio": -0.05},
+            {"teacher_val_switch_point_recall": +0.10},
+            {"teacher_val_switch_point_recall": -0.10},
+            {"teacher_val_return_capture_ratio": +0.10},
+            {"teacher_val_return_capture_ratio": -0.10},
+            {"teacher_val_sharpe_ratio": +0.05},
+            {"teacher_val_sharpe_ratio": -0.05},
         ]
     )
 
@@ -392,6 +407,7 @@ _NESTED_TYPE_MAP: Dict[tuple, type] = {
     ("SelectionPolicyConfig", "risk"): RiskGuardrailConfig,
     ("SelectionPolicyConfig", "behavior"): BehaviorGuardrailConfig,
     ("SelectionPolicyConfig", "teacher"): TeacherQualityGuardrailConfig,
+    ("SelectionPolicyConfig", "online_validation"): CausalOnlineValidationConfig,
 }
 
 
@@ -915,6 +931,34 @@ PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
     "selection_policy.teacher.min_dp_teacher_profitable_ratio": _config_doc(
         "要求 DP teacher 盈利 horizon 的最小比例。",
         "提高可过滤弱 teacher 批次；降低可保留更困难或低波动市场。",
+    ),
+    "selection_policy.online_validation": _config_doc(
+        "配置 Phase I teacher-free causal online validation，用于防止只选中 hindsight demonstration 重构好的 checkpoint。",
+        "开启后 best 选择更保守；关闭仅适合 smoke 或消融，不应作为线上签收依据。",
+    ),
+    "selection_policy.online_validation.enabled": _config_doc(
+        "控制是否在 evaluator 中计算 online_* 指标。",
+        "true 会增加 validation 开销并输出线上式 replay 指标；false 跳过该诊断。",
+    ),
+    "selection_policy.online_validation.require_for_best": _config_doc(
+        "控制 online validation 是否作为 promote_to_best 的硬约束。",
+        "true 要求 checkpoint 同时通过线上式 replay；false 仅报告指标不阻塞 best。",
+    ),
+    "selection_policy.online_validation.code_prefix_steps": _config_doc(
+        "设置 state-prefix encoder 选 code 时允许查看的起始步数。",
+        "越小越接近 horizon 起点决策；越大越放宽但更容易引入未来信息。",
+    ),
+    "selection_policy.online_validation.min_return_capture_ratio": _config_doc(
+        "设置线上式 student replay 相对 DP teacher 总收益捕获率下限。",
+        "提高会过滤收益捕获不足的 codebook；降低可保留更探索性的 archetype。",
+    ),
+    "selection_policy.online_validation.min_sharpe_ratio": _config_doc(
+        "设置线上式 replay Sharpe 下限。",
+        "提高更重视风险调整收益；降低可容忍更噪声的线上式验证结果。",
+    ),
+    "selection_policy.online_validation.max_drawdown": _config_doc(
+        "限制线上式 replay 最大回撤。",
+        "降低更保守；提高会允许更大 validation 回撤。",
     ),
     "selection_policy.composite_score_sensitivity_perturbations": _config_doc(
         "配置综合分权重扰动，用于检查 checkpoint 选择是否过度依赖单一权重。",
