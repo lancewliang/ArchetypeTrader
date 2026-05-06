@@ -6,7 +6,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from src.preprocess_data.data_augmentation import ContrastivePair
-from src.data.dataset import Phase1DemoDataset, collate_phase1
+from src.phase1.data.dataset import Phase1DemoDataset, collate_phase1
 from src.preprocess_data.horizon_builder import HorizonRecord
 
 

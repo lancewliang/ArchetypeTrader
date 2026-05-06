@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.evaluation.diagnostics.latent_visualization import (
+from src.phase1.evaluation.diagnostics.latent_visualization import (
     LatentSnapshot,
     LatentVisualizationWriter,
 )

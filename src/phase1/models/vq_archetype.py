@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover
     torch = None  # type: ignore[assignment]
     nn = None  # type: ignore[assignment]
 
-from src.config.phase1_config import ModelConfig
+from src.phase1.config import ModelConfig
 
 from .encoder_inputs import EncoderInputAdapter
 from .vector_quantizer import QuantizeOutput, VectorQuantizer

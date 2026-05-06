@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.config.phase1_config import (
+from src.phase1.config import (
     CodebookConfig,
     CodebookHealthConfig,
     DPConfig,
@@ -19,13 +19,13 @@ from src.config.phase1_config import (
     TrainingConfig,
     apply_paper_strict_overrides,
 )
-from src.data.dataset import Phase1DemoDataset
+from src.phase1.data.dataset import Phase1DemoDataset
 from src.preprocess_data.demo_store import Phase1DemoStore
 from src.preprocess_data.horizon_builder import HorizonRecord
-from src.evaluation.phase1_evaluator import EpochMetrics
-from src.trainers.phase1_checkpoint import Phase1CheckpointManager
-from src.trainers.phase1_selection_policy import Phase1SelectionPolicy, SelectionHistory
-from src.trainers.phase1_trainer import Phase1FatalError, Phase1Trainer
+from src.phase1.evaluation.evaluator import EpochMetrics
+from src.phase1.training.checkpoint import Phase1CheckpointManager
+from src.phase1.training.selection_policy import Phase1SelectionPolicy, SelectionHistory
+from src.phase1.training.trainer import Phase1FatalError, Phase1Trainer
 
 
 def _config(**overrides) -> Phase1Config:

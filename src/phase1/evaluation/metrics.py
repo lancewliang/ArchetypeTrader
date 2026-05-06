@@ -7,7 +7,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Sequence, Tuple
 
-from .metrics.action import (  # noqa: F401
+from src.evaluation.metrics.action import (  # noqa: F401
     ConfusionMatrix,
     SwitchMetrics,
     action_confusion_matrix,
@@ -17,21 +17,21 @@ from .metrics.action import (  # noqa: F401
     switch_metrics,
     weighted_reconstruction_accuracy,
 )
-from .metrics.archetype import (  # noqa: F401
+from src.evaluation.metrics.archetype import (  # noqa: F401
     ArchetypeDiagnostics,
     PerCodeStats,
     TeacherQuality,
     dp_teacher_quality,
     per_code_summary,
 )
-from .metrics.behavior import (  # noqa: F401
+from src.evaluation.metrics.behavior import (  # noqa: F401
     decoder_sensitivity_to_code,
     inter_code_action_diversity,
     inter_code_distance,
     latent_silhouette_score,
     per_code_action_entropy,
 )
-from .metrics.risk import (  # noqa: F401
+from src.evaluation.metrics.risk import (  # noqa: F401
     DEFAULT_ANNUALIZATION_FACTOR,
     calmar_ratio,
     equity_curve_from_step_returns,
@@ -39,7 +39,7 @@ from .metrics.risk import (  # noqa: F401
     sharpe_ratio,
     sortino_ratio,
 )
-from .metrics.stability import (  # noqa: F401
+from src.evaluation.metrics.stability import (  # noqa: F401
     codebook_displacement,
     epoch_code_stability,
     horizon_boundary_metrics,

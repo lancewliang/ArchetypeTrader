@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import pytest
 
-from src.config.phase1_config import (
+from src.phase1.config import (
     SelectionPolicyConfig,
 )
-from src.trainers.phase1_selection_policy import (
+from src.phase1.training.selection_policy import (
     Phase1SelectionPolicy,
     SelectionHistory,
 )

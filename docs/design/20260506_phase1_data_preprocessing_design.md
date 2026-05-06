@@ -73,7 +73,7 @@ scripts/pre_process_data.py
 - `src/preprocess_data/` 放所有前置数据处理代码，包括配置、编排、读文件、schema、窗口、采样、horizon 构建、processed store 和 manifest。
 - `src/preprocess_data/` 可以调用共享的交易成本、reward 对齐和 DP planner，但不能把前置数据处理逻辑留在 `src/data/` 或 `scripts/`。
 - `src/data/` 不再承载 Phase I 前置数据处理模块。若仍有通用 dataset 适配代码，应只保留训练/推理通用能力，不包含采样和 DP teacher 生成。
-- `src/config/phase1_config.py` 不再定义 `Phase1DataProcessConfig`；该配置迁移到 `src/preprocess_data/config.py`。Phase I 训练配置仍保留在 `src/config/phase1_config.py`。
+- `src/config/phase1_config.py` 已删除；`Phase1DataProcessConfig` 保留在 `src/preprocess_data/config.py`，Phase I 训练配置迁移到 `src/phase1/config.py`。
 
 主要配置：
 
@@ -113,6 +113,7 @@ src/preprocess_data/processor.py::Phase1DataProcessor
 | --- | --- |
 | `scripts/pre_process_data.py::Phase1DataProcessor` | `src/preprocess_data/processor.py` |
 | `src/config/phase1_config.py::Phase1DataProcessConfig` | `src/preprocess_data/config.py` |
+| `src/config/phase1_config.py::Phase1Config` | `src/phase1/config.py` |
 | `src/data/market_reader.py` | `src/preprocess_data/market_reader.py` |
 | `src/data/feature_registry.py` | `src/preprocess_data/feature_registry.py` |
 | `src/data/feature_provenance.py` | `src/preprocess_data/feature_provenance.py` |

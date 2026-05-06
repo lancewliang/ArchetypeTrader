@@ -5,17 +5,17 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from src.config.phase1_config import (
+from src.phase1.config import (
     CodebookConfig,
     CodebookHealthConfig,
     EncoderInputConfig,
     ModelConfig,
 )
-from src.data.dataset import Phase1DemoDataset
+from src.phase1.data.dataset import Phase1DemoDataset
 from src.preprocess_data.horizon_builder import HorizonRecord
-from src.evaluation.phase1_evaluator import Phase1Evaluator
-from src.evaluation.phase1_replay import Phase1ReplayEvaluator
-from src.models.vq_archetype import VQArchetypeModel
+from src.phase1.evaluation.evaluator import Phase1Evaluator
+from src.phase1.evaluation.replay import Phase1ReplayEvaluator
+from src.phase1.models.vq_archetype import VQArchetypeModel
 from src.trading.cost_model import ExecutionBook, LobDepthCostModel
 from src.trading.env import TradingEnv
 from src.trading.reward_alignment import RewardAlignment

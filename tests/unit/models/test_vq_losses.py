@@ -5,7 +5,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from src.models.vq_losses import Phase1Loss, compute_soft_code_assignments
+from src.phase1.models.vq_losses import Phase1Loss, compute_soft_code_assignments
 
 
 def _logits_and_targets(near_perfect: bool = True):

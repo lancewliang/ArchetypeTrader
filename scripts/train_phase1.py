@@ -1,7 +1,7 @@
 """Phase I 训练入口。
 
 训练必须通过 ``--data-process-manifest`` 指向离线数据预处理产物。
-数据预处理由 ``scripts/phase1_data_processor.py`` 独立完成。
+数据预处理由 ``scripts/pre_process_data.py`` 独立完成。
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.config.phase1_config import (  # noqa: E402
+from src.phase1.config import (  # noqa: E402
     BehaviorGuardrailConfig,
     CodebookConfig,
     CodebookHealthConfig,
@@ -30,7 +30,7 @@ from src.config.phase1_config import (  # noqa: E402
     TrainingConfig,
     apply_paper_strict_overrides,
 )
-from src.trainers.phase1_trainer import Phase1FatalError, Phase1Trainer  # noqa: E402
+from src.phase1.training.trainer import Phase1FatalError, Phase1Trainer  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:

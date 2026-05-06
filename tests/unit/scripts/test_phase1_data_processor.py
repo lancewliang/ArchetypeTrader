@@ -1,4 +1,4 @@
-"""``scripts.process_phase1_data`` tests."""
+"""``scripts.pre_process_data`` tests."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.process_phase1_data import (
+from scripts.pre_process_data import (
     Phase1DataProcessor,
     assert_prospective_diagnostic,
     build_data_process_config,

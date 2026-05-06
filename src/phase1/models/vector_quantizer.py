@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover
     torch = None  # type: ignore[assignment]
     nn = None  # type: ignore[assignment]
 
-from src.config.phase1_config import CodebookConfig
+from src.phase1.config import CodebookConfig
 
 _EPS = 1e-6
 

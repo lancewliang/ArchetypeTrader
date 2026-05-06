@@ -1,5 +1,4 @@
-"""诊断子包: latent 可视化与失败案例错题本。
+"""Shared and Phase II diagnostic helpers.
 
-诊断只观察、不参与 checkpoint 选择；任何图形结论必须能回溯到同 epoch 的
-metrics 与 snapshot 文件。
+Phase I diagnostic helpers live in ``src.phase1.evaluation.diagnostics``.
 """

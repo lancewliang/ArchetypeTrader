@@ -22,7 +22,7 @@ def test_next_row_yields_n_minus_h_minus_1_candidates():
 
 def test_next_row_split_boundary_embargo_default():
     """next_row_execution 默认 embargo 必须为 ``h+2``。"""
-    from src.config.phase1_config import SamplingHealthConfig
+    from src.phase1.config import SamplingHealthConfig
 
     cfg = SamplingHealthConfig()
     h = 72

@@ -989,11 +989,24 @@ class Phase2Trainer:
                 "请关闭 reward_normalization 并使用 reward_scaling。"
             )
 
-    def _phase1_label_path(self, p1_dir: Path, split: str) -> Path:        
+    def _phase1_label_path(self, p1_dir: Path, split: str) -> Path:
+        if self.config.phase1_label_source == "full_time" and split == "train":
+            full_time_path = p1_dir / "horizon_labels_full_time_train.feather"
+            if not full_time_path.exists():
+                raise Phase2FatalError(
+                    "phase1_label_source=full_time requires "
+                    f"{full_time_path.name}; 请先用 Phase I 导出 full-time train labels。"
+                )
+            return full_time_path
+
         no_path = p1_dir / f"non_overlap_horizon_labels_{split}.feather"
         if no_path.exists():
             return no_path
-      
+
+        default_path = p1_dir / f"horizon_labels_{split}.feather"
+        if default_path.exists():
+            return default_path
+        raise Phase2FatalError(f"missing Phase I horizon labels: {default_path}")
 
     def _unmasked_diagnostic_probe(
         self,

@@ -20,7 +20,7 @@ except ImportError:
 from src.config.phase2_config import Phase2Config
 from src.data.phase2_dataset import Phase2Dataset
 from src.data.phase2_horizon_index import Phase2HorizonEntry
-from src.data.state_normalizer import StateNormalizer
+from src.phase1.data.state_normalizer import StateNormalizer
 
 
 def _frame(num_rows=8):

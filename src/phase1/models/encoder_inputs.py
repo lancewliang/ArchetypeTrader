@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover
     torch = None  # type: ignore[assignment]
     nn = None  # type: ignore[assignment]
 
-from src.config.phase1_config import EncoderInputConfig
+from src.phase1.config import EncoderInputConfig
 
 _EPS = 1e-6
 

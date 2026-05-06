@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.evaluation.phase1_report import (
+from src.phase1.evaluation.report import (
     Phase1ReportWriter,
     REQUIRED_REPORT_KEYS,
     ReportPaths,

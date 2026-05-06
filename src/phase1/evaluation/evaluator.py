@@ -16,25 +16,25 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
-from src.config.phase1_config import SelectionPolicyConfig
-from src.data.dataset import Phase1DemoDataset, collate_phase1
+from src.phase1.config import SelectionPolicyConfig
+from src.phase1.data.dataset import Phase1DemoDataset, collate_phase1
 from src.preprocess_data.horizon_builder import HorizonRecord
 
-from .metrics.action import (
+from src.evaluation.metrics.action import (
     action_confusion_matrix,
     switch_metrics,
     single_trade_consistency_rate,
     weighted_reconstruction_accuracy,
 )
-from .metrics.archetype import dp_teacher_quality, per_code_summary
-from .metrics.behavior import (
+from src.evaluation.metrics.archetype import dp_teacher_quality, per_code_summary
+from src.evaluation.metrics.behavior import (
     decoder_sensitivity_to_code,
     inter_code_action_diversity,
     inter_code_distance,
     latent_silhouette_score,
     per_code_action_entropy,
 )
-from .metrics.risk import (
+from src.evaluation.metrics.risk import (
     DEFAULT_ANNUALIZATION_FACTOR,
     calmar_ratio,
     cumulative_pnl_curve,
@@ -45,7 +45,7 @@ from .metrics.risk import (
     sortino_ratio,
     step_returns_from_pnl,
 )
-from .phase1_metrics import (
+from .metrics import (
     codebook_displacement,
     code_usage_ratio,
     codebook_perplexity,
@@ -56,7 +56,7 @@ from .phase1_metrics import (
     regret_to_dp,
     non_flat_accuracy,
 )
-from .phase1_replay import HorizonReplayRecord, Phase1ReplayEvaluator
+from .replay import HorizonReplayRecord, Phase1ReplayEvaluator
 
 
 @dataclass

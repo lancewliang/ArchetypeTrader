@@ -6,8 +6,8 @@ import random
 
 import pytest
 
-from src.config.phase1_config import EncoderInputConfig
-from src.models.encoder_inputs import RewardNormalizer
+from src.phase1.config import EncoderInputConfig
+from src.phase1.models.encoder_inputs import RewardNormalizer
 
 
 def _heavy_tail_rewards(n: int = 2000, seed: int = 1):

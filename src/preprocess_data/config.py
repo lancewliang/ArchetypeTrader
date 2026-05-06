@@ -3,7 +3,7 @@
 This module owns every configuration field that can change sampled horizons,
 DP teacher outputs, processed-data hashes, or the data-process manifest.
 Phase I model/optimizer/checkpoint configuration remains in
-``src.config.phase1_config``.
+``src.phase1.config``.
 """
 from __future__ import annotations
 

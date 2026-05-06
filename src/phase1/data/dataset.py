@@ -27,7 +27,7 @@ from src.preprocess_data.horizon_builder import HorizonRecord
 class _SupportsTransform(Protocol):
     """任何实现 ``transform(rewards) -> Sequence[float]`` 的对象都可作为 normalizer。
 
-    主要为 ``src.models.encoder_inputs.RewardNormalizer``；
+    主要为 ``src.phase1.models.encoder_inputs.RewardNormalizer``；
     用 Protocol 而不是直接 import 是为了避免 dataset 模块依赖 torch 之外的 models。
     """
 

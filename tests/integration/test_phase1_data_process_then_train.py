@@ -9,12 +9,12 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("polars")
 
-from scripts.process_phase1_data import (  # noqa: E402
+from scripts.pre_process_data import (  # noqa: E402
     Phase1DataProcessor,
     build_data_process_config,
     build_parser,
 )
-from src.config.phase1_config import (  # noqa: E402
+from src.phase1.config import (  # noqa: E402
     BehaviorGuardrailConfig,
     CodebookConfig,
     CodebookHealthConfig,
@@ -36,7 +36,7 @@ from src.preprocess_data.stratified_sampler import StratifiedWindowSampler  # no
 from src.preprocess_data.window_indexer import SlidingWindowIndexer  # noqa: E402
 from src.planners.demo_generator import Phase1DemoGenerator  # noqa: E402
 from src.planners.single_trade_dp import SingleTradeDPPlanner  # noqa: E402
-from src.trainers.phase1_trainer import Phase1Trainer  # noqa: E402
+from src.phase1.training.trainer import Phase1Trainer  # noqa: E402
 from tests.fixtures.phase1.build_fixtures import FixtureSpec, build_fixtures  # noqa: E402
 
 

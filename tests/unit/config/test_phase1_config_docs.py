@@ -1,6 +1,6 @@
 from dataclasses import fields
 
-from src.config.phase1_config import (
+from src.phase1.config import (
     BehaviorGuardrailConfig,
     CodebookConfig,
     CodebookHealthConfig,

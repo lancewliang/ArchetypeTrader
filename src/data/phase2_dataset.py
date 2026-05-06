@@ -23,7 +23,7 @@ import numpy as np
 from src.config.phase2_config import Phase2Config
 from src.preprocess_data.horizon_builder import HorizonRecord
 from src.data.phase2_horizon_index import Phase2HorizonEntry
-from src.data.state_normalizer import StateNormalizer
+from src.phase1.data.state_normalizer import StateNormalizer
 from src.trading.cost_model import ExecutionBook
 from src.trading.env import HorizonInputs
 from src.trading.reward_alignment import RewardAlignment

@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from src.utils.feather_io import atomic_write_json, read_json
 
-from .phase1_selection_policy import SelectionVerdict
+from .selection_policy import SelectionVerdict
 
 
 @dataclass

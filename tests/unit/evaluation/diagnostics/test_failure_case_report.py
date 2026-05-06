@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.evaluation.diagnostics.failure_case_report import FailureCaseReportBuilder
+from src.phase1.evaluation.diagnostics.failure_case_report import FailureCaseReportBuilder
 
 
 def _record(sample_id: str, **kwargs):

@@ -35,7 +35,7 @@ def generate_smoke_phase1_artifacts(output_dir: Path) -> None:
     import torch
     import yaml
 
-    from src.models.vq_archetype import ArchetypeDecoder
+    from src.phase1.models.vq_archetype import ArchetypeDecoder
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

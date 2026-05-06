@@ -24,7 +24,7 @@ from src.data.phase2_dataset import Phase2Dataset
 from src.data.phase2_horizon_index import Phase2HorizonEntry
 from src.models.archetype_selector import ArchetypeSelector
 from src.models.phase1_frozen_policy import Phase1FrozenPolicy
-from src.models.vq_archetype import ArchetypeDecoder
+from src.phase1.models.vq_archetype import ArchetypeDecoder
 from src.rl.actor_critic import ActorCritic
 from src.trainers.phase2_trainer import Phase2Trainer, Phase2TrainerArtifacts
 from src.trading.cost_model import LobDepthCostModel

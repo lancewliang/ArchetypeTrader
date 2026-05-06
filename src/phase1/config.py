@@ -5,7 +5,7 @@
 设计原则:
 - 配置必须可序列化为 yaml/json（写入 ``phase1_config.yaml`` / ``phase1_report.json``）。
 - 所有默认值必须与设计文档一致；偏离时应在设计中明确记录。
-- 模型行为开关（如 ``train_reward_robust``、``dead_code_restart`` 默认 true、
+- 模型行为开关（如 reward normalization、``dead_code_restart`` 默认 true、
   ``require_prospective_diagnostic`` 默认 true）锁在本文件，避免训练入口偷偷改变。
 
 实现要点:
@@ -13,7 +13,7 @@
   任何"运行时偷改"都需要通过 ``dataclasses.replace`` 明确生成新实例。
 - ``config_hash`` 必须稳定: 相同字段 → 相同 hash；用于 cache 失效检测。
 - ``paper_strict_reproduction=True`` 时调用 ``apply_paper_strict_overrides`` 自动
-  关闭工程稳定项（usage_regularization / dead_code_restart / robust normalization），
+  关闭工程稳定项（usage_regularization / usage-profit alignment / dead_code_restart），
   使训练严格对齐论文公式 (4)。
 """
 from __future__ import annotations

@@ -12,24 +12,24 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.config.phase1_config import (
+from src.phase1.config import (
     Phase1Config,
     apply_paper_strict_overrides,
 )
-from src.data.dataset import Phase1DemoDataset, collate_phase1
+from src.phase1.data.dataset import Phase1DemoDataset, collate_phase1
 from src.preprocess_data.demo_store import HorizonLabel, Phase1DemoStore
 from src.preprocess_data.feature_provenance import file_sha256_short
 from src.preprocess_data.processed_store import Phase1ProcessedStore
-from src.data.state_normalizer import StateNormalizer
-from src.evaluation.phase1_evaluator import Phase1Evaluator
-from src.evaluation.phase1_metrics import (
+from src.phase1.data.state_normalizer import StateNormalizer
+from src.phase1.evaluation.evaluator import Phase1Evaluator
+from src.phase1.evaluation.metrics import (
     composite_score_sensitivity_across_epochs,
 )
-from src.evaluation.phase1_replay import Phase1ReplayEvaluator
-from src.evaluation.phase1_report import Phase1ReportWriter, ReportPaths
-from src.models.encoder_inputs import RewardNormalizer
-from src.models.vq_archetype import VQArchetypeModel
-from src.models.vq_losses import Phase1Loss
+from src.phase1.evaluation.replay import Phase1ReplayEvaluator
+from src.phase1.evaluation.report import Phase1ReportWriter, ReportPaths
+from src.phase1.models.encoder_inputs import RewardNormalizer
+from src.phase1.models.vq_archetype import VQArchetypeModel
+from src.phase1.models.vq_losses import Phase1Loss
 from src.planners.demo_generator import RejectStats
 from src.trading.cost_model import LobDepthCostModel
 from src.trading.env import TradingEnv
@@ -39,8 +39,8 @@ from src.utils.feather_io import read_json
 from src.utils.run_logging import configure_run_logger
 from src.utils.seed_init import seed_everything
 
-from .phase1_checkpoint import Phase1CheckpointManager, Phase1FatalCollapse
-from .phase1_selection_policy import (
+from .checkpoint import Phase1CheckpointManager, Phase1FatalCollapse
+from .selection_policy import (
     Phase1SelectionPolicy,
     SelectionHistory,
     SelectionVerdict,
@@ -141,25 +141,24 @@ class Phase1Trainer:
 
         Steps
         -----
-        0. ``_seed_everything``: 设置 random/numpy/torch 全局 seed（设计 §9 可复现性）。
-        1. ``_check_prospective_diagnostic``: 强制 prospective 对照检查。
-        2. 写 ``phase1_config.yaml``，并计算 ``config_hash``。
-        3. 读三个 split + schema 校验 → ``input_schema.json``。
-        4. 滑窗枚举 + 分层采样 + 采样健康检查 → ``window_index_*.feather``。
-        5. 数据增强（仅 train，按配置）。
-        6. ``HorizonBuilder`` 切出 horizon。
-        7. ``Phase1DemoGenerator`` 跑 DP，写 ``demos_train.feather``；同时收集
-           reject_transition 统计，超阈值时直接抛错（fail_when_exceeded=True）。
-        8. ``RewardNormalizer.fit_train`` → ``reward_normalizer.json``；
-           train rewards 立即应用 transform，val/test 同理。
-        9. 训练 ``VQArchetypeModel`` ``epochs`` 轮：
+        0. 设置 random/numpy/torch 全局 seed（设计 §9 可复现性）。
+        1. 写 ``phase1_config.yaml``，并计算 ``config_hash`` / ``training_config_hash``。
+        2. 通过 ``data_process_manifest.json`` 读取并校验 schema、sampled horizons
+           与 DP teacher artifacts；训练阶段不枚举窗口、不构建 horizon、不运行 DP。
+        3. 可选加载 full-time train 与 non-overlap train/val/test 标签来源。
+        4. ``StateNormalizer.fit_records(train)`` → transform train/val/test。
+        5. ``RewardNormalizer.fit_train`` → ``reward_normalizer.json``；dataset 在
+           ``__getitem__`` 中即时 transform rewards，records 保留原始 reward。
+        6. 保存训练 demonstrations 快照 ``demos_train.feather``。
+        7. 训练 ``VQArchetypeModel`` ``epochs`` 轮：
            - 每 epoch: forward + Phase1Loss + backward + EMA 更新。
            - 每若干 epoch 调 evaluator 跑 validation。
            - selection_policy → checkpoint manager (commit_verdict)。
            - 触发 ``fatal`` 时 trainer 退出。
-        10. 训练结束: composite_score sensitivity → 报告写入。
-        11. 用 best checkpoint 编码 horizon labels（train/val/test）。
-        12. 导出 Phase II/III 产物 ``encoder.pt`` / ``decoder.pt`` / ``codebook.pt``。
+        8. 用 best checkpoint 编码 horizon labels（train/val/test，外加可选
+           full-time / non-overlap 标签来源）。
+        9. 导出 Phase II/III 产物 ``encoder.pt`` / ``decoder.pt`` / ``codebook.pt``。
+        10. composite_score sensitivity、sampling leakage 与 sign-off 诊断 → 报告写入。
 
         Returns
         -------
@@ -604,7 +603,7 @@ class Phase1Trainer:
         manifest,
         artifacts_dir: Path,
     ) -> Path:
-        """Resolve the feature provenance written by ``process_phase1_data.py``."""
+        """Resolve the feature provenance written by ``pre_process_data.py``."""
 
         candidates: List[Path] = []
         source_ref = getattr(manifest, "feature_provenance_path", "")

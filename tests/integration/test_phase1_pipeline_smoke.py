@@ -16,12 +16,12 @@ if str(ROOT) not in sys.path:
 
 from tests.fixtures.phase1.build_fixtures import FixtureSpec, build_fixtures  # noqa: E402
 
-from scripts.process_phase1_data import (  # noqa: E402
+from scripts.pre_process_data import (  # noqa: E402
     Phase1DataProcessor,
     build_data_process_config,
     build_parser as build_dp_parser,
 )
-from src.config.phase1_config import (  # noqa: E402
+from src.phase1.config import (  # noqa: E402
     CodebookConfig,
     CodebookHealthConfig,
     CostConfig,
@@ -37,7 +37,7 @@ from src.config.phase1_config import (  # noqa: E402
     StratificationConfig,
     TrainingConfig,
 )
-from src.trainers.phase1_trainer import Phase1Trainer  # noqa: E402
+from src.phase1.training.trainer import Phase1Trainer  # noqa: E402
 
 
 def _run_data_processor(tmp_path: Path) -> Path:

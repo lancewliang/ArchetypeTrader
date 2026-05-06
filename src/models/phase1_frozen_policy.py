@@ -114,7 +114,7 @@ class Phase1FrozenPolicy:
             if isinstance(decoder_state, dict):
                 decoder_state = cls._normalize_decoder_state_dict(decoder_state)
                 # 尝试从 state_dict 推断结构
-                from src.models.vq_archetype import ArchetypeDecoder
+                from src.phase1.models.vq_archetype import ArchetypeDecoder
                 # 从 state_proj.weight 推断 feature_dim
                 sp_key = "state_proj.weight"
                 if sp_key in decoder_state:

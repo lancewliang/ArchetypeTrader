@@ -1,5 +1,5 @@
 """按域拆分的指标子包。
 
-对外稳定 API 由 ``src.evaluation.phase1_metrics`` 重新导出，本包只负责实现。
+对外稳定 API 由 ``src.phase1.evaluation.metrics`` 重新导出，本包只负责实现。
 所有函数应是纯函数或轻状态对象，便于离线重算与单元测试。
 """

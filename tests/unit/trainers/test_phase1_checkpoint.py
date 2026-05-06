@@ -8,12 +8,12 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from src.trainers.phase1_checkpoint import (
+from src.phase1.training.checkpoint import (
     Phase1CheckpointManager,
     Phase1FatalCollapse,
     file_sha256,
 )
-from src.trainers.phase1_selection_policy import SelectionVerdict
+from src.phase1.training.selection_policy import SelectionVerdict
 
 
 def _state():

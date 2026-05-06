@@ -5,12 +5,12 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from src.config.phase1_config import (
+from src.phase1.config import (
     CodebookConfig,
     CodebookHealthConfig,
     CodebookLocalOptimumEscapeConfig,
 )
-from src.models.vector_quantizer import VectorQuantizer
+from src.phase1.models.vector_quantizer import VectorQuantizer
 
 
 def _make_quantizer(num_codes: int = 4, code_dim: int = 4, update_method: str = "ema"):

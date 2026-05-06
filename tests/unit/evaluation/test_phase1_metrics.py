@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from src.evaluation.phase1_metrics import (
+from src.phase1.evaluation.metrics import (
     code_usage_ratio,
     codebook_perplexity,
     composite_score_sensitivity,

@@ -7,8 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Literal, Optional, Tuple
 
-from src.config.phase1_config import SelectionPolicyConfig
-from src.evaluation.phase1_metrics import phase1_composite_score
+from src.phase1.config import SelectionPolicyConfig
+from src.phase1.evaluation.metrics import phase1_composite_score
 
 
 SelectionDecision = Literal["promote_to_best", "reject", "keep_as_periodic", "fatal", "skipped"]

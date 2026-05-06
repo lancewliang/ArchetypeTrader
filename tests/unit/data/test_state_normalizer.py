@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from src.data.state_normalizer import StateNormalizer
+from src.phase1.data.state_normalizer import StateNormalizer
 
 
 def test_state_normalizer_scales_large_magnitude_features():

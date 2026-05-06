@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.config.phase1_config import (
+from src.phase1.config import (
     Phase1Config,
     SamplingHealthConfig,
     StratificationConfig,

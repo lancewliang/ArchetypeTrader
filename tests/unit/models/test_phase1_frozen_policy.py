@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from src.models.phase1_frozen_policy import Phase1FrozenPolicy
-from src.models.vq_archetype import ArchetypeDecoder
+from src.phase1.models.vq_archetype import ArchetypeDecoder
 
 
 def _policy() -> Phase1FrozenPolicy:

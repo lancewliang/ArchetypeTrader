@@ -5,13 +5,13 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from src.config.phase1_config import (
+from src.phase1.config import (
     CodebookConfig,
     CodebookHealthConfig,
     EncoderInputConfig,
     ModelConfig,
 )
-from src.models.vq_archetype import VQArchetypeModel
+from src.phase1.models.vq_archetype import VQArchetypeModel
 
 
 def _make_model(feature_dim=2, num_codes=4):
