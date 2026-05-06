@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from src.config.phase1_config import RejectTransitionHealthConfig
-from src.data.horizon_builder import HorizonRecord
+from src.preprocess_data.horizon_builder import HorizonRecord
 from src.planners.demo_generator import Phase1DemoGenerator, RejectTransitionExceeded
 from src.planners.single_trade_dp import SingleTradeDPPlanner
 from src.trading.cost_model import ExecutionBook, LobDepthCostModel

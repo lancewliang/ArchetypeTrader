@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.data.sampling_health import SamplingHealthChecker, SamplingHealthError
-from src.data.stratified_sampler import SampledHorizon
+from src.preprocess_data.sampling_health import SamplingHealthChecker, SamplingHealthError
+from src.preprocess_data.stratified_sampler import SampledHorizon
 
 
 def _sampled(starts):

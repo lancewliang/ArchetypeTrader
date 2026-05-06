@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.data.feature_registry import (
+from src.preprocess_data.feature_registry import (
     FIXED_FEATURES,
     default_factor_list_path,
     load_feature_selection,

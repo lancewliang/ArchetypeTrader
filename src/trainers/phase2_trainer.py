@@ -166,7 +166,7 @@ class Phase2Trainer:
         p1_dir = self.config.phase1_dir()
         input_schema = read_json(p1_dir / "input_schema.json")
 
-        from src.data.phase1_processed_store import Phase1ProcessedStore
+        from src.preprocess_data.processed_store import Phase1ProcessedStore
         processed_store = Phase1ProcessedStore(p1_dir)
         manifest_path = p1_dir / "data_process_manifest.json"
 

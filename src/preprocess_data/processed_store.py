@@ -13,8 +13,8 @@ from dataclasses import field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from src.data.horizon_builder import HorizonRecord
-from src.data.schema import InputSchema
+from src.preprocess_data.horizon_builder import HorizonRecord
+from src.preprocess_data.schema import InputSchema
 from src.planners.demo_generator import RejectStats
 from src.trading.cost_model import ExecutionBook
 from src.utils import feather_io

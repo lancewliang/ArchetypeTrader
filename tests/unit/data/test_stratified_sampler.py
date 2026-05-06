@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.data.stratified_sampler import StratifiedWindowSampler
-from src.data.window_indexer import WindowIndexEntry
+from src.preprocess_data.stratified_sampler import StratifiedWindowSampler
+from src.preprocess_data.window_indexer import WindowIndexEntry
 
 
 def _entries(n: int):

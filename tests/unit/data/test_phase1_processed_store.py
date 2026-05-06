@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.data.horizon_builder import HorizonRecord
-from src.data.phase1_processed_store import (
+from src.preprocess_data.horizon_builder import HorizonRecord
+from src.preprocess_data.processed_store import (
     Phase1ProcessedStore,
     Phase1ProcessedStoreError,
     stable_hash,

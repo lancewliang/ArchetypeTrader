@@ -12,7 +12,7 @@ from src.config.phase1_config import (
     ModelConfig,
 )
 from src.data.dataset import Phase1DemoDataset
-from src.data.horizon_builder import HorizonRecord
+from src.preprocess_data.horizon_builder import HorizonRecord
 from src.evaluation.phase1_evaluator import Phase1Evaluator
 from src.evaluation.phase1_replay import Phase1ReplayEvaluator
 from src.models.vq_archetype import VQArchetypeModel

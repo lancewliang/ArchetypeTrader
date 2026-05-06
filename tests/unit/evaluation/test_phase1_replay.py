@@ -5,7 +5,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from src.data.horizon_builder import HorizonRecord
+from src.preprocess_data.horizon_builder import HorizonRecord
 from src.evaluation.phase1_replay import Phase1ReplayEvaluator
 from src.trading.cost_model import ExecutionBook, LobDepthCostModel
 from src.trading.env import TradingEnv

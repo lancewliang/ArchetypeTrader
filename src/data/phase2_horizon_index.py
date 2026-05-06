@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 import polars as pl
 
 from src.config.phase2_config import Phase2Config
-from src.data.feature_provenance import (
+from src.preprocess_data.feature_provenance import (
     evaluate_feature_provenance,
     file_sha256_short,
 )

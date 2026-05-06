@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.data.demo_store import HorizonLabel, Phase1DemoStore
-from src.data.horizon_builder import HorizonRecord
+from src.preprocess_data.demo_store import HorizonLabel, Phase1DemoStore
+from src.preprocess_data.horizon_builder import HorizonRecord
 from src.trading.cost_model import ExecutionBook
 
 

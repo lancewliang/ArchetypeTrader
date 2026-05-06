@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.data.market_reader import MarketFileReader
+from src.preprocess_data.market_reader import MarketFileReader
 
 
 def _build_simple_frame():

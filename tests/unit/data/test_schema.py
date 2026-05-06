@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.data.schema import InputSchemaValidator
+from src.preprocess_data.schema import InputSchemaValidator
 
 
 def _make_frame(close=(100.0, 100.5, 101.0), extra: dict | None = None):

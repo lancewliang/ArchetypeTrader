@@ -20,8 +20,8 @@ except ImportError:  # pragma: no cover
     torch = None  # type: ignore[assignment]
     Dataset = object  # type: ignore[misc, assignment]
 
-from .data_augmentation import ContrastivePair
-from .horizon_builder import HorizonRecord
+from src.preprocess_data.data_augmentation import ContrastivePair
+from src.preprocess_data.horizon_builder import HorizonRecord
 
 
 class _SupportsTransform(Protocol):

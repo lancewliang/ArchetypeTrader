@@ -30,7 +30,7 @@ from src.config.phase2_config import (  # noqa: E402
     Phase1ArtifactsConfig,
     Phase2Config,
 )
-from src.data.phase1_processed_store import Phase1ProcessedStore  # noqa: E402
+from src.preprocess_data.processed_store import Phase1ProcessedStore  # noqa: E402
 from src.data.phase2_dataset import Phase2Dataset  # noqa: E402
 from src.data.phase2_label_loader import Phase2LabelLoader  # noqa: E402
 from src.models.phase1_frozen_policy import Phase1FrozenPolicy  # noqa: E402

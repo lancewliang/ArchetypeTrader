@@ -56,7 +56,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     import torch
 
     from src.config.phase2_config import Phase2Config
-    from src.data.market_reader import MarketFileReader
+    from src.preprocess_data.market_reader import MarketFileReader
     from src.data.phase2_dataset import Phase2Dataset
     from src.data.phase2_horizon_index import Phase2HorizonIndexer
     from src.evaluation.phase2_evaluator import Phase2Evaluator

@@ -20,8 +20,8 @@ from src.config.phase1_config import (
     apply_paper_strict_overrides,
 )
 from src.data.dataset import Phase1DemoDataset
-from src.data.demo_store import Phase1DemoStore
-from src.data.horizon_builder import HorizonRecord
+from src.preprocess_data.demo_store import Phase1DemoStore
+from src.preprocess_data.horizon_builder import HorizonRecord
 from src.evaluation.phase1_evaluator import EpochMetrics
 from src.trainers.phase1_checkpoint import Phase1CheckpointManager
 from src.trainers.phase1_selection_policy import Phase1SelectionPolicy, SelectionHistory

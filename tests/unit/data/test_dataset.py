@@ -5,9 +5,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from src.data.data_augmentation import ContrastivePair
+from src.preprocess_data.data_augmentation import ContrastivePair
 from src.data.dataset import Phase1DemoDataset, collate_phase1
-from src.data.horizon_builder import HorizonRecord
+from src.preprocess_data.horizon_builder import HorizonRecord
 
 
 def _record(sample_id: str, h: int = 4, rewards=None):

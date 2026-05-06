@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
-from src.data.schema import InputSchema, KNOWN_ORDERBOOK_COLUMNS, KNOWN_TRADE_COLUMNS
+from src.preprocess_data.schema import InputSchema, KNOWN_ORDERBOOK_COLUMNS, KNOWN_TRADE_COLUMNS
 from src.utils.feather_io import atomic_write_json
 
 

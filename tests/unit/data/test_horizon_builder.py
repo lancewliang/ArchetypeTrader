@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-from src.data.horizon_builder import HorizonBuilder
-from src.data.schema import InputSchemaValidator
-from src.data.stratified_sampler import SampledHorizon
+from src.preprocess_data.horizon_builder import HorizonBuilder
+from src.preprocess_data.schema import InputSchemaValidator
+from src.preprocess_data.stratified_sampler import SampledHorizon
 
 
 def _frame(rows: int = 20):

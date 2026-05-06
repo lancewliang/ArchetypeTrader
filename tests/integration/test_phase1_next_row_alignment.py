@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.data.window_indexer import SlidingWindowIndexer
+from src.preprocess_data.window_indexer import SlidingWindowIndexer
 
 
 def _frame(rows: int = 20):

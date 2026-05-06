@@ -8,8 +8,8 @@ from src.config.phase1_config import (
     SamplingHealthConfig,
     StratificationConfig,
 )
-from src.data.stratified_sampler import StratifiedWindowSampler
-from src.data.window_indexer import SlidingWindowIndexer
+from src.preprocess_data.stratified_sampler import StratifiedWindowSampler
+from src.preprocess_data.window_indexer import SlidingWindowIndexer
 
 
 def _frame(rows: int = 200):

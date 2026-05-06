@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from src.data.window_indexer import (
+from src.preprocess_data.window_indexer import (
     SlidingWindowIndexer,
     _compute_past_stats,
     _compute_window_stats,

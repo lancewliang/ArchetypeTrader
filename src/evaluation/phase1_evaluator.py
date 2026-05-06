@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from src.config.phase1_config import SelectionPolicyConfig
 from src.data.dataset import Phase1DemoDataset, collate_phase1
-from src.data.horizon_builder import HorizonRecord
+from src.preprocess_data.horizon_builder import HorizonRecord
 
 from .metrics.action import (
     action_confusion_matrix,

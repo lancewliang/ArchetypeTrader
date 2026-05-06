@@ -25,80 +25,22 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 
-# ---------- 数据 / 采样 ----------
+# ---------- 前置数据处理配置 ----------
 
-@dataclass(frozen=True)
-class StratificationConfig:
-    """分层采样配置。
-
-    强制 prospective 对照: ``require_prospective_diagnostic`` 默认 ``True``，
-    主实验在缺少诊断 BATCH_ID 时不可启动。
-    """
-    mode: Literal["hindsight_horizon", "prospective_past"] = "hindsight_horizon"
-    prospective_lookback_minutes: int = 1440
-    require_prospective_diagnostic: bool = True
-    diagnostic_pair_batch_id: Optional[str] = None
-    report_hindsight_bias_warning: bool = True
-    hindsight_vs_prospective_max_delta: Dict[str, float] = field(
-        default_factory=lambda: {
-            "val_return_capture_ratio": 0.20,
-            "val_sharpe_ratio": 0.50,
-            "val_max_drawdown": 0.10,
-            "code_usage_ratio": 0.10,
-        }
-    )
-
-
-@dataclass(frozen=True)
-class SamplingHealthConfig:
-    """采样健康阈值。
-
-    ``split_boundary_embargo`` 必须同时覆盖 markout 行:
-    - ``paper_formula``: ``h + 1``
-    - ``next_row_execution``: ``h + 2``
-    """
-    max_no_trade_ratio: float = 0.25
-    flat_low_vol_max_ratio: float = 0.15
-    min_gap_between_samples: int = 12  # h=72 时的 50% overlap 上限
-    max_overlap_ratio: float = 0.5
-    split_boundary_embargo: int = 73            # paper_formula 默认 (h + 1)
-    next_row_split_boundary_embargo: int = 74   # next_row_execution 默认 (h + 2)
-    warn_only: bool = False
-    allow_overlap_relaxation: bool = False
-
-
-@dataclass(frozen=True)
-class NoTradeControlConfig:
-    """No-trade 样本处理。"""
-    keep_no_trade: bool = True
-    max_no_trade_ratio: float = 0.35
-    min_no_trade_ratio: float = 0.10
-    min_low_opportunity_ratio: float = 0.25
-    low_opportunity_return_quantile: float = 0.30
-    min_profit_gate: float = 0.0
-    cap_flat_low_vol_strata: bool = True
-    flat_low_vol_max_ratio: float = 0.15
-    resample_when_exceeded: bool = True
-    resample_when_below_min: bool = True
-
-
-@dataclass(frozen=True)
-class TimeDistributionSamplingConfig:
-    """Train split 的完整时间分布采样配置。"""
-    enabled: bool = True
-    full_time_mode: Literal["non_overlap", "stride"] = "stride"
-    full_time_stride: int = 36
-    min_train_ratio: float = 0.40
-    label_export_enabled: bool = True
-
-
-@dataclass(frozen=True)
-class EvalLabelingConfig:
-    """Eval split 的 label 生成契约。"""
-    val_mode: Literal["horizon_stride", "all_eligible"] = "horizon_stride"
-    test_mode: Literal["horizon_stride", "all_eligible"] = "horizon_stride"
-    apply_sampling: bool = False
-    apply_augmentation: bool = False
+from src.preprocess_data.config import (  # noqa: E402
+    CostConfig,
+    DPConfig,
+    DataAugmentationConfig,
+    EvalLabelingConfig,
+    NoTradeControlConfig,
+    Phase1DataProcessConfig,
+    RejectTransitionHealthConfig,
+    SamplingHealthConfig,
+    StratificationConfig,
+    SyntheticHorizonConfig,
+    TemporalContrastiveConfig,
+    TimeDistributionSamplingConfig,
+)
 
 
 @dataclass(frozen=True)
@@ -107,75 +49,6 @@ class NoTradeCodeHealthConfig:
     max_per_code_no_trade_ratio: float = 0.8
     max_top2_no_trade_concentration: float = 0.7
     min_active_trade_code_count: int = 6
-
-
-@dataclass(frozen=True)
-class TemporalContrastiveConfig:
-    enabled: bool = False
-    shift_bars: List[int] = field(default_factory=lambda: [-2, -1, 1, 2])
-    pair_ratio: float = 0.5
-    max_pairs: int = 30000
-    require_same_strata: bool = False
-    rerun_dp_for_shifted: bool = True
-    contrastive_weight: float = 0.05
-    temperature: float = 0.1
-
-
-@dataclass(frozen=True)
-class SyntheticHorizonConfig:
-    enabled: bool = False
-    synthetic_ratio: float = 0.1
-    max_synthetic_horizons: int = 3000
-    source_selection: str = "contrasting_strata"
-    blend_window: int = 8
-    min_source_distance: int = 72
-    require_orderbook_consistency: bool = True
-    rerun_dp: bool = True
-    exclude_from_validation: bool = True
-
-
-@dataclass(frozen=True)
-class DataAugmentationConfig:
-    temporal_contrastive: TemporalContrastiveConfig = field(
-        default_factory=TemporalContrastiveConfig
-    )
-    synthetic_horizon: SyntheticHorizonConfig = field(
-        default_factory=SyntheticHorizonConfig
-    )
-
-
-# ---------- DP / 成本 / reward 对齐 ----------
-
-@dataclass(frozen=True)
-class RejectTransitionHealthConfig:
-    """盘口深度不足导致的转移拒绝监控。"""
-    max_horizon_reject_rate: float = 0.10
-    max_dataset_reject_rate: float = 0.05
-    fail_when_exceeded: bool = True
-
-
-@dataclass(frozen=True)
-class CostConfig:
-    """统一交易成本配置（DP teacher / student replay 必须共用）。"""
-    reward_alignment: Literal["paper_formula", "next_row_execution"] = "paper_formula"
-    commission_rate: float = 0.0005  # 论文 δ = 0.02%
-    slippage_model: Literal["lob_depth"] = "lob_depth"
-    book_levels: int = 5
-    mark_price: Literal["mid_price"] = "mid_price"
-    execution_lag: int = 0  # paper_formula 必须为 0
-    insufficient_depth_policy: Literal["reject_transition"] = "reject_transition"
-    reject_transition_health: RejectTransitionHealthConfig = field(
-        default_factory=RejectTransitionHealthConfig
-    )
-
-
-@dataclass(frozen=True)
-class DPConfig:
-    """Single-trade DP 配置。"""
-    horizon: int = 72
-    gamma: float = 1.0
-    max_position: int = 1
-    cost_config: CostConfig = field(default_factory=CostConfig)
 
 
 # ---------- 模型 ----------
@@ -346,53 +219,6 @@ class DiagnosticsConfig:
 
 
 # ---------- 顶层配置 ----------
-
-@dataclass(frozen=True)
-class Phase1DataProcessConfig:
-    """Offline Phase I data processing config.
-
-    It contains only fields that can affect sampled horizons or DP teacher
-    outputs. Model and optimizer fields intentionally stay in ``Phase1Config``.
-    """
-    pair: str
-    data_batch_id: str
-    train_file: str
-    val_file: str
-    test_file: str
-    artifact_root: str = "artifacts"
-    factor_profile: str = "short"
-    factor_list_file: Optional[str] = None
-    horizon: int = 72
-    num_demos: int = 30000
-    sampling_strategy: Literal[
-        "stratified_uniform", "stratified_proportional"
-    ] = "stratified_uniform"
-    stratification: StratificationConfig = field(default_factory=StratificationConfig)
-    sampling_health: SamplingHealthConfig = field(default_factory=SamplingHealthConfig)
-    no_trade_control: NoTradeControlConfig = field(
-        default_factory=NoTradeControlConfig
-    )
-    time_distribution_sampling: TimeDistributionSamplingConfig = field(
-        default_factory=TimeDistributionSamplingConfig
-    )
-    eval_labeling: EvalLabelingConfig = field(default_factory=EvalLabelingConfig)
-    data_augmentation: DataAugmentationConfig = field(
-        default_factory=DataAugmentationConfig
-    )
-    dp: DPConfig = field(default_factory=DPConfig)
-    dp_workers: int = 0  # 0=auto; large datasets use available CPU cores
-    dp_worker_chunksize: int = 32
-    seed: int = 42
-    allow_missing_prospective_diagnostic: bool = False
-    risk_acknowledged_by: Optional[str] = None
-    expected_sign_off_followup_batch_id: Optional[str] = None
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    def artifacts_dir(self) -> Path:
-        return Path(self.artifact_root) / self.pair / self.data_batch_id / "phase1"
-
 
 @dataclass(frozen=True)
 class Phase1Config:
@@ -1077,6 +903,10 @@ PHASE1_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
     "selection_policy.behavior.min_epoch_code_stability": _config_doc(
         "要求相邻评估中 code assignment 保持一定稳定性。",
         "提高更重视可复现标签；降低允许训练后期仍有迁移。",
+    ),
+    "selection_policy.behavior.min_horizon_boundary_position_consistency_warning": _config_doc(
+        "设置相邻 horizon 边界仓位一致率的 warning 阈值。",
+        "提高会更早提示边界频繁换仓风险；降低则减少提示但可能忽略边界成本问题。",
     ),
     "selection_policy.teacher": _config_doc(
         "配置 DP teacher 质量 guardrail。",

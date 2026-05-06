@@ -17,9 +17,9 @@ from src.config.phase1_config import (
     apply_paper_strict_overrides,
 )
 from src.data.dataset import Phase1DemoDataset, collate_phase1
-from src.data.demo_store import HorizonLabel, Phase1DemoStore
-from src.data.feature_provenance import file_sha256_short
-from src.data.phase1_processed_store import Phase1ProcessedStore
+from src.preprocess_data.demo_store import HorizonLabel, Phase1DemoStore
+from src.preprocess_data.feature_provenance import file_sha256_short
+from src.preprocess_data.processed_store import Phase1ProcessedStore
 from src.data.state_normalizer import StateNormalizer
 from src.evaluation.phase1_evaluator import Phase1Evaluator
 from src.evaluation.phase1_metrics import (
@@ -622,7 +622,7 @@ class Phase1Trainer:
 
         raise Phase1FatalError(
             "Phase I 数据预处理产物缺少 feature_provenance.json；"
-            "请重新运行 scripts/process_phase1_data.py 生成完整 manifest。"
+            "请重新运行 scripts/pre_process_data.py 生成完整 manifest。"
         )
 
     def _build_training_components(self, feature_dim, val_horizons, reward_normalizer=None):
