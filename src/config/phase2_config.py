@@ -670,8 +670,8 @@ PHASE2_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
         "true 提升论文可比性但稳定性可能下降；工程训练和生产候选通常保持 false。",
     ),
     "phase1_label_source": _config_doc(
-        "选择 Phase II train split 使用默认 sampled labels 还是 Phase I 导出的 full-time train labels。",
-        "full_time 可提升连续时间训练的 label 覆盖；若对应文件缺失会 fail-fast，避免静默退回稀疏标签。",
+        "兼容旧配置的保留字段；Phase II 主训练固定读取 sampled train labels。",
+        "当前实现不再使用 full_time train labels；评估固定读取 non-overlap val labels，test label 不进入训练。",
     ),
     "resume_from": _config_doc(
         "指定从某个 Phase II checkpoint 恢复训练的路径。",

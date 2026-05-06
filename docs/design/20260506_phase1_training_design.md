@@ -8,7 +8,7 @@ Phase I 训练只做三件事：
 
 1. 消费 `data_process_manifest.json` 加载离线数据处理阶段固化的 sampled horizons 与 DP teacher 产物。
 2. 训练 VQ encoder-decoder，学习离散 archetype codebook 和因果 decoder。
-3. 用 best checkpoint 导出 Phase II/III 所需产物：`encoder.pt`、`decoder.pt`、`codebook.pt`、`horizon_labels_*.feather`。
+3. 用 best checkpoint 导出 Phase II/III 所需产物：`encoder.pt`、`decoder.pt`、`codebook.pt`、`sampled_horizon_labels_*.feather`。
 
 Phase I 训练不重新读取原始行情、不重新采样、不重新运行 DP。DP 只允许在离线数据处理阶段使用，Phase I/II/III 的验证、测试、回测推理和线上推理不能动态调用 DP。
 
@@ -23,7 +23,7 @@ Phase I 训练不重新读取原始行情、不重新采样、不重新运行 DP
 | VQ codebook 离散化 latent | `VectorQuantizer`：最近邻量化 + STE → `code_id`, `z_q` |
 | decoder 根据 state 和 code 重构 action | `ArchetypeDecoder`：因果 LSTM，每步拼接 `z_q`，输出 3 分类 logits |
 | 损失为 reconstruction + VQ + commitment | `Phase1Loss`：`L_rec + L_codebook + β₀·L_commit + λ_usage·L_usage + λ_tc·L_tc + λ_align·L_align` |
-| Phase II 需要 demonstration label | best checkpoint 导出 `horizon_labels_*.feather.code_label` |
+| Phase II 需要 demonstration label | best checkpoint 导出 `sampled_horizon_labels_*.feather.code_label` |
 
 ### 2.1 与论文第一阶段的一致性边界
 
@@ -131,8 +131,8 @@ SingleTradeDPPlanner.plan
 
 | manifest 字段 | 当前使用方式 | 后续含义 |
 | --- | --- | --- |
-| `full_time_sampled_horizons_path` / `full_time_dp_teacher_path` | 仅 train split 可选加载，导出 `horizon_labels_full_time_train.feather` | 给 Phase II 提供更连续的 train 标签覆盖 |
-| `non_overlap_horizons_path` / `non_overlap_dp_teacher_path` | train/val/test 可选加载，导出 `non_overlap_horizon_labels_{split}.feather` | 给 Phase II/回测提供非重叠标签，降低 horizon 重叠泄漏 |
+| `full_time_sampled_horizons_path` / `full_time_dp_teacher_path` | 仅 train split 可选加载，导出 `sampled_horizon_labels_full_time_train.feather` | 离线分析/审计使用；当前 Phase II 主训练不消费 |
+| `non_overlap_horizons_path` / `non_overlap_dp_teacher_path` | train/val/test 可选加载，导出 `non_overlap_horizon_labels_{split}.feather` | Phase II val/evaluation 与回测审计使用，降低 horizon 重叠泄漏 |
 
 这些额外来源仍必须满足同一 schema/hash/sample_id/actions/rewards 长度校验；训练损失本身只使用 sampled train records。
 
@@ -629,7 +629,7 @@ data_process_manifest.json
       → Phase1SelectionPolicy.evaluate() → SelectionVerdict
       → Phase1CheckpointManager.commit_verdict()
   → best checkpoint 冻结
-  → _export_horizon_labels() → horizon_labels_{split}.feather
+  → _export_horizon_labels() → sampled_horizon_labels_{split}.feather
   → _export_phase2_artifacts() → encoder.pt / decoder.pt / codebook.pt
   → composite_score_sensitivity_across_epochs()
   → Phase1ReportWriter.write_final_report()
@@ -762,38 +762,75 @@ epoch metrics → Phase1SelectionPolicy.evaluate()
 - `phase1_report.json` 写入 `fatal_collapse=true`、`code_assignment_drift_warning=true`
 - `best_vq_model.pt` 不可被声明为 sign-off 版本
 
-## 9. 输出产物
+## 9. 具体产出物契约
 
 ```text
 artifacts/{PAIR}/{TRAIN_BATCH_ID}/phase1/
 ```
 
-| 文件 | 作用 | 后续使用方 |
-| --- | --- | --- |
-| `phase1_config.yaml` | 固化训练配置 | 复现、Phase II/III 上下文 |
-| `input_schema.json` | 字段契约 | Dataset、Phase II/III 对齐 |
-| `state_normalizer.json` | 状态特征归一化参数 | Phase I 复现 |
-| `reward_normalizer.json` | encoder reward 归一化参数 | Phase I 复现 |
-| `encoder.pt` | encoder 权重 | 离线编码、分析 |
-| `decoder.pt` | 冻结 decoder 权重 | Phase II/III 推理 base action |
-| `codebook.pt` | K=10 code embedding | Phase II selector 动作空间 |
-| `best_vq_model.pt` | 完整最优 checkpoint | 继续训练、回滚 |
-| `last_vq_model.pt` | 最后 epoch checkpoint | 断点恢复 |
-| `checkpoints/epoch_*.pt` | 周期性 checkpoint | 调试 |
-| `checkpoint_manifest.json` | checkpoint 验证与选择记录 | 审计 |
-| `horizon_labels_train.feather` | train code labels | Phase II KL/demo regularization |
-| `horizon_labels_val.feather` | val code labels | Phase II 验证 |
-| `horizon_labels_test.feather` | test code labels | 离线分析 |
-| `horizon_labels_full_time_train.feather` | 可选 full-time train code labels | Phase II 更连续 train 标签 |
-| `non_overlap_horizon_labels_{split}.feather` | 可选非重叠 code labels | Phase II/回测审计与泄漏控制 |
-| `phase1_report.json` | 训练与诊断汇总 | 验收、实验对比 |
-| `composite_score_sensitivity.json` | 权重敏感性 | 审计 |
-| `sampling_leakage_diagnostics.json` | 后视/前瞻对照 | sign-off |
-| `tensorboard/` | 规划中的训练过程可视化；当前 trainer 未接入 `SummaryWriter` | 观察 codebook 演化 |
-| `latent_snapshots/` | 规划中的中间表示快照；模块存在但当前 trainer 未调用 | 离线复盘 |
-| `failure_cases/` | 规划中的失败案例错题本；模块存在但当前 trainer 未调用 | 定位问题 |
+Phase I 训练完成后产出分为四类：
 
-`horizon_labels_*.feather` 字段：
+1. **Phase II/III 必需接口产物**：冻结 decoder、codebook、schema、horizon-level labels。
+2. **Phase I 复现产物**：配置、normalizer、完整 checkpoint、checkpoint manifest。
+3. **审计/签收产物**：report、composite sensitivity、sampling leakage/sign-off diagnostics。
+4. **可选标签来源产物**：full-time train labels、non-overlap labels。
+
+### 9.1 Phase II/III 最小消费集合
+
+Phase II selector 启动训练至少需要：
+
+| 文件 | 是否必需 | 消费方 | 说明 |
+| --- | --- | --- | --- |
+| `decoder.pt` | 必需 | Phase II/III frozen policy | 从 best checkpoint 导出的冻结 causal decoder；输入 state 序列 + selected code，输出 base action logits |
+| `codebook.pt` | 必需 | Phase II selector action space | `K x code_dim` archetype embedding；Phase II action id 必须落在 `[0, K-1]` |
+| `input_schema.json` | 必需 | Phase II dataset / state builder | 固化 `feature_columns`、`price_column`、`excluded_columns`；Phase II 必须按同一特征顺序构造 state |
+| `state_normalizer.json` | 必需 | Phase II dataset / replay | Phase I train-only state normalizer；Phase II 复用同一变换，避免特征尺度漂移 |
+| `sampled_horizon_labels_train.feather` | 必需 | Phase II KL/demo regularization | sampled train horizon 的 `code_label`；Phase II 训练只读取该 train label |
+| `non_overlap_horizon_labels_val.feather` | 必需 | Phase II validation/evaluation | non-overlap val horizon 的 `code_label`；Phase II 评估只读取该 val label |
+| `phase1_config.yaml` | 必需 | Phase II artifact validator | 读取 `horizon`、`max_position`、`reward_alignment`、成本参数，校验 Phase I/II 执行语义一致 |
+| `phase1_report.json` | 必需 | Phase II sign-off / dead-code mask | 读取 Phase I sign-off、code usage、hindsight warning 等审计信息 |
+
+Phase II 的当前工程契约固定为：train split 使用 `sampled_horizons_train.feather` + `sampled_horizon_labels_train.feather` 训练；val/evaluation 使用 `non_overlap_horizons_val.feather` + `non_overlap_horizon_labels_val.feather` 评估。Phase II 主训练不加载 test split market data，也不加载任何 test label；`phase1_label_source` 仅为旧配置兼容字段，不再改变 train label 来源。
+
+### 9.2 全量文件清单
+
+| 文件 | 类别 | 作用 | 后续使用方 |
+| --- | --- | --- |
+| `phase1_config.yaml` | 复现/接口 | 固化训练配置和成本语义 | 复现、Phase II/III 上下文 |
+| `input_schema.json` | 接口 | 字段契约和 feature 顺序 | Dataset、Phase II/III 对齐 |
+| `feature_provenance.json` | 审计 | 记录特征来源与数据预处理阶段 provenance | 复现、数据审计 |
+| `state_normalizer.json` | 接口/复现 | 状态特征归一化参数 | Phase I 复现、Phase II state transform |
+| `reward_normalizer.json` | 复现 | encoder reward 归一化参数 | Phase I label 复现、离线分析 |
+| `encoder.pt` | 模型 | encoder 权重 | 离线编码、分析；线上不使用 |
+| `decoder.pt` | 接口/模型 | 冻结 decoder 权重 | Phase II/III 推理 base action |
+| `codebook.pt` | 接口/模型 | K=10 code embedding | Phase II selector 动作空间 |
+| `best_vq_model.pt` | 复现/checkpoint | 完整最优 checkpoint | 继续训练、回滚、重新导出 |
+| `last_vq_model.pt` | checkpoint | 最后 epoch checkpoint | 断点恢复、失败复盘 |
+| `checkpoints/epoch_*.pt` | checkpoint | 周期性 checkpoint | 调试、ablation |
+| `checkpoint_manifest.json` | 审计/checkpoint | checkpoint sha、metrics、selection verdict、best 选择记录 | 审计、复现 |
+| `sampled_demos_train.feather` | 复现/审计 | 训练 demonstrations 快照，含 states/actions/rewards/meta | 训练复盘、demo 审计 |
+| `sampled_horizon_labels_train.feather` | 接口/label | sampled train code labels | Phase II KL/demo regularization |
+| `sampled_horizon_labels_val.feather` | 分析/label | sampled val code labels | 离线分析；Phase II 主评估使用 non-overlap val labels |
+| `sampled_horizon_labels_test.feather` | 分析/label | sampled test code labels | 离线分析；Phase II 主训练不得用 test label |
+| `sampled_horizon_labels_full_time_train.feather` | 可选 label | 可选 full-time train code labels | 离线分析/审计；当前 Phase II 主训练不消费 |
+| `non_overlap_horizon_labels_{split}.feather` | 可选/接口 label | 可选非重叠 code labels | `val` 为 Phase II 评估必需；`train/test` 用于回测审计与泄漏控制 |
+| `sampled_horizons_full_time_train.feather` / `sampled_dp_teacher_full_time_train.feather` | 可选审计拷贝 | full-time train 标签来源拷贝 | label provenance 审计 |
+| `phase1_report.json` | 审计/sign-off | 训练与诊断汇总、best epoch、guardrail、Phase II eligible 状态 | 验收、实验对比、Phase II sign-off |
+| `composite_score_sensitivity.json` | 审计 | 权重敏感性检查 | checkpoint 选择审计 |
+| `sampling_leakage_diagnostics.json` | 审计/sign-off | 后视/前瞻对照与 sign-off 阻塞原因 | sign-off |
+| `action_diagnostics.json` | 可选诊断 | best epoch action 混淆矩阵、precision/recall、switch timing | 误差分析 |
+| `risk_diagnostics.json` | 可选诊断 | best epoch Sharpe、Sortino、MDD、Calmar 等风险诊断 | 风险复盘 |
+| `archetype_separation.json` | 可选诊断 | code usage、perplexity、silhouette、per-code metrics | codebook 健康分析 |
+| `archetype_behavior_diagnostics.json` | 可选诊断 | inter-code diversity、decoder sensitivity、no-trade concentration | archetype 行为分析 |
+| `horizon_boundary_diagnostics.json` | 可选诊断 | horizon 边界换仓成本与仓位一致性 | Phase II 边界风险评估 |
+| `code_stability_diagnostics.json` | 可选诊断 | epoch code stability、codebook displacement | label 稳定性复盘 |
+| `tensorboard/` | 规划中 | 当前 trainer 未接入 `SummaryWriter` | 观察 codebook 演化 |
+| `latent_snapshots/` | 规划中 | 模块存在但当前 trainer 未调用 | 离线复盘 |
+| `failure_cases/` | 规划中 | 模块存在但当前 trainer 未调用 | 定位问题 |
+
+### 9.3 Label 文件字段
+
+`sampled_horizon_labels_*.feather`、`sampled_horizon_labels_full_time_train.feather` 与 `non_overlap_horizon_labels_{split}.feather` 字段一致：
 
 | 字段 | 说明 |
 | --- | --- |
@@ -805,6 +842,31 @@ artifacts/{PAIR}/{TRAIN_BATCH_ID}/phase1/
 | `demo_return` | DP demonstration horizon return |
 | `num_switches` | action 切换次数 |
 | `is_no_trade` | 是否全程 flat |
+| `sample_source` | label 来源，如 sampled / full_time / non_overlap |
+| `_config_hash` | Phase I config hash，用于防止错配旧 label |
+| `_schema_hash` | input schema hash，用于防止特征字段错配 |
+
+### 9.4 产物生成顺序和失败边界
+
+产物生成顺序：
+
+```text
+phase1_config.yaml / input_schema.json / feature_provenance.json
+  → state_normalizer.json / reward_normalizer.json
+  → sampled_demos_train.feather
+  → last_vq_model.pt / checkpoints/epoch_*.pt / checkpoint_manifest.json
+  → best_vq_model.pt
+  → sampled_horizon_labels_{train,val,test}.feather
+  → sampled_horizon_labels_full_time_train.feather (可选)
+  → non_overlap_horizon_labels_{train,val,test}.feather (可选)
+  → encoder.pt / decoder.pt / codebook.pt
+  → phase1_report.json / diagnostics json
+```
+
+失败边界：
+- 如果训练没有产生 `best_vq_model.pt`，禁止导出 `encoder.pt`、`decoder.pt`、`codebook.pt` 和 label 文件。
+- 如果 sign-off 因 prospective diagnostic 缺失或 hindsight bias 超阈值被阻塞，模型产物可以存在，但 `phase1_report.json.phase1_checkpoint_eligible_for_phase2` 必须为 false，Phase II 主实验不得默认消费。
+- `encoder.pt` 只服务离线编码/复盘；Phase II/III 线上路径只使用 `decoder.pt` + `codebook.pt`。
 
 ## 10. 验收标准
 
@@ -837,7 +899,7 @@ artifacts/{PAIR}/{TRAIN_BATCH_ID}/phase1/
 
 ### 10.4 产物验收
 
-- Phase II 可以只依赖 `decoder.pt`、`codebook.pt`、`horizon_labels_*.feather`、`input_schema.json` 启动训练。
+- Phase II 可以只依赖 `decoder.pt`、`codebook.pt`、`sampled_horizon_labels_train.feather`、`non_overlap_horizon_labels_val.feather`、`input_schema.json`、`state_normalizer.json`、`phase1_config.yaml` 启动主训练；test label 不进入训练。
 - 固定 seed + 固定 manifest 后，重复运行得到一致的 `best_checkpoint_path` 和可比指标。
 
 ## 11. 风险与处理
@@ -859,7 +921,8 @@ artifacts/{PAIR}/{TRAIN_BATCH_ID}/phase1/
 
 Phase II 读取：
 - `decoder.pt`、`codebook.pt`
-- `horizon_labels_train.feather`、`horizon_labels_val.feather`
+- train: `sampled_horizons_train.feather` + `sampled_horizon_labels_train.feather`
+- val/evaluation: `non_overlap_horizons_val.feather` + `non_overlap_horizon_labels_val.feather`
 - `input_schema.json`
 
 Phase II 使用 `code_label` 作为 KL/demo regularization 的 ground-truth：
@@ -888,7 +951,7 @@ Phase I 的最终验收不是单纯 reconstruction accuracy，而是能否提供
 | 事项 | 当前代码事实 | 设计约束 |
 | --- | --- | --- |
 | manifest-only 训练 | `Phase1Trainer.run()` 只通过 `Phase1ProcessedStore` 读取已固化 horizons/teacher | 训练阶段禁止重新采样和在线 DP |
-| 额外标签来源 | trainer 会导出可选 `full_time_train` 与 `non_overlap_*` labels | Phase II 使用这些文件时必须区分 sampled / full-time / non-overlap 语义 |
+| 额外标签来源 | trainer 会导出可选 `full_time_train` 与 `non_overlap_*` labels | Phase II 主训练固定使用 sampled train；主评估固定使用 non-overlap val；full-time 仅作离线审计 |
 | sign-off 阻塞 | 训练可完成但因 prospective diagnostic 缺失或 hindsight delta 超阈值抛 `Phase1FatalError` | “训练完成”不等于“可作为 Phase II 主实验输入” |
 | reward 保真 | dataset 即时 transform rewards，`rec.rewards` 保留原始值 | `demo_return`、teacher replay 和收益报告必须使用原始 reward |
 | best 选择 | Phase A baseline validation 只建稳定性基线，不参与 best | best checkpoint 必须来自 Phase B VQ 训练 |

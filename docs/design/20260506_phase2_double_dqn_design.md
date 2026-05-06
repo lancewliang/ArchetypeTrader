@@ -65,9 +65,9 @@ artifacts/{PAIR}/{PHASE1_BATCH_ID}/phase1/
   decoder.pt
   codebook.pt
   input_schema.json
-  non_overlap_horizons_train.feather
+  sampled_horizons_train.feather
   non_overlap_horizons_val.feather
-  non_overlap_horizon_labels_train.feather
+  sampled_horizon_labels_train.feather
   non_overlap_horizon_labels_val.feather
   phase1_config.yaml
   phase1_report.json
@@ -77,7 +77,7 @@ artifacts/{PAIR}/{PHASE1_BATCH_ID}/phase1/
 
 - Phase II 不重新训练 Phase I encoder、decoder、codebook。
 - Phase II 不重新生成 demonstration label。
-- train/val 的 `code_label` 只来自 Phase I label 文件。
+- train 的 `code_label` 固定来自 `sampled_horizon_labels_train.feather`；val/evaluation 的 `code_label` 固定来自 `non_overlap_horizon_labels_val.feather`。
 - test label 不进入训练和 checkpoint selection。
 - Phase II selector obs 特征列等于 Phase I `input_schema.json.feature_columns`。
 - 持仓信息不进入 selector 决策输入。
@@ -626,9 +626,9 @@ run:
 
 data:
   horizon: 72
-  train_horizons: non_overlap_horizons_train.feather
+  train_horizons: sampled_horizons_train.feather
   val_horizons: non_overlap_horizons_val.feather
-  train_labels: non_overlap_horizon_labels_train.feather
+  train_labels: sampled_horizon_labels_train.feather
   val_labels: non_overlap_horizon_labels_val.feather
   input_schema: input_schema.json
   selector_include_position: false

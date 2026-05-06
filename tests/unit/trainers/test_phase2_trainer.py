@@ -144,15 +144,27 @@ class TestPhase2Trainer:
         assert stats["label_accuracy"] > 0.8
         assert stats["argmax_dominance_ratio"] < 0.8
 
-    def test_full_time_label_source_requires_exported_train_labels(self, tmp_path):
+    def test_phase1_label_paths_use_sampled_train_and_non_overlap_val(self, tmp_path):
+        """Phase II 训练使用 sampled train labels，评估使用 non-overlap val labels。"""
         config = make_config(tmp_path)
-        config = config.__class__.from_dict(
-            {**config.to_dict(), "phase1_label_source": "full_time"}
+        trainer = Phase2Trainer(config)
+
+        assert (
+            trainer._phase1_label_path(config.phase1_dir(), "train").name
+            == "sampled_horizon_labels_train.feather"
+        )
+        assert (
+            trainer._phase1_label_path(config.phase1_dir(), "val").name
+            == "non_overlap_horizon_labels_val.feather"
         )
 
+    def test_phase1_label_paths_refuse_test_split(self, tmp_path):
+        """Phase II 主训练不得请求 test labels。"""
+        config = make_config(tmp_path)
+
         try:
-            Phase2Trainer(config)._phase1_label_path(config.phase1_dir(), "train")
+            Phase2Trainer(config)._phase1_label_path(config.phase1_dir(), "test")
         except Phase2FatalError as exc:
-            assert "horizon_labels_full_time_train.feather" in str(exc)
+            assert "only loads train/val labels" in str(exc)
         else:  # pragma: no cover
-            raise AssertionError("expected full_time label source to fail-fast")
+            raise AssertionError("expected test label split to be refused")

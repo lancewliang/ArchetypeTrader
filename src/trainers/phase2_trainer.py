@@ -159,9 +159,9 @@ class Phase2Trainer:
             self.config.config_hash(),
         )
 
-        # 3. 读取 Phase I 预计算的非重叠 horizon 记录。
-        # 直接使用 Phase I 已生成的 non_overlap_horizons_{train,val}.feather，
-        # 无需读取原始 market frame，也无需重新生成 horizon index。
+        # 3. 读取 Phase I 预计算的 horizon 记录。
+        # train 使用 sampled_horizons_train.feather 进行 KL/demo 训练；
+        # val/eval 使用 non_overlap_horizons_val.feather，避免评估 horizon 重叠。
         reward_alignment_name = val_result.resolved_reward_alignment
         p1_dir = self.config.phase1_dir()
         input_schema = read_json(p1_dir / "input_schema.json")
@@ -170,10 +170,10 @@ class Phase2Trainer:
         processed_store = Phase1ProcessedStore(p1_dir)
         manifest_path = p1_dir / "data_process_manifest.json"
 
-        p1_train_records = processed_store.load_non_overlap_records(manifest_path, "train")
+        p1_train_records = processed_store.load_records(manifest_path, "train")
         p1_val_records = processed_store.load_non_overlap_records(manifest_path, "val")
         self._logger.info(
-            "Phase I 非重叠 horizon 记录已加载：训练记录数=%d，验证记录数=%d，输入特征数=%s",
+            "Phase I horizon 记录已加载：训练来源=sampled，验证来源=non_overlap，训练记录数=%d，验证记录数=%d，输入特征数=%s",
             len(p1_train_records),
             len(p1_val_records),
             len(input_schema.get("feature_columns", [])) if isinstance(input_schema, dict) else None,
@@ -185,8 +185,7 @@ class Phase2Trainer:
         train_labels_df = read_ipc(train_label_path) if train_label_path.exists() else None
         val_labels_df = read_ipc(val_label_path) if val_label_path.exists() else None
         self._logger.info(
-            "Phase I 标签已加载：source=%s 训练标签数=%s，验证标签数=%s train_path=%s val_path=%s",
-            self.config.phase1_label_source,
+            "Phase I 标签已加载：训练来源=sampled，验证来源=non_overlap，训练标签数=%s，验证标签数=%s train_path=%s val_path=%s",
             getattr(train_labels_df, "height", 0) if train_labels_df is not None else 0,
             getattr(val_labels_df, "height", 0) if val_labels_df is not None else 0,
             train_label_path,
@@ -827,6 +826,8 @@ class Phase2Trainer:
             "training_splits": ["train", "val"],
             "backtest_required_for_test_metrics": True,
             "phase1_label_source": self.config.phase1_label_source,
+            "phase1_train_label_source": "sampled",
+            "phase1_eval_label_source": "non_overlap",
             "phase1_train_label_path": str(train_label_path),
             "phase1_train_label_count": (
                 int(getattr(train_labels_df, "height", 0))
@@ -990,23 +991,19 @@ class Phase2Trainer:
             )
 
     def _phase1_label_path(self, p1_dir: Path, split: str) -> Path:
-        if self.config.phase1_label_source == "full_time" and split == "train":
-            full_time_path = p1_dir / "horizon_labels_full_time_train.feather"
-            if not full_time_path.exists():
-                raise Phase2FatalError(
-                    "phase1_label_source=full_time requires "
-                    f"{full_time_path.name}; 请先用 Phase I 导出 full-time train labels。"
-                )
-            return full_time_path
+        if split == "train":
+            path = p1_dir / "sampled_horizon_labels_train.feather"
+        elif split == "val":
+            path = p1_dir / "non_overlap_horizon_labels_val.feather"
+        else:
+            raise Phase2FatalError(
+                "Phase II training only loads train/val labels; "
+                f"refusing split={split!r}."
+            )
 
-        no_path = p1_dir / f"non_overlap_horizon_labels_{split}.feather"
-        if no_path.exists():
-            return no_path
-
-        default_path = p1_dir / f"horizon_labels_{split}.feather"
-        if default_path.exists():
-            return default_path
-        raise Phase2FatalError(f"missing Phase I horizon labels: {default_path}")
+        if path.exists():
+            return path
+        raise Phase2FatalError(f"missing required Phase I horizon labels: {path}")
 
     def _unmasked_diagnostic_probe(
         self,

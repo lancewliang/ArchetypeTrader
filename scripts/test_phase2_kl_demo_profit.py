@@ -2,7 +2,7 @@
 
 This is a local diagnostic test script for questions like:
 
-    Do non_overlap_horizon_labels_train.feather labels actually make money
+    Do Phase II KL/demo labels actually make money
     when Phase II executes them via the frozen Phase I decoder?
 
 It intentionally depends on local artifacts and is not meant for regular CI.
@@ -43,7 +43,7 @@ from src.utils.feather_io import atomic_write_json, read_json, write_ipc  # noqa
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Replay Phase I non-overlap KL/demo labels with frozen decoder and "
+            "Replay Phase I KL/demo labels with frozen decoder and "
             "write per-step profitability diagnostics."
         )
     )
@@ -127,13 +127,22 @@ def replay_kl_demo_labels(
 ) -> dict[str, Any]:
     phase1_dir = config.phase1_dir()
     manifest_path = phase1_dir / "data_process_manifest.json"
-    label_path = phase1_dir / f"non_overlap_horizon_labels_{split}.feather"
+    if split == "train":
+        source = "sampled"
+        label_path = phase1_dir / "sampled_horizon_labels_train.feather"
+        horizons_path = phase1_dir / "sampled_horizons_train.feather"
+        teacher_path = phase1_dir / "sampled_dp_teacher_train.feather"
+    else:
+        source = "non_overlap"
+        label_path = phase1_dir / "non_overlap_horizon_labels_val.feather"
+        horizons_path = phase1_dir / "non_overlap_horizons_val.feather"
+        teacher_path = phase1_dir / "non_overlap_dp_teacher_val.feather"
 
     for required in (
         manifest_path,
         label_path,
-        phase1_dir / f"non_overlap_horizons_{split}.feather",
-        phase1_dir / f"non_overlap_dp_teacher_{split}.feather",
+        horizons_path,
+        teacher_path,
         phase1_dir / "decoder.pt",
         phase1_dir / "codebook.pt",
         phase1_dir / "input_schema.json",
@@ -142,7 +151,10 @@ def replay_kl_demo_labels(
             raise FileNotFoundError(f"missing required artifact: {required}")
 
     store = Phase1ProcessedStore(phase1_dir)
-    records = store.load_non_overlap_records(manifest_path, split)
+    if split == "train":
+        records = store.load_records(manifest_path, "train")
+    else:
+        records = store.load_non_overlap_records(manifest_path, "val")
     if max_horizons is not None:
         records = records[: max(0, int(max_horizons))]
 
@@ -301,6 +313,8 @@ def replay_kl_demo_labels(
         "pair": config.pair,
         "phase1_batch_id": config.phase1_batch_id,
         "split": split,
+        "label_source": source,
+        "label_path": str(label_path),
         "phase1_dir": str(phase1_dir),
         "horizon": config.horizon,
         "max_position": config.max_position,

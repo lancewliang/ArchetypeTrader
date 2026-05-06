@@ -224,9 +224,9 @@ def write_phase1_artifacts(
         pl.DataFrame(teacher_rows).write_ipc(teacher_path)
         pl.DataFrame(horizon_rows).write_ipc(p1_dir / f"sampled_horizons_{split}.feather")
         pl.DataFrame(teacher_rows).write_ipc(p1_dir / f"sampled_dp_teacher_{split}.feather")
-        pl.DataFrame(
-            label_rows
-        ).write_ipc(p1_dir / f"non_overlap_horizon_labels_{split}.feather")
+        labels_df = pl.DataFrame(label_rows)
+        labels_df.write_ipc(p1_dir / f"sampled_horizon_labels_{split}.feather")
+        labels_df.write_ipc(p1_dir / f"non_overlap_horizon_labels_{split}.feather")
         splits_payload[split] = {
             "window_index_path": f"window_index_{split}.feather",
             "sampled_horizons_path": f"sampled_horizons_{split}.feather",
