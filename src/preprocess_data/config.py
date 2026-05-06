@@ -26,7 +26,7 @@ class StratificationConfig:
             "teacher_val_return_capture_ratio": 0.20,
             "teacher_val_sharpe_ratio": 0.50,
             "teacher_val_max_drawdown": 0.10,
-            "code_usage_ratio": 0.10,
+            "teacher_val_code_usage_ratio": 0.10,
         }
     )
 

@@ -1145,7 +1145,7 @@ class Phase1Trainer:
                     metrics_for_select["_consecutive_collapse_epochs"] = (
                         history.consecutive_collapse_epochs + (
                             1
-                            if metrics_for_select.get("code_usage_ratio", 1.0)
+                            if metrics_for_select.get("teacher_val_code_usage_ratio", 1.0)
                             < self.config.selection_policy.min_code_usage_ratio
                             else 0
                         )
@@ -1208,20 +1208,20 @@ class Phase1Trainer:
                     "code_usage_ratio=%s "
                     "teacher_val_return_capture_ratio=%s teacher_val_sharpe_ratio=%s "
                     "online_validation_measured=%s online_val_return_capture_ratio=%s online_val_sharpe_ratio=%s online_val_max_drawdown=%s "
-                    "epoch_code_stability=%s epoch_code_stability_matched=%s restarts=%d reasons=%s",
+                    "teacher_val_epoch_code_stability=%s teacher_val_epoch_code_stability_matched=%s restarts=%d reasons=%s",
                     epoch,
                     full_val,
                     verdict.decision,
                     verdict.composite_score,
-                    metrics_for_select.get("code_usage_ratio"),
+                    metrics_for_select.get("teacher_val_code_usage_ratio"),
                     metrics_for_select.get("teacher_val_return_capture_ratio"),
                     metrics_for_select.get("teacher_val_sharpe_ratio"),
                     metrics_for_select.get("online_validation_measured"),
                     metrics_for_select.get("online_val_return_capture_ratio"),
                     metrics_for_select.get("online_val_sharpe_ratio"),
                     metrics_for_select.get("online_val_max_drawdown"),
-                    metrics_for_select.get("epoch_code_stability"),
-                    metrics_for_select.get("epoch_code_stability_matched"),
+                    metrics_for_select.get("teacher_val_epoch_code_stability"),
+                    metrics_for_select.get("teacher_val_epoch_code_stability_matched"),
                     len(restarted_code_ids),
                     ",".join(verdict.reasons),
                 )
@@ -1476,8 +1476,9 @@ class Phase1Trainer:
         summary.setdefault("teacher_val_reconstruction_accuracy", 0.0)
         summary.setdefault("teacher_val_weighted_reconstruction_accuracy", 0.0)
         summary.setdefault("teacher_val_non_flat_accuracy", 0.0)
+        summary.setdefault("teacher_val_code_usage_ratio", 0.0)
         summary.setdefault("code_usage", {"used": 0, "K": self.config.model.num_codes})
-        summary.setdefault("perplexity", 0.0)
+        summary.setdefault("teacher_val_perplexity", 0.0)
         summary.setdefault("teacher_val_single_trade_consistency_rate", 0.0)
         # 用 trainer 在 demo 生成后实际统计的 no_trade_ratio 覆盖默认。
         summary["no_trade_ratio"] = float(no_trade_ratio)
@@ -1608,7 +1609,7 @@ class Phase1Trainer:
         if self.config.local_smoke_relaxed_guardrails:
             blocking_reasons.append("local_smoke_relaxed_guardrails")
 
-        boundary_value = report_summary.get("horizon_boundary_position_consistency")
+        boundary_value = report_summary.get("teacher_val_horizon_boundary_position_consistency")
         boundary_threshold = (
             self.config.selection_policy.behavior
             .min_horizon_boundary_position_consistency_warning
@@ -1620,7 +1621,7 @@ class Phase1Trainer:
                 boundary_float = None
             if boundary_float is not None and boundary_float < boundary_threshold:
                 warning_reasons.append(
-                    "horizon_boundary_position_consistency="
+                    "teacher_val_horizon_boundary_position_consistency="
                     f"{boundary_float:.3f} < {boundary_threshold:.3f}; "
                     "Phase II must inherit initial_position and charge boundary turnover cost"
                 )

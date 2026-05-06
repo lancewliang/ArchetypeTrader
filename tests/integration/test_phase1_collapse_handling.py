@@ -19,12 +19,12 @@ from src.phase1.training.selection_policy import (
 def _good_metrics(extra: dict | None = None):
     m = {
         "epoch": 1,
-        "code_usage_ratio": 0.9,
+        "teacher_val_code_usage_ratio": 0.9,
         "teacher_val_max_drawdown": 0.1,
         "teacher_val_sharpe_ratio": 1.0,
-        "inter_code_action_diversity": 0.5,
-        "decoder_sensitivity_to_code": 0.5,
-        "epoch_code_stability": 0.9,
+        "teacher_val_inter_code_action_diversity": 0.5,
+        "teacher_val_decoder_sensitivity_to_code": 0.5,
+        "teacher_val_epoch_code_stability": 0.9,
         "teacher_val_dp_teacher_profitable_ratio": 0.5,
     }
     if extra:
@@ -36,7 +36,7 @@ def test_consecutive_collapse_eventually_fatal():
     policy = Phase1SelectionPolicy(SelectionPolicyConfig(min_code_usage_ratio=0.7))
     history = SelectionHistory()
     metrics = _good_metrics({
-        "code_usage_ratio": 0.5,
+        "teacher_val_code_usage_ratio": 0.5,
         "_consecutive_collapse_epochs": 11,
         "_consecutive_collapse_limit": 10,
     })

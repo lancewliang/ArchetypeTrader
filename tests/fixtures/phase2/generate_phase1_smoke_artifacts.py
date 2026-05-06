@@ -179,6 +179,7 @@ def generate_smoke_phase1_artifacts(output_dir: Path) -> None:
         "teacher_val_reconstruction_accuracy": 0.8,
         "teacher_val_weighted_reconstruction_accuracy": 0.75,
         "teacher_val_non_flat_accuracy": 0.7,
+        "teacher_val_code_usage_ratio": 0.7,
         "teacher_val_single_trade_consistency_rate": 0.9,
         "no_trade_ratio": 0.1,
         "reward_alignment": "paper_formula",

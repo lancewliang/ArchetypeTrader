@@ -146,13 +146,13 @@ def test_train_loop_runs_phase_a_baseline_before_phase_b_validation(tmp_path):
             self.calls.append((epoch, full_validation))
             stability_measured = len(self.calls) > 1
             metrics = {
-                "code_usage_ratio": 1.0,
+                "teacher_val_code_usage_ratio": 1.0,
                 "teacher_val_max_drawdown": 0.01,
                 "teacher_val_sharpe_ratio": 1.0,
-                "inter_code_action_diversity": 1.0,
-                "decoder_sensitivity_to_code": 1.0,
-                "epoch_code_stability_measured": stability_measured,
-                "epoch_code_stability": 0.9,
+                "teacher_val_inter_code_action_diversity": 1.0,
+                "teacher_val_decoder_sensitivity_to_code": 1.0,
+                "teacher_val_epoch_code_stability_measured": stability_measured,
+                "teacher_val_epoch_code_stability": 0.9,
                 "teacher_val_dp_teacher_profitable_ratio": 1.0,
                 "teacher_val_switch_point_recall": 1.0,
                 "teacher_val_switch_direction_accuracy": 1.0,
@@ -353,7 +353,7 @@ def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):
                 "teacher_val_return_capture_ratio": 0.10,
                 "teacher_val_sharpe_ratio": 0.20,
                 "teacher_val_max_drawdown": 0.05,
-                "code_usage_ratio": 0.80,
+                "teacher_val_code_usage_ratio": 0.80,
             }
         ),
         encoding="utf-8",
@@ -367,7 +367,7 @@ def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):
                 "teacher_val_return_capture_ratio": 0.20,
                 "teacher_val_sharpe_ratio": 0.50,
                 "teacher_val_max_drawdown": 0.10,
-                "code_usage_ratio": 0.10,
+                "teacher_val_code_usage_ratio": 0.10,
             },
         ),
     )
@@ -377,7 +377,7 @@ def test_sampling_leakage_diagnostics_compares_prospective_report(tmp_path):
             "teacher_val_return_capture_ratio": 0.50,
             "teacher_val_sharpe_ratio": 0.20,
             "teacher_val_max_drawdown": 0.05,
-            "code_usage_ratio": 0.80,
+            "teacher_val_code_usage_ratio": 0.80,
         }
     )
     assert payload["hindsight_bias_warning"] == "exceeded"
@@ -409,7 +409,7 @@ def test_signoff_diagnostics_warns_for_low_horizon_boundary_consistency():
     )
 
     payload = trainer._build_signoff_diagnostics(
-        report_summary={"horizon_boundary_position_consistency": 0.04},
+        report_summary={"teacher_val_horizon_boundary_position_consistency": 0.04},
         leakage_payload={
             "hindsight_bias_warning": "not_applicable",
             "signoff_blocked_reason": "",
@@ -424,7 +424,7 @@ def test_signoff_diagnostics_warns_for_low_horizon_boundary_consistency():
         "inherit_initial_position_and_charge_boundary_turnover_cost"
     ]
     assert any(
-        "horizon_boundary_position_consistency" in reason
+        "teacher_val_horizon_boundary_position_consistency" in reason
         for reason in payload["signoff_warning_reasons"]
     )
 
@@ -433,7 +433,7 @@ def test_signoff_diagnostics_blocks_leakage_failure(tmp_path):
     trainer = Phase1Trainer(_config(artifact_root=str(tmp_path)))
 
     payload = trainer._build_signoff_diagnostics(
-        report_summary={"horizon_boundary_position_consistency": 1.0},
+        report_summary={"teacher_val_horizon_boundary_position_consistency": 1.0},
         leakage_payload={
             "hindsight_bias_warning": "missing_prospective_report",
             "signoff_blocked_reason": "missing_prospective_report",

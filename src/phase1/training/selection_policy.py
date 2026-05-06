@@ -131,10 +131,10 @@ class Phase1SelectionPolicy:
     # ---------- guardrail ----------
 
     def should_block_due_to_codebook(self, metrics: dict) -> Tuple[bool, Optional[str]]:
-        """``code_usage_ratio < min_code_usage_ratio`` 时阻止 best。"""
-        usage = float(metrics.get("code_usage_ratio", 1.0))
+        """``teacher_val_code_usage_ratio < min_code_usage_ratio`` 时阻止 best。"""
+        usage = float(metrics.get("teacher_val_code_usage_ratio", 1.0))
         if usage < self.config.min_code_usage_ratio:
-            return True, f"code_usage_ratio={usage:.3f} < {self.config.min_code_usage_ratio}"
+            return True, f"teacher_val_code_usage_ratio={usage:.3f} < {self.config.min_code_usage_ratio}"
         return False, None
 
     def should_block_due_to_risk(self, metrics: dict) -> Tuple[bool, Optional[str]]:
@@ -148,34 +148,34 @@ class Phase1SelectionPolicy:
         return False, None
 
     def should_block_due_to_behavior(self, metrics: dict) -> Tuple[bool, Optional[str]]:
-        """``inter_code_action_diversity`` / ``decoder_sensitivity_to_code`` /
+        """``teacher_val_inter_code_action_diversity`` / ``teacher_val_decoder_sensitivity_to_code`` /
         epoch 稳定性任一低于阈值即阻止 best；若稳定性尚未被实际测量
         （例如首次 VQ full validation），同样阻止 best。
 
-        若 evaluator 提供 ``epoch_code_stability_matched``，guardrail 优先使用
+        若 evaluator 提供 ``teacher_val_epoch_code_stability_matched``，guardrail 优先使用
         matched 一致率，避免纯 code-id 交换被误判为真实标签漂移；历史 metrics
-        没有该字段时回退到原始 ``epoch_code_stability``。
+        没有该字段时回退到原始 ``teacher_val_epoch_code_stability``。
 
         语义: codebook 在 latent space 看似分开，但 decoder 对 ``z_q`` 不敏感时，
         不同 archetype 实际产生几乎相同的 actions——这种 checkpoint 不能 sign-off。
         """
-        diversity = float(metrics.get("inter_code_action_diversity", 1.0))
-        sensitivity = float(metrics.get("decoder_sensitivity_to_code", 1.0))
-        stability_measured = bool(metrics.get("epoch_code_stability_measured", True))
+        diversity = float(metrics.get("teacher_val_inter_code_action_diversity", 1.0))
+        sensitivity = float(metrics.get("teacher_val_decoder_sensitivity_to_code", 1.0))
+        stability_measured = bool(metrics.get("teacher_val_epoch_code_stability_measured", True))
         stability_key = (
-            "epoch_code_stability_matched"
-            if "epoch_code_stability_matched" in metrics
-            else "epoch_code_stability"
+            "teacher_val_epoch_code_stability_matched"
+            if "teacher_val_epoch_code_stability_matched" in metrics
+            else "teacher_val_epoch_code_stability"
         )
         stability = float(
-            metrics.get(stability_key, metrics.get("epoch_code_stability", 1.0))
+            metrics.get(stability_key, metrics.get("teacher_val_epoch_code_stability", 1.0))
         )
         if diversity < self.config.behavior.min_inter_code_action_diversity:
-            return True, f"inter_code_action_diversity={diversity:.3f} < {self.config.behavior.min_inter_code_action_diversity}"
+            return True, f"teacher_val_inter_code_action_diversity={diversity:.3f} < {self.config.behavior.min_inter_code_action_diversity}"
         if sensitivity < self.config.behavior.min_decoder_sensitivity_to_code:
-            return True, f"decoder_sensitivity_to_code={sensitivity:.3f} < {self.config.behavior.min_decoder_sensitivity_to_code}"
+            return True, f"teacher_val_decoder_sensitivity_to_code={sensitivity:.3f} < {self.config.behavior.min_decoder_sensitivity_to_code}"
         if not stability_measured:
-            return True, "epoch_code_stability_measured=false; wait_for_next_full_validation"
+            return True, "teacher_val_epoch_code_stability_measured=false; wait_for_next_full_validation"
         if stability < self.config.behavior.min_epoch_code_stability:
             return True, f"{stability_key}={stability:.3f} < {self.config.behavior.min_epoch_code_stability}"
         return False, None
@@ -251,7 +251,7 @@ class Phase1SelectionPolicy:
             new_history.best_score = verdict.composite_score
             new_history.best_epoch = epoch
         # collapse 计数维护
-        if metrics.get("code_usage_ratio", 1.0) < self.config.min_code_usage_ratio:
+        if metrics.get("teacher_val_code_usage_ratio", 1.0) < self.config.min_code_usage_ratio:
             new_history.consecutive_collapse_epochs = history.consecutive_collapse_epochs + 1
         else:
             new_history.consecutive_collapse_epochs = 0

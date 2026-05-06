@@ -59,8 +59,8 @@ def test_composite_sensitivity_returns_per_perturbation():
 
 def test_composite_sensitivity_across_epochs_reselects_best():
     epochs = [
-        {"epoch": 0, "a": 1.0, "b": 0.0, "code_usage_ratio": 0.8},
-        {"epoch": 1, "a": 0.0, "b": 2.0, "code_usage_ratio": 0.9},
+        {"epoch": 0, "a": 1.0, "b": 0.0, "teacher_val_code_usage_ratio": 0.8},
+        {"epoch": 1, "a": 0.0, "b": 2.0, "teacher_val_code_usage_ratio": 0.9},
     ]
     out = composite_score_sensitivity_across_epochs(
         epochs,

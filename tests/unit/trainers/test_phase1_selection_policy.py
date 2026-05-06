@@ -40,13 +40,13 @@ def _policy() -> Phase1SelectionPolicy:
 def _good_metrics(extra: dict | None = None):
     m = {
         "epoch": 1,
-        "code_usage_ratio": 0.9,
+        "teacher_val_code_usage_ratio": 0.9,
         "teacher_val_max_drawdown": 0.1,
         "teacher_val_sharpe_ratio": 1.0,
-        "inter_code_action_diversity": 0.5,
-        "decoder_sensitivity_to_code": 0.5,
-        "epoch_code_stability_measured": True,
-        "epoch_code_stability": 0.9,
+        "teacher_val_inter_code_action_diversity": 0.5,
+        "teacher_val_decoder_sensitivity_to_code": 0.5,
+        "teacher_val_epoch_code_stability_measured": True,
+        "teacher_val_epoch_code_stability": 0.9,
         "teacher_val_dp_teacher_profitable_ratio": 0.5,
         "teacher_val_switch_point_recall": 0.7,
         "teacher_val_switch_direction_accuracy": 0.7,
@@ -64,7 +64,7 @@ def _good_metrics(extra: dict | None = None):
 
 def test_block_when_code_usage_below_threshold():
     policy = _policy()
-    metrics = _good_metrics({"code_usage_ratio": 0.5})
+    metrics = _good_metrics({"teacher_val_code_usage_ratio": 0.5})
     verdict = policy.evaluate(metrics, SelectionHistory())
     assert verdict.decision == "reject"
     assert any("codebook_collapse" in r for r in verdict.reasons)
@@ -86,30 +86,31 @@ def test_block_when_sharpe_below_threshold():
 
 def test_block_when_inter_code_action_diversity_low():
     policy = _policy()
-    metrics = _good_metrics({"inter_code_action_diversity": 0.05})
+    metrics = _good_metrics({"teacher_val_inter_code_action_diversity": 0.05})
     verdict = policy.evaluate(metrics, SelectionHistory())
     assert verdict.decision == "reject"
 
 
 def test_block_when_decoder_sensitivity_low():
     policy = _policy()
-    metrics = _good_metrics({"decoder_sensitivity_to_code": 0.01})
+    metrics = _good_metrics({"teacher_val_decoder_sensitivity_to_code": 0.01})
     verdict = policy.evaluate(metrics, SelectionHistory())
     assert verdict.decision == "reject"
 
 
 def test_block_when_code_stability_low():
     policy = _policy()
-    metrics = _good_metrics({"epoch_code_stability": 0.5})
+    metrics = _good_metrics({"teacher_val_epoch_code_stability": 0.5})
     verdict = policy.evaluate(metrics, SelectionHistory())
     assert verdict.decision == "reject"
+    assert any("teacher_val_epoch_code_stability" in r for r in verdict.reasons)
 
 
 def test_prefers_matched_code_stability_when_available():
     policy = _policy()
     metrics = _good_metrics({
-        "epoch_code_stability": 0.1,
-        "epoch_code_stability_matched": 0.9,
+        "teacher_val_epoch_code_stability": 0.1,
+        "teacher_val_epoch_code_stability_matched": 0.9,
     })
     verdict = policy.evaluate(metrics, SelectionHistory())
     assert verdict.decision == "promote_to_best"
@@ -118,19 +119,19 @@ def test_prefers_matched_code_stability_when_available():
 def test_block_when_matched_code_stability_low():
     policy = _policy()
     metrics = _good_metrics({
-        "epoch_code_stability": 0.9,
-        "epoch_code_stability_matched": 0.5,
+        "teacher_val_epoch_code_stability": 0.9,
+        "teacher_val_epoch_code_stability_matched": 0.5,
     })
     verdict = policy.evaluate(metrics, SelectionHistory())
     assert verdict.decision == "reject"
-    assert any("epoch_code_stability_matched=0.500" in r for r in verdict.reasons)
+    assert any("teacher_val_epoch_code_stability_matched=0.500" in r for r in verdict.reasons)
 
 
 def test_block_when_code_stability_unmeasured():
     policy = _policy()
     metrics = _good_metrics({
-        "epoch_code_stability_measured": False,
-        "epoch_code_stability": 1.0,
+        "teacher_val_epoch_code_stability_measured": False,
+        "teacher_val_epoch_code_stability": 1.0,
     })
     verdict = policy.evaluate(metrics, SelectionHistory())
     assert verdict.decision == "reject"
@@ -176,7 +177,7 @@ def test_keep_periodic_when_score_lower():
 def test_consecutive_collapse_triggers_fatal():
     policy = _policy()
     metrics = _good_metrics({
-        "code_usage_ratio": 0.5,
+        "teacher_val_code_usage_ratio": 0.5,
         "_consecutive_collapse_epochs": 11,
         "_consecutive_collapse_limit": 10,
     })

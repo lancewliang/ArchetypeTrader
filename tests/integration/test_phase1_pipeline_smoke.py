@@ -129,7 +129,7 @@ def smoke_artifacts(tmp_path):
                 "teacher_val_return_capture_ratio": 0.0,
                 "teacher_val_sharpe_ratio": 0.0,
                 "teacher_val_max_drawdown": 0.0,
-                "code_usage_ratio": 1.0,
+                "teacher_val_code_usage_ratio": 1.0,
                 "phase1_composite_score": 0.0,
             }
         ),

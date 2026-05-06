@@ -80,8 +80,8 @@ def test_evaluate_epoch_returns_required_metric_keys():
     )
     required = {
         "teacher_val_reconstruction_accuracy",
-        "code_usage_ratio",
-        "perplexity",
+        "teacher_val_code_usage_ratio",
+        "teacher_val_perplexity",
         "teacher_val_switch_point_recall",
         "teacher_val_dp_teacher_net_return",
         "teacher_val_student_net_return",
@@ -91,12 +91,12 @@ def test_evaluate_epoch_returns_required_metric_keys():
         "teacher_val_max_drawdown",
         "teacher_val_max_drawdown_abs",
         "teacher_val_annual_return_ratio",
-        "inter_code_action_diversity",
-        "decoder_sensitivity_to_code",
-        "confusion_matrix",
-        "action_precision_recall_per_class",
-        "horizon_boundary_turnover_cost",
-        "horizon_boundary_position_consistency",
+        "teacher_val_inter_code_action_diversity",
+        "teacher_val_decoder_sensitivity_to_code",
+        "teacher_val_confusion_matrix",
+        "teacher_val_action_precision_recall_per_class",
+        "teacher_val_horizon_boundary_turnover_cost",
+        "teacher_val_horizon_boundary_position_consistency",
         "online_validation_measured",
         "online_code_prefix_steps",
         "online_code_usage_ratio",
@@ -104,15 +104,15 @@ def test_evaluate_epoch_returns_required_metric_keys():
         "online_val_return_capture_ratio",
         "online_val_sharpe_ratio",
         "online_val_max_drawdown",
-        "dp_teacher_return_distribution",
-        "epoch_code_stability_measured",
-        "epoch_code_stability",
-        "epoch_code_stability_matched",
-        "per_code_switch_point_distribution",
+        "teacher_val_dp_teacher_return_distribution",
+        "teacher_val_epoch_code_stability_measured",
+        "teacher_val_epoch_code_stability",
+        "teacher_val_epoch_code_stability_matched",
+        "teacher_val_per_code_switch_point_distribution",
     }
     assert required.issubset(out.metrics.keys())
-    assert out.metrics["epoch_code_stability_measured"] is False
-    assert out.metrics["epoch_code_stability_matched"] == 1.0
+    assert out.metrics["teacher_val_epoch_code_stability_measured"] is False
+    assert out.metrics["teacher_val_epoch_code_stability_matched"] == 1.0
     assert isinstance(out.metrics["teacher_val_return_capture_ratio"], float)
     assert isinstance(out.metrics["teacher_val_sharpe_ratio"], float)
     assert out.metrics["teacher_val_risk_capital_base"] > 90.0
@@ -141,9 +141,9 @@ def test_evaluate_epoch_marks_code_stability_measured_after_first_probe():
         val_records=records,
         full_validation=True,
     )
-    assert first.metrics["epoch_code_stability_measured"] is False
-    assert second.metrics["epoch_code_stability_measured"] is True
-    assert "epoch_code_stability_matched" in second.metrics
+    assert first.metrics["teacher_val_epoch_code_stability_measured"] is False
+    assert second.metrics["teacher_val_epoch_code_stability_measured"] is True
+    assert "teacher_val_epoch_code_stability_matched" in second.metrics
 
 
 def test_fast_probe_uses_subset():

@@ -234,52 +234,52 @@ class Phase1Evaluator:
             sw.switch_timing_error_mean
         )
         cm = action_confusion_matrix(true_actions, pred_actions)
-        out.metrics["confusion_matrix"] = cm.matrix
-        out.metrics["action_precision_recall_per_class"] = cm.per_class()
+        out.metrics["teacher_val_confusion_matrix"] = cm.matrix
+        out.metrics["teacher_val_action_precision_recall_per_class"] = cm.per_class()
 
         K = model.quantizer.num_codes
-        out.metrics["code_usage_ratio"] = code_usage_ratio(all_code_ids, K)
-        out.metrics["perplexity"] = codebook_perplexity(all_code_ids, K)
+        out.metrics["teacher_val_code_usage_ratio"] = code_usage_ratio(all_code_ids, K)
+        out.metrics["teacher_val_perplexity"] = codebook_perplexity(all_code_ids, K)
         codebook_list = model.quantizer.codebook.detach().cpu().tolist()
-        out.metrics["inter_code_distance"] = inter_code_distance(codebook_list)
-        out.metrics["silhouette_score"] = latent_silhouette_score(z_e_tensor, all_code_ids)
+        out.metrics["teacher_val_inter_code_distance"] = inter_code_distance(codebook_list)
+        out.metrics["teacher_val_silhouette_score"] = latent_silhouette_score(z_e_tensor, all_code_ids)
         stability_measured = (
             self._previous_code_ids is not None
             and len(self._previous_code_ids) == len(all_code_ids)
         )
-        out.metrics["epoch_code_stability_measured"] = stability_measured
+        out.metrics["teacher_val_epoch_code_stability_measured"] = stability_measured
         if stability_measured:
-            out.metrics["epoch_code_stability"] = epoch_code_stability(
+            out.metrics["teacher_val_epoch_code_stability"] = epoch_code_stability(
                 self._previous_code_ids, all_code_ids
             )
             if (
                 self._previous_codebook is not None
                 and len(self._previous_codebook) == len(codebook_list)
             ):
-                out.metrics["epoch_code_stability_matched"] = matched_epoch_code_stability(
+                out.metrics["teacher_val_epoch_code_stability_matched"] = matched_epoch_code_stability(
                     self._previous_code_ids,
                     all_code_ids,
                     self._previous_codebook,
                     codebook_list,
                 )
             else:
-                out.metrics["epoch_code_stability_matched"] = out.metrics[
-                    "epoch_code_stability"
+                out.metrics["teacher_val_epoch_code_stability_matched"] = out.metrics[
+                    "teacher_val_epoch_code_stability"
                 ]
         else:
-            out.metrics["epoch_code_stability"] = 1.0
-            out.metrics["epoch_code_stability_matched"] = 1.0
+            out.metrics["teacher_val_epoch_code_stability"] = 1.0
+            out.metrics["teacher_val_epoch_code_stability_matched"] = 1.0
         displacement = (
             codebook_displacement(codebook_list, self._previous_codebook)
             if self._previous_codebook is not None
             else {}
         )
         if displacement:
-            out.metrics["codebook_displacement_mean"] = sum(displacement.values()) / len(displacement)
-            out.metrics["codebook_displacement_max"] = max(displacement.values())
+            out.metrics["teacher_val_codebook_displacement_mean"] = sum(displacement.values()) / len(displacement)
+            out.metrics["teacher_val_codebook_displacement_max"] = max(displacement.values())
         else:
-            out.metrics["codebook_displacement_mean"] = 0.0
-            out.metrics["codebook_displacement_max"] = 0.0
+            out.metrics["teacher_val_codebook_displacement_mean"] = 0.0
+            out.metrics["teacher_val_codebook_displacement_max"] = 0.0
 
         teacher_records: List[HorizonReplayRecord] = []
         student_records: List[HorizonReplayRecord] = []
@@ -335,10 +335,10 @@ class Phase1Evaluator:
         boundary = self.replay_evaluator.evaluate_horizon_boundaries(
             probe_records, decoded_actions
         )
-        out.metrics["horizon_boundary_turnover_cost"] = (
+        out.metrics["teacher_val_horizon_boundary_turnover_cost"] = (
             boundary.horizon_boundary_turnover_cost
         )
-        out.metrics["horizon_boundary_position_consistency"] = (
+        out.metrics["teacher_val_horizon_boundary_position_consistency"] = (
             boundary.horizon_boundary_position_consistency
         )
 
@@ -372,7 +372,6 @@ class Phase1Evaluator:
         out.metrics["teacher_val_dp_teacher_profitable_ratio"] = (
             tq.teacher_val_dp_teacher_profitable_ratio
         )
-        out.metrics["dp_teacher_return_distribution"] = tq.return_distribution
         out.metrics["teacher_val_dp_teacher_return_distribution"] = tq.return_distribution
 
         diag = per_code_summary(
@@ -394,26 +393,26 @@ class Phase1Evaluator:
                 "no_trade_ratio": s.no_trade_ratio,
                 "switch_point_distribution": s.switch_point_distribution,
             }
-        out.metrics["per_code_switch_point_distribution"] = {
+        out.metrics["teacher_val_per_code_switch_point_distribution"] = {
             str(s.code_id): s.switch_point_distribution for s in diag.per_code
         }
-        out.metrics["active_trade_code_count"] = float(diag.active_trade_code_count)
-        out.metrics["no_trade_code_concentration_top1"] = diag.no_trade_code_concentration["top1"]
-        out.metrics["no_trade_code_concentration_top2"] = diag.no_trade_code_concentration["top2"]
+        out.metrics["teacher_val_active_trade_code_count"] = float(diag.active_trade_code_count)
+        out.metrics["teacher_val_no_trade_code_concentration_top1"] = diag.no_trade_code_concentration["top1"]
+        out.metrics["teacher_val_no_trade_code_concentration_top2"] = diag.no_trade_code_concentration["top2"]
 
         if probe_records and len(all_code_ids) > 0:
             decoded_logits_by_code, decoded_actions_by_code = self._behavior_probe(
                 model, probe_records[: min(64, len(probe_records))]
             )
-            out.metrics["per_code_action_entropy_mean"] = (
+            out.metrics["teacher_val_per_code_action_entropy_mean"] = (
                 sum(per_code_action_entropy(decoded_logits_by_code).values())
                 / max(K, 1)
             )
-            out.metrics["inter_code_action_diversity"] = inter_code_action_diversity(decoded_actions_by_code)
-            out.metrics["decoder_sensitivity_to_code"] = decoder_sensitivity_to_code(decoded_logits_by_code)
+            out.metrics["teacher_val_inter_code_action_diversity"] = inter_code_action_diversity(decoded_actions_by_code)
+            out.metrics["teacher_val_decoder_sensitivity_to_code"] = decoder_sensitivity_to_code(decoded_logits_by_code)
 
-        if out.metrics.get("code_usage_ratio", 1.0) < 0.7:
-            out.warnings.append(f"code_usage_ratio={out.metrics['code_usage_ratio']:.3f} < 0.7")
+        if out.metrics.get("teacher_val_code_usage_ratio", 1.0) < 0.7:
+            out.warnings.append(f"teacher_val_code_usage_ratio={out.metrics['teacher_val_code_usage_ratio']:.3f} < 0.7")
         if out.metrics.get("teacher_val_max_drawdown", 0.0) > 0.2:
             out.warnings.append(f"teacher_val_max_drawdown={out.metrics['teacher_val_max_drawdown']:.3f} > 0.2")
         if out.metrics.get("teacher_val_dp_teacher_profitable_ratio", 1.0) < 0.3:
@@ -520,8 +519,8 @@ class Phase1Evaluator:
         """构建 diagnostics 字典。"""
         out.diagnostics = {
             "action": {
-                "confusion_matrix": teacher_ctx.confusion_matrix.matrix,
-                "action_precision_recall_per_class": teacher_ctx.confusion_matrix.per_class(),
+                "teacher_val_confusion_matrix": teacher_ctx.confusion_matrix.matrix,
+                "teacher_val_action_precision_recall_per_class": teacher_ctx.confusion_matrix.per_class(),
                 "switch_timing_error_distribution": teacher_ctx.switch_metrics.switch_timing_error_distribution,
             },
             "risk": {
@@ -542,24 +541,24 @@ class Phase1Evaluator:
                 "teacher_val_calmar_ratio": out.metrics["teacher_val_calmar_ratio"],
             },
             "archetype_separation": {
-                "code_usage_ratio": out.metrics["code_usage_ratio"],
-                "perplexity": out.metrics["perplexity"],
-                "inter_code_distance": out.metrics["inter_code_distance"],
-                "silhouette_score": out.metrics["silhouette_score"],
+                "teacher_val_code_usage_ratio": out.metrics["teacher_val_code_usage_ratio"],
+                "teacher_val_perplexity": out.metrics["teacher_val_perplexity"],
+                "teacher_val_inter_code_distance": out.metrics["teacher_val_inter_code_distance"],
+                "teacher_val_silhouette_score": out.metrics["teacher_val_silhouette_score"],
                 "per_code_metrics": {str(k): v for k, v in out.per_code_metrics.items()},
-                "dp_teacher_return_distribution": teacher_ctx.teacher_quality.return_distribution,
+                "teacher_val_dp_teacher_return_distribution": teacher_ctx.teacher_quality.return_distribution,
             },
             "archetype_behavior": {
-                "active_trade_code_count": out.metrics["active_trade_code_count"],
-                "no_trade_code_concentration_top1": out.metrics["no_trade_code_concentration_top1"],
-                "no_trade_code_concentration_top2": out.metrics["no_trade_code_concentration_top2"],
-                "per_code_switch_point_distribution": out.metrics["per_code_switch_point_distribution"],
-                "inter_code_action_diversity": out.metrics.get("inter_code_action_diversity", 0.0),
-                "decoder_sensitivity_to_code": out.metrics.get("decoder_sensitivity_to_code", 0.0),
+                "teacher_val_active_trade_code_count": out.metrics["teacher_val_active_trade_code_count"],
+                "teacher_val_no_trade_code_concentration_top1": out.metrics["teacher_val_no_trade_code_concentration_top1"],
+                "teacher_val_no_trade_code_concentration_top2": out.metrics["teacher_val_no_trade_code_concentration_top2"],
+                "teacher_val_per_code_switch_point_distribution": out.metrics["teacher_val_per_code_switch_point_distribution"],
+                "teacher_val_inter_code_action_diversity": out.metrics.get("teacher_val_inter_code_action_diversity", 0.0),
+                "teacher_val_decoder_sensitivity_to_code": out.metrics.get("teacher_val_decoder_sensitivity_to_code", 0.0),
             },
             "horizon_boundary": {
-                "horizon_boundary_turnover_cost": out.metrics["horizon_boundary_turnover_cost"],
-                "horizon_boundary_position_consistency": out.metrics["horizon_boundary_position_consistency"],
+                "teacher_val_horizon_boundary_turnover_cost": out.metrics["teacher_val_horizon_boundary_turnover_cost"],
+                "teacher_val_horizon_boundary_position_consistency": out.metrics["teacher_val_horizon_boundary_position_consistency"],
                 "online_horizon_boundary_turnover_cost": out.metrics[
                     "online_horizon_boundary_turnover_cost"
                 ],
@@ -586,12 +585,12 @@ class Phase1Evaluator:
                 ],
             },
             "code_stability": {
-                "epoch_code_stability_measured": out.metrics["epoch_code_stability_measured"],
-                "epoch_code_stability": out.metrics["epoch_code_stability"],
-                "epoch_code_stability_matched": out.metrics["epoch_code_stability_matched"],
+                "teacher_val_epoch_code_stability_measured": out.metrics["teacher_val_epoch_code_stability_measured"],
+                "teacher_val_epoch_code_stability": out.metrics["teacher_val_epoch_code_stability"],
+                "teacher_val_epoch_code_stability_matched": out.metrics["teacher_val_epoch_code_stability_matched"],
                 "codebook_displacement": teacher_ctx.displacement,
-                "codebook_displacement_mean": out.metrics["codebook_displacement_mean"],
-                "codebook_displacement_max": out.metrics["codebook_displacement_max"],
+                "teacher_val_codebook_displacement_mean": out.metrics["teacher_val_codebook_displacement_mean"],
+                "teacher_val_codebook_displacement_max": out.metrics["teacher_val_codebook_displacement_max"],
             },
         }
 
