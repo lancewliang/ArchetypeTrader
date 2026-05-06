@@ -379,6 +379,8 @@ class Phase2Trainer:
                 dataset=train_dataset,
                 dead_code_mask=dead_code_mask,
                 num_codes=num_codes,
+                epochs_override=self.config.ppo.kl_demo_prelearn_epochs,
+                lr_override=self.config.ppo.kl_demo_prelearn_lr,
             )
         else:
             selector_prelearn_stats = {
@@ -453,6 +455,8 @@ class Phase2Trainer:
 
         for update_idx in range(start_update, num_updates):
             stats = ppo_trainer.collect_and_update()
+            selector_aux_stats: Dict[str, Any] = {}
+          
             self._rollout_stats.append({
                 "update_idx": update_idx,
                 "policy_loss": stats.policy_loss,
@@ -476,6 +480,8 @@ class Phase2Trainer:
                 "rollout_worker_startup_seconds": stats.rollout_worker_startup_seconds,
                 "rollout_samples_per_second": stats.rollout_samples_per_second,
                 "kl_demo_dominance_ratio": stats.kl_demo_dominance_ratio,
+                "selector_aux_label_accuracy": selector_aux_stats.get("label_accuracy", 0.0),
+                "selector_aux_loss": selector_aux_stats.get("final_loss", 0.0),
             })
 
             # 保存 last
@@ -504,6 +510,43 @@ class Phase2Trainer:
                 eval_metrics = eval_result.metrics
                 eval_metrics["update_idx"] = update_idx
                 eval_metrics["val_net_return"] = eval_metrics.get("net_return", 0.0)
+                train_code_diag = self._selector_label_diagnostics_from_dataset(
+                    selector=selector,
+                    actor_critic=actor_critic,
+                    dataset=train_dataset,
+                    num_codes=num_codes,
+                    prev_positions=[0],
+                )
+                train_code_position_aug_diag = {}
+                if (
+                    self.config.horizon_schedule.position_continuity
+                    and self.config.max_position > 0
+                ):
+                    train_code_position_aug_diag = (
+                        self._selector_label_diagnostics_from_dataset(
+                            selector=selector,
+                            actor_critic=actor_critic,
+                            dataset=train_dataset,
+                            num_codes=num_codes,
+                            prev_positions=[
+                                -self.config.max_position,
+                                0,
+                                self.config.max_position,
+                            ],
+                        )
+                    )
+                eval_metrics.update(
+                    self._prefixed_selector_label_metrics(
+                        train_code_diag,
+                        prefix="train_selector",
+                    )
+                )
+                eval_metrics.update(
+                    self._prefixed_selector_label_metrics(
+                        train_code_position_aug_diag,
+                        prefix="train_selector_position_aug",
+                    )
+                )
                 score, score_debug = compute_phase2_composite_score(
                     eval_metrics,
                     self.config.selection_policy.metric_weights,
@@ -533,8 +576,18 @@ class Phase2Trainer:
                     if float(eval_metrics.get("selector_labeled_count", 0.0)) > 0.0
                     else "n/a"
                 )
+                train_selector_label_accuracy = (
+                    f"{float(eval_metrics.get('train_selector_label_accuracy', 0.0)):.6f}"
+                    if float(eval_metrics.get("train_selector_labeled_count", 0.0)) > 0.0
+                    else "n/a"
+                )
+                train_selector_position_aug_label_accuracy = (
+                    f"{float(eval_metrics.get('train_selector_position_aug_label_accuracy', 0.0)):.6f}"
+                    if float(eval_metrics.get("train_selector_position_aug_labeled_count", 0.0)) > 0.0
+                    else "n/a"
+                )
                 self._logger.info(
-                    "Phase II 评估结果：更新=%d，决策=%s，综合分=%.6f，验证净收益=%s，夏普=%s，近似 KL=%.6f，平均奖励=%.6f，selector主导率=%.6f，selector熵=%.6f，selector_top1_margin=%.6f，selector_label_acc=%s，原因=%s",
+                    "Phase II 评估结果：更新=%d，决策=%s，综合分=%.2f，验证净收益=%s.3f，夏普=%s.2f，近似 KL=%.3f，平均奖励=%.3f，train_code_acc_flat=%s，train_code_acc_position_aug=%s，train_code_labeled=%d，train_selector主导code=%d，train_selector主导率=%.3f，train_selector熵=%.6f，train_selector_top1_margin=%.6f，val_code_acc=%s，val_selector主导率=%.6f，val_selector熵=%.6f，val_selector_top1_margin=%.6f，原因=%s",
                     update_idx,
                     verdict.decision,
                     float(eval_metrics.get("phase2_composite_score", 0.0)),
@@ -542,11 +595,28 @@ class Phase2Trainer:
                     eval_metrics.get("sharpe_ratio"),
                     stats.approx_kl,
                     stats.reward_mean,
+                    train_selector_label_accuracy,
+                    train_selector_position_aug_label_accuracy,
+                    int(float(eval_metrics.get("train_selector_labeled_count", 0.0))),
+                    int(float(eval_metrics.get("train_selector_argmax_dominance_code", -1))),
+                    float(eval_metrics.get("train_selector_argmax_dominance_ratio", 0.0)),
+                    float(eval_metrics.get("train_selector_entropy_mean", 0.0)),
+                    float(eval_metrics.get("train_selector_top1_margin_mean", 0.0)),
+                    selector_label_accuracy,
                     float(eval_metrics.get("selector_argmax_dominance_ratio", 0.0)),
                     float(eval_metrics.get("selector_entropy_mean", 0.0)),
                     float(eval_metrics.get("selector_top1_margin_mean", 0.0)),
-                    selector_label_accuracy,
                     ",".join(verdict.reasons),
+                )
+                self._logger.info(
+                    "Phase II train code 分布诊断：更新=%d，label_counts=%s，argmax_counts=%s，mean_probs=%s",
+                    update_idx,
+                    train_code_diag.get("label_counts", []),
+                    train_code_diag.get("argmax_counts", []),
+                    [
+                        round(float(v), 6)
+                        for v in train_code_diag.get("mean_probs", [])
+                    ],
                 )
 
                 # 保存 replay log
@@ -919,29 +989,11 @@ class Phase2Trainer:
                 "请关闭 reward_normalization 并使用 reward_scaling。"
             )
 
-    def _phase1_label_path(self, p1_dir: Path, split: str) -> Path:
-        if self.config.phase1_label_source == "full_time" and split == "train":
-            sampled_full_time = p1_dir / "sampled_horizon_labels_full_time_train.feather"
-            if sampled_full_time.exists():
-                return sampled_full_time
-            legacy_full_time = p1_dir / "horizon_labels_full_time_train.feather"
-            if legacy_full_time.exists():
-                return legacy_full_time
-            raise Phase2FatalError(
-                "phase1_label_source=full_time 需要 "
-                "horizon_labels_full_time_train.feather "
-                "或 sampled_horizon_labels_full_time_train.feather"
-            )
+    def _phase1_label_path(self, p1_dir: Path, split: str) -> Path:        
         no_path = p1_dir / f"non_overlap_horizon_labels_{split}.feather"
         if no_path.exists():
             return no_path
-        new_path = p1_dir / f"sampled_horizon_labels_{split}.feather"
-        if new_path.exists():
-            return new_path
-        legacy_path = p1_dir / f"horizon_labels_{split}.feather"
-        if legacy_path.exists():
-            return legacy_path
-        return new_path
+      
 
     def _unmasked_diagnostic_probe(
         self,
@@ -997,6 +1049,8 @@ class Phase2Trainer:
         dataset: Phase2Dataset,
         dead_code_mask: Optional[Any],
         num_codes: int,
+        epochs_override: Optional[int] = None,
+        lr_override: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Bootstrap selector with the existing Phase I KL/demo labels.
 
@@ -1058,16 +1112,23 @@ class Phase2Trainer:
             max(int(self.config.ppo.minibatch_size or sample_count), 1),
             sample_count,
         )
-        epochs = max(int(self.config.ppo.update_epochs), 1)
+        epochs_source = (
+            self.config.ppo.update_epochs
+            if epochs_override is None
+            else epochs_override
+        )
+        epochs = max(int(epochs_source), 1)
 
         counts = torch.bincount(targets, minlength=num_codes).float()
         present = counts > 0
-        class_weights = torch.zeros(num_codes, dtype=torch.float32, device=device)
-        if present.any():
-            class_weights[present] = (
-                float(sample_count)
-                / (present.float().sum().to(device) * counts[present].to(device))
-            )
+        class_weights = None
+        if self.config.ppo.kl_demo_class_balance:
+            class_weights = torch.zeros(num_codes, dtype=torch.float32, device=device)
+            if present.any():
+                class_weights[present] = (
+                    float(sample_count)
+                    / (present.float().sum().to(device) * counts[present].to(device))
+                )
 
         mask_tensor = None
         if dead_code_mask is not None:
@@ -1076,29 +1137,39 @@ class Phase2Trainer:
         was_training = selector.training
         selector.train()
         final_loss = 0.0
-        for _epoch in range(epochs):
-            permutation = torch.randperm(sample_count, device=device)
-            for start in range(0, sample_count, batch_size):
-                mb_idx = permutation[start:start + batch_size]
-                logits, _value = selector(obs[mb_idx])
-                if mask_tensor is not None:
-                    logits = ArchetypeSelector.apply_dead_code_mask(logits, mask_tensor)
-                loss = F.cross_entropy(
-                    logits,
-                    targets[mb_idx],
-                    weight=class_weights,
-                    label_smoothing=float(self.config.ppo.kl_demo_label_smoothing),
-                )
-                loss = loss * float(self.config.ppo.kl_demo_coef)
-                optimizer.zero_grad()
-                loss.backward()
-                if self.config.ppo.max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        selector.parameters(),
-                        self.config.ppo.max_grad_norm,
+        old_lrs = [float(pg.get("lr", self.config.ppo.lr)) for pg in optimizer.param_groups]
+        if lr_override is not None:
+            for pg in optimizer.param_groups:
+                pg["lr"] = float(lr_override)
+        try:
+            for _epoch in range(epochs):
+                permutation = torch.randperm(sample_count, device=device)
+                for start in range(0, sample_count, batch_size):
+                    mb_idx = permutation[start:start + batch_size]
+                    logits, _value = selector(obs[mb_idx])
+                    if mask_tensor is not None:
+                        logits = ArchetypeSelector.apply_dead_code_mask(logits, mask_tensor)
+                    loss = F.cross_entropy(
+                        logits,
+                        targets[mb_idx],
+                        weight=class_weights,
+                        label_smoothing=float(self.config.ppo.kl_demo_label_smoothing),
                     )
-                optimizer.step()
-                final_loss = float(loss.detach().item())
+                    # self._logger.info("kl_demo_loss=%.3f", loss.item())
+                    loss = loss * float(self.config.ppo.kl_demo_coef)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    if self.config.ppo.max_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            selector.parameters(),
+                            self.config.ppo.max_grad_norm,
+                        )
+                    optimizer.step()
+                    final_loss = float(loss.detach().item())
+        finally:
+            if lr_override is not None:
+                for pg, old_lr in zip(optimizer.param_groups, old_lrs):
+                    pg["lr"] = old_lr
 
         selector.eval()
         with torch.no_grad():
@@ -1122,13 +1193,14 @@ class Phase2Trainer:
             "augmented_sample_count": sample_count,
             "epochs": epochs,
             "batch_size": batch_size,
+            "lr": float(lr_override) if lr_override is not None else float(old_lrs[0]),
             "final_loss": final_loss,
             "label_accuracy": float(correct),
             "entropy_mean": float(entropy.mean().item()),
             "argmax_dominance_ratio": float(dominance_count / max(sample_count, 1)),
             "argmax_counts": [int(v) for v in argmax_counts],
             "class_counts": [int(v) for v in counts.detach().cpu().tolist()],
-            "class_balanced": True,
+            "class_balanced": bool(self.config.ppo.kl_demo_class_balance),
         }
 
     def _selector_pre_ppo_diagnostics(
@@ -1285,6 +1357,32 @@ class Phase2Trainer:
             "label_counts": [int(v) for v in label_counts],
             "mean_probs": [float(v) for v in mean_probs],
         }
+
+    @staticmethod
+    def _prefixed_selector_label_metrics(
+        diagnostics: Dict[str, Any],
+        *,
+        prefix: str,
+    ) -> Dict[str, float]:
+        """Flatten direct selector-vs-label diagnostics into eval metrics."""
+        scalar_keys = (
+            "sample_count",
+            "labeled_count",
+            "label_accuracy",
+            "argmax_dominance_code",
+            "argmax_dominance_ratio",
+            "entropy_mean",
+            "top1_prob_mean",
+            "top2_prob_mean",
+            "top1_margin_mean",
+            "dead_label_count",
+        )
+        out: Dict[str, float] = {}
+        for key in scalar_keys:
+            value = diagnostics.get(key)
+            if isinstance(value, (int, float)):
+                out[f"{prefix}_{key}"] = float(value)
+        return out
 
     @staticmethod
     def _selector_diagnostics_summary(

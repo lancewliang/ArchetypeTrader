@@ -14,7 +14,7 @@
 - done 与 truncated 语义不混淆。
 """
 from __future__ import annotations
-
+import logging
 import random as _random
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -112,6 +112,8 @@ class PPOTrainer:
         # 当前每个 env 的 obs
         self._current_obs: List[Optional[np.ndarray]] = [None] * self._num_envs
         self._last_rollout_timing = RolloutTimingStats()
+        self._logger = logging.getLogger("archetype.phase2.ppo_trainer")
+
 
     def setup(self, optimizer: Optional[torch.optim.Optimizer] = None) -> None:
         """初始化 buffer / loss_fn / optimizer。
@@ -141,6 +143,7 @@ class PPOTrainer:
             num_codes=self.actor_critic.selector.num_codes,
             value_clip_range=self.config.ppo.value_clip_range,
             kl_demo_label_smoothing=self.config.ppo.kl_demo_label_smoothing,
+            kl_demo_class_balance=self.config.ppo.kl_demo_class_balance,
         )
         if optimizer is not None:
             self._optimizer = optimizer
@@ -290,7 +293,7 @@ class PPOTrainer:
                     action=action,
                     logits=logits,
                 )
-
+                
                 # Numerical safety check
                 self._check_numerical_safety(loss_out.total)
 

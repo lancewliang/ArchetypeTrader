@@ -7,12 +7,12 @@
 - value_loss: clipped value loss。
 - entropy_bonus: 鼓励探索。
 - kl_demo_loss: 只在 is_labeled=true 上生效；masked dead code 样本 loss=0。
-  labeled minibatch 内使用 class-balanced CE，避免高频 code 主导 selector。
+  默认使用普通 CE 直接优化 demo code micro accuracy；可配置开启 class-balanced CE。
 - approx_kl: 用于 early stop 判断。
 
 关键约束:
 - kl_demo_loss 只在 is_labeled=true 上生效。
-- masked KL label 样本 loss=0。
+- masked KL label 样本 loss=0，demo CE logits 与 action distribution 使用同一 dead-code mask。
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
-
+import logging
 
 @dataclass
 class PPOLossOutput:
@@ -58,6 +58,7 @@ class PPOLoss:
         num_codes: int = 10,
         value_clip_range: Optional[float] = None,
         kl_demo_label_smoothing: float = 0.0,
+        kl_demo_class_balance: bool = False,
     ) -> None:
         self.clip_ratio = clip_ratio
         self.value_coef = value_coef
@@ -66,6 +67,11 @@ class PPOLoss:
         self.num_codes = num_codes
         self.value_clip_range = value_clip_range
         self.kl_demo_label_smoothing = kl_demo_label_smoothing
+        self.kl_demo_class_balance = bool(kl_demo_class_balance)
+        
+        self._logger = logging.getLogger("archetype.phase2.loss")
+
+
 
     def compute(
         self,
@@ -144,13 +150,19 @@ class PPOLoss:
                             labeled_mask[i] = False
 
             if labeled_mask.any():
-                labeled_logits = logits[labeled_mask]
+                demo_logits = logits
+                if dead_code_mask is not None:
+                    demo_logits = logits.clone()
+                    demo_logits[:, dead_code_mask.to(device=logits.device)] = float("-inf")
+                labeled_logits = demo_logits[labeled_mask]
                 labeled_targets = kl_label[labeled_mask]
-                class_weights = self._class_balanced_weights(
-                    labeled_targets,
-                    num_codes=int(logits.shape[-1]),
-                    device=logits.device,
-                )
+                class_weights = None
+                if self.kl_demo_class_balance:
+                    class_weights = self._class_balanced_weights(
+                        labeled_targets,
+                        num_codes=int(logits.shape[-1]),
+                        device=logits.device,
+                    )
                 kl_demo_loss = F.cross_entropy(
                     labeled_logits,
                     labeled_targets,
@@ -176,7 +188,16 @@ class PPOLoss:
             + self.entropy_coef * entropy_loss
             + self.kl_demo_coef * kl_demo_loss
         )
-
+        # self._logger.info(
+        #         "total=%.3f, policy_loss=%.3f, value_loss=%.3f, entropy_loss=%.3f, kl_demo_loss=%.3f, approx_kl=%.3f, clip_fraction=%.3f",
+        #         total.item(),
+        #         policy_loss.item(),
+        #         value_loss.item() * self.value_coef,
+        #         entropy_loss.item() * self.entropy_coef,    
+        #         kl_demo_loss.item() * self.kl_demo_coef,
+        #         approx_kl,
+        #         clip_fraction,
+        #     )
         return PPOLossOutput(
             total=total,
             policy_loss=policy_loss,

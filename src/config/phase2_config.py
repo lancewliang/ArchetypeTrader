@@ -105,17 +105,22 @@ class PPOConfig:
     """
     clip_ratio: float = 0.2
     value_clip_range: Optional[float] = None
-    value_loss_coef: float = 0.5
-    entropy_coef: float = 0.01
+    value_loss_coef: float = 0.005
+    entropy_coef: float = 0.001
     entropy_min_coef: float = 1e-4
     entropy_warmup_coef: Optional[float] = None
     entropy_warmup_fraction: float = 0.0
-    kl_demo_coef: float = 1.0  # 论文 α=1
+    kl_demo_coef: float = 2.0  # 论文 α=1
     kl_demo_label_smoothing: float = 0.0
+    kl_demo_class_balance: bool = False
+    kl_demo_prelearn_epochs: Optional[int] = 50
+    kl_demo_prelearn_lr: Optional[float] = 0.001
+    kl_demo_aux_epochs_per_update: int = 0
+    kl_demo_aux_lr: Optional[float] = None
     kl_demo_anneal_to: Optional[float] = None
     kl_demo_anneal_fraction: float = 1.0
     target_kl: Optional[float] = 0.05
-    max_grad_norm: float = 0.5
+    max_grad_norm: float = 10
     update_epochs: int = 4
     batch_size: Optional[int] = None
     minibatch_size: int = 256
@@ -124,7 +129,7 @@ class PPOConfig:
     advantage_normalization: bool = True
     reward_normalization: bool = False
     lr_schedule: Literal["constant", "linear"] = "linear"
-    lr: float = 3e-4
+    lr: float = 1e-3
 
 
 # ---------- Selection Policy ----------
@@ -839,6 +844,26 @@ PHASE2_CONFIG_FIELD_DOCS: Dict[str, Dict[str, str]] = {
     "ppo.kl_demo_label_smoothing": _config_doc(
         "对 demo label 做平滑，避免 KL 目标过硬。",
         "增大可缓解噪声标签但弱化 teacher 信号；通常从 0 到小值做消融。",
+    ),
+    "ppo.kl_demo_class_balance": _config_doc(
+        "是否对 demo label CE 使用逆频率 class balance。",
+        "默认 false 直接优化总体 demo code 命中率；设为 true 会更照顾少数 code，但可能降低 micro accuracy。",
+    ),
+    "ppo.kl_demo_prelearn_epochs": _config_doc(
+        "PPO 前 demo 行为克隆预学习 epoch 数；为空时沿用 ppo.update_epochs。",
+        "增大可让 selector 更充分拟合 demo code；过大会放大对不可预测/噪声 label 的过拟合。",
+    ),
+    "ppo.kl_demo_prelearn_lr": _config_doc(
+        "PPO 前 demo 行为克隆预学习学习率；为空时沿用 ppo.lr。",
+        "可设得高于 PPO lr 以更快提高 demo 命中率；过高可能导致 argmax collapse 或泛化下降。",
+    ),
+    "ppo.kl_demo_aux_epochs_per_update": _config_doc(
+        "每次 PPO update 后额外执行的全量 demo 行为克隆 epoch 数。",
+        "设为 0 关闭；设为 1 或更高可让正式训练持续优化 code 命中率，而不只依赖 rollout 中的 KL 项。",
+    ),
+    "ppo.kl_demo_aux_lr": _config_doc(
+        "PPO 期间额外 demo 行为克隆更新的学习率；为空时沿用当前 optimizer lr。",
+        "通常不高于 prelearn lr；过高会使 PPO reward 信号被 demo 监督完全覆盖。",
     ),
     "ppo.kl_demo_anneal_to": _config_doc(
         "KL-demo 系数退火终值；为空时调度器使用默认退火规则。",

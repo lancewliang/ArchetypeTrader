@@ -78,14 +78,53 @@ class TestPPOLoss:
         )
         assert out.kl_demo_loss.item() > 0  # 有 labeled 样本
 
-    def test_kl_demo_uses_class_balanced_ce(self):
-        """kl_demo_loss 对 labeled minibatch 内的 code 做 class-balanced CE。"""
+    def test_kl_demo_defaults_to_unweighted_ce(self):
+        """kl_demo_loss 默认直接优化 micro demo-label accuracy 对应的 CE。"""
         loss_fn = PPOLoss(
             clip_ratio=0.2,
             value_coef=0.5,
             entropy_coef=0.01,
             kl_demo_coef=0.1,
             num_codes=2,
+        )
+        batch = 4
+        logits = torch.tensor(
+            [
+                [3.0, 0.0],
+                [3.0, 0.0],
+                [3.0, 0.0],
+                [3.0, 0.0],
+            ]
+        )
+        kl_label = torch.tensor([0, 0, 0, 1])
+        is_labeled = torch.tensor([True, True, True, True])
+
+        out = loss_fn.compute(
+            torch.zeros(batch), torch.zeros(batch),
+            torch.zeros(batch), torch.zeros(batch),
+            torch.zeros(batch), torch.ones(batch),
+            kl_label=kl_label, is_labeled=is_labeled, logits=logits,
+        )
+
+        expected = torch.nn.functional.cross_entropy(logits, kl_label)
+        balanced_weights = torch.tensor([2.0 / 3.0, 2.0])
+        balanced = torch.nn.functional.cross_entropy(
+            logits,
+            kl_label,
+            weight=balanced_weights,
+        )
+        assert out.kl_demo_loss.item() == pytest.approx(expected.item())
+        assert out.kl_demo_loss.item() < balanced.item()
+
+    def test_kl_demo_class_balance_is_opt_in(self):
+        """显式开启后才对 labeled minibatch 内的 code 做 class-balanced CE。"""
+        loss_fn = PPOLoss(
+            clip_ratio=0.2,
+            value_coef=0.5,
+            entropy_coef=0.01,
+            kl_demo_coef=0.1,
+            num_codes=2,
+            kl_demo_class_balance=True,
         )
         batch = 4
         logits = torch.tensor(
@@ -115,6 +154,38 @@ class TestPPOLoss:
         unweighted = torch.nn.functional.cross_entropy(logits, kl_label)
         assert out.kl_demo_loss.item() == pytest.approx(expected.item())
         assert out.kl_demo_loss.item() > unweighted.item()
+
+    def test_kl_demo_applies_dead_code_mask_to_logits(self):
+        """KL/demo CE 使用与 action distribution 一致的 dead-code mask。"""
+        loss_fn = PPOLoss(
+            clip_ratio=0.2,
+            value_coef=0.5,
+            entropy_coef=0.01,
+            kl_demo_coef=0.1,
+            num_codes=2,
+        )
+        batch = 2
+        logits = torch.tensor(
+            [
+                [0.0, 10.0],
+                [0.0, 10.0],
+            ]
+        )
+        kl_label = torch.tensor([0, 0])
+        is_labeled = torch.tensor([True, True])
+        dead_code_mask = torch.tensor([False, True])
+
+        out = loss_fn.compute(
+            torch.zeros(batch), torch.zeros(batch),
+            torch.zeros(batch), torch.zeros(batch),
+            torch.zeros(batch), torch.ones(batch),
+            kl_label=kl_label,
+            is_labeled=is_labeled,
+            logits=logits,
+            dead_code_mask=dead_code_mask,
+        )
+
+        assert out.kl_demo_loss.item() == pytest.approx(0.0, abs=1e-6)
 
     def test_masked_kl_label_zero(self, loss_fn):
         """全部 is_labeled=false 时 kl_demo_loss=0。"""
