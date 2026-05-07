@@ -99,3 +99,32 @@ def test_online_sequence_replay_inherits_terminal_position():
     assert records[0].student_actions == [2, 2, 2, 2]
     # 第二段首步从上一段 long 仓继承而来，不应重新从 flat 建仓。
     assert records[1].cost_paid < records[0].cost_paid
+
+
+def test_online_sequence_replay_uses_streaming_decoder_path():
+    class StreamingOnlyDecoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.state_proj = torch.nn.Linear(2, 2)
+            self.lstm = torch.nn.LSTM(input_size=4, hidden_size=2, batch_first=True)
+            self.head = torch.nn.Linear(2, 3)
+            with torch.no_grad():
+                self.state_proj.weight.zero_()
+                self.state_proj.bias.zero_()
+                for param in self.lstm.parameters():
+                    param.zero_()
+                self.head.weight.zero_()
+                self.head.bias[:] = torch.tensor([0.0, 0.0, 1.0])
+
+        def forward(self, states, z_q):
+            raise AssertionError("online sequence replay must not decode a full horizon")
+
+    evaluator = Phase1ReplayEvaluator(env_factory=_factory)
+    records = evaluator.replay_student_online_sequence(
+        [_record("streaming")],
+        StreamingOnlyDecoder(),
+        torch.ones(1, 2),
+        [0],
+    )
+
+    assert records[0].student_actions == [2, 2, 2, 2]

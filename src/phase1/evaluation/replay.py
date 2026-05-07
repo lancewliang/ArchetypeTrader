@@ -138,8 +138,13 @@ class Phase1ReplayEvaluator:
         """按时间顺序 replay student，并在 horizon 间继承仓位。
 
         该路径用于 Phase I causal online validation：code_id 由 teacher-free
-        selector 给出，decoder 产生动作，env 逐 horizon reset 时继承上一段
+        selector 给出，decoder 逐步产生动作，env 逐 horizon reset 时继承上一段
         末仓位，边界换仓成本由第一步 ``TradingEnv.step`` 自然扣除。
+
+        与 teacher-conditioned replay 不同，这里不能先对完整 horizon 做一次
+        decoder forward 再 replay 整段动作；online validation 必须保持
+        ``decode action_t -> env.step(action_t)`` 的执行顺序，避免评估路径
+        依赖整段分片已经可用这一离线假设。
         """
         if len(ordered_horizons) != len(code_ids):
             raise ValueError("ordered_horizons 与 code_ids 长度不一致")
@@ -157,11 +162,8 @@ class Phase1ReplayEvaluator:
         _device = cb_tensor.device
         decoder.eval()
         for horizon, code_id in zip(ordered_horizons, code_ids):
-            states = torch.tensor(horizon.states, dtype=torch.float32).unsqueeze(0).to(_device)
+            states = torch.tensor(horizon.states, dtype=torch.float32).to(_device)
             z_q = cb_tensor[int(code_id)].unsqueeze(0)
-            with torch.no_grad():
-                logits = decoder(states, z_q)
-            actions = logits.argmax(dim=-1).squeeze(0).tolist()
 
             env = self.env_factory()
             env.reset(
@@ -171,7 +173,27 @@ class Phase1ReplayEvaluator:
                 ),
                 initial_position=prev_position,
             )
-            rewards, infos = env.replay(actions)
+
+            actions: List[int] = []
+            rewards = []
+            infos = []
+            recurrent_state = None
+            prefix_states = []
+            with torch.no_grad():
+                for state_t in states:
+                    action, recurrent_state = self._decode_student_action_step(
+                        decoder=decoder,
+                        state_t=state_t,
+                        z_q=z_q,
+                        recurrent_state=recurrent_state,
+                        prefix_states=prefix_states,
+                    )
+                    actions.append(action)
+                    reward, done, info = env.step(action)
+                    rewards.append(reward)
+                    infos.append(info)
+                    if done:
+                        break
             cost = sum(info.fee + info.slippage for info in infos)
             rejected = sum(1 for info in infos if info.rejected)
             if infos:
@@ -188,6 +210,40 @@ class Phase1ReplayEvaluator:
                 )
             )
         return records
+
+    @staticmethod
+    def _decode_student_action_step(
+        decoder,
+        state_t,
+        z_q,
+        recurrent_state,
+        prefix_states,
+    ):
+        """Decode exactly one online action without looking at future states."""
+        import torch
+
+        if (
+            hasattr(decoder, "state_proj")
+            and hasattr(decoder, "lstm")
+            and hasattr(decoder, "head")
+        ):
+            if state_t.dim() == 1:
+                state_t = state_t.unsqueeze(0)
+            state_h = decoder.state_proj(state_t)
+            x = torch.cat([state_h, z_q], dim=-1).unsqueeze(1)
+            if recurrent_state is None:
+                out, next_state = decoder.lstm(x)
+            else:
+                out, next_state = decoder.lstm(x, recurrent_state)
+            logits = decoder.head(out.squeeze(1)).squeeze(0)
+        else:
+            # Generic causal fallback: recompute on the observed prefix only.
+            prefix_states.append(state_t)
+            states_prefix = torch.stack(prefix_states, dim=0).unsqueeze(0)
+            logits = decoder(states_prefix, z_q)[:, -1, :].squeeze(0)
+            next_state = recurrent_state
+
+        return int(logits.argmax().item()), next_state
 
     # ---------- boundary ----------
 
