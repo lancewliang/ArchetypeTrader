@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-from .data_types import HorizonDataset
+from ..model.data_types import HorizonDataset
 
 
 class HorizonBuilder:

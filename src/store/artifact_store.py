@@ -1,18 +1,18 @@
-"""数据准备产出物存储类的接口骨架。"""
+"""数据准备产出物读写类的接口骨架。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from .data_types import ArtifactPaths, HorizonDataset, TrajectoryDataset
+from ..model.data_types import ArtifactPaths, HorizonDataset, TrajectoryDataset
 
 
 class DataStore:
-    """负责计算产出物路径并保存数据准备中间产物。
+    """负责计算产出物路径，并读写数据准备中间产物。
 
     为什么需要这个类:
         ``horizon_dataset`` 和 ``trajectory_dataset`` 都是需要持久化的产出物。
-        将路径规划和保存逻辑从 ``DataPreparer`` 中拆出，可以让
+        将路径规划、保存和读取逻辑从 ``DataPreparer`` 中拆出，可以让
         ``DataPreparer`` 专注于流程编排，避免 I/O 细节散落在训练、测试、
         校验三个入口里。
     """
@@ -69,6 +69,30 @@ class DataStore:
         """
         ...
 
+    def load_horizon_dataset(
+        self,
+        input_path: str | Path,
+    ) -> HorizonDataset:
+        """读取 horizon 中间数据。
+
+        参数:
+            input_path: horizon 中间数据产出物路径。
+
+        输出:
+            返回 ``HorizonDataset``，通常为 ``(states, prices)``。
+            ``states`` shape 为 ``[x, h, len(states)]``。
+            ``prices`` shape 为 ``[x, h, 1]``。
+
+        方法作用:
+            从已保存的产出物中恢复 ``HorizonBuilder`` 生成的 horizon 数据。
+
+        为什么:
+            数据准备产物需要可复用。后续调试、审计或重新生成
+            ``trajectory_dataset`` 时，应能直接读取已固化的 horizon 数据，
+            而不是重新读取 feature 文件并重新切分。
+        """
+        ...
+
     def save_trajectory_dataset(
         self,
         trajectory_dataset: TrajectoryDataset,
@@ -91,5 +115,29 @@ class DataStore:
         为什么:
             Phase I 训练应消费已经固化的 trajectory 数据集，
             而不是在训练过程中重新读取 feature 文件或重新运行 DP。
+        """
+        ...
+
+    def load_trajectory_dataset(
+        self,
+        input_path: str | Path,
+    ) -> TrajectoryDataset:
+        """读取 demonstration trajectory 数据集。
+
+        参数:
+            input_path: trajectory 数据集产出物路径。
+
+        输出:
+            返回 ``TrajectoryDataset``。
+            数据形式为 ``D = [tau_0, tau_1, ..., tau_{n-1}]``，
+            每个 ``tau`` 都是 ``(s_demo, a_demo, r_demo)``。
+
+        方法作用:
+            从已保存的产出物中恢复 DP teacher 生成的 demonstration trajectories。
+
+        为什么:
+            Phase I 训练应直接消费固化后的 ``trajectory_dataset``。
+            读取方法可以让训练流程、验证流程和审计流程复用同一份产物，
+            避免重复运行 DP teacher。
         """
         ...

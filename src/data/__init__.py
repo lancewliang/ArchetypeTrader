@@ -2,13 +2,13 @@
 
 from .data_load import DataLoad
 from .data_preparer import DataPreparer
-from .data_store import DataStore
-from .data_types import (
+from ..model.data_types import (
     ArtifactPaths,
     DemonstrationTrajectory,
     HorizonDataset,
     TrajectoryDataset,
 )
+from ..store.artifact_store import DataStore
 from .horizon_builder import HorizonBuilder
 
 __all__ = [

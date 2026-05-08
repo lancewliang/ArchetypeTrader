@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from .data_load import DataLoad
-from .data_store import DataStore
-from .data_types import TrajectoryDataset
+from ..model.data_types import TrajectoryDataset
+from ..store.artifact_store import DataStore
 
 
 class DataPreparer:
@@ -17,7 +17,8 @@ class DataPreparer:
         1. ``DataLoad``: 根据 ``path`` 读取 feature 文件，得到 ``pl.DataFrame``。
         2. ``HorizonBuilder``: 从 ``pl.DataFrame`` 生成 ``horizon_dataset``。
         3. ``SingleTrade_DP_Planner``: 从 ``horizon_dataset`` 生成 ``trajectory_dataset``。
-        4. ``DataStore``: 保存 ``horizon_dataset`` 和 ``trajectory_dataset``。
+        4. ``DataStore``: 计算产物路径，并读写 ``horizon_dataset`` 和
+           ``trajectory_dataset``。
 
     数据集的核心样本是论文中的 demonstration trajectory：
 
@@ -45,7 +46,8 @@ class DataPreparer:
         参数:
             horizon: 每个样本的固定时间窗口长度 ``h``，默认 72。
             data_load: 数据读取组件。用于从 feature 文件读取 ``pl.DataFrame``。
-            data_store: 数据存储组件。用于计算产物路径并保存中间产物。
+            data_store: 数据产物读写组件。用于计算产物路径、保存中间产物，
+                以及读取已经固化的产出物。
 
         输出:
             无返回值。
@@ -55,7 +57,7 @@ class DataPreparer:
 
         为什么:
             train/test/validation 必须使用相同的 horizon 长度和同一套
-            数据读取、产物保存规则，否则数据集之间的 schema 和审计方式会不一致。
+            数据读取、产物读写规则，否则数据集之间的 schema 和审计方式会不一致。
         """
         ...
 
@@ -86,6 +88,11 @@ class DataPreparer:
             4. 调用 ``DataStore.build_artifact_paths(path, split_name)`` 计算产物路径。
             5. 调用 ``DataStore.save_horizon_dataset(...)`` 保存 horizon 中间数据。
             6. 调用 ``DataStore.save_trajectory_dataset(...)`` 保存 trajectory 数据集。
+
+        读取产物:
+            如果后续流程需要复用已保存的中间产物，可通过
+            ``DataStore.load_horizon_dataset(...)`` 和
+            ``DataStore.load_trajectory_dataset(...)`` 读取，不需要在本类中重复实现 I/O。
 
         为什么:
             三个 split 的准备流程相同，只是输入文件和 split 名称不同。
