@@ -20,6 +20,4 @@ matplotlib>=3.8.0       # failure case HTML 图表 (可选; 第一版可先 SVG 
 # 测试
 pytest>=8.0.0
 pytest-cov>=5.0.0
-
-# 兼容旧脚本（不主推）
-pandas>=2.0.0
+ 
