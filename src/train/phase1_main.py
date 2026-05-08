@@ -103,10 +103,12 @@ class Phase1MainFlow:
 
     def __init__(self, config: Phase1MainConfig) -> None:
         self.config = config
-        self.data_store = DataFileStore()
+        self.data_store = DataFileStore(
+            pair=config.pair,
+            batchid=config.train_batch_id,
+        )
 
-        self._artifact_paths: ArtifactPaths = {}
-
+   
     def run(self) -> None:
         """执行 Phase I 主流程。
 
@@ -162,36 +164,15 @@ class Phase1MainFlow:
         """创建输出目录和训练主流程上下文。
 
         功能流程:
-            1. 通过 ``DataFileStore`` 初始化 Phase I 标准产物目录。
-            2. 保存标准产物路径字典，供 checkpoint、model export、label 和
-               report 步骤复用。
+            1. 通过 ``DataFileStore`` 初始化 Phase I 标准产物目录。        
 
         职责边界:
             日志初始化和随机种子初始化属于入口脚本的 runtime bootstrap，
             不在训练主流程中执行。
         """
 
-        artifacts_root = self._infer_artifacts_root()
-        self._artifact_paths = self.data_store.initialize_phase1_artifact_dirs(
-            pair=self.config.pair,
-            batch_id=self.config.train_batch_id,
-            artifacts_root=artifacts_root,
-        )
-
-    def _infer_artifacts_root(self) -> Path:
-        """从 ``output_dir`` 推断 artifacts 根目录。
-
-        ``Phase1MainConfig.output_dir`` 当前仍保留为兼容字段；目录创建规则由
-        ``DataFileStore.initialize_phase1_artifact_dirs(pair, batch_id, root)``
-        统一管理。
-        """
-
-        output_dir = self.config.output_dir
-        if output_dir.name == "phase1" and len(output_dir.parents) >= 3:
-            return output_dir.parents[2]
-        return output_dir
-
-
+        self.data_store.initialize_phase1_artifact_dirs()
+ 
     def load_inputs(self) -> None:
         """加载 Phase I 训练输入。
 

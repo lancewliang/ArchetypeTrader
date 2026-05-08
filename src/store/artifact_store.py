@@ -24,6 +24,32 @@ class DataFileStore:
         checkpoint、模型导出、label 和报告各自拼路径、各自决定 I/O 语义。
     """
 
+    def __init__(
+        self,
+        pair: str | None = None,
+        batchid: str | None = None,
+        artifacts_root: str | Path = "artifacts",
+    ) -> None:
+        """初始化 store，并可选初始化 Phase I 标准产物目录。
+
+        参数:
+            pair: 交易标的，例如 ``BTC``、``ETH`` 或当前工程中的 ``AL``。
+            batchid: Phase I 训练批次 ID，例如 ``batch_001``。
+            artifacts_root: 全阶段产物根目录，默认 ``artifacts``。
+
+        说明:
+            当 ``pair`` 和 ``batchid`` 都传入时，构造器会创建 Phase I 目录并
+            将路径保存到 ``artifact_paths``。无参构造仍保留，用于数据准备等
+            不需要立即绑定训练批次的调用方。
+        """
+
+        self.pair = pair
+        self.batchid = batchid
+        self.artifacts_root = Path(artifacts_root)
+        self.artifact_paths: ArtifactPaths = {}
+
+     
+
     def build_artifact_paths(
         self,
         path: str | Path,
@@ -49,6 +75,127 @@ class DataFileStore:
             导致产物位置和命名不一致。
         """
         ...
+
+    def initialize_phase1_artifact_dirs(
+        self,
+        pair: str,
+        batch_id: str,
+        artifacts_root: str | Path = "artifacts",
+    ) -> ArtifactPaths:
+        """初始化 Phase I 训练产出物目录，并返回标准产物路径。
+
+        参数:
+            pair: 交易标的，例如 ``BTC``、``ETH`` 或当前工程中的 ``AL``。
+            batch_id: Phase I 训练批次 ID，例如 ``batch_001``。
+            artifacts_root: 全阶段产物根目录，默认 ``artifacts``。
+
+        输出:
+            返回 Phase I 标准产物路径字典。当前方法只创建目录和规划路径，
+            不写入任何 checkpoint、模型、label 或报告文件。
+
+        方法作用:
+            将 Phase I 目录结构集中到 store 层管理，避免训练主流程、入口脚本
+            或评估模块各自拼接路径。后续保存 checkpoint、导出 model 和写报告
+            都应复用这里返回的 key。
+
+        目录骨架:
+            ``output_dir``:
+                Phase I 根目录，保存 config、normalizer、导出模型、label 和报告。
+            ``checkpoints``:
+                周期性 epoch checkpoint 与 last/best checkpoint 的目录。
+            ``diagnostics``:
+                action/risk/archetype/boundary 等诊断 JSON 或图表目录。
+            ``tensorboard``:
+                TensorBoard 事件文件目录。
+            ``latent_snapshots``:
+                latent/codebook 快照目录，供离线可视化和稳定性复盘使用。
+            ``failure_cases``:
+                失败样本、bad reconstruction 或 guardrail reject 复盘目录。
+
+        设计边界:
+            本方法只负责文件系统目录和路径契约，不初始化日志、不设置随机种子、
+            不加载数据，也不创建空产物文件。
+        """
+
+        root = Path(artifacts_root) / pair / batch_id / "phase1"
+        checkpoint_dir = root / "checkpoints"
+        diagnostics_dir = root / "diagnostics"
+        tensorboard_dir = root / "tensorboard"
+        latent_snapshot_dir = root / "latent_snapshots"
+        failure_case_dir = root / "failure_cases"
+
+        for directory in (
+            root,
+            checkpoint_dir,
+            diagnostics_dir,
+            tensorboard_dir,
+            latent_snapshot_dir,
+            failure_case_dir,
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+
+        return {
+            "output_dir": root,
+            "checkpoint_dir": checkpoint_dir,
+            "diagnostics_dir": diagnostics_dir,
+            "tensorboard_dir": tensorboard_dir,
+            "latent_snapshot_dir": latent_snapshot_dir,
+            "failure_case_dir": failure_case_dir,
+            "phase1_config": root / "phase1_config.yaml",
+            "input_schema": root / "input_schema.json",
+            "feature_provenance": root / "feature_provenance.json",
+            "state_normalizer": root / "state_normalizer.json",
+            "reward_normalizer": root / "reward_normalizer.json",
+            "encoder": root / "encoder.pt",
+            "decoder": root / "decoder.pt",
+            "codebook": root / "codebook.pt",
+            "best_checkpoint": checkpoint_dir / "best_vq_model.pt",
+            "last_checkpoint": checkpoint_dir / "last_vq_model.pt",
+            "checkpoint_manifest": checkpoint_dir / "checkpoint_manifest.json",
+            "sampled_demos_train": root / "sampled_demos_train.feather",
+            "sampled_horizon_labels_train": (
+                root / "sampled_horizon_labels_train.feather"
+            ),
+            "sampled_horizon_labels_val": (
+                root / "sampled_horizon_labels_val.feather"
+            ),
+            "sampled_horizon_labels_test": (
+                root / "sampled_horizon_labels_test.feather"
+            ),
+            "sampled_horizon_labels_full_time_train": (
+                root / "sampled_horizon_labels_full_time_train.feather"
+            ),
+            "non_overlap_horizon_labels_train": (
+                root / "non_overlap_horizon_labels_train.feather"
+            ),
+            "non_overlap_horizon_labels_val": (
+                root / "non_overlap_horizon_labels_val.feather"
+            ),
+            "non_overlap_horizon_labels_test": (
+                root / "non_overlap_horizon_labels_test.feather"
+            ),
+            "phase1_report": root / "phase1_report.json",
+            "composite_score_sensitivity": (
+                diagnostics_dir / "composite_score_sensitivity.json"
+            ),
+            "sampling_leakage_diagnostics": (
+                diagnostics_dir / "sampling_leakage_diagnostics.json"
+            ),
+            "action_diagnostics": diagnostics_dir / "action_diagnostics.json",
+            "risk_diagnostics": diagnostics_dir / "risk_diagnostics.json",
+            "archetype_separation": (
+                diagnostics_dir / "archetype_separation.json"
+            ),
+            "archetype_behavior_diagnostics": (
+                diagnostics_dir / "archetype_behavior_diagnostics.json"
+            ),
+            "horizon_boundary_diagnostics": (
+                diagnostics_dir / "horizon_boundary_diagnostics.json"
+            ),
+            "code_stability_diagnostics": (
+                diagnostics_dir / "code_stability_diagnostics.json"
+            ),
+        }
 
     def save_phase1_checkpoint(
         self,
