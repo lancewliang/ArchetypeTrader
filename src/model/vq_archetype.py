@@ -464,7 +464,7 @@ class ArchetypeVQModel(nn.Module):
             dropout=dropout,
         )
 
-    def forward(self, batch: TrajectoryTensorBatch) -> V钱VqModelOutputs:
+    def forward(self, batch: TrajectoryTensorBatch) -> VqModelOutputs:
         """完整 VQ 训练前向。
 
         为什么需要:
