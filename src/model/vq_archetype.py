@@ -585,45 +585,65 @@ class ArchetypeVQModel(nn.Module):
         states_seq: torch.Tensor,
         code_id: ArchetypeLabelTensor,
     ) -> tuple[torch.Tensor, ActionLogitTensor]:
-        """根据指定 archetype 生成基础动作。
+        """在线生成，根据指定 archetype 生成基础动作。
 
         为什么需要:
             Phase II/III 中 selector 选择的是离散 archetype id，而真正下单
             或继续细化策略时需要逐时间步动作。``decode`` 是从 archetype id
-            回到可执行基础动作序列的推理入口。
+            回到单个 horizon 内可执行基础动作序列的推理入口。
 
         功能说明:
-            1. 接收市场状态序列 ``states_seq`` 和指定 ``code_id``。
+            1. 接收一个 horizon 内的部分市场状态序列 ``states_seq`` 和一个
+               指定 ``code_id``。
             2. 从 codebook 中取出对应 embedding ``z_q``。
-            3. 用 ``decoder`` 生成逐步 ``decode_logits``。
+            3. 内部临时补一个 batch 维度，复用 batch-first 的 ``decoder``。
             4. 对 logits 做 ``argmax``，得到基础动作 ``base_actions``。
                方法带 ``torch.no_grad``，默认用于推理/离线生成。
 
         输入形状:
-            ``states_seq``: ``[batch, horizon, state_dim]``
-                一批待解码的市场状态序列。``batch`` 是样本数，``horizon``
-                是每条序列的时间步长度，``state_dim`` 必须和模型初始化时的
-                ``state_dim`` 一致。
+            ``states_seq``: ``[partial_horizon, state_dim]``
+                单个 horizon 内已经观察到或准备解码的状态片段。
+                ``partial_horizon`` 可以小于完整 horizon 长度；``state_dim``
+                必须和模型初始化时的 ``state_dim`` 一致。
 
-            ``code_id``: ``[batch]`` 或标量
-                每条状态序列要使用的 archetype id。若传入标量，会自动扩展
-                为单元素 batch；若传入 ``[batch]``，长度应与
-                ``states_seq.shape[0]`` 一致。
+            ``code_id``: 标量或单元素 Tensor
+                该状态片段要使用的 archetype id。这个接口只解码一个
+                horizon 片段，因此不接受 ``[batch]`` 形式的多个 code。
+
+        内部形状:
+            ``states_batch``: ``[1, partial_horizon, state_dim]``
+            ``z_q``: ``[1, latent_dim]``
+            ``decode_logits_batch``: ``[1, partial_horizon, action_dim]``
 
         使用场景:
             Phase II/III 推理时，根据 selector 选中的 archetype 生成基础交易
-            动作；也可在分析阶段固定某个 code，观察该 archetype 在不同
-            market states 下会输出什么动作。
+            动作；也可在一个 horizon 还没走完时，用当前已经有的
+            ``partial_horizon`` 状态片段生成基础动作。
 
         返回:
             ``(base_actions, decode_logits)``，其中 ``base_actions`` 是
-            ``argmax`` 后的动作 id，形状为 ``[batch, horizon]``。
+            ``argmax`` 后的动作 id，形状为 ``[partial_horizon]``；
+            ``decode_logits`` 形状为 ``[partial_horizon, action_dim]``。
         """
 
-        if code_id.ndim == 0:
-            code_id = code_id.unsqueeze(0)
+        if states_seq.ndim != 2:
+            raise ValueError("states_seq must have shape [partial_horizon, state_dim]")
+        if states_seq.shape[-1] != self.state_dim:
+            raise ValueError(
+                f"states_seq last dim must be {self.state_dim}, got {states_seq.shape[-1]}"
+            )
+
+        if not torch.is_tensor(code_id):
+            code_id = torch.as_tensor(code_id, dtype=torch.long, device=states_seq.device)
+        else:
+            code_id = code_id.to(states_seq.device)
+        if code_id.numel() != 1:
+            raise ValueError("code_id must be a scalar or single-element tensor")
+        code_id = code_id.reshape(1).long()
+
+        states_batch = states_seq.unsqueeze(0)
         z_q = self.quantizer.embedding_from_code(code_id.to(states_seq.device))
-        decode_logits = self.decoder(states_seq, z_q)
+        decode_logits = self.decoder(states_batch, z_q).squeeze(0)
         base_actions = decode_logits.argmax(dim=-1)
         return base_actions, decode_logits
 
