@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
+from .data_types import HorizonDataset
+
 
 class HorizonBuilder:
     """将时间序列 DataFrame 转换为 ``numpy.ndarray`` 张量。
@@ -39,7 +41,7 @@ class HorizonBuilder:
     def build(
         self,
         dataframe: pl.DataFrame,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> HorizonDataset:
         """从 ``dataframe`` 构建 horizon 状态张量和价格张量。
 
         参数:
@@ -47,7 +49,7 @@ class HorizonBuilder:
                 其中 ``close`` 列就是价格列，会被单独返回为 ``prices``。
 
         输出:
-            返回 ``(states, prices)``。
+            返回 ``HorizonDataset``，即 ``(states, prices)``。
             ``states`` 的 ``shape`` 为 ``[x, h, len(states)]``。
             ``prices`` 的 ``shape`` 为 ``[x, h, 1]``。
             其中 ``h = horizon``，``x = len(dataframe) / h``。

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .data_types import DemonstrationTrajectory, HorizonDataset, TrajectoryDataset
+
 
 class SingleTrade_DP_Planner:
     """为固定 horizon 生成 single-trade demonstration trajectories。
@@ -57,7 +59,7 @@ class SingleTrade_DP_Planner:
         self,
         states: np.ndarray,
         prices: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> DemonstrationTrajectory:
         """为单个 horizon 生成 demonstration trajectory。
 
         参数:
@@ -65,7 +67,7 @@ class SingleTrade_DP_Planner:
             prices: 单个 horizon 的价格序列，shape 为 ``[h]``。
 
         输出:
-            返回 ``tau = (s_demo, a_demo, r_demo)``。
+            返回 ``DemonstrationTrajectory``，即 ``tau = (s_demo, a_demo, r_demo)``。
             ``s_demo`` 的 shape 为 ``[h, feature_dim]``。
             ``a_demo`` 的 shape 为 ``[h]``。
             ``r_demo`` 的 shape 为 ``[h]``。
@@ -83,20 +85,21 @@ class SingleTrade_DP_Planner:
 
     def build_trajectory_dataset(
         self,
-        horizon_states: np.ndarray,
-        horizon_prices: np.ndarray,
-    ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        horizon_dataset: HorizonDataset,
+    ) -> TrajectoryDataset:
         """批量生成 demonstration trajectory 数据集 ``D``。
 
         参数:
-            horizon_states: 多个 horizon 的状态张量，shape 为 ``[n, h, feature_dim]``。
-            horizon_prices: 多个 horizon 的价格张量，shape 为 ``[n, h]``。
+            horizon_dataset: ``HorizonBuilder`` 的输出，即 ``(states, prices)``。
+                ``states`` 的 shape 为 ``[n, h, feature_dim]``。
+                ``prices`` 的 shape 为 ``[n, h, 1]``，来自 feature 文件的 ``close`` 列。
 
         输出:
-            返回 ``D = [tau_0, tau_1, ..., tau_{n-1}]``。
+            返回 ``TrajectoryDataset``，即 ``D = [tau_0, tau_1, ..., tau_{n-1}]``。
             每个 ``tau_i`` 都是 ``(s_demo, a_demo, r_demo)``。
 
         方法作用:
+            从 ``horizon_dataset`` 中取出每个 horizon 的 ``states`` 和 ``prices``，
             对每个 sampled horizon 调用 ``build_trajectory``，
             批量生成 Phase I 训练所需的 demonstration trajectories。
 
