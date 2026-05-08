@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.train.phase1_main import Phase1MainConfig, Phase1MainFlow  # noqa: E402
+from src.utils import RuntimeUtils  # noqa: E402
 
 
 PAIR = "AL"
@@ -32,6 +33,23 @@ BATCH_SIZE = 256
 LEARNING_RATE = 1e-3
 DEVICE = "cpu"
 SEED = 42
+LOG_LEVEL = "INFO"
+DETERMINISTIC = True
+
+
+def initialize_runtime() -> None:
+    """初始化入口脚本层面的日志和随机种子。"""
+
+    logger = RuntimeUtils.init_logging(
+        name="archetype_trader.phase1",
+        log_file=OUTPUT_DIR / "phase1.log",
+        level=LOG_LEVEL,
+    )
+    seed_status = RuntimeUtils.init_random_seed(
+        SEED,
+        deterministic=DETERMINISTIC,
+    )
+    logger.info("runtime initialized: seed_status=%s", seed_status)
 
 
 def create_phase1_flow() -> Phase1MainFlow:
@@ -49,8 +67,7 @@ def create_phase1_flow() -> Phase1MainFlow:
         pretrain_epochs=PRETRAIN_EPOCHS,
         batch_size=BATCH_SIZE,
         learning_rate=LEARNING_RATE,
-        device=DEVICE,
-        seed=SEED,
+        device=DEVICE
     )
     return Phase1MainFlow(config)
 
@@ -58,6 +75,7 @@ def create_phase1_flow() -> Phase1MainFlow:
 def main() -> None:
     """创建并运行 Phase I 主流程。"""
 
+    initialize_runtime()
     flow = create_phase1_flow()
     flow.run()
 
