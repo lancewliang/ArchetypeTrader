@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .data_types import DemonstrationTrajectory, HorizonDataset, TrajectoryDataset
+from ..model.data_types import DemonstrationTrajectory, HorizonDataset, TrajectoryDataset
 
 
 class SingleTrade_DP_Planner:
