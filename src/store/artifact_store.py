@@ -77,11 +77,8 @@ class DataFileStore:
         ...
 
     def initialize_phase1_artifact_dirs(
-        self,
-        pair: str,
-        batch_id: str,
-        artifacts_root: str | Path = "artifacts",
-    ) -> ArtifactPaths:
+        self           
+    ) -> None:
         """初始化 Phase I 训练产出物目录，并返回标准产物路径。
 
         参数:
@@ -117,7 +114,7 @@ class DataFileStore:
             不加载数据，也不创建空产物文件。
         """
 
-        root = Path(artifacts_root) / pair / batch_id / "phase1"
+        root = Path(self.artifacts_root) / self.pair / self.batch_id / "phase1"
         checkpoint_dir = root / "checkpoints"
         diagnostics_dir = root / "diagnostics"
         tensorboard_dir = root / "tensorboard"
@@ -134,80 +131,19 @@ class DataFileStore:
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
-        return {
-            "output_dir": root,
-            "checkpoint_dir": checkpoint_dir,
-            "diagnostics_dir": diagnostics_dir,
-            "tensorboard_dir": tensorboard_dir,
-            "latent_snapshot_dir": latent_snapshot_dir,
-            "failure_case_dir": failure_case_dir,
-            "phase1_config": root / "phase1_config.yaml",
-            "input_schema": root / "input_schema.json",
-            "feature_provenance": root / "feature_provenance.json",
-            "state_normalizer": root / "state_normalizer.json",
-            "reward_normalizer": root / "reward_normalizer.json",
-            "encoder": root / "encoder.pt",
-            "decoder": root / "decoder.pt",
-            "codebook": root / "codebook.pt",
-            "best_checkpoint": checkpoint_dir / "best_vq_model.pt",
-            "last_checkpoint": checkpoint_dir / "last_vq_model.pt",
-            "checkpoint_manifest": checkpoint_dir / "checkpoint_manifest.json",
-            "sampled_demos_train": root / "sampled_demos_train.feather",
-            "sampled_horizon_labels_train": (
-                root / "sampled_horizon_labels_train.feather"
-            ),
-            "sampled_horizon_labels_val": (
-                root / "sampled_horizon_labels_val.feather"
-            ),
-            "sampled_horizon_labels_test": (
-                root / "sampled_horizon_labels_test.feather"
-            ),
-            "sampled_horizon_labels_full_time_train": (
-                root / "sampled_horizon_labels_full_time_train.feather"
-            ),
-            "non_overlap_horizon_labels_train": (
-                root / "non_overlap_horizon_labels_train.feather"
-            ),
-            "non_overlap_horizon_labels_val": (
-                root / "non_overlap_horizon_labels_val.feather"
-            ),
-            "non_overlap_horizon_labels_test": (
-                root / "non_overlap_horizon_labels_test.feather"
-            ),
-            "phase1_report": root / "phase1_report.json",
-            "composite_score_sensitivity": (
-                diagnostics_dir / "composite_score_sensitivity.json"
-            ),
-            "sampling_leakage_diagnostics": (
-                diagnostics_dir / "sampling_leakage_diagnostics.json"
-            ),
-            "action_diagnostics": diagnostics_dir / "action_diagnostics.json",
-            "risk_diagnostics": diagnostics_dir / "risk_diagnostics.json",
-            "archetype_separation": (
-                diagnostics_dir / "archetype_separation.json"
-            ),
-            "archetype_behavior_diagnostics": (
-                diagnostics_dir / "archetype_behavior_diagnostics.json"
-            ),
-            "horizon_boundary_diagnostics": (
-                diagnostics_dir / "horizon_boundary_diagnostics.json"
-            ),
-            "code_stability_diagnostics": (
-                diagnostics_dir / "code_stability_diagnostics.json"
-            ),
-        }
+        return None
+        
 
     def save_phase1_checkpoint(
         self,
-        checkpoint: Any,
-        output_path: str | Path,
+        checkpoint: Any 
     ) -> None:
         """保存 Phase I checkpoint。
 
         参数:
             checkpoint: checkpoint 内容。后续实现通常是包含 model/optimizer/
                 scheduler/epoch/metrics/config hash 的字典。
-            output_path: checkpoint 保存路径，例如 ``last.pt`` 或 ``best.pt``。
+           
 
         方法作用:
             统一封装 Phase I checkpoint 持久化。正式实现应使用原子写入，并
@@ -425,12 +361,12 @@ class DataFileStore:
 
     def load_horizon_dataset(
         self,
-        input_path: str | Path,
+        split_name: str | Path,
     ) -> HorizonDataset:
         """读取 horizon 中间数据。
 
         参数:
-            input_path: horizon 中间数据产出物路径。
+            split_name: split 名称，例如 ``train``、``val``、``test``。
 
         输出:
             返回 ``HorizonDataset``，通常为 ``(states, prices)``。
@@ -474,12 +410,12 @@ class DataFileStore:
 
     def load_trajectory_dataset(
         self,
-        input_path: str | Path,
+        split_name: str | Path,
     ) -> TrajectoryDataset:
         """读取 demonstration trajectory 数据集。
 
         参数:
-            input_path: trajectory 数据集产出物路径。
+            split_name: split 名称，例如 ``train``、``val``、``test``。
 
         输出:
             返回 ``TrajectoryDataset``。

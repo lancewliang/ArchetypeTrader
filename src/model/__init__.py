@@ -21,11 +21,13 @@ from .vq_archetype import (
     ArchetypeEncoder,
     ArchetypeTrajectoryEncoder,
     ArchetypeVQModel,
-    ModelOutputs,
     QuantizeOutput,
     VQArchetypeModel,
     VectorQuantizer,
+    VqModelOutputs,
 )
+
+ModelOutputs = VqModelOutputs
 
 __all__ = [
     "ActionLogitTensor",

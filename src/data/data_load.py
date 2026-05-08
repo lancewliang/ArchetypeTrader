@@ -37,4 +37,25 @@ class DataLoad:
             ``DataPreparer`` 的公开入口只接收文件路径。
             在进入数据准备主流程前，需要先把文件统一读取为 ``pl.DataFrame``。
         """
-        ...
+        input_path = Path(path)
+        if not input_path.exists():
+            raise FileNotFoundError(f"feature file not found: {input_path}")
+
+        suffix = input_path.suffix.lower()
+        if suffix in {".feather", ".ipc", ".arrow"}:
+            dataframe = pl.read_ipc(input_path)
+        elif suffix == ".parquet":
+            dataframe = pl.read_parquet(input_path)
+        elif suffix == ".csv":
+            dataframe = pl.read_csv(input_path)
+        else:
+            raise ValueError(
+                "unsupported feature file format: "
+                f"{suffix or '<no suffix>'}; expected feather/ipc/parquet/csv"
+            )
+
+        if "close" not in dataframe.columns:
+            raise ValueError("feature dataframe must contain a 'close' column")
+        if dataframe.is_empty():
+            raise ValueError("feature dataframe is empty")
+        return dataframe

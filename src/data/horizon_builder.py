@@ -36,7 +36,9 @@ class HorizonBuilder:
             同时 DP teacher 需要 ``close`` 价格序列计算 ``a_demo`` 和 ``r_demo``。
             将 ``close`` 单独返回可以避免把结算价格误混入状态特征。
         """
-        ...
+        if horizon <= 1:
+            raise ValueError("horizon must be greater than 1")
+        self.horizon = horizon
 
     def build(
         self,
@@ -66,4 +68,34 @@ class HorizonBuilder:
             同时返回价格可以保证 HorizonBuilder 的输出直接供后续
             Single-trade DP planner 使用。
         """
-        ...
+        if "close" not in dataframe.columns:
+            raise ValueError("dataframe must contain a 'close' column")
+
+        state_columns = [column for column in dataframe.columns if column != "close"]
+        if not state_columns:
+            raise ValueError("dataframe must contain at least one state feature column")
+
+        usable_rows = len(dataframe) // self.horizon * self.horizon
+        if usable_rows == 0:
+            raise ValueError(
+                f"dataframe has {len(dataframe)} rows, fewer than horizon={self.horizon}"
+            )
+        dataframe = dataframe.head(usable_rows)
+
+        states = (
+            dataframe.select(state_columns)
+            .to_numpy()
+            .astype(np.float32, copy=False)
+            .reshape(-1, self.horizon, len(state_columns))
+        )
+        prices = (
+            dataframe.select("close")
+            .to_numpy()
+            .astype(np.float32, copy=False)
+            .reshape(-1, self.horizon, 1)
+        )
+        if not np.isfinite(states).all():
+            raise ValueError("state features contain non-finite values")
+        if not np.isfinite(prices).all():
+            raise ValueError("close prices contain non-finite values")
+        return states, prices

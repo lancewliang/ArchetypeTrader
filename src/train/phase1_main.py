@@ -1,11 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from ..model.data_types import ArtifactPaths
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+
+from ..data.data_load import DataLoad
+from ..data.horizon_builder import HorizonBuilder
+from ..model.data_types import ArtifactPaths, HorizonDataset, TrajectoryDataset
+from ..model.vq_archetype import ArchetypeVQModel
 from ..store.artifact_store import DataFileStore
+from ..tool.SingleTrade_DP_Planner import SingleTrade_DP_Planner
 
 
 class Phase1FatalError(RuntimeError):
@@ -53,6 +61,15 @@ class Phase1MainConfig:
     batch_size: int = 256
     learning_rate: float = 1e-3
     device: str = "cuda"
+    horizon: int = 72
+    hidden_dim: int = 128
+    latent_dim: int = 16
+    num_archetypes: int = 10
+    action_dim: int = 3
+    commitment_cost: float = 0.25
+    num_layers: int = 1
+    dropout: float = 0.0
+    gamma: float = 1.0
 
 
 class Phase1MainFlow:
@@ -87,10 +104,19 @@ class Phase1MainFlow:
         """
 
         self.config = config
-        self.data_store = DataFileStore(
-            pair=config.pair,
-            batchid=config.train_batch_id,
-        )
+        
+        self.horizon_datasets: dict[str, HorizonDataset] = {}
+        self.trajectory_datasets: dict[str, TrajectoryDataset] = {}   
+        self.data_load: DataLoad | None = None
+        self.horizon_builder: HorizonBuilder | None = None
+        self.dp_planner: SingleTrade_DP_Planner | None = None
+        self.model: ArchetypeVQModel | None = None
+        self.optimizer: torch.optim.Optimizer | None = None
+        self.dataloaders: dict[str, DataLoader[tuple[torch.Tensor, ...]]] = {}
+        self.data_store: DataFileStore | None = None
+        self.best_metric: float | None = None
+        self.device = torch.device("cpu")
+ 
 
     def run(self) -> None:
         """按论文 Phase I 顺序执行 Archetype Discovery。
@@ -114,15 +140,17 @@ class Phase1MainFlow:
             self.load_inputs()
             # Step 3: 构建 DP planner、trajectory dataset、encoder、decoder 和 VQ codebook。
             self.build_components()
-            # Step 4: 训练 VQ encoder-decoder，使 codebook 学到可复用 trading archetypes。
+            # Step 4: 可选预训练 encoder-decoder，使模型具备基础动作重构能力。
+            self.pretrain()
+            # Step 5: 训练 VQ encoder-decoder，使 codebook 学到可复用 trading archetypes。
             self.train()
-            # Step 5: 根据验证指标选择最能代表稳定 archetype 发现结果的 checkpoint。
+            # Step 6: 根据验证指标选择最能代表稳定 archetype 发现结果的 checkpoint。
             self.select_best_checkpoint()
-            # Step 6: 从 best checkpoint 导出 Phase II/III 复用的 encoder、decoder 和 codebook。
+            # Step 7: 从 best checkpoint 导出 Phase II/III 复用的 encoder、decoder 和 codebook。
             self.export_phase2_artifacts()
-            # Step 7: 用训练好的 encoder/codebook 为 sampled horizons 生成 archetype labels。
+            # Step 8: 用训练好的 encoder/codebook 为 sampled horizons 生成 archetype labels。
             self.export_horizon_labels()
-            # Step 8: 写出配置、指标、诊断和产物索引，支撑复现实验与后续阶段审计。
+            # Step 9: 写出配置、指标、诊断和产物索引，支撑复现实验与后续阶段审计。
             self.write_report()
         except Phase1FatalError:
             raise
@@ -143,8 +171,26 @@ class Phase1MainFlow:
             这些产物必须在训练前有稳定路径，才能保证后续 Phase II selector
             使用的是同一组离散 archetypes，而不是混用不同实验批次。
         """
-
+        self.data_store = DataFileStore(
+            pair=self.config.pair,
+            batchid=self.config.train_batch_id,
+        )   
         self.data_store.initialize_phase1_artifact_dirs()
+        self.data_load = DataLoad()
+        self.horizon_builder = HorizonBuilder(horizon=self.config.horizon)
+        self.dp_planner = SingleTrade_DP_Planner(
+            horizon=self.config.horizon,
+            action_set=tuple(range(self.config.action_dim)),
+            initial_action=1,
+            gamma=self.config.gamma,
+        )
+        
+        requested_device = torch.device(self.config.device)
+        if requested_device.type == "cuda" and not torch.cuda.is_available():
+            requested_device = torch.device("cpu")
+        self.device = requested_device
+
+
 
     def load_inputs(self) -> None:
         """加载输入 split，并形成 Phase I 训练数据基础。
@@ -162,10 +208,19 @@ class Phase1MainFlow:
             reward 序列 r_demo，最终组成 tau=(s_demo, a_demo, r_demo) 作为
             VQ archetype extraction 的训练数据集 D。
         """
-
-        raise NotImplementedError(
-            "build Phase I datasets, model and training components here"
-        )
+      
+        split_files: dict[str, Path | None] = {
+            "train": self.config.train_file,
+            "val": self.config.val_file,
+            "test": self.config.test_file,
+        }
+        for split_name, path in split_files.items():
+            if path is None:
+                continue
+            if self.data_store is None:
+                raise Phase1FatalError("data store must be initialized")
+            self.horizon_datasets[split_name] = self.data_store.load_horizon_dataset(split_name)
+            self.trajectory_datasets[split_name] = self.data_store.load_trajectory_dataset(split_name)
 
     def build_components(self) -> None:
         """构建 DP 示范生成与 VQ 训练组件。
@@ -185,18 +240,78 @@ class Phase1MainFlow:
             状态和离散 archetype 重构动作序列。
         """
 
-        raise NotImplementedError(
-            "build Phase I datasets, model and training components here"
+        train_dataset = self.trajectory_datasets.get("train")
+        if train_dataset is None:
+            raise Phase1FatalError("train trajectory dataset is required")
+        for split_name, trajectory_dataset in self.trajectory_datasets.items():
+            tensor_dataset = self._build_tensor_dataset(trajectory_dataset)
+            self.dataloaders[split_name] = DataLoader(
+                tensor_dataset,
+                batch_size=self.config.batch_size,
+                shuffle=(split_name == "train"),
+            )
+
+        first_states, _, _ = train_dataset[0]
+        state_dim = int(first_states.shape[-1])
+        self.model = ArchetypeVQModel(
+            state_dim=state_dim,
+            action_dim=self.config.action_dim,
+            hidden_dim=self.config.hidden_dim,
+            latent_dim=self.config.latent_dim,
+            num_archetypes=self.config.num_archetypes,
+            commitment_cost=self.config.commitment_cost,
+            num_layers=self.config.num_layers,
+            dropout=self.config.dropout,
+        ).to(self.device)
+        self.optimizer = torch.optim.Adam(
+            self.model.parameters(),
+            lr=self.config.learning_rate,
         )
+
+    def pretrain(self) -> None:
+        """预训练 Phase I encoder-decoder 并保存 checkpoint。
+
+        功能描述:
+            执行可选 reconstruction pretrain，让 encoder/decoder 具备基础动作
+            重构能力。checkpoint 保存委托给 ``DataFileStore``，具体持久化策略
+            后续在 store 层实现。
+
+        论文描述:
+            预训练阶段先跳过 VQ quantization，仅优化动作重构，使后续离散
+            archetype 学习从较稳定的 encoder/decoder 表示开始。
+        """
+
+        train_loader = self.dataloaders.get("train")     
+        val_loader = self.dataloaders.get("val")
+        if train_loader is None:
+            raise Phase1FatalError("train dataloader is required")
+        if self.data_store is None:
+            raise Phase1FatalError("data store must be initialized")
+        if self.model is None or self.optimizer is None:
+            raise Phase1FatalError("model and optimizer must be initialized")
+
+        for epoch in range(1, self.config.pretrain_epochs + 1):
+            train_metrics = self._run_epoch(train_loader, use_vq=False)
+            eval_loader = val_loader or train_loader
+            val_metrics = self._evaluate(eval_loader, use_vq=False)
+            self.data_store.save_phase1_checkpoint(
+                {
+                    "stage": "pretrain",
+                    "epoch": epoch,
+                    "is_best": False,
+                    "config": asdict(self.config),
+                    "model_state_dict": self.model.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "metrics": {"train": train_metrics, "val": val_metrics},
+                }
+            )
 
     def train(self) -> None:
         """训练 Phase I VQ encoder-decoder 并保存 checkpoint。
 
         功能描述:
-            先执行可选 reconstruction pretrain，让 encoder/decoder 具备基础动作
-            重构能力；再启用 VQ codebook 训练，按 epoch 计算训练/验证指标，
-            保存 last checkpoint、候选 best checkpoint、latent snapshot 和诊断
-            数据。
+            启用 VQ codebook 训练，按 epoch 计算训练/验证指标，并通过
+            ``DataFileStore.save_phase1_checkpoint`` 交给 store 层保存 checkpoint。
 
         论文描述:
             训练目标对应论文式 (4):
@@ -208,10 +323,149 @@ class Phase1MainFlow:
             latent manifold。
         """
 
-        raise NotImplementedError(
-            "implement pretrain loop, VQ training loop and checkpoint saving here"
+        train_loader = self.dataloaders.get("train")     
+        val_loader = self.dataloaders.get("val")
+        if train_loader is None:
+            raise Phase1FatalError("train dataloader is required")
+        if self.data_store is None:
+            raise Phase1FatalError("data store must be initialized")
+        if self.model is None or self.optimizer is None:
+            raise Phase1FatalError("model and optimizer must be initialized")
+        best_metric = float("inf")
+
+        for epoch in range(1, self.config.epochs + 1):
+            train_metrics = self._run_epoch(train_loader, use_vq=True)
+            eval_loader = val_loader or train_loader
+            val_metrics = self._evaluate(eval_loader, use_vq=True)
+            metrics = {"train": train_metrics, "val": val_metrics}
+            self.data_store.save_phase1_checkpoint(
+                {
+                    "stage": "vq",
+                    "epoch": epoch,
+                    "is_best": False,
+                    "config": asdict(self.config),
+                    "model_state_dict": self.model.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "metrics": metrics,
+                }
+            )
+
+            metric = float(val_metrics["total_loss"])
+            if metric < best_metric:
+                best_metric = metric
+                self.best_metric = metric
+                self.data_store.save_phase1_checkpoint(
+                    {
+                        "stage": "vq",
+                        "epoch": epoch,
+                        "is_best": True,
+                        "config": asdict(self.config),
+                        "model_state_dict": self.model.state_dict(),
+                        "optimizer_state_dict": self.optimizer.state_dict(),
+                        "metrics": metrics,
+                    }
+                )
+
+    def _build_tensor_dataset(
+        self,
+        trajectory_dataset: TrajectoryDataset,
+    ) -> TensorDataset:
+        states = torch.as_tensor(
+            np.stack([trajectory[0] for trajectory in trajectory_dataset]),
+            dtype=torch.float32,
+        )
+        actions = torch.as_tensor(
+            np.stack([trajectory[1] for trajectory in trajectory_dataset]),
+            dtype=torch.long,
+        )
+        rewards = torch.as_tensor(
+            np.stack([trajectory[2] for trajectory in trajectory_dataset]),
+            dtype=torch.float32,
+        )
+        return TensorDataset(states, actions, rewards)
+
+    def _run_epoch(
+        self,
+        dataloader: DataLoader[tuple[torch.Tensor, ...]],
+        *,
+        use_vq: bool,
+    ) -> dict[str, float]:
+        if self.model is None or self.optimizer is None:
+            raise Phase1FatalError("model and optimizer must be initialized")
+
+        self.model.train()
+        totals = self._empty_metric_totals()
+        for batch in dataloader:
+            batch = self._move_batch(batch)
+            self.optimizer.zero_grad(set_to_none=True)
+            outputs = self.model(batch) if use_vq else self.model.forward_pretrain(batch)
+            outputs.total_loss.backward()
+            self.optimizer.step()
+            self._accumulate_metrics(totals, outputs, batch_size=batch[0].shape[0])
+        return self._finalize_metrics(totals)
+
+    @torch.no_grad()
+    def _evaluate(
+        self,
+        dataloader: DataLoader[tuple[torch.Tensor, ...]],
+        *,
+        use_vq: bool,
+    ) -> dict[str, float]:
+        if self.model is None:
+            raise Phase1FatalError("model must be initialized")
+
+        self.model.eval()
+        totals = self._empty_metric_totals()
+        for batch in dataloader:
+            batch = self._move_batch(batch)
+            outputs = self.model(batch) if use_vq else self.model.forward_pretrain(batch)
+            self._accumulate_metrics(totals, outputs, batch_size=batch[0].shape[0])
+        return self._finalize_metrics(totals)
+
+    def _move_batch(
+        self,
+        batch: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        states, actions, rewards = batch
+        return (
+            states.to(self.device),
+            actions.to(self.device),
+            rewards.to(self.device),
         )
 
+    def _empty_metric_totals(self) -> dict[str, float]:
+        return {
+            "samples": 0.0,
+            "total_loss": 0.0,
+            "reconstruction_loss": 0.0,
+            "vq_loss": 0.0,
+            "codebook_loss": 0.0,
+            "commitment_loss": 0.0,
+        }
+
+    def _accumulate_metrics(
+        self,
+        totals: dict[str, float],
+        outputs: Any,
+        *,
+        batch_size: int,
+    ) -> None:
+        totals["samples"] += batch_size
+        totals["total_loss"] += float(outputs.total_loss.detach().cpu()) * batch_size
+        totals["reconstruction_loss"] += (
+            float(outputs.reconstruction_loss.detach().cpu()) * batch_size
+        )
+        totals["vq_loss"] += float(outputs.vq_loss.detach().cpu()) * batch_size
+        totals["codebook_loss"] += (
+            float(outputs.codebook_loss.detach().cpu()) * batch_size
+        )
+        totals["commitment_loss"] += (
+            float(outputs.commitment_loss.detach().cpu()) * batch_size
+        )
+
+    def _finalize_metrics(self, totals: dict[str, float]) -> dict[str, float]:
+        samples = max(totals.pop("samples"), 1.0)
+        return {name: value / samples for name, value in totals.items()}
     def select_best_checkpoint(self) -> None:
         """选择 Phase I best checkpoint。
 
