@@ -121,7 +121,7 @@ src/phase1/metrics/
   __init__.py
   phase1_metrics.py
   phase1_validation_config.py
-  phase1_validation_data.py
+  phase1_validation_data_schema.py
   phase1_metric_results.py
   phase1_validation_rules.py
   phase1_validation_score.py
@@ -147,8 +147,8 @@ src/phase1/report/
 说明：
 
 - `phase1_metrics.py` 保留给训练期 loss/accuracy 指标，兼容现有调用；
-- `phase1_validation_config.py` 放阈值、评分权重和 evaluator 运行参数三个配置类；
-- `phase1_validation_data.py` 放 evaluator 收集到的中间数据结构；
+- `phase1_validation_config.py` 放五个分层阈值类、评分权重类和 evaluator 运行参数类；
+- `phase1_validation_data_schema.py` 放 evaluator 收集到的中间数据结构；
 - `phase1_metric_results.py` 放判定结果结构；
 - `phase1_validation_rules.py` 放 hard gate 规则；
 - `phase1_validation_score.py` 放 normalized score 和 tie-breaker 所需字段；
@@ -247,22 +247,25 @@ def add_batch(self, batch_size: int, outputs: VqModelOutputs) -> None:
 src/phase1/metrics/phase1_validation_config.py
 ```
 
-配置分为三类，并在 `phase1_validation_config.py` 中明确拆成三个 dataclass：
+配置分为三类，其中阈值按 validation layer 拆成五个 dataclass：
 
-- 阈值；
+- 分层阈值；
 - 综合评分权重；
 - evaluator 运行参数。
 
-建议结构：
+阈值配置：
 
 ```python
 @dataclass(frozen=True)
-class Phase1ValidationThresholds:
+class Phase1TeacherQualityThresholds:
     dp_win_rate_min: float = 0.58
     near_zero_opportunity_ratio_max: float = 0.35
     fee_sensitivity_min: float = 0.60
     morphology_coverage_min: float = 0.60
 
+
+@dataclass(frozen=True)
+class Phase1VQInternalThresholds:
     action_accuracy_min: float = 0.85
     reconstruction_loss_gap_max: float = 1.25
     active_code_ratio_min: float = 0.80
@@ -275,6 +278,9 @@ class Phase1ValidationThresholds:
     direction_accuracy_min: float = 0.88
     entry_timing_error_ratio_max: float = 0.15
 
+
+@dataclass(frozen=True)
+class Phase1BehaviorQualityThresholds:
     min_code_support_abs: int = 100
     min_code_support_ratio: float = 0.02
     weak_code_ratio_max: float = 0.20
@@ -286,6 +292,9 @@ class Phase1ValidationThresholds:
     inter_intra_separation_min: float = 1.30
     duplicate_code_similarity_max: float = 0.85
 
+
+@dataclass(frozen=True)
+class Phase1OracleProfitabilityThresholds:
     decoded_win_rate_min: float = 0.55
     retention_ratio_min: float = 0.50
     random_label_relative_lift_min: float = 0.20
@@ -293,6 +302,9 @@ class Phase1ValidationThresholds:
     top_5_contribution_max: float = 0.60
     dominant_pair_positive_ratio_min: float = 0.60
 
+
+@dataclass(frozen=True)
+class Phase1LabelPredictabilityThresholds:
     probe_top1_floor: float = 0.25
     probe_top1_k_factor: float = 1.5
     probe_top3_floor: float = 0.55
@@ -301,6 +313,12 @@ class Phase1ValidationThresholds:
     mutual_information_lift_min: float = 2.0
     probe_return_retention_min: float = 0.35
 ```
+
+拆分原则：
+
+- 每个 rule 函数只接收本层阈值对象，避免跨层字段误用；
+- 不定义 `Phase1ValidationThresholds` 总阈值类；
+- checkpoint/report 若需要保存配置快照，应按 layer key 保存五个阈值对象。
 
 评分权重：
 
@@ -332,17 +350,21 @@ class Phase1ValidationRuntimeConfig:
     random_seed: int = 42
 ```
 
-不再定义第四个“总配置”类。调用方应显式持有这三个对象：
+不再定义第四个“总配置”类，也不定义阈值总配置类。调用方应显式持有这些对象：
 
 ```python
-thresholds = Phase1ValidationThresholds()
+teacher_thresholds = Phase1TeacherQualityThresholds()
+vq_internal_thresholds = Phase1VQInternalThresholds()
+behavior_thresholds = Phase1BehaviorQualityThresholds()
+oracle_profitability_thresholds = Phase1OracleProfitabilityThresholds()
+label_predictability_thresholds = Phase1LabelPredictabilityThresholds()
 score_weights = Phase1ValidationScoreWeights()
 runtime_config = Phase1ValidationRuntimeConfig()
 ```
 
 职责边界：
 
-- `Phase1ValidationThresholds` 只给 `phase1_validation_rules.py` 使用；
+- 五个分层 thresholds 只给 `phase1_validation_rules.py` 的对应 layer rule 使用；
 - `Phase1ValidationScoreWeights` 只给 `phase1_validation_score.py` 使用；
 - `Phase1ValidationRuntimeConfig` 给 evaluator 和五个 layer calculator 使用。
 
@@ -351,7 +373,7 @@ runtime_config = Phase1ValidationRuntimeConfig()
 建议位置：
 
 ```text
-src/phase1/metrics/phase1_validation_data.py
+src/phase1/metrics/phase1_validation_data_schema.py
 ```
 
 ### 9.1 Split snapshot
@@ -712,7 +734,11 @@ class Phase1CodebookEvaluator:
     def __init__(
         self,
         model: ArchetypeVQModel,
-        thresholds: Phase1ValidationThresholds,
+        teacher_thresholds: Phase1TeacherQualityThresholds,
+        vq_internal_thresholds: Phase1VQInternalThresholds,
+        behavior_thresholds: Phase1BehaviorQualityThresholds,
+        oracle_profitability_thresholds: Phase1OracleProfitabilityThresholds,
+        label_predictability_thresholds: Phase1LabelPredictabilityThresholds,
         score_weights: Phase1ValidationScoreWeights,
         runtime_config: Phase1ValidationRuntimeConfig,
         device: torch.device | str,
@@ -813,7 +839,7 @@ collect_snapshot
   -> validation_rules 按 0,1,2,3,4 输出 layer results
 ```
 
-建议中间返回结构定义在 `metrics/phase1_validation_data.py`：
+建议中间返回结构定义在 `metrics/phase1_validation_data_schema.py`：
 
 ```python
 Phase1LayerMetrics: TypeAlias = (
@@ -1604,31 +1630,31 @@ src/phase1/metrics/phase1_validation_rules.py
 ```python
 def evaluate_teacher_quality_rules(
     metrics: Phase1TeacherQualityMetrics,
-    thresholds: Phase1ValidationThresholds,
+    thresholds: Phase1TeacherQualityThresholds,
 ) -> Phase1LayerResult:
     ...
 
 def evaluate_vq_internal_rules(
     metrics: Phase1VQInternalMetrics,
-    thresholds: Phase1ValidationThresholds,
+    thresholds: Phase1VQInternalThresholds,
 ) -> Phase1LayerResult:
     ...
 
 def evaluate_behavior_quality_rules(
     metrics: Phase1BehaviorQualityMetrics,
-    thresholds: Phase1ValidationThresholds,
+    thresholds: Phase1BehaviorQualityThresholds,
 ) -> Phase1LayerResult:
     ...
 
 def evaluate_oracle_profitability_rules(
     metrics: Phase1OracleProfitabilityMetrics,
-    thresholds: Phase1ValidationThresholds,
+    thresholds: Phase1OracleProfitabilityThresholds,
 ) -> Phase1LayerResult:
     ...
 
 def evaluate_label_predictability_rules(
     metrics: Phase1LabelPredictabilityMetrics,
-    thresholds: Phase1ValidationThresholds,
+    thresholds: Phase1LabelPredictabilityThresholds,
 ) -> Phase1LayerResult:
     ...
 
@@ -1784,12 +1810,20 @@ class Phase1CodebookReport:
 在 `build_components()` 中新增：
 
 ```python
-self.validation_thresholds = Phase1ValidationThresholds()
+self.teacher_thresholds = Phase1TeacherQualityThresholds()
+self.vq_internal_thresholds = Phase1VQInternalThresholds()
+self.behavior_thresholds = Phase1BehaviorQualityThresholds()
+self.oracle_profitability_thresholds = Phase1OracleProfitabilityThresholds()
+self.label_predictability_thresholds = Phase1LabelPredictabilityThresholds()
 self.validation_score_weights = Phase1ValidationScoreWeights()
 self.validation_runtime_config = Phase1ValidationRuntimeConfig()
 self.codebook_evaluator = Phase1CodebookEvaluator(
     model=model,
-    thresholds=self.validation_thresholds,
+    teacher_thresholds=self.teacher_thresholds,
+    vq_internal_thresholds=self.vq_internal_thresholds,
+    behavior_thresholds=self.behavior_thresholds,
+    oracle_profitability_thresholds=self.oracle_profitability_thresholds,
+    label_predictability_thresholds=self.label_predictability_thresholds,
     score_weights=self.validation_score_weights,
     runtime_config=self.validation_runtime_config,
     device=self.device,
@@ -1975,7 +2009,7 @@ net_return_t = gross_return_t - fee_t
 实现：
 
 - `phase1_validation_config.py`
-- `phase1_validation_data.py`
+- `phase1_validation_data_schema.py`
 - `phase1_metric_results.py`
 - `phase1_validation_rules.py` 的空规则框架和少量核心规则。
 
