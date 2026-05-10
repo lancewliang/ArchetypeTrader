@@ -346,14 +346,12 @@ class Phase1MainFlow:
         """
 
         train_loader = self.dataloaders["train"]
-        val_loader = self.dataloaders.get("val")
+        val_loader = self.dataloaders["train"]
         data_store = cast(DataFileStore, self.data_store)
         model = cast(ArchetypeVQModel, self.model)
         evaluator = cast(Phase1Evaluator, self.evaluator)
         optimizer = cast(torch.optim.Optimizer, self.optimizer)
-        best_metric = float("inf")
-        eval_loader = val_loader or train_loader
-        eval_split = "val" if val_loader is not None else "train"
+        best_metric = float("inf")  
 
         for epoch in range(1, self.config.epochs + 1):
             train_metrics = self._run_epoch(
@@ -363,11 +361,11 @@ class Phase1MainFlow:
                 split="train",
                 epoch=epoch,
             )
-            val_metrics = evaluator.evaluate(
-                eval_loader,
+            val_metrics:Phase1Metrics = evaluator.evaluate(
+                val_loader,
                 use_vq=True,
                 stage="vq",
-                split=eval_split,
+                split="val",
                 epoch=epoch,
             )
             metrics = {
