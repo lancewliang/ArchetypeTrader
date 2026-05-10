@@ -147,7 +147,7 @@ src/phase1/report/
 说明：
 
 - `phase1_metrics.py` 保留给训练期 loss/accuracy 指标，兼容现有调用；
-- `phase1_validation_config.py` 放阈值、权重和开关；
+- `phase1_validation_config.py` 放阈值、评分权重和 evaluator 运行参数三个配置类；
 - `phase1_validation_data.py` 放 evaluator 收集到的中间数据结构；
 - `phase1_metric_results.py` 放判定结果结构；
 - `phase1_validation_rules.py` 放 hard gate 规则；
@@ -247,7 +247,7 @@ def add_batch(self, batch_size: int, outputs: VqModelOutputs) -> None:
 src/phase1/metrics/phase1_validation_config.py
 ```
 
-配置分为三类：
+配置分为三类，并在 `phase1_validation_config.py` 中明确拆成三个 dataclass：
 
 - 阈值；
 - 综合评分权重；
@@ -315,13 +315,11 @@ class Phase1ValidationScoreWeights:
     label_predictability: float = 0.10
 ```
 
-总配置：
+Evaluator 运行参数：
 
 ```python
 @dataclass(frozen=True)
-class Phase1ValidationConfig:
-    thresholds: Phase1ValidationThresholds = Phase1ValidationThresholds()
-    score_weights: Phase1ValidationScoreWeights = Phase1ValidationScoreWeights()
+class Phase1ValidationRuntimeConfig:
     fee_rate: float = 0.0002
     random_label_trials: int = 3
     churn_window_epochs: int = 5
@@ -331,7 +329,22 @@ class Phase1ValidationConfig:
     probe_epochs: int = 20
     probe_learning_rate: float = 1e-3
     probe_batch_size: int = 256
+    random_seed: int = 42
 ```
+
+不再定义第四个“总配置”类。调用方应显式持有这三个对象：
+
+```python
+thresholds = Phase1ValidationThresholds()
+score_weights = Phase1ValidationScoreWeights()
+runtime_config = Phase1ValidationRuntimeConfig()
+```
+
+职责边界：
+
+- `Phase1ValidationThresholds` 只给 `phase1_validation_rules.py` 使用；
+- `Phase1ValidationScoreWeights` 只给 `phase1_validation_score.py` 使用；
+- `Phase1ValidationRuntimeConfig` 给 evaluator 和五个 layer calculator 使用。
 
 ## 9. Validation 中间数据设计
 
@@ -415,6 +428,131 @@ class Phase1CodeDiagnostic:
 
 该结构直接供 report 呈现 code-level 表格。
 
+### 9.4 强类型 Layer Metrics
+
+所有五层指标都必须使用明确 dataclass 字段承载，不使用
+`Mapping[str, float]` 作为主要数据结构。字符串 key 只允许出现在
+`to_dict()` 序列化结果中，供 checkpoint/report 落盘。
+
+设计原则：
+
+- 每个指标是一个显式字段，便于 IDE 补全、类型检查和重构；
+- rules/scoring/report 都消费强类型对象；
+- `to_flat_dict()` 只作为 checkpoint selector 快速读取的派生视图；
+- 缺失或不可计算指标用 `float("nan")` 或 `None`，不要省略字段。
+
+```python
+@dataclass(frozen=True)
+class Phase1TeacherQualityMetrics:
+    dp_advantage_vs_flat: float
+    dp_win_rate_vs_flat: float
+    near_zero_opportunity_ratio: float
+    fee_sensitivity: float
+    morphology_coverage: float
+    dp_return_concentration_after_top5_removed: float
+
+
+@dataclass(frozen=True)
+class Phase1VQInternalMetrics:
+    validation_action_accuracy: float
+    reconstruction_loss_gap: float
+    active_code_ratio: float
+    max_code_occupancy: float
+    normalized_code_perplexity: float
+    dead_code_ratio: float
+    assignment_churn_recent_mean: float
+    code_lifetime_pass_ratio: float
+    quantization_distance: float
+    nearest_second_margin_median: float
+    decoder_turnover_error: float
+    entry_timing_error_median: float
+    direction_accuracy: float
+
+
+@dataclass(frozen=True)
+class Phase1BehaviorQualityMetrics:
+    weak_support_code_ratio: float
+    weak_morphology_code_ratio: float
+    weak_motif_code_ratio: float
+    weak_pair_code_ratio: float
+    weak_lift_nonprofitable_code_ratio: float
+    intra_code_action_similarity: float
+    inter_intra_separation: float
+    latent_silhouette_score: float
+    duplicate_code_pair_count: int
+    profitable_code_coverage: float
+
+
+@dataclass(frozen=True)
+class Phase1OracleProfitabilityMetrics:
+    mean_decoded_advantage_vs_flat: float
+    decoded_win_rate_vs_flat: float
+    mean_advantage_vs_random_label: float
+    random_label_relative_lift: float
+    retention_ratio: float
+    downside_control: float
+    risk_adjusted_return: float
+    top_5_contribution: float
+    trimmed_decoded_advantage: float
+    fee_drag: float
+    turnover_return_correlation: float
+    bad_code_ratio: float
+    dominant_pair_positive_ratio: float
+
+
+@dataclass(frozen=True)
+class Phase1LabelPredictabilityMetrics:
+    probe_top1_accuracy: float
+    probe_top3_accuracy: float
+    probe_balanced_accuracy: float
+    label_entropy_given_morphology: float
+    mutual_information_lift: float
+    probe_return_retention: float
+
+
+@dataclass(frozen=True)
+class Phase1TieBreakerMetrics:
+    risk_adjusted_return: float
+    probe_top3_accuracy: float
+    retention_ratio: float
+    active_code_ratio: float
+    max_code_occupancy: float
+    reconstruction_loss: float
+
+
+@dataclass(frozen=True)
+class Phase1PerCodeProfitability:
+    code_id: int
+    mean_advantage: float
+    win_rate: float
+    retention_ratio: float
+    fee_drag: float
+    passed: bool
+```
+
+五层指标聚合对象：
+
+```python
+@dataclass(frozen=True)
+class Phase1ValidationMetrics:
+    teacher_quality: Phase1TeacherQualityMetrics
+    vq_internal: Phase1VQInternalMetrics
+    behavior_quality: Phase1BehaviorQualityMetrics
+    oracle_profitability: Phase1OracleProfitabilityMetrics
+    label_predictability: Phase1LabelPredictabilityMetrics
+
+    def to_flat_dict(self) -> dict[str, float | int]:
+        ...
+```
+
+序列化要求：
+
+- 每个 metrics dataclass 都实现 `to_dict()` / `from_dict()`；
+- `Phase1ValidationMetrics.to_flat_dict()` 负责生成 checkpoint selector 使用的扁平
+  key，例如 `oracle_profitability.risk_adjusted_return`；
+- 代码内部禁止通过字符串 key 读取指标值，必须访问字段，例如
+  `metrics.vq_internal.active_code_ratio`。
+
 ## 10. Metric 判定结果设计
 
 建议位置：
@@ -480,10 +618,10 @@ class Phase1ValidationResult:
     score: float | None
     failed_layers: tuple[str, ...]
     layers: tuple[Phase1LayerResult, ...]
-    scalar_metrics: Mapping[str, float]
+    metrics: Phase1ValidationMetrics
     code_diagnostics: tuple[Phase1CodeDiagnostic, ...]
     drift_diagnostics: Mapping[str, Phase1MetricResult]
-    tie_breaker_metrics: Mapping[str, float]
+    tie_breaker_metrics: Phase1TieBreakerMetrics
 ```
 
 必须提供：
@@ -524,7 +662,7 @@ validation.tie_breaker.reconstruction_loss
 checkpoint.metrics["validation"] = validation_result.to_dict()
 ```
 
-同时为了 selector 快速读取，可额外冗余几个 top-level scalar：
+同时为了 selector 快速读取，可额外冗余几个由强类型结果派生出的 top-level scalar：
 
 ```python
 metrics = {
@@ -574,7 +712,9 @@ class Phase1CodebookEvaluator:
     def __init__(
         self,
         model: ArchetypeVQModel,
-        config: Phase1ValidationConfig,
+        thresholds: Phase1ValidationThresholds,
+        score_weights: Phase1ValidationScoreWeights,
+        runtime_config: Phase1ValidationRuntimeConfig,
         device: torch.device | str,
     ) -> None:
         ...
@@ -607,8 +747,8 @@ class Phase1CodebookEvaluator:
 `evaluate_checkpoint()` 的职责：
 
 1. 调用 `collect_snapshot()` 收集 train/val snapshot；
-2. 调用五个 layer calculator，分别得到 raw scalar metrics 和 diagnostics；
-3. 将 raw metrics 交给 `metrics.phase1_validation_rules` 做 hard gate 判定；
+2. 调用五个 layer calculator，分别得到强类型 layer metrics 和 diagnostics；
+3. 将强类型 metrics 交给 `metrics.phase1_validation_rules` 做 hard gate 判定；
 4. 将通过 hard gates 的结果交给 `metrics.phase1_validation_score` 计算 score；
 5. 组装 `Phase1ValidationResult`。
 
@@ -637,7 +777,7 @@ class Phase1CodebookEvaluator:
 
 ## 13. 五层指标计算归属
 
-本节定义“每层 raw metric 由哪个独立文件计算、metrics 层如何判定”。
+本节定义“每层强类型 metrics 由哪个独立文件计算、metrics 层如何判定”。
 
 五层计算代码不放在 `phase1_codebook_evaluator.py` 中，而是放在 5 个独立文件：
 
@@ -652,7 +792,7 @@ src/phase1/evaluators/phase1_validation_layers/
 
 统一约定：
 
-- 每个 layer 文件只负责本层 raw metric 计算；
+- 每个 layer 文件只负责本层强类型 metrics 计算；
 - 每个 layer 文件可以包含本层私有 helper；
 - 每个 layer 文件返回 `Phase1LayerComputation`；
 - 每个 layer 文件不返回 PASS/FAIL；
@@ -676,11 +816,20 @@ collect_snapshot
 建议中间返回结构定义在 `metrics/phase1_validation_data.py`：
 
 ```python
+Phase1LayerMetrics: TypeAlias = (
+    Phase1TeacherQualityMetrics
+    | Phase1VQInternalMetrics
+    | Phase1BehaviorQualityMetrics
+    | Phase1OracleProfitabilityMetrics
+    | Phase1LabelPredictabilityMetrics
+)
+
+
 @dataclass(frozen=True)
 class Phase1LayerComputation:
     layer_id: int
     layer_name: str
-    scalar_metrics: Mapping[str, float]
+    metrics: Phase1LayerMetrics
     code_diagnostics: tuple[Phase1CodeDiagnostic, ...] = ()
     extra_payload: Mapping[str, object] = field(default_factory=dict)
 ```
@@ -703,19 +852,23 @@ def compute_teacher_quality_metrics(
     *,
     train_snapshot: Phase1EvaluationSnapshot,
     val_snapshot: Phase1EvaluationSnapshot,
-    config: Phase1ValidationConfig,
+    runtime_config: Phase1ValidationRuntimeConfig,
 ) -> Phase1LayerComputation:
     ...
 ```
 
-输出 raw metrics：
+输出强类型 metrics：
 
-- `dp_advantage_vs_flat`
-- `dp_win_rate_vs_flat`
-- `near_zero_opportunity_ratio`
-- `fee_sensitivity`
-- `morphology_coverage`
-- `dp_return_concentration_after_top5_removed`
+```python
+Phase1TeacherQualityMetrics(
+    dp_advantage_vs_flat=...,
+    dp_win_rate_vs_flat=...,
+    near_zero_opportunity_ratio=...,
+    fee_sensitivity=...,
+    morphology_coverage=...,
+    dp_return_concentration_after_top5_removed=...,
+)
+```
 
 Metrics 判定仍在 `phase1_validation_rules.py`：
 
@@ -744,26 +897,30 @@ def compute_vq_internal_metrics(
     train_snapshot: Phase1EvaluationSnapshot,
     val_snapshot: Phase1EvaluationSnapshot,
     assignment_history: Sequence[CodeAssignmentSnapshot],
-    config: Phase1ValidationConfig,
+    runtime_config: Phase1ValidationRuntimeConfig,
 ) -> Phase1LayerComputation:
     ...
 ```
 
-输出 raw metrics：
+输出强类型 metrics：
 
-- `validation_action_accuracy`
-- `reconstruction_loss_gap`
-- `active_code_ratio`
-- `max_code_occupancy`
-- `normalized_code_perplexity`
-- `dead_code_ratio`
-- `assignment_churn_recent_mean`
-- `code_lifetime_pass_ratio`
-- `quantization_distance`
-- `nearest_second_margin_median`
-- `decoder_turnover_error`
-- `entry_timing_error_median`
-- `direction_accuracy`
+```python
+Phase1VQInternalMetrics(
+    validation_action_accuracy=...,
+    reconstruction_loss_gap=...,
+    active_code_ratio=...,
+    max_code_occupancy=...,
+    normalized_code_perplexity=...,
+    dead_code_ratio=...,
+    assignment_churn_recent_mean=...,
+    code_lifetime_pass_ratio=...,
+    quantization_distance=...,
+    nearest_second_margin_median=...,
+    decoder_turnover_error=...,
+    entry_timing_error_median=...,
+    direction_accuracy=...,
+)
+```
 
 Metrics 判定仍在 `phase1_validation_rules.py`，按
 `phase1_codebook_validation_criteria.md` 的第一层 hard gates 执行。
@@ -787,24 +944,28 @@ def compute_behavior_quality_metrics(
     *,
     train_snapshot: Phase1EvaluationSnapshot,
     val_snapshot: Phase1EvaluationSnapshot,
-    config: Phase1ValidationConfig,
-    per_code_profitability: Mapping[int, Mapping[str, float]] | None = None,
+    runtime_config: Phase1ValidationRuntimeConfig,
+    per_code_profitability: Sequence[Phase1PerCodeProfitability] | None = None,
 ) -> Phase1LayerComputation:
     ...
 ```
 
-输出 raw metrics：
+输出强类型 metrics：
 
-- `weak_support_code_ratio`
-- `weak_morphology_code_ratio`
-- `weak_motif_code_ratio`
-- `weak_pair_code_ratio`
-- `weak_lift_nonprofitable_code_ratio`
-- `intra_code_action_similarity`
-- `inter_intra_separation`
-- `latent_silhouette_score`
-- `duplicate_code_pair_count`
-- `profitable_code_coverage`
+```python
+Phase1BehaviorQualityMetrics(
+    weak_support_code_ratio=...,
+    weak_morphology_code_ratio=...,
+    weak_motif_code_ratio=...,
+    weak_pair_code_ratio=...,
+    weak_lift_nonprofitable_code_ratio=...,
+    intra_code_action_similarity=...,
+    inter_intra_separation=...,
+    latent_silhouette_score=...,
+    duplicate_code_pair_count=...,
+    profitable_code_coverage=...,
+)
+```
 
 输出 code diagnostics：
 
@@ -846,7 +1007,7 @@ def compute_oracle_profitability_metrics(
     *,
     model: ArchetypeVQModel,
     val_snapshot: Phase1EvaluationSnapshot,
-    config: Phase1ValidationConfig,
+    runtime_config: Phase1ValidationRuntimeConfig,
     device: torch.device | str,
 ) -> Phase1LayerComputation:
     ...
@@ -859,21 +1020,25 @@ def compute_oracle_profitability_metrics(
   只接收 `random_label_decoded_actions`，以减少本层对 model 的依赖；
 - 收益执行口径必须集中在本文件或同文件私有 helper 中，不能分散到 report。
 
-输出 raw metrics：
+输出强类型 metrics：
 
-- `mean_decoded_advantage_vs_flat`
-- `decoded_win_rate_vs_flat`
-- `mean_advantage_vs_random_label`
-- `random_label_relative_lift`
-- `retention_ratio`
-- `downside_control`
-- `risk_adjusted_return`
-- `top_5_contribution`
-- `trimmed_decoded_advantage`
-- `fee_drag`
-- `turnover_return_correlation`
-- `bad_code_ratio`
-- `dominant_pair_positive_ratio`
+```python
+Phase1OracleProfitabilityMetrics(
+    mean_decoded_advantage_vs_flat=...,
+    decoded_win_rate_vs_flat=...,
+    mean_advantage_vs_random_label=...,
+    random_label_relative_lift=...,
+    retention_ratio=...,
+    downside_control=...,
+    risk_adjusted_return=...,
+    top_5_contribution=...,
+    trimmed_decoded_advantage=...,
+    fee_drag=...,
+    turnover_return_correlation=...,
+    bad_code_ratio=...,
+    dominant_pair_positive_ratio=...,
+)
+```
 
 输出 `extra_payload`：
 
@@ -913,7 +1078,7 @@ def compute_label_predictability_metrics(
     model: ArchetypeVQModel,
     train_snapshot: Phase1EvaluationSnapshot,
     val_snapshot: Phase1EvaluationSnapshot,
-    config: Phase1ValidationConfig,
+    runtime_config: Phase1ValidationRuntimeConfig,
     device: torch.device | str,
 ) -> Phase1LayerComputation:
     ...
@@ -928,14 +1093,18 @@ def compute_label_predictability_metrics(
   `model` 或预先 decode 好的 probe actions；
 - probe 训练必须支持 seed，避免 checkpoint score 抖动。
 
-输出 raw metrics：
+输出强类型 metrics：
 
-- `probe_top1_accuracy`
-- `probe_top3_accuracy`
-- `probe_balanced_accuracy`
-- `label_entropy_given_morphology`
-- `mutual_information_lift`
-- `probe_return_retention`
+```python
+Phase1LabelPredictabilityMetrics(
+    probe_top1_accuracy=...,
+    probe_top3_accuracy=...,
+    probe_balanced_accuracy=...,
+    label_entropy_given_morphology=...,
+    mutual_information_lift=...,
+    probe_return_retention=...,
+)
+```
 
 Metrics 判定仍在 `phase1_validation_rules.py`：
 
@@ -944,6 +1113,475 @@ Metrics 判定仍在 `phase1_validation_rules.py`：
 - balanced accuracy `>= 0.25`
 - mutual information lift `>= 2.0`
 - probe return retention `>= 0.35`
+
+### 13.6 Layer 0 详细计算设计
+
+目标：判断 DP teacher 本身是否有足够稳定的扣费后优势。该层失败时，后续
+checkpoint 选择应停止，因为 codebook 只能压缩 teacher 信号，不能凭空创造
+teacher 中不存在的交易价值。
+
+输入依赖：
+
+- `val_snapshot.demo_actions`
+- `val_snapshot.demo_rewards`
+- `val_snapshot.prices`
+- `runtime_config.fee_rate`
+- `runtime_config.top_contribution_ratio`
+
+推荐 helper：
+
+```python
+def compute_flat_returns(prices: np.ndarray) -> np.ndarray: ...
+def compute_demo_returns(snapshot: Phase1EvaluationSnapshot) -> np.ndarray: ...
+def compute_fee_sensitivity(
+    prices: np.ndarray,
+    actions: np.ndarray,
+    fee_rate: float,
+) -> float: ...
+def compute_top_removed_total_advantage(
+    advantages: np.ndarray,
+    top_ratio: float,
+) -> float: ...
+```
+
+计算流程：
+
+1. 计算 `R_DP`。优先使用 `demo_rewards.sum(axis=1)`；如果 reward 口径不可信或
+   需要手续费敏感性，则用统一 execution helper 根据 `prices + demo_actions`
+   重新计算。
+2. 计算 `R_flat`。默认全 0；如果后续环境有资金利息或持仓成本，应通过 runtime
+   config 接入 execution helper。
+3. 计算 `advantage = R_DP - R_flat`。
+4. 计算 `dp_advantage_vs_flat = mean(advantage)`。
+5. 计算 `dp_win_rate_vs_flat = mean(R_DP > R_flat)`。
+6. 计算 `near_zero_opportunity_ratio = mean(abs(advantage) < fee_threshold)`。
+   `fee_threshold` 第一版可取 `runtime_config.fee_rate`，后续可扩展为单边交易
+   成本或 horizon 平均换手成本。
+7. 用 `fee_rate * 2` 重新执行 demo actions，计算翻倍手续费后的总优势保留比例：
+   `fee_sensitivity = sum(adv_double_fee) / (sum(advantage) + eps)`。
+8. 通过 morphology helper 计算 validation horizon 的形态标签，得到
+   `morphology_coverage = mean(morphology != "neutral")`。
+9. 去掉 advantage 最高的 `top_contribution_ratio` 样本，计算剩余总优势：
+   `dp_return_concentration_after_top5_removed`。
+
+输出强类型 metrics：
+
+```python
+Phase1TeacherQualityMetrics(
+    dp_advantage_vs_flat=...,
+    dp_win_rate_vs_flat=...,
+    near_zero_opportunity_ratio=...,
+    fee_sensitivity=...,
+    morphology_coverage=...,
+    dp_return_concentration_after_top5_removed=...,
+)
+```
+
+缺失数据策略：
+
+- 缺少 `prices` 时，`fee_sensitivity` 和 `morphology_coverage` 不能可靠计算；
+- 对 hard gate 指标，缺失值写入 `nan`，由 rules 层判定为 fail；
+- report 中需要明确标记 failure reason 为 `missing_prices`。
+
+### 13.7 Layer 1 详细计算设计
+
+目标：判断 VQ 内部表示是否稳定、可用、未塌缩，并且 decoder 是否保留了 DP
+示范动作的主要交易语义。
+
+输入依赖：
+
+- `train_snapshot.reconstruction_loss`
+- `val_snapshot.reconstruction_loss`
+- `val_snapshot.demo_actions`
+- `val_snapshot.decoded_actions`
+- `val_snapshot.code_ids`
+- `val_snapshot.z_e`
+- `val_snapshot.z_q`
+- `val_snapshot.distances`
+- `assignment_history`
+- `runtime_config.active_code_min_occupancy`
+- `runtime_config.dead_code_max_occupancy`
+- `runtime_config.churn_window_epochs`
+
+推荐 helper：
+
+```python
+def compute_action_accuracy(demo: np.ndarray, decoded: np.ndarray) -> float: ...
+def compute_code_distribution(code_ids: np.ndarray, k: int) -> np.ndarray: ...
+def compute_normalized_perplexity(p: np.ndarray) -> float: ...
+def compute_assignment_churn(
+    current: CodeAssignmentSnapshot,
+    history: Sequence[CodeAssignmentSnapshot],
+    window: int,
+) -> float: ...
+def compute_code_lifetime_pass_ratio(...) -> float: ...
+def compute_nearest_second_margin(distances: np.ndarray) -> np.ndarray: ...
+def classify_main_direction(actions: np.ndarray) -> np.ndarray: ...
+def compute_first_trade_t(actions: np.ndarray) -> np.ndarray: ...
+```
+
+计算流程：
+
+1. `validation_action_accuracy = mean(decoded_actions == demo_actions)`，按所有
+   horizon 和 timestep 展开统计。
+2. `reconstruction_loss_gap = val_rec_loss / (train_rec_loss + eps)`。
+3. `p_k = bincount(code_ids, minlength=K) / N`。
+4. `active_code_ratio = mean(p_k >= active_code_min_occupancy)`。
+5. `max_code_occupancy = max(p_k)`。
+6. `normalized_code_perplexity = exp(-sum(p_k * log(p_k + eps))) / K`。
+7. `dead_code_ratio = mean(p_k < dead_code_max_occupancy)`。
+8. `assignment_churn_recent_mean`：取最近 `churn_window_epochs` 个历史 snapshot，
+   按稳定 `sample_ids` 对齐，计算同一 sample 的 label 改变比例，再求均值。
+9. `code_lifetime_pass_ratio`：对当前 active code，统计其连续 active epoch 数，
+   计算 lifetime 达到 10 个 epoch 的 active code 比例。
+10. `quantization_distance = mean(norm(z_e - z_q, axis=-1))`。
+11. `nearest_second_margin_median`：对每个样本取最近距离 `d1` 和第二近距离 `d2`，
+    计算 `(d2 - d1) / (d1 + eps)` 的中位数。
+12. `decoder_turnover_error`：分别计算 demo/decoded action 的 position change
+    次数，取 `mean(abs(turnover_dec - turnover_demo))`。
+13. `entry_timing_error_median`：只对 demo 和 decoded 都存在交易的样本统计
+    `abs(first_trade_dec - first_trade_demo)` 的中位数。
+14. `direction_accuracy`：把每条 action sequence 归为 `long/short/flat/mixed`，
+    统计 demo 和 decoded 主方向一致比例。
+
+输出强类型 metrics：
+
+```python
+Phase1VQInternalMetrics(
+    validation_action_accuracy=...,
+    reconstruction_loss_gap=...,
+    active_code_ratio=...,
+    max_code_occupancy=...,
+    normalized_code_perplexity=...,
+    dead_code_ratio=...,
+    assignment_churn_recent_mean=...,
+    code_lifetime_pass_ratio=...,
+    quantization_distance=...,
+    nearest_second_margin_median=...,
+    decoder_turnover_error=...,
+    entry_timing_error_median=...,
+    direction_accuracy=...,
+)
+```
+
+缺失数据策略：
+
+- 训练初期 history 不足时，`assignment_churn_recent_mean` 可标记为 `nan`；
+  rules 层可在前 `churn_window_epochs` 内降级为 warn，正式 checkpoint selection
+  阶段必须有足够 history；
+- 如果 `distances` 未收集，margin 和 quantization distance 视为不可计算；
+- 如果没有任何样本同时存在 demo/decoded entry，`entry_timing_error_median`
+  写入 `nan`，由 rules 层结合 direction/flat ratio 决定 fail 或 warn。
+
+### 13.8 Layer 2 详细计算设计
+
+目标：判断每个 code 是否对应可解释、相对稳定、彼此有区分度的交易行为。
+该层关注行为结构，不直接评估收益；但可以消费 Layer 3 的 per-code profitability，
+用于判断 weak lift code 是否仍有保留价值。
+
+输入依赖：
+
+- `val_snapshot.prices`
+- `val_snapshot.decoded_actions`
+- `val_snapshot.code_ids`
+- `val_snapshot.z_e`
+- `runtime_config`
+- Layer 3 输出的 `per_code_profitability`
+
+推荐 helper：
+
+```python
+def classify_market_morphology(prices: np.ndarray) -> np.ndarray: ...
+def classify_action_motif(
+    actions: np.ndarray,
+    prices: np.ndarray | None,
+) -> np.ndarray: ...
+def compute_distribution_by_code(values: np.ndarray, code_ids: np.ndarray) -> dict: ...
+def compute_lift(
+    code_distribution: Mapping[str, float],
+    global_distribution: Mapping[str, float],
+) -> dict[str, float]: ...
+def compute_intra_code_action_similarity(actions: np.ndarray, code_ids: np.ndarray) -> float: ...
+def compute_inter_intra_separation(actions: np.ndarray, code_ids: np.ndarray) -> float: ...
+def compute_duplicate_code_pair_count(code_prototypes: np.ndarray, threshold: float) -> int: ...
+```
+
+计算流程：
+
+1. 对每个 validation horizon 用价格序列分类 morphology。
+2. 对每条 decoded action sequence 分类 motif。
+3. 对每个 active code 统计 support、occupancy。
+4. 统计 `P(morphology | code)`，得到 dominant morphology 和 ratio。
+5. 统计 `P(motif | code)`，得到 dominant motif 和 ratio。
+6. 统计 `P(morphology, motif | code)`，得到 dominant pair 和 ratio。
+7. 用全体验证集 `P(morphology)` 计算 dominant morphology lift。
+8. 统计 support 低于 `max(100, 0.02 * N_val)` 的 active code 比例，
+   得到 `weak_support_code_ratio`。
+9. 统计 dominant morphology ratio、motif ratio、pair ratio 不达标的 code 比例。
+10. 结合 Layer 3 的 per-code profitability，统计 morphology lift 不足且不盈利的
+    code 比例，得到 `weak_lift_nonprofitable_code_ratio`。
+11. 计算 intra-code action similarity。第一版可用逐 timestep position 一致率：
+    对同一 code 内样本两两比较或抽样比较，求平均相似度。
+12. 计算 inter/intra separation。第一版可将每个 code 的 decoded action 转为
+    position sequence 均值原型，计算 code 间中心距离 / code 内平均距离。
+13. 计算 latent silhouette score。若 active code 少于 2，写入 `nan`。
+14. 计算 duplicate code pair count。任意两个 code 原型相似度超过阈值即计数。
+15. 计算 `profitable_code_coverage`：Layer 3 中 per-code 盈利条件通过的 active
+    code 数量 / active code 数量。
+
+输出强类型 metrics：
+
+```python
+Phase1BehaviorQualityMetrics(
+    weak_support_code_ratio=...,
+    weak_morphology_code_ratio=...,
+    weak_motif_code_ratio=...,
+    weak_pair_code_ratio=...,
+    weak_lift_nonprofitable_code_ratio=...,
+    intra_code_action_similarity=...,
+    inter_intra_separation=...,
+    latent_silhouette_score=...,
+    duplicate_code_pair_count=...,
+    profitable_code_coverage=...,
+)
+```
+
+输出 `code_diagnostics`：
+
+```python
+Phase1CodeDiagnostic(
+    code_id=...,
+    support=...,
+    occupancy=...,
+    dominant_morphology=...,
+    dominant_morphology_ratio=...,
+    morphology_lift=...,
+    dominant_motif=...,
+    dominant_motif_ratio=...,
+    dominant_pair=...,
+    dominant_pair_ratio=...,
+    decoded_mean_advantage=...,
+    decoded_win_rate=...,
+    retention_ratio=...,
+    fee_drag=...,
+    status=...,
+)
+```
+
+缺失数据策略：
+
+- 缺少 `prices` 时，morphology 和 against/with recent move motif 不可靠；
+  morphology 相关 hard gate 应 fail；
+- 如果 Layer 3 尚未完成，`profitable_code_coverage` 和
+  `weak_lift_nonprofitable_code_ratio` 写入 `nan`，正式 selector 不应使用该
+  checkpoint；
+- active code 少于 2 时，inter/intra separation 和 silhouette 不可计算，应 fail。
+
+### 13.9 Layer 3 详细计算设计
+
+目标：判断 oracle assigned-label 经过 frozen decoder 执行后，是否仍保留 DP
+teacher 的盈利能力。该层是 Phase I codebook 是否有交易价值的核心验证。
+
+输入依赖：
+
+- `model`
+- `val_snapshot.prices`
+- `val_snapshot.demo_actions`
+- `val_snapshot.decoded_actions`
+- `val_snapshot.code_ids`
+- `runtime_config.fee_rate`
+- `runtime_config.random_label_trials`
+- `runtime_config.random_seed`
+- `runtime_config.top_contribution_ratio`
+
+推荐 helper：
+
+```python
+def execute_actions(
+    prices: np.ndarray,
+    actions: np.ndarray,
+    fee_rate: float,
+) -> ExecutionResult: ...
+def decode_random_labels(
+    model: ArchetypeVQModel,
+    states: np.ndarray,
+    num_archetypes: int,
+    trials: int,
+    seed: int,
+) -> np.ndarray: ...
+def compute_max_drawdown(returns: np.ndarray) -> float: ...
+def compute_risk_adjusted_return(returns: np.ndarray) -> float: ...
+def compute_top_contribution_ratio(returns: np.ndarray, top_ratio: float) -> float: ...
+def compute_per_code_profitability(...) -> dict[int, dict[str, float]]: ...
+```
+
+统一 execution 口径：
+
+```text
+position_t = {-1, 0, 1}[action_t]
+bar_return_t = price_{t+1} / price_t - 1
+gross_return_t = position_t * bar_return_t
+turnover_t = abs(position_t - position_{t-1})
+fee_t = turnover_t * fee_rate
+net_return_t = gross_return_t - fee_t
+R_i = sum_t net_return_t
+```
+
+计算流程：
+
+1. 用 execution helper 计算 `R_DP`、`R_dec`、`R_flat`。
+2. 用随机 label decode 得到 `random_actions`，执行后得到 `R_rand`。多次 trial
+   时对 random returns 取均值。
+3. `decoded_advantage = R_dec - R_flat`。
+4. `dp_advantage = R_DP - R_flat`。
+5. `mean_decoded_advantage_vs_flat = mean(decoded_advantage)`。
+6. `decoded_win_rate_vs_flat = mean(R_dec > R_flat)`。
+7. `mean_advantage_vs_random_label = mean(R_dec - R_rand)`。
+8. `random_label_relative_lift = mean(R_dec - R_rand) / (abs(mean(R_rand - R_flat)) + eps)`。
+9. `retention_ratio = sum(decoded_advantage) / (sum(dp_advantage) + eps)`。
+10. `downside_control = max_drawdown(cumsum(R_dec)) / (max_drawdown(cumsum(R_DP)) + eps)`。
+11. `risk_adjusted_return = mean(R_dec) / (std(R_dec) + eps)`。
+12. `top_5_contribution`：取 decoded profit 为正的样本，计算收益最高 top 5%
+    对总正收益的贡献。
+13. `trimmed_decoded_advantage`：去掉 decoded advantage 最高和最低各 5% 后求均值。
+14. `fee_drag = total_fee / (gross_profit + eps)`。
+15. `turnover_return_correlation = corr(turnover, R_dec)`。
+16. 按 active code 统计 per-code mean advantage、win rate、retention、fee drag。
+17. 计算 `bad_code_ratio`：per-code mean advantage 小于 0 的 active code 比例。
+18. 结合 Layer 2 的 dominant pair 或本层临时 pair 统计，计算
+    `dominant_pair_positive_ratio`。
+
+输出强类型 metrics：
+
+```python
+Phase1OracleProfitabilityMetrics(
+    mean_decoded_advantage_vs_flat=...,
+    decoded_win_rate_vs_flat=...,
+    mean_advantage_vs_random_label=...,
+    random_label_relative_lift=...,
+    retention_ratio=...,
+    downside_control=...,
+    risk_adjusted_return=...,
+    top_5_contribution=...,
+    trimmed_decoded_advantage=...,
+    fee_drag=...,
+    turnover_return_correlation=...,
+    bad_code_ratio=...,
+    dominant_pair_positive_ratio=...,
+)
+```
+
+输出 `extra_payload`：
+
+```python
+{
+    "per_code_profitability": tuple[Phase1PerCodeProfitability, ...],
+    "decoded_returns": ...,
+    "dp_returns": ...,
+    "flat_returns": ...,
+    "random_label_returns": ...,
+}
+```
+
+缺失数据策略：
+
+- 缺少 `prices` 时，本层全部 hard gate 指标不可计算，应 fail；
+- `sum(dp_advantage) <= 0` 时 retention ratio 不可靠，应同时反映 Layer 0 失败；
+- `gross_profit <= 0` 时 fee drag 写入 `inf`；
+- random baseline 必须固定 seed，并把 seed 写入 report payload。
+
+### 13.10 Layer 4 详细计算设计
+
+目标：判断 Phase I assigned label 是否能从 Phase II selector 可见状态中学习。
+第三层证明 oracle label 有交易价值；第四层证明这些 label 对未来 selector
+不是不可预测的未来信息标签。
+
+输入依赖：
+
+- `model`
+- `train_snapshot.states`
+- `train_snapshot.code_ids`
+- `val_snapshot.states`
+- `val_snapshot.code_ids`
+- `val_snapshot.prices`
+- `runtime_config.probe_epochs`
+- `runtime_config.probe_learning_rate`
+- `runtime_config.probe_batch_size`
+- `runtime_config.random_seed`
+
+推荐 helper：
+
+```python
+def build_probe_features(states: np.ndarray) -> np.ndarray: ...
+def train_probe_classifier(
+    train_x: np.ndarray,
+    train_y: np.ndarray,
+    runtime_config: Phase1ValidationRuntimeConfig,
+) -> ProbeModel: ...
+def evaluate_probe(probe: ProbeModel, val_x: np.ndarray, val_y: np.ndarray) -> ProbeMetrics: ...
+def compute_balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray, active_codes: np.ndarray) -> float: ...
+def compute_mutual_information_lift(features: np.ndarray, labels: np.ndarray, seed: int) -> float: ...
+def decode_probe_top1_actions(...) -> np.ndarray: ...
+```
+
+Probe feature 设计：
+
+- 第一版使用 horizon 起点可见状态：`states[:, 0, :]`；
+- 若后续 selector 可见历史窗口，应改为 `states[:, :visible_window, :]` 并做 flatten
+  或小型 temporal encoder；
+- 严禁使用完整未来 horizon 的价格路径、demo action 或 reward 作为 probe 输入。
+
+计算流程：
+
+1. 构造 `train_x = build_probe_features(train_snapshot.states)`。
+2. 构造 `val_x = build_probe_features(val_snapshot.states)`。
+3. `train_y = train_snapshot.code_ids`，`val_y = val_snapshot.code_ids`。
+4. 训练轻量 probe。第一版建议 shallow MLP；若需要更快基线，可实现 multinomial
+   logistic regression 风格的单层线性分类器。
+5. 在 validation 上输出 `probe_probs`。
+6. `probe_top1_accuracy = mean(argmax(probe_probs) == val_y)`。
+7. `probe_top3_accuracy = mean(val_y in top3(probe_probs))`。
+8. `probe_balanced_accuracy`：对每个 active code 分别计算 recall 后取均值。
+9. `label_entropy_given_morphology`：用 Layer 2 的 morphology label 或本层重新
+   计算 morphology，统计 `H(label | morphology)`。
+10. `mutual_information_lift`：计算 label 与可见 feature/morphology 的 MI，再与
+    随机置换 label 后的 MI 均值比较。
+11. 用 probe top-1 label 通过 decoder 得到 probe actions，并用 Layer 3 同一
+    execution helper 计算 probe decoded return。
+12. `probe_return_retention = sum(R_probe - R_flat) / (sum(R_oracle - R_flat) + eps)`。
+
+输出强类型 metrics：
+
+```python
+Phase1LabelPredictabilityMetrics(
+    probe_top1_accuracy=...,
+    probe_top3_accuracy=...,
+    probe_balanced_accuracy=...,
+    label_entropy_given_morphology=...,
+    mutual_information_lift=...,
+    probe_return_retention=...,
+)
+```
+
+输出 `extra_payload`：
+
+```python
+{
+    "probe_train_accuracy": float,
+    "probe_validation_accuracy": float,
+    "probe_predictability_gap": float,
+    "probe_confusion_matrix": ...,
+    "probe_seed": runtime_config.random_seed,
+}
+```
+
+缺失数据策略：
+
+- 缺少 validation prices 时，`probe_return_retention` 不可计算，应 fail；
+- active code 数量小于 2 时，probe accuracy 没有意义，应 fail；
+- probe 训练必须 deterministic：固定 seed，并避免 dataloader shuffle 的非确定性；
+- 若某些 active code 在 train 中没有样本但在 val 中出现，balanced accuracy 应按
+  0 recall 计入。
 
 ## 14. Rule 层设计
 
@@ -955,7 +1593,7 @@ src/phase1/metrics/phase1_validation_rules.py
 
 设计原则：
 
-- 输入 raw scalar metrics；
+- 输入强类型 layer metrics；
 - 输出 `Phase1LayerResult`；
 - 不访问 model、dataloader、文件系统；
 - 不重复计算 evaluator 已经计算过的数值；
@@ -965,21 +1603,33 @@ src/phase1/metrics/phase1_validation_rules.py
 
 ```python
 def evaluate_teacher_quality_rules(
-    metrics: Mapping[str, float],
+    metrics: Phase1TeacherQualityMetrics,
     thresholds: Phase1ValidationThresholds,
 ) -> Phase1LayerResult:
     ...
 
-def evaluate_vq_internal_rules(...) -> Phase1LayerResult:
+def evaluate_vq_internal_rules(
+    metrics: Phase1VQInternalMetrics,
+    thresholds: Phase1ValidationThresholds,
+) -> Phase1LayerResult:
     ...
 
-def evaluate_behavior_quality_rules(...) -> Phase1LayerResult:
+def evaluate_behavior_quality_rules(
+    metrics: Phase1BehaviorQualityMetrics,
+    thresholds: Phase1ValidationThresholds,
+) -> Phase1LayerResult:
     ...
 
-def evaluate_oracle_profitability_rules(...) -> Phase1LayerResult:
+def evaluate_oracle_profitability_rules(
+    metrics: Phase1OracleProfitabilityMetrics,
+    thresholds: Phase1ValidationThresholds,
+) -> Phase1LayerResult:
     ...
 
-def evaluate_label_predictability_rules(...) -> Phase1LayerResult:
+def evaluate_label_predictability_rules(
+    metrics: Phase1LabelPredictabilityMetrics,
+    thresholds: Phase1ValidationThresholds,
+) -> Phase1LayerResult:
     ...
 
 def aggregate_validation_result(
@@ -988,11 +1638,11 @@ def aggregate_validation_result(
     stage: str,
     epoch: int,
     layers: Sequence[Phase1LayerResult],
-    scalar_metrics: Mapping[str, float],
+    metrics: Phase1ValidationMetrics,
     code_diagnostics: Sequence[Phase1CodeDiagnostic],
     drift_diagnostics: Mapping[str, Phase1MetricResult],
     score: float | None,
-    tie_breaker_metrics: Mapping[str, float],
+    tie_breaker_metrics: Phase1TieBreakerMetrics,
 ) -> Phase1ValidationResult:
     ...
 ```
@@ -1012,7 +1662,7 @@ src/phase1/metrics/phase1_validation_score.py
 
 ```python
 def compute_phase1_validation_score(
-    metrics: Mapping[str, float],
+    metrics: Phase1ValidationMetrics,
     weights: Phase1ValidationScoreWeights,
 ) -> float:
     ...
@@ -1077,14 +1727,14 @@ tie_score_tolerance = 0.03
 Tie-breaker 字段：
 
 ```python
-tie_breaker_metrics = {
-    "risk_adjusted_return": ...,
-    "probe_top3_accuracy": ...,
-    "retention_ratio": ...,
-    "active_code_ratio": ...,
-    "max_code_occupancy": ...,
-    "reconstruction_loss": ...,
-}
+tie_breaker_metrics = Phase1TieBreakerMetrics(
+    risk_adjusted_return=...,
+    probe_top3_accuracy=...,
+    retention_ratio=...,
+    active_code_ratio=...,
+    max_code_occupancy=...,
+    reconstruction_loss=...,
+)
 ```
 
 ## 16. Report 设计
@@ -1134,9 +1784,14 @@ class Phase1CodebookReport:
 在 `build_components()` 中新增：
 
 ```python
+self.validation_thresholds = Phase1ValidationThresholds()
+self.validation_score_weights = Phase1ValidationScoreWeights()
+self.validation_runtime_config = Phase1ValidationRuntimeConfig()
 self.codebook_evaluator = Phase1CodebookEvaluator(
     model=model,
-    config=Phase1ValidationConfig(),
+    thresholds=self.validation_thresholds,
+    score_weights=self.validation_score_weights,
+    runtime_config=self.validation_runtime_config,
     device=self.device,
 )
 ```
