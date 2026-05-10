@@ -48,6 +48,10 @@ def _dataclass_from_mapping(config_type: type[TDataclass], payload: Mapping[str,
 def _array_to_payload(value: np.ndarray | None) -> list[Any] | None:
     """把 numpy array 转成可 JSON 序列化的 list。
 
+    输入形状:
+        保留原数组形状，例如 ``[N]``、``[N, H]``、``[N, H, F]``、
+        ``[N, H, A]`` 或 ``[N, K]``，转换后用嵌套 list 表达同样维度。
+
     使用场景:
         ``Phase1EvaluationSnapshot`` 和 ``CodeAssignmentSnapshot`` 在调试、测试或
         受控落盘时需要序列化中间数组。大规模训练的 checkpoint 通常不应保存完整
@@ -60,7 +64,15 @@ def _array_to_payload(value: np.ndarray | None) -> list[Any] | None:
 
 
 def _array_from_payload(value: Any) -> np.ndarray | None:
-    """把 list/array payload 恢复为 numpy array。"""
+    """把 list/array payload 恢复为 numpy array。
+
+    输入形状:
+        输入通常是 ``_array_to_payload()`` 生成的嵌套 list，维度对应原始数组，
+        例如 ``[N]``、``[N, H]``、``[N, H, F]``、``[N, H, A]`` 或 ``[N, K]``。
+
+    输出:
+        与输入嵌套结构同形状的 ``np.ndarray``；输入为 ``None`` 时返回 ``None``。
+    """
 
     if value is None:
         return None
@@ -98,6 +110,14 @@ class Phase1EvaluationSnapshot:
         layer0 到 layer4 的 metric calculator 读取该对象计算 teacher quality、
         VQ internal、behavior quality、oracle profitability 和 label predictability。
         该对象通常只在内存中流转，不建议完整写入常规 checkpoint。
+
+    数组形状约定:
+        ``N`` 表示 split 中 horizon 样本数；
+        ``H`` 表示每条 horizon 的时间步长度；
+        ``F`` 表示单步状态特征维度；
+        ``A`` 表示 action 类别数；
+        ``K`` 表示 codebook size；
+        ``D`` 表示 latent/code embedding 维度。
     """
 
     # 数据 split 名称，例如 "train"、"val" 或 "test"。用于区分指标来源。
@@ -106,37 +126,37 @@ class Phase1EvaluationSnapshot:
     # 当前 checkpoint 或 epoch 编号。用于关联训练过程和 assignment history。
     epoch: int
 
-    # horizon 样本稳定 ID。用于跨 epoch 对齐同一样本并计算 assignment churn。
+    # horizon 样本稳定 ID，shape=[N]。用于跨 epoch 对齐同一样本并计算 assignment churn。
     sample_ids: np.ndarray
 
-    # horizon 状态特征数组。用于 label predictability probe 和部分 morphology 诊断。
+    # horizon 状态特征数组，shape=[N, H, F]。用于 label predictability probe 和部分 morphology 诊断。
     states: np.ndarray
 
-    # horizon 价格序列。用于收益、fee drag、morphology 和 oracle profitability 计算；缺失时可为 None。
+    # horizon 价格序列，shape=[N, H] 或 [N, H, 1]。用于收益、fee drag、morphology 和 oracle profitability 计算；缺失时可为 None。
     prices: np.ndarray | None
 
-    # DP teacher 动作序列。用于重构准确率、direction accuracy、teacher return 计算。
+    # DP teacher 动作序列，shape=[N, H]。用于重构准确率、direction accuracy、teacher return 计算。
     demo_actions: np.ndarray
 
-    # DP teacher reward 序列。用于 teacher quality 和 retention ratio 计算。
+    # DP teacher reward 序列，shape=[N, H] 或 [N, H, 1]。用于 teacher quality 和 retention ratio 计算。
     demo_rewards: np.ndarray
 
-    # decoder 在 assigned code 条件下输出的离散动作序列，通常为 decoded_logits 的 argmax。
+    # decoder 在 assigned code 条件下输出的离散动作序列，shape=[N, H]，通常为 decoded_logits 的 argmax。
     decoded_actions: np.ndarray
 
-    # decoder 原始 logits。用于 action accuracy、top-k 诊断和后续更细粒度 report。
+    # decoder 原始 logits，shape=[N, H, A]。用于 action accuracy、top-k 诊断和后续更细粒度 report。
     decoded_logits: np.ndarray
 
-    # encoder/quantizer 分配的 code id。用于 code occupancy、per-code metrics 和 label probe。
+    # encoder/quantizer 分配的 code id，shape=[N]。用于 code occupancy、per-code metrics 和 label probe。
     code_ids: np.ndarray
 
-    # encoder 连续 latent。用于 latent silhouette、quantization distance 和聚类诊断。
+    # encoder 连续 latent，shape=[N, D]。用于 latent silhouette、quantization distance 和聚类诊断。
     z_e: np.ndarray
 
-    # quantized latent。用于量化误差和 decoder 条件输入诊断。
+    # quantized latent，shape=[N, D]。用于量化误差和 decoder 条件输入诊断。
     z_q: np.ndarray
 
-    # 每个样本到 codebook 各 code 的距离。用于 nearest/second-nearest margin 和分配置信度诊断。
+    # 每个样本到 codebook 各 code 的距离，shape=[N, K]。用于 nearest/second-nearest margin 和分配置信度诊断。
     distances: np.ndarray
 
     # 当前 split 的平均 reconstruction loss。用于泛化 gap 和 tie-breaker。
@@ -147,6 +167,11 @@ class Phase1EvaluationSnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         """序列化 snapshot。
+
+        数组形状:
+            所有 ``np.ndarray`` 字段会按原 shape 转为嵌套 list，例如
+            ``sample_ids=[N]``、``states=[N,H,F]``、``decoded_logits=[N,H,A]``、
+            ``distances=[N,K]``。
 
         使用场景:
             单元测试、debug dump 或小样本诊断。生产 checkpoint 通常只保存聚合
@@ -173,7 +198,14 @@ class Phase1EvaluationSnapshot:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1EvaluationSnapshot":
-        """从 dict 恢复 snapshot。"""
+        """从 dict 恢复 snapshot。
+
+        数组形状:
+            期望 payload 中数组字段保持 ``to_dict()`` 写出的嵌套 list 形状：
+            ``sample_ids=[N]``、``states=[N,H,F]``、``prices=[N,H]`` 或
+            ``[N,H,1]``、``demo_actions=[N,H]``、``decoded_logits=[N,H,A]``、
+            ``code_ids=[N]``、``z_e/z_q=[N,D]``、``distances=[N,K]``。
+        """
 
         return cls(
             split=str(payload["split"]),
@@ -204,6 +236,9 @@ class CodeAssignmentSnapshot:
     使用场景:
         计算相邻 epoch assignment churn、active code lifetime，并诊断 codebook
         是否仍在重排。
+
+    数组形状约定:
+        ``N`` 表示该 assignment snapshot 覆盖的 horizon 样本数。
     """
 
     # 当前 assignment 所属 epoch。
@@ -212,17 +247,21 @@ class CodeAssignmentSnapshot:
     # 当前 assignment 所属 split，通常使用 validation split 计算 churn。
     split: str
 
-    # 与 code_ids 一一对应的稳定样本 ID。用于跨 epoch 对齐同一样本。
+    # 与 code_ids 一一对应的稳定样本 ID，shape=[N]。用于跨 epoch 对齐同一样本。
     sample_ids: np.ndarray
 
-    # 每个样本在当前 epoch 被分配到的 code id。
+    # 每个样本在当前 epoch 被分配到的 code id，shape=[N]。
     code_ids: np.ndarray
 
     # 当前 epoch 满足 active 标准的 code id 集合。
     active_codes: tuple[int, ...]
 
     def to_dict(self) -> dict[str, Any]:
-        """序列化 assignment 快照，供 churn/lifetime 诊断持久化。"""
+        """序列化 assignment 快照，供 churn/lifetime 诊断持久化。
+
+        数组形状:
+            ``sample_ids`` 和 ``code_ids`` 均按 shape=[N] 转为一维 list。
+        """
 
         return {
             "epoch": self.epoch,
@@ -234,7 +273,11 @@ class CodeAssignmentSnapshot:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "CodeAssignmentSnapshot":
-        """从 dict 恢复 assignment 快照。"""
+        """从 dict 恢复 assignment 快照。
+
+        数组形状:
+            期望 ``sample_ids`` 和 ``code_ids`` 为 shape=[N] 的一维 list/array。
+        """
 
         return cls(
             epoch=int(payload["epoch"]),
