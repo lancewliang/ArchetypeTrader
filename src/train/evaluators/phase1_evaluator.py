@@ -3,6 +3,10 @@ from __future__ import annotations
 import torch
 from torch.utils.data import DataLoader
 
+from ...model.tensor_data_types import (
+    TrajectoryTensorBatch,
+    move_trajectory_batch_to_device,
+)
 from ...model.vq_archetype import ArchetypeVQModel
 from ..metrics import Phase1Metrics
 
@@ -27,7 +31,7 @@ class Phase1Evaluator:
     @torch.no_grad()
     def evaluate(
         self,
-        dataloader: DataLoader[tuple[torch.Tensor, ...]],
+        dataloader: DataLoader[TrajectoryTensorBatch],
         *,
         use_vq: bool,
         stage: str | None = None,
@@ -37,7 +41,7 @@ class Phase1Evaluator:
         self.model.eval()
         totals = Phase1Metrics(stage=stage, split=split, epoch=epoch)
         for batch in dataloader:
-            batch = self._move_batch(batch)
+            batch = move_trajectory_batch_to_device(batch, self.device)
             outputs = (
                 self.model(batch)
                 if use_vq
@@ -45,14 +49,3 @@ class Phase1Evaluator:
             )
             totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs)
         return totals.averaged()
-
-    def _move_batch(
-        self,
-        batch: tuple[torch.Tensor, ...],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        states, actions, rewards = batch
-        return (
-            states.to(self.device),
-            actions.to(self.device),
-            rewards.to(self.device),
-        )

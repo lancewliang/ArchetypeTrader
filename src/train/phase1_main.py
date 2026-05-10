@@ -3,9 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
-import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 
 from ..data.data_load import DataLoad
 from ..data.horizon_builder import HorizonBuilder
@@ -13,6 +12,11 @@ from ..model.data_types import (
     ArtifactPaths,
     HorizonDataset,
     TrajectoryDataset,
+)
+from ..model.tensor_data_types import (
+    TrajectoryTensorBatch,
+    build_trajectory_tensor_dataset,
+    move_trajectory_batch_to_device,
 )
 from ..model.vq_archetype import ArchetypeVQModel
 from ..store.artifact_store import DataFileStore
@@ -118,7 +122,7 @@ class Phase1MainFlow:
         self.dp_planner: SingleTrade_DP_Planner | None = None
         self.model: ArchetypeVQModel | None = None
         self.optimizer: torch.optim.Optimizer | None = None
-        self.dataloaders: dict[str, DataLoader[tuple[torch.Tensor, ...]]] = {}
+        self.dataloaders: dict[str, DataLoader[TrajectoryTensorBatch]] = {}
         self.data_store: DataFileStore | None = None
         self.best_metric: float | None = None
         self.evaluator: Phase1Evaluator | None = None
@@ -249,7 +253,7 @@ class Phase1MainFlow:
         if not train_dataset:
             return
         for split_name, trajectory_dataset in self.trajectory_datasets.items():
-            tensor_dataset = self._build_tensor_dataset(trajectory_dataset)
+            tensor_dataset = build_trajectory_tensor_dataset(trajectory_dataset)
             self.dataloaders[split_name] = DataLoader(
                 tensor_dataset,
                 batch_size=self.config.batch_size,
@@ -400,27 +404,9 @@ class Phase1MainFlow:
                     }
                 )
 
-    def _build_tensor_dataset(
-        self,
-        trajectory_dataset: TrajectoryDataset,
-    ) -> TensorDataset:
-        states = torch.as_tensor(
-            np.stack([trajectory[0] for trajectory in trajectory_dataset]),
-            dtype=torch.float32,
-        )
-        actions = torch.as_tensor(
-            np.stack([trajectory[1] for trajectory in trajectory_dataset]),
-            dtype=torch.long,
-        )
-        rewards = torch.as_tensor(
-            np.stack([trajectory[2] for trajectory in trajectory_dataset]),
-            dtype=torch.float32,
-        )
-        return TensorDataset(states, actions, rewards)
-
     def _run_epoch(
         self,
-        dataloader: DataLoader[tuple[torch.Tensor, ...]],
+        dataloader: DataLoader[TrajectoryTensorBatch],
         *,
         use_vq: bool,
         stage: str | None = None,
@@ -433,7 +419,7 @@ class Phase1MainFlow:
         model.train()
         totals = Phase1Metrics(stage=stage, split=split, epoch=epoch)
         for batch in dataloader:
-            batch = self._move_batch(batch)
+            batch = move_trajectory_batch_to_device(batch, self.device)
             optimizer.zero_grad(set_to_none=True)
             outputs = (
                 model(batch)
@@ -444,17 +430,6 @@ class Phase1MainFlow:
             optimizer.step()
             totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs)
         return totals.averaged()
-
-    def _move_batch(
-        self,
-        batch: tuple[torch.Tensor, ...],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        states, actions, rewards = batch
-        return (
-            states.to(self.device),
-            actions.to(self.device),
-            rewards.to(self.device),
-        )
 
     def select_best_checkpoint(self) -> None:
         evaluator = cast(Any, self.evaluator)

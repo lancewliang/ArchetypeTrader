@@ -14,6 +14,8 @@ from .tensor_data_types import (
     LatentTensor,
     TrajectoryTensorBatch,
     TrajectoryTensorDataset,
+    build_trajectory_tensor_dataset,
+    move_trajectory_batch_to_device,
 )
 from .vq_archetype import (
     ArchetypeActionDecoder,
@@ -50,4 +52,6 @@ __all__ = [
     "TrajectoryTensorDataset",
     "VQArchetypeModel",
     "VectorQuantizer",
+    "build_trajectory_tensor_dataset",
+    "move_trajectory_batch_to_device",
 ]

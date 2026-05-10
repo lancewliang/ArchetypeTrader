@@ -1,8 +1,8 @@
 """模型训练阶段共用 Tensor 类型定义。
 
-本文件是 ``data_types.py`` 的 PyTorch Tensor 版本，只描述进入模型后的
-数据结构、形状和 dtype 约定，不负责 numpy 到 Tensor 的转换，也不负责
-Dataset、DataLoader 或模型训练逻辑。
+本文件是 ``data_types.py`` 的 PyTorch Tensor 版本，描述进入模型后的
+数据结构、形状和 dtype 约定，并提供 numpy trajectory 到 PyTorch
+``TensorDataset`` 的标准转换和 batch device 搬运工具。
 
 核心数据流:
     ``HorizonDataset`` / ``TrajectoryDataset`` 的 numpy 产物
@@ -21,7 +21,11 @@ from __future__ import annotations
 
 from typing import TypeAlias
 
+import numpy as np
 import torch
+from torch.utils.data import TensorDataset
+
+from .data_types import TrajectoryDataset
 
 
 HorizonTensorDataset: TypeAlias = tuple[torch.Tensor, torch.Tensor]
@@ -119,6 +123,41 @@ dtype:
     ``states`` 和选中的 archetype 重构 ``actions``。
 """
 
+
+def build_trajectory_tensor_dataset(
+    trajectory_dataset: TrajectoryDataset,
+) -> TensorDataset:
+    """将 numpy ``TrajectoryDataset`` 转为 Phase I 训练用 ``TensorDataset``。"""
+
+    states = torch.as_tensor(
+        np.stack([trajectory[0] for trajectory in trajectory_dataset]),
+        dtype=torch.float32,
+    )
+    actions = torch.as_tensor(
+        np.stack([trajectory[1] for trajectory in trajectory_dataset]),
+        dtype=torch.long,
+    )
+    rewards = torch.as_tensor(
+        np.stack([trajectory[2] for trajectory in trajectory_dataset]),
+        dtype=torch.float32,
+    )
+    return TensorDataset(states, actions, rewards)
+
+
+def move_trajectory_batch_to_device(
+    batch: tuple[torch.Tensor, ...],
+    device: torch.device | str,
+) -> TrajectoryTensorBatch:
+    """将 Phase I trajectory batch 搬到目标 device。"""
+
+    states, actions, rewards = batch
+    return (
+        states.to(device),
+        actions.to(device),
+        rewards.to(device),
+    )
+
+
 ArchetypeLabelTensor: TypeAlias = torch.Tensor
 """VQ encoder 分配的 archetype label。
 
@@ -172,4 +211,6 @@ __all__ = [
     "LatentTensor",
     "TrajectoryTensorBatch",
     "TrajectoryTensorDataset",
+    "build_trajectory_tensor_dataset",
+    "move_trajectory_batch_to_device",
 ]
