@@ -76,11 +76,94 @@
 | 指标 | 定义 | 作用 | 通过阈值 |
 |---|---|---|---|
 | per-code minimum support | 每个 active code 的样本数 `n_k` | 保证每个原型的统计结论有足够样本支撑；样本过少的 code 可能只是偶然噪声或训练残留。 | `n_k >= max(100, 0.02 * N_val)` |
+| dominant market morphology ratio | 每个 code 内占比最高的市场形态比例 | 检查一个 code 是否集中出现在相似市场结构中；如果比例过低，selector 很难仅凭市场状态学习何时选择该 code。 | `>= 35%` |
 | dominant motif ratio | 每个 code 内占比最高的行为 motif 比例 | 检查一个 code 是否对应清晰交易意图；如果最高 motif 占比太低，该 code 内部行为混乱，selector 难以学习其适用场景。 | `>= 40%` |
+| dominant morphology-motif pair ratio | 每个 code 内占比最高的 `(market morphology, trading motif)` 组合比例 | 检查市场形态和交易行为是否形成稳定对应关系；如果 pair 不集中，说明该 code 的盈利可能缺少可预测结构。 | `>= 30%` |
+| morphology distribution lift | 某 code 的 dominant morphology 占比 / 全体验证集同类 morphology 占比 | 检查该 code 是否真的偏向某类市场，而不是和全体验证集分布几乎一样；lift 越高，说明 label 对市场结构越有辨识度。 | `>= 1.25` |
 | intra-code action similarity | 同一 code 内 decoded action sequence 的平均相似度 | 衡量同一 archetype 内行为一致性；过低表示一个 label 聚合了互相矛盾的动作模式。 | `>= 65%` |
 | inter/intra separation | code 间动作中心距离 / code 内动作距离 | 衡量不同 archetype 之间是否有足够区分度；如果该比值低，说明 codebook 只是形式上离散，行为上没有分开。 | `>= 1.30` |
 | duplicate code similarity | 任意两个 code 原型 decoded action 的平均相似度 | 检查是否多个 code 学成同一种策略；重复 code 会浪费容量，并让第二阶段在等价 label 间无效探索。 | `<= 85%` |
 | profitable-code coverage | 满足第三层 per-code 盈利条件的 active code 数量 / active code 数量 | 检查可解释原型中有多少同时具备盈利潜力；如果覆盖率太低，codebook 虽有行为模式但可交易价值不足。 | `>= 60%` |
+
+### Horizon 市场形态分类
+
+需要对每个 validation horizon 做自动化市场形态分类。这里的形态分类不是人工标注，也不参与训练；它只用于 validation 诊断，回答两个问题：
+
+1. 每个 code 是否集中对应某类市场结构；
+2. 每个 code 的交易行为是否和市场结构形成稳定对应关系。
+
+市场形态描述“horizon 长什么样”，行为 motif 描述“原型怎么交易”。二者应分别统计，再联合统计。
+
+#### 基础变量
+
+对每个 horizon 的价格序列 `p_0, ..., p_{h-1}`，先计算：
+
+- `ret_total = p_{h-1} / p_0 - 1`：horizon 总收益率。
+- `ret_first = p_{mid} / p_0 - 1`：前半段收益率，其中 `mid = floor(h / 2)`。
+- `ret_second = p_{h-1} / p_{mid} - 1`：后半段收益率。
+- `realized_vol = std(log(p_t / p_{t-1})) * sqrt(h)`：horizon 内实现波动。
+- `max_drawdown`：horizon 内从局部高点到后续低点的最大跌幅。
+- `max_runup`：horizon 内从局部低点到后续高点的最大涨幅。
+- `range_ratio = (max(p) - min(p)) / p_0`：horizon 内振幅。
+- `trend_efficiency = abs(p_{h-1} - p_0) / sum_t abs(p_t - p_{t-1})`：趋势效率，越高表示走势越单边。
+
+阈值建议用 validation set 的分位数自适应确定：
+
+- `vol_high`：`realized_vol` 的 70% 分位数。
+- `vol_low`：`realized_vol` 的 30% 分位数。
+- `range_high`：`range_ratio` 的 70% 分位数。
+- `trend_ret_threshold`：`abs(ret_total)` 的 60% 分位数，且至少大于单边交易成本的 `3` 倍。
+- `reversal_leg_threshold`：`abs(ret_first)` 和 `abs(ret_second)` 合并后的 60% 分位数，且至少大于单边交易成本的 `2` 倍。
+
+使用分位数阈值的原因是不同资产和不同时间段波动水平不同，固定收益率阈值容易使某些资产几乎全部落入同一类。
+
+#### 市场形态类别
+
+| 类别 | 判定规则 | 含义 |
+|---|---|---|
+| `uptrend` | `ret_total > trend_ret_threshold` 且 `trend_efficiency >= 0.35` | 单边上涨或上涨占主导，适合检查 long/hold 类原型。 |
+| `downtrend` | `ret_total < -trend_ret_threshold` 且 `trend_efficiency >= 0.35` | 单边下跌或下跌占主导，适合检查 short/hold 类原型。 |
+| `reversal-up` | `ret_first < -reversal_leg_threshold` 且 `ret_second > reversal_leg_threshold` | 先跌后涨，适合检查 short-to-long 或 against-recent-move 类原型。 |
+| `reversal-down` | `ret_first > reversal_leg_threshold` 且 `ret_second < -reversal_leg_threshold` | 先涨后跌，适合检查 long-to-short 或 against-recent-move 类原型。 |
+| `range-high-vol` | `abs(ret_total) <= trend_ret_threshold` 且 `range_ratio >= range_high` | 首尾变化不大但内部振幅较高，可能适合反转或短交易原型。 |
+| `range-low-vol` | `abs(ret_total) <= trend_ret_threshold` 且 `realized_vol <= vol_low` | 低波动横盘，可能适合 mostly-flat 或低交易频率原型。 |
+| `volatile-mixed` | `realized_vol >= vol_high` 且不满足以上类别 | 高波动但方向不清晰，需警惕 code 行为混杂。 |
+| `neutral` | 不满足以上类别 | 没有明显结构，通常不应成为大多数盈利 code 的主要来源。 |
+
+#### 市场形态归类优先级
+
+为保证每个 horizon 只有一个主形态，建议按以下顺序归类：
+
+1. 先判断 `reversal-up` 和 `reversal-down`。
+2. 再判断 `uptrend` 和 `downtrend`。
+3. 再判断 `range-high-vol` 和 `range-low-vol`。
+4. 再判断 `volatile-mixed`。
+5. 最后归为 `neutral`。
+
+反转类优先于趋势类，是因为很多强反转 horizon 的首尾收益可能也较大；如果不优先识别反转，容易把反转机会误归为单边趋势。
+
+#### 按 code 的检查方法
+
+对每个 active code `k`，统计：
+
+- `P(morphology | code=k)`：该 code 内各市场形态占比。
+- `P(motif | code=k)`：该 code 内各交易 motif 占比。
+- `P(morphology, motif | code=k)`：该 code 内市场形态和交易行为组合占比。
+- `lift(morphology, k) = P(morphology | code=k) / P(morphology)`：该 code 对某类市场形态的富集倍数。
+- `return_by_pair(k, morphology, motif)`：该 code 在不同 pair 下的 decoded return、win rate、retention ratio。
+
+验证时应输出一张 code 级别诊断表：
+
+| code | support | dominant morphology | morph ratio | morph lift | dominant motif | motif ratio | dominant pair | pair ratio | decoded return | win rate |
+|---|---:|---|---:|---:|---|---:|---|---:|---:|---:|
+
+一个健康 code 的典型结果应类似：
+
+- `code 3`: dominant morphology 为 `downtrend`，dominant motif 为 `short + early + hold`，dominant pair 占比高，decoded return 为正。
+- `code 5`: dominant morphology 为 `reversal-up`，dominant motif 为 `long + middle + delayed-hold + against-recent-move`，retention ratio 较高。
+- `code 1`: dominant morphology 为 `range-low-vol`，dominant motif 为 `flat + none + mostly-flat`，收益不一定高，但回撤和交易成本较低。
+
+如果某个 code 的 `P(morphology | code=k)` 与全体验证集 `P(morphology)` 很接近，且 `morphology distribution lift < 1.25`，说明这个 code 没有明显市场结构偏好。这样的 code 不一定必须淘汰，但如果同时 motif ratio 低或盈利性差，应视为弱原型。
 
 ### 行为 motif 定义
 
@@ -184,7 +267,10 @@
 满足以下任一条件，直接淘汰该 checkpoint：
 
 - 超过 `20%` 的 active code 样本数低于 `max(100, 0.02 * N_val)`；
+- 超过 `40%` 的 active code 的 dominant market morphology ratio `< 35%`；
 - 超过 `40%` 的 active code 无法形成 dominant motif，即最高 motif 占比 `< 40%`；
+- 超过 `40%` 的 active code 的 dominant morphology-motif pair ratio `< 30%`；
+- 超过 `40%` 的 active code 的 morphology distribution lift `< 1.25`，且这些 code 同时不满足第三层 per-code 盈利条件；
 - intra-code action similarity `< 65%`；
 - inter/intra separation `< 1.30`；
 - 存在多个高度重复 code，且 duplicate code similarity `> 85%` 的 code pair 数量超过 `K`。
@@ -309,7 +395,7 @@ Score =
 | 层级 | 关键阈值 |
 |---|---|
 | 第一层 VQ 内部质量 | action accuracy `>= 85%`；active code ratio `>= 80%`；max occupancy `<= 40%`；normalized perplexity `[0.50, 0.90]`；val/train loss gap `<= 1.25` |
-| 第二层 原型行为质量 | per-code support `>= max(100, 2% N_val)`；dominant motif `>= 40%`；intra-code similarity `>= 65%`；inter/intra separation `>= 1.30`；duplicate similarity `<= 85%` |
+| 第二层 原型行为质量 | per-code support `>= max(100, 2% N_val)`；dominant market morphology `>= 35%`；dominant motif `>= 40%`；dominant morphology-motif pair `>= 30%`；morphology lift `>= 1.25`；intra-code similarity `>= 65%`；inter/intra separation `>= 1.30`；duplicate similarity `<= 85%` |
 | 第三层 盈利性验证 | mean advantage vs flat `> 0`；win rate vs flat `>= 55%`；advantage vs random label `>= 20%`；retention ratio `>= 50%`；bad-code ratio `<= 30%` |
 
 ## 适用边界
