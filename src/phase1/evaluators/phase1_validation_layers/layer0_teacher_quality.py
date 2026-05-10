@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.utils import ActionExecutionCalculator, nan_value as _nan
+
 from ...metrics import (
     Phase1EvaluationSnapshot,
     Phase1LayerComputation,
@@ -30,22 +32,6 @@ from ...metrics import (
 
 
 _EPS = 1e-12
-
-
-def _nan() -> float:
-    """返回标准 NaN 标记。
-
-    输入参数:
-        无。
-
-    输出:
-        ``float("nan")``，用于表示 hard gate raw metric 缺失或不可计算。
-
-    使用场景:
-        layer calculator 内部遇到缺失 prices、空样本或无效 horizon 时调用。
-    """
-
-    return float("nan")
 
 
 def _prices_2d(prices: np.ndarray | None) -> np.ndarray | None:
@@ -69,63 +55,6 @@ def _prices_2d(prices: np.ndarray | None) -> np.ndarray | None:
     if values.ndim != 2 or values.shape[1] < 2:
         return None
     return values
-
-
-def _action_positions(actions: np.ndarray) -> np.ndarray:
-    """将模型动作 id 映射为交易持仓。
-
-    输入参数:
-        actions: 动作数组，约定 ``0=short``、``1=flat``、``2=long``。
-
-    输出:
-        与 ``actions`` 同形状的持仓数组，取值约定为 ``-1/0/1``。
-
-    使用场景:
-        执行收益和手续费计算前，把分类动作转换为可乘价格收益的持仓。
-    """
-
-    return np.asarray(actions, dtype=np.float64) - 1.0
-
-
-def _execute_returns(
-    prices: np.ndarray,
-    actions: np.ndarray,
-    *,
-    fee_rate: float,
-) -> np.ndarray:
-    """按统一口径执行动作并计算每条 horizon 的扣费收益。
-
-    输入参数:
-        prices: 价格数组，形状为 ``[N, H]`` 或 ``[N, H, 1]``。
-        actions: 动作数组，形状为 ``[N, H]``。
-        fee_rate: 单边手续费率。
-
-    输出:
-        ``[N]`` 形状的 net return 数组。价格缺失或 horizon 不足时返回 NaN 数组。
-
-    使用场景:
-        计算 DP teacher 在基础手续费和双倍手续费下的收益，用于 fee sensitivity。
-    """
-
-    price_values = _prices_2d(prices)
-    if price_values is None:
-        return np.full(np.asarray(actions).shape[0], _nan(), dtype=np.float64)
-
-    positions = _action_positions(actions)
-    horizon = min(price_values.shape[1], positions.shape[1])
-    if horizon < 2:
-        return np.full(positions.shape[0], _nan(), dtype=np.float64)
-
-    price_values = price_values[:, :horizon]
-    positions = positions[:, :horizon]
-    bar_returns = price_values[:, 1:] / np.maximum(price_values[:, :-1], _EPS) - 1.0
-    gross = np.sum(positions[:, :-1] * bar_returns, axis=1)
-    position_path = np.concatenate(
-        [np.zeros((positions.shape[0], 1), dtype=np.float64), positions],
-        axis=1,
-    )
-    fees = np.sum(np.abs(np.diff(position_path, axis=1)), axis=1) * fee_rate
-    return gross - fees
 
 
 def _demo_returns(
@@ -157,7 +86,11 @@ def _demo_returns(
     price_values = _prices_2d(snapshot.prices)
     if price_values is None:
         return np.full(np.asarray(snapshot.demo_actions).shape[0], _nan())
-    return _execute_returns(price_values, snapshot.demo_actions, fee_rate=fee_rate)
+    return ActionExecutionCalculator.execute_actions(
+        price_values,
+        snapshot.demo_actions,
+        fee_rate,
+    ).returns
 
 
 def _morphology_labels(prices: np.ndarray, *, fee_rate: float) -> np.ndarray:
@@ -256,11 +189,11 @@ def compute_teacher_quality_metrics(
         fee_sensitivity = _nan()
         morphology_coverage = _nan()
     else:
-        doubled_fee_returns = _execute_returns(
+        doubled_fee_returns = ActionExecutionCalculator.execute_actions(
             price_values,
             val_snapshot.demo_actions,
-            fee_rate=runtime_config.fee_rate * 2.0,
-        )
+            runtime_config.fee_rate * 2.0,
+        ).returns
         fee_sensitivity = float(
             np.nansum(doubled_fee_returns - flat_returns)
             / (np.nansum(advantages) + _EPS)

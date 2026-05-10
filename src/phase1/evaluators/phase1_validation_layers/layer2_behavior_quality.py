@@ -24,6 +24,8 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
+from src.utils import nan_value as _nan
+
 from ...metrics import (
     Phase1BehaviorQualityMetrics,
     Phase1BehaviorQualityThresholds,
@@ -36,22 +38,6 @@ from ...metrics import (
 
 
 _EPS = 1e-12
-
-
-def _nan() -> float:
-    """返回标准 NaN 标记。
-
-    输入参数:
-        无。
-
-    输出:
-        ``float("nan")``。
-
-    使用场景:
-        active code 不足、prices 缺失或统计量无法计算时作为 raw metric 值。
-    """
-
-    return float("nan")
 
 
 def _positions(actions: np.ndarray) -> np.ndarray:

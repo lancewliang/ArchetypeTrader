@@ -21,11 +21,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
+
+from src.utils import ActionExecutionCalculator, ActionExecutionResult, nan_value as _nan
 
 from ...metrics import (
     Phase1EvaluationSnapshot,
@@ -40,136 +41,10 @@ from .layer2_behavior_quality import classify_action_motif, classify_market_morp
 _EPS = 1e-12
 
 
-@dataclass(frozen=True)
-class ExecutionResult:
-    """动作执行结果。
-
-    字段说明:
-        returns: 每条 horizon 的扣费后净收益。
-        gross_returns: 每条 horizon 的未扣费收益。
-        fees: 每条 horizon 的总手续费。
-        turnover: 每条 horizon 的换手量。
-
-    使用场景:
-        Layer 3、Layer 4 共享统一执行口径，避免 report 或 selector 重新计算收益。
-    """
-
-    returns: np.ndarray
-    gross_returns: np.ndarray
-    fees: np.ndarray
-    turnover: np.ndarray
-
-
-def _nan() -> float:
-    """返回标准 NaN 标记。
-
-    输入参数:
-        无。
-
-    输出:
-        ``float("nan")``。
-
-    使用场景:
-        缺少 prices、收益样本为空或风险指标不可计算时作为 raw metric 值。
-    """
-
-    return float("nan")
-
-
-def _prices_2d(prices: np.ndarray | None) -> np.ndarray | None:
-    """把价格数组标准化为二维 ``[sample, horizon]``。
-
-    输入参数:
-        prices: 原始价格数组，可为 ``[N, H]``、``[N, H, 1]`` 或 ``None``。
-
-    输出:
-        二维价格数组；缺失、维度不合法或 horizon 不足时返回 ``None``。
-
-    使用场景:
-        统一收益执行 helper 的价格输入。
-    """
-
-    if prices is None:
-        return None
-    values = np.asarray(prices, dtype=np.float64)
-    if values.ndim == 3 and values.shape[-1] == 1:
-        values = values[..., 0]
-    if values.ndim != 2 or values.shape[1] < 2:
-        return None
-    return values
-
-
-def _positions(actions: np.ndarray) -> np.ndarray:
-    """将动作 id 映射为持仓值。
-
-    输入参数:
-        actions: 动作数组，约定 ``0=short``、``1=flat``、``2=long``。
-
-    输出:
-        同形状持仓数组，取值为 ``-1/0/1``。
-
-    使用场景:
-        统一执行收益、turnover 和手续费计算。
-    """
-
-    return np.asarray(actions, dtype=np.float64) - 1.0
-
-
-def execute_actions(
-    prices: np.ndarray | None,
-    actions: np.ndarray,
-    fee_rate: float,
-) -> ExecutionResult:
-    """执行 action sequence 并计算扣费收益。
-
-    输入参数:
-        prices: 价格数组，可为 ``[N, H]``、``[N, H, 1]`` 或 ``None``。
-        actions: 动作数组，形状为 ``[N, H]``。
-        fee_rate: 单边手续费率。
-
-    输出:
-        ``ExecutionResult``，包含净收益、gross return、手续费和 turnover。
-
-    使用场景:
-        Layer 3 oracle/random label profitability、Layer 4 probe return retention
-        以及后续 report 复用的统一收益口径。
-    """
-
-    price_values = _prices_2d(prices)
-    action_values = np.asarray(actions)
-    if price_values is None:
-        empty = np.full(action_values.shape[0], _nan(), dtype=np.float64)
-        return ExecutionResult(empty, empty, empty, empty)
-
-    positions = _positions(action_values)
-    horizon = min(price_values.shape[1], positions.shape[1])
-    if horizon < 2:
-        empty = np.full(positions.shape[0], _nan(), dtype=np.float64)
-        return ExecutionResult(empty, empty, empty, empty)
-
-    price_values = price_values[:, :horizon]
-    positions = positions[:, :horizon]
-    bar_returns = price_values[:, 1:] / np.maximum(price_values[:, :-1], _EPS) - 1.0
-    gross_path = positions[:, :-1] * bar_returns
-    gross_returns = np.sum(gross_path, axis=1)
-    position_path = np.concatenate(
-        [np.zeros((positions.shape[0], 1), dtype=np.float64), positions],
-        axis=1,
-    )
-    turnover = np.sum(np.abs(np.diff(position_path, axis=1)), axis=1)
-    fees = turnover * fee_rate
-    return ExecutionResult(
-        returns=gross_returns - fees,
-        gross_returns=gross_returns,
-        fees=fees,
-        turnover=turnover,
-    )
-
-
 def _demo_returns(
     snapshot: Phase1EvaluationSnapshot,
     runtime_config: Phase1ValidationRuntimeConfig,
-) -> ExecutionResult:
+) -> ActionExecutionResult:
     """计算 DP teacher 的执行收益结果。
 
     输入参数:
@@ -178,7 +53,7 @@ def _demo_returns(
         runtime_config: 提供手续费率。
 
     输出:
-        ``ExecutionResult``。若 ``demo_rewards`` 可用，则 ``returns`` 优先使用
+        ``ActionExecutionResult``。若 ``demo_rewards`` 可用，则 ``returns`` 优先使用
         reward 求和，gross/fee/turnover 仍由统一执行口径补充。
 
     使用场景:
@@ -188,13 +63,13 @@ def _demo_returns(
     rewards = np.asarray(snapshot.demo_rewards, dtype=np.float64)
     if rewards.ndim == 3 and rewards.shape[-1] == 1:
         rewards = rewards[..., 0]
-    execution = execute_actions(
+    execution = ActionExecutionCalculator.execute_actions(
         snapshot.prices,
         snapshot.demo_actions,
         runtime_config.fee_rate,
     )
     if rewards.ndim == 2 and np.all(np.isfinite(rewards)):
-        return ExecutionResult(
+        return ActionExecutionResult(
             returns=np.sum(rewards, axis=1),
             gross_returns=execution.gross_returns,
             fees=execution.fees,
@@ -279,7 +154,7 @@ def _random_label_returns(
             device=device,
         )
         trial_returns.append(
-            execute_actions(
+            ActionExecutionCalculator.execute_actions(
                 snapshot.prices,
                 random_actions,
                 runtime_config.fee_rate,
@@ -518,7 +393,7 @@ def compute_oracle_profitability_metrics(
     """
 
     dp_execution = _demo_returns(val_snapshot, runtime_config)
-    decoded_execution = execute_actions(
+    decoded_execution = ActionExecutionCalculator.execute_actions(
         val_snapshot.prices,
         val_snapshot.decoded_actions,
         runtime_config.fee_rate,
@@ -605,7 +480,5 @@ def compute_oracle_profitability_metrics(
 
 
 __all__ = [
-    "ExecutionResult",
     "compute_oracle_profitability_metrics",
-    "execute_actions",
 ]

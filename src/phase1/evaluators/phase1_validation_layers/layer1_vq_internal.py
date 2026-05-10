@@ -23,6 +23,8 @@ from collections.abc import Sequence
 
 import numpy as np
 
+from src.utils import nan_value as _nan
+
 from ...metrics import (
     CodeAssignmentSnapshot,
     Phase1EvaluationSnapshot,
@@ -33,22 +35,6 @@ from ...metrics import (
 
 
 _EPS = 1e-12
-
-
-def _nan() -> float:
-    """返回标准 NaN 标记。
-
-    输入参数:
-        无。
-
-    输出:
-        ``float("nan")``，表示 raw metric 缺失或不可计算。
-
-    使用场景:
-        history 不足、active code 不足、distances 缺失等情况下作为指标值返回。
-    """
-
-    return float("nan")
 
 
 def _num_codes(snapshot: Phase1EvaluationSnapshot) -> int:

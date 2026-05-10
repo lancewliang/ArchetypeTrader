@@ -27,6 +27,8 @@ from typing import Any
 import numpy as np
 import torch
 
+from src.utils import ActionExecutionCalculator, nan_value as _nan
+
 from ...metrics import (
     Phase1EvaluationSnapshot,
     Phase1LabelPredictabilityMetrics,
@@ -34,7 +36,6 @@ from ...metrics import (
     Phase1ValidationRuntimeConfig,
 )
 from .layer2_behavior_quality import classify_market_morphology
-from .layer3_oracle_profitability import execute_actions
 
 
 _EPS = 1e-12
@@ -58,22 +59,6 @@ class CentroidProbe:
     centroids: np.ndarray
     feature_mean: np.ndarray
     feature_std: np.ndarray
-
-
-def _nan() -> float:
-    """返回标准 NaN 标记。
-
-    输入参数:
-        无。
-
-    输出:
-        ``float("nan")``。
-
-    使用场景:
-        active code 不足、prices 缺失或 label 统计不可计算时作为 raw metric 值。
-    """
-
-    return float("nan")
 
 
 def build_probe_features(states: np.ndarray) -> np.ndarray:
@@ -365,12 +350,12 @@ def _probe_return_retention(
         code_ids=predicted_labels,
         device=device,
     )
-    probe_returns = execute_actions(
+    probe_returns = ActionExecutionCalculator.execute_actions(
         val_snapshot.prices,
         probe_actions,
         runtime_config.fee_rate,
     ).returns
-    oracle_returns = execute_actions(
+    oracle_returns = ActionExecutionCalculator.execute_actions(
         val_snapshot.prices,
         val_snapshot.decoded_actions,
         runtime_config.fee_rate,
