@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <style>
+    :root { color-scheme: light; --bg:#f6f7fb; --panel:#fff; --ink:#172033; --muted:#667085; --line:#d8dee8; --soft:#edf1f6; --pass:#147a4d; --pass-bg:#e8f6ef; --fail:#b42318; --fail-bg:#ffe8e5; --warn:#a15c00; --warn-bg:#fff4df; --skip:#475467; --skip-bg:#eef2f6; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .wrap { width:min(1440px, calc(100vw - 40px)); margin:0 auto; }
+    header { background:#101828; color:#fff; border-bottom:1px solid #0b1220; }
+    .hero { display:flex; justify-content:space-between; gap:24px; padding:28px 0; align-items:flex-end; }
+    h1,h2,h3,p { margin:0; }
+    h1 { font-size:28px; line-height:1.2; }
+    h2 { font-size:18px; margin:22px 0 10px; }
+    h3 { font-size:14px; }
+    .subtitle { margin-top:8px; color:#cbd5e1; }
+    .meta { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; color:#d1d5db; font-size:12px; }
+    .meta span { border:1px solid rgba(255,255,255,.18); border-radius:6px; padding:6px 8px; }
+    main { padding:22px 0 48px; }
+    .grid { display:grid; gap:14px; }
+    .summary { grid-template-columns:280px repeat(5, minmax(130px, 1fr)); align-items:stretch; }
+    .layers { grid-template-columns:repeat(5, minmax(0, 1fr)); }
+    .stack { display:grid; gap:14px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; box-shadow:0 8px 24px rgba(16,24,40,.06); overflow:hidden; padding:14px; }
+    .panel-head { padding-bottom:10px; border-bottom:1px solid var(--soft); margin-bottom:8px; }
+    .score-card { display:flex; flex-direction:column; gap:10px; }
+    .score { font-size:40px; font-weight:760; line-height:1; }
+    .label { color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }
+    .value { margin-top:8px; font-size:18px; font-weight:720; overflow-wrap:anywhere; }
+    .badge { border-radius:999px; padding:3px 8px; font-size:12px; font-weight:800; display:inline-flex; width:max-content; }
+    .badge.pass { color:var(--pass); background:var(--pass-bg); }
+    .badge.fail { color:var(--fail); background:var(--fail-bg); }
+    .badge.warn { color:var(--warn); background:var(--warn-bg); }
+    .badge.skip { color:var(--skip); background:var(--skip-bg); }
+    .layer-card { min-height:132px; display:flex; flex-direction:column; justify-content:space-between; }
+    .layer-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+    .layer-stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--soft); padding-top:10px; }
+    .layer-stats strong { display:block; font-size:20px; }
+    .layer-stats span { color:var(--muted); font-size:12px; }
+    .table-wrap { overflow:auto; padding:0; }
+    table { width:100%; border-collapse:collapse; min-width:760px; }
+    th,td { text-align:left; vertical-align:top; border-bottom:1px solid var(--soft); padding:9px 10px; }
+    th { color:#475467; font-size:12px; text-transform:uppercase; background:#f9fafb; }
+    td { overflow-wrap:anywhere; }
+    tr:last-child td { border-bottom:0; }
+    @media (max-width: 980px) { .hero { align-items:flex-start; flex-direction:column; } .summary, .layers { grid-template-columns:1fr; } .wrap { width:min(100vw - 24px, 1440px); } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap hero">
+      <div>
+        <h1>{{ header_title }}</h1>
+        <p class="subtitle">Checkpoint {{ summary.checkpoint_id }} · Stage {{ summary.stage }} · Epoch {{ summary.epoch }}</p>
+      </div>
+      <div class="meta">
+        <span>Generated {{ report.generated_at }}</span>
+        <span>Schema {{ report.schema }}</span>
+      </div>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="grid summary">
+      <article class="panel score-card">
+        <div class="label">Validation Score</div>
+        <div class="score">{{ summary.score }}</div>
+        <span class="badge {{ summary.badge_class }}">{{ summary.status_label }}</span>
+      </article>
+      <article class="panel"><div class="label">Checkpoint</div><div class="value">{{ summary.checkpoint_id }}</div></article>
+      <article class="panel"><div class="label">Stage</div><div class="value">{{ summary.stage }}</div></article>
+      <article class="panel"><div class="label">Epoch</div><div class="value">{{ summary.epoch }}</div></article>
+      <article class="panel"><div class="label">Failed Layers</div><div class="value">{{ summary.failed_layers }}</div></article>
+      <article class="panel"><div class="label">Code Diagnostics</div><div class="value">{{ summary.code_diagnostic_count }}</div></article>
+    </section>
+
+    <section>
+      <h2>Layer Gates</h2>
+      <div class="grid layers">
+        {% for layer in layers %}
+        <article class="panel layer-card">
+          <div class="layer-head">
+            <div><div class="label">Layer {{ layer.layer_id }}</div><h3>{{ layer.name }}</h3></div>
+            <span class="badge {{ layer.badge_class }}">{{ layer.status_label }}</span>
+          </div>
+          <div class="layer-stats">
+            <div><strong>{{ layer.metric_count }}</strong><span>metrics</span></div>
+            <div><strong>{{ layer.failed_count }}</strong><span>failed</span></div>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section>
+      <h2>Metric Details</h2>
+      <div class="stack">
+        {% for layer in layers %}
+        <article class="panel">
+          <div class="panel-head"><h3>Layer {{ layer.layer_id }}: {{ layer.name }}</h3></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th><th>Message</th></tr></thead>
+              <tbody>
+                {% for metric in layer.metrics %}
+                <tr>
+                  <td>{{ metric.name }}</td>
+                  <td>{{ metric.value }}</td>
+                  <td>{{ metric.threshold }}</td>
+                  <td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td>
+                  <td>{{ metric.message }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    {% if code_diagnostics %}
+    <section>
+      <h2>Code Diagnostics</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead><tr><th>Code</th><th>Support</th><th>Occupancy</th><th>Morphology</th><th>Morph Ratio</th><th>Motif</th><th>Motif Ratio</th><th>Pair</th><th>Decoded Adv</th><th>Retention</th><th>Status</th></tr></thead>
+          <tbody>
+            {% for item in code_diagnostics %}
+            <tr>
+              <td>{{ item.code_id }}</td>
+              <td>{{ item.support }}</td>
+              <td>{{ item.occupancy }}</td>
+              <td>{{ item.dominant_morphology }}</td>
+              <td>{{ item.dominant_morphology_ratio }}</td>
+              <td>{{ item.dominant_motif }}</td>
+              <td>{{ item.dominant_motif_ratio }}</td>
+              <td>{{ item.dominant_pair }}</td>
+              <td>{{ item.decoded_mean_advantage }}</td>
+              <td>{{ item.retention_ratio }}</td>
+              <td>{{ item.status }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if tie_breaker_rows %}
+    <section>
+      <h2>Tie Breaker Metrics</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead><tr><th>Key</th><th>Value</th></tr></thead>
+          <tbody>
+            {% for row in tie_breaker_rows %}
+            <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if drift_diagnostics %}
+    <section>
+      <h2>Drift Diagnostics</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead><tr><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th><th>Message</th></tr></thead>
+          <tbody>
+            {% for metric in drift_diagnostics %}
+            <tr>
+              <td>{{ metric.name }}</td>
+              <td>{{ metric.value }}</td>
+              <td>{{ metric.threshold }}</td>
+              <td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td>
+              <td>{{ metric.message }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if config_rows %}
+    <section>
+      <h2>Config Snapshot</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead><tr><th>Key</th><th>Value</th></tr></thead>
+          <tbody>
+            {% for row in config_rows %}
+            <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if artifact_rows %}
+    <section>
+      <h2>Artifacts</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead><tr><th>Key</th><th>Value</th></tr></thead>
+          <tbody>
+            {% for row in artifact_rows %}
+            <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+  </main>
+</body>
+</html>

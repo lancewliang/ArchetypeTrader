@@ -21,12 +21,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from html import escape
 import json
 import math
 from pathlib import Path
 from typing import Any, Mapping
 
+from ._template import render_template_file
 from ..metrics import (
     Phase1CodeDiagnostic,
     Phase1LayerResult,
@@ -36,6 +36,7 @@ from ..metrics import (
 
 
 JsonObject = dict[str, Any]
+_TEMPLATE_PATH = Path(__file__).with_name("templates") / "phase1_codebook_report.html"
 
 
 def _json_safe(value: Any) -> Any:
@@ -267,6 +268,22 @@ class Phase1CodebookReport:
             ``write_html()`` 写文件前调用；测试中也可直接校验 HTML 片段。
         """
 
+        return render_template_file(_TEMPLATE_PATH, self._build_html_context(payload))
+
+    def _build_html_context(self, payload: Mapping[str, Any]) -> JsonObject:
+        """把 report payload 转成模板使用的展示模型。
+
+        输入参数:
+            payload: ``build_payload()`` 返回的 report payload。
+
+        输出:
+            只包含字符串、数字、bool、list 和 dict 的模板上下文。
+
+        使用场景:
+            ``render_html()`` 调用模板前完成强类型恢复、值格式化和状态映射，
+            HTML 结构本身留在独立模板文件中。
+        """
+
         validation = payload["validation"]
         summary = payload["summary"]
         report = payload["report"]
@@ -285,373 +302,100 @@ class Phase1CodebookReport:
             for name, item in validation.get("drift_diagnostics", {}).items()
         }
 
-        return "\n".join(
-            [
-                "<!doctype html>",
-                '<html lang="zh-CN">',
-                "<head>",
-                '  <meta charset="utf-8">',
-                '  <meta name="viewport" content="width=device-width, initial-scale=1">',
-                f"  <title>{escape(str(report.get('title', self.title)))}</title>",
-                f"  {self._style_block()}",
-                "</head>",
-                "<body>",
-                self._render_header(summary, report),
-                "  <main class=\"wrap\">",
-                self._render_summary(summary),
-                self._render_layers(layers),
-                self._render_metric_tables(layers),
-                self._render_code_diagnostics(code_diagnostics),
-                self._render_tie_breaker(validation.get("tie_breaker_metrics", {})),
-                self._render_drift_diagnostics(drift_diagnostics),
-                self._render_mapping_table("Config Snapshot", config),
-                self._render_mapping_table("Artifacts", artifacts),
-                "  </main>",
-                "</body>",
-                "</html>",
-            ]
-        )
-
-    def _render_header(
-        self,
-        summary: Mapping[str, Any],
-        report: Mapping[str, Any],
-    ) -> str:
-        """渲染 HTML 顶部标题区。
-
-        输入参数:
-            summary: report summary payload。
-            report: report metadata payload。
-
-        输出:
-            header HTML 字符串。
-
-        使用场景:
-            ``render_html()`` 内部组装报告页面。
-        """
-
-        return f"""
-  <header>
-    <div class="wrap hero">
-      <div>
-        <h1>{escape(self.title)}</h1>
-        <p class="subtitle">Checkpoint {escape(str(summary.get("checkpoint_id", "-")))} · Stage {escape(str(summary.get("stage", "-")))} · Epoch {escape(str(summary.get("epoch", "-")))}</p>
-      </div>
-      <div class="meta">
-        <span>Generated {escape(str(report.get("generated_at", "-")))}</span>
-        <span>Schema {escape(str(report.get("schema", "-")))}</span>
-      </div>
-    </div>
-  </header>"""
-
-    def _render_summary(self, summary: Mapping[str, Any]) -> str:
-        """渲染 checkpoint validation 摘要。
-
-        输入参数:
-            summary: report summary payload。
-
-        输出:
-            summary section HTML。
-
-        使用场景:
-            HTML 首屏展示 checkpoint 是否通过、score 和失败层。
-        """
-
         passed = bool(summary.get("passed", False))
-        badge = _badge_class(passed)
         failed_layers = summary.get("failed_layers", [])
         failed_text = ", ".join(str(layer) for layer in failed_layers) or "-"
-        score = _format_value(summary.get("score"))
-        return f"""
-    <section class="grid summary">
-      <article class="panel score-card">
-        <div class="label">Validation Score</div>
-        <div class="score">{escape(score)}</div>
-        <span class="badge {badge}">{'PASS' if passed else 'FAIL'}</span>
-      </article>
-      <article class="panel"><div class="label">Checkpoint</div><div class="value">{escape(str(summary.get("checkpoint_id", "-")))}</div></article>
-      <article class="panel"><div class="label">Stage</div><div class="value">{escape(str(summary.get("stage", "-")))}</div></article>
-      <article class="panel"><div class="label">Epoch</div><div class="value">{escape(str(summary.get("epoch", "-")))}</div></article>
-      <article class="panel"><div class="label">Failed Layers</div><div class="value">{escape(failed_text)}</div></article>
-      <article class="panel"><div class="label">Code Diagnostics</div><div class="value">{escape(str(summary.get("code_diagnostic_count", 0)))}</div></article>
-    </section>"""
+        return {
+            "page_title": str(report.get("title", self.title)),
+            "header_title": self.title,
+            "report": {
+                "generated_at": str(report.get("generated_at", "-")),
+                "schema": str(report.get("schema", "-")),
+            },
+            "summary": {
+                "checkpoint_id": str(summary.get("checkpoint_id", "-")),
+                "stage": str(summary.get("stage", "-")),
+                "epoch": str(summary.get("epoch", "-")),
+                "score": _format_value(summary.get("score")),
+                "failed_layers": failed_text,
+                "code_diagnostic_count": str(summary.get("code_diagnostic_count", 0)),
+                "badge_class": _badge_class(passed),
+                "status_label": "PASS" if passed else "FAIL",
+            },
+            "layers": [self._build_layer_context(layer) for layer in layers],
+            "code_diagnostics": [
+                self._build_code_diagnostic_context(item)
+                for item in code_diagnostics
+            ],
+            "tie_breaker_rows": self._build_mapping_rows(
+                validation.get("tie_breaker_metrics", {})
+            ),
+            "drift_diagnostics": [
+                self._build_metric_context(metric)
+                for metric in drift_diagnostics.values()
+            ],
+            "config_rows": self._build_mapping_rows(config),
+            "artifact_rows": self._build_mapping_rows(artifacts),
+        }
 
-    def _render_layers(self, layers: tuple[Phase1LayerResult, ...]) -> str:
-        """渲染五层 hard gate 总览。
+    def _build_layer_context(self, layer: Phase1LayerResult) -> JsonObject:
+        """构建单个 validation layer 的模板上下文。"""
 
-        输入参数:
-            layers: 五层 layer result。
+        failed = sum(1 for metric in layer.metrics if not metric.passed)
+        return {
+            "layer_id": str(layer.layer_id),
+            "name": layer.name,
+            "badge_class": _badge_class(layer.passed),
+            "status_label": "PASS" if layer.passed else "FAIL",
+            "metric_count": str(len(layer.metrics)),
+            "failed_count": str(failed),
+            "metrics": [
+                self._build_metric_context(metric)
+                for metric in layer.metrics
+            ],
+        }
 
-        输出:
-            layer cards HTML。
+    def _build_metric_context(self, metric: Phase1MetricResult) -> JsonObject:
+        """构建单个 metric result 的模板上下文。"""
 
-        使用场景:
-            HTML 摘要区之后展示每层是否通过、指标数量和失败数量。
-        """
+        return {
+            "name": metric.name,
+            "value": _format_value(metric.value),
+            "threshold": metric.threshold,
+            "badge_class": _badge_class(metric.severity),
+            "severity_label": metric.severity.upper(),
+            "message": metric.message,
+        }
 
-        cards = []
-        for layer in layers:
-            failed = sum(1 for metric in layer.metrics if not metric.passed)
-            badge = _badge_class(layer.passed)
-            cards.append(
-                f"""
-      <article class="panel layer-card">
-        <div class="layer-head">
-          <div><div class="label">Layer {layer.layer_id}</div><h3>{escape(layer.name)}</h3></div>
-          <span class="badge {badge}">{'PASS' if layer.passed else 'FAIL'}</span>
-        </div>
-        <div class="layer-stats">
-          <div><strong>{len(layer.metrics)}</strong><span>metrics</span></div>
-          <div><strong>{failed}</strong><span>failed</span></div>
-        </div>
-      </article>"""
-            )
-        return f"""
-    <section>
-      <h2>Layer Gates</h2>
-      <div class="grid layers">{''.join(cards)}</div>
-    </section>"""
-
-    def _render_metric_tables(self, layers: tuple[Phase1LayerResult, ...]) -> str:
-        """渲染每层 metric 明细表。
-
-        输入参数:
-            layers: 五层 layer result。
-
-        输出:
-            metric tables HTML。
-
-        使用场景:
-            人工审计具体哪个 raw metric 触发 fail/skip/warn。
-        """
-
-        sections = []
-        for layer in layers:
-            rows = "\n".join(self._render_metric_row(metric) for metric in layer.metrics)
-            sections.append(
-                f"""
-      <article class="panel">
-        <div class="panel-head"><h3>Layer {layer.layer_id}: {escape(layer.name)}</h3></div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th><th>Message</th></tr></thead>
-            <tbody>{rows}</tbody>
-          </table>
-        </div>
-      </article>"""
-            )
-        return f"""
-    <section>
-      <h2>Metric Details</h2>
-      <div class="stack">{''.join(sections)}</div>
-    </section>"""
-
-    def _render_metric_row(self, metric: Phase1MetricResult) -> str:
-        """渲染单条 metric result 表格行。
-
-        输入参数:
-            metric: 单个 hard gate metric result。
-
-        输出:
-            ``<tr>`` HTML 字符串。
-
-        使用场景:
-            ``_render_metric_tables()`` 和 drift diagnostics 表格复用。
-        """
-
-        badge = _badge_class(metric.severity)
-        return f"""
-              <tr>
-                <td>{escape(metric.name)}</td>
-                <td>{escape(_format_value(metric.value))}</td>
-                <td>{escape(metric.threshold)}</td>
-                <td><span class="badge {badge}">{escape(metric.severity.upper())}</span></td>
-                <td>{escape(metric.message)}</td>
-              </tr>"""
-
-    def _render_code_diagnostics(
+    def _build_code_diagnostic_context(
         self,
-        diagnostics: tuple[Phase1CodeDiagnostic, ...],
-    ) -> str:
-        """渲染 code-level diagnostics 表。
+        item: Phase1CodeDiagnostic,
+    ) -> JsonObject:
+        """构建单个 code diagnostic 的模板上下文。"""
 
-        输入参数:
-            diagnostics: per-code diagnostics。
+        return {
+            "code_id": str(item.code_id),
+            "support": str(item.support),
+            "occupancy": _format_value(item.occupancy),
+            "dominant_morphology": str(item.dominant_morphology or "-"),
+            "dominant_morphology_ratio": _format_value(
+                item.dominant_morphology_ratio
+            ),
+            "dominant_motif": str(item.dominant_motif or "-"),
+            "dominant_motif_ratio": _format_value(item.dominant_motif_ratio),
+            "dominant_pair": str(item.dominant_pair or "-"),
+            "decoded_mean_advantage": _format_value(item.decoded_mean_advantage),
+            "retention_ratio": _format_value(item.retention_ratio),
+            "status": item.status,
+        }
 
-        输出:
-            code diagnostics section HTML；没有数据时返回空字符串。
+    def _build_mapping_rows(self, payload: Mapping[str, Any]) -> list[JsonObject]:
+        """构建普通 key-value 表格上下文。"""
 
-        使用场景:
-            展示每个 active code 的 support、morphology、motif 和 profitability 摘要。
-        """
-
-        if not diagnostics:
-            return ""
-        rows = []
-        for item in diagnostics:
-            rows.append(
-                f"""
-              <tr>
-                <td>{item.code_id}</td>
-                <td>{item.support}</td>
-                <td>{escape(_format_value(item.occupancy))}</td>
-                <td>{escape(str(item.dominant_morphology or "-"))}</td>
-                <td>{escape(_format_value(item.dominant_morphology_ratio))}</td>
-                <td>{escape(str(item.dominant_motif or "-"))}</td>
-                <td>{escape(_format_value(item.dominant_motif_ratio))}</td>
-                <td>{escape(str(item.dominant_pair or "-"))}</td>
-                <td>{escape(_format_value(item.decoded_mean_advantage))}</td>
-                <td>{escape(_format_value(item.retention_ratio))}</td>
-                <td>{escape(item.status)}</td>
-              </tr>"""
-            )
-        return f"""
-    <section>
-      <h2>Code Diagnostics</h2>
-      <article class="panel table-wrap">
-        <table>
-          <thead><tr><th>Code</th><th>Support</th><th>Occupancy</th><th>Morphology</th><th>Morph Ratio</th><th>Motif</th><th>Motif Ratio</th><th>Pair</th><th>Decoded Adv</th><th>Retention</th><th>Status</th></tr></thead>
-          <tbody>{''.join(rows)}</tbody>
-        </table>
-      </article>
-    </section>"""
-
-    def _render_tie_breaker(self, tie_breaker: Mapping[str, Any]) -> str:
-        """渲染 tie-breaker 指标表。
-
-        输入参数:
-            tie_breaker: ``Phase1TieBreakerMetrics.to_dict()`` payload。
-
-        输出:
-            tie-breaker section HTML。
-
-        使用场景:
-            分数接近时解释 checkpoint selector 的二级排序依据。
-        """
-
-        return self._render_mapping_table("Tie Breaker Metrics", tie_breaker)
-
-    def _render_drift_diagnostics(
-        self,
-        diagnostics: Mapping[str, Phase1MetricResult],
-    ) -> str:
-        """渲染 drift diagnostics 表。
-
-        输入参数:
-            diagnostics: drift diagnostic name 到 metric result 的映射。
-
-        输出:
-            drift diagnostics section HTML；没有数据时返回空字符串。
-
-        使用场景:
-            后续加入跨 epoch drift metric 后，在 report 中统一呈现。
-        """
-
-        if not diagnostics:
-            return ""
-        rows = "\n".join(self._render_metric_row(metric) for metric in diagnostics.values())
-        return f"""
-    <section>
-      <h2>Drift Diagnostics</h2>
-      <article class="panel table-wrap">
-        <table>
-          <thead><tr><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th><th>Message</th></tr></thead>
-          <tbody>{rows}</tbody>
-        </table>
-      </article>
-    </section>"""
-
-    def _render_mapping_table(
-        self,
-        title: str,
-        payload: Mapping[str, Any],
-    ) -> str:
-        """渲染普通 key-value 表。
-
-        输入参数:
-            title: section 标题。
-            payload: key-value 数据。
-
-        输出:
-            mapping section HTML；payload 为空时返回空字符串。
-
-        使用场景:
-            渲染 config、artifacts、tie-breaker 等普通字典。
-        """
-
-        if not payload:
-            return ""
-        rows = "\n".join(
-            f"<tr><td>{escape(str(key))}</td><td>{escape(_format_value(value))}</td></tr>"
+        return [
+            {"key": str(key), "value": _format_value(value)}
             for key, value in payload.items()
-        )
-        return f"""
-    <section>
-      <h2>{escape(title)}</h2>
-      <article class="panel table-wrap">
-        <table>
-          <thead><tr><th>Key</th><th>Value</th></tr></thead>
-          <tbody>{rows}</tbody>
-        </table>
-      </article>
-    </section>"""
-
-    def _style_block(self) -> str:
-        """返回 HTML 内联样式。
-
-        输入参数:
-            无。
-
-        输出:
-            ``<style>`` HTML 字符串。
-
-        使用场景:
-            ``render_html()`` 构建自包含静态 report。
-        """
-
-        return """<style>
-    :root { color-scheme: light; --bg:#f6f7fb; --panel:#fff; --ink:#172033; --muted:#667085; --line:#d8dee8; --soft:#edf1f6; --pass:#147a4d; --pass-bg:#e8f6ef; --fail:#b42318; --fail-bg:#ffe8e5; --warn:#a15c00; --warn-bg:#fff4df; --skip:#475467; --skip-bg:#eef2f6; }
-    * { box-sizing: border-box; }
-    body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .wrap { width:min(1440px, calc(100vw - 40px)); margin:0 auto; }
-    header { background:#101828; color:#fff; border-bottom:1px solid #0b1220; }
-    .hero { display:flex; justify-content:space-between; gap:24px; padding:28px 0; align-items:flex-end; }
-    h1,h2,h3,p { margin:0; }
-    h1 { font-size:28px; line-height:1.2; }
-    h2 { font-size:18px; margin:22px 0 10px; }
-    h3 { font-size:14px; }
-    .subtitle { margin-top:8px; color:#cbd5e1; }
-    .meta { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; color:#d1d5db; font-size:12px; }
-    .meta span { border:1px solid rgba(255,255,255,.18); border-radius:6px; padding:6px 8px; }
-    main { padding:22px 0 48px; }
-    .grid { display:grid; gap:14px; }
-    .summary { grid-template-columns:280px repeat(5, minmax(130px, 1fr)); align-items:stretch; }
-    .layers { grid-template-columns:repeat(5, minmax(0, 1fr)); }
-    .stack { display:grid; gap:14px; }
-    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; box-shadow:0 8px 24px rgba(16,24,40,.06); overflow:hidden; padding:14px; }
-    .panel-head { padding-bottom:10px; border-bottom:1px solid var(--soft); margin-bottom:8px; }
-    .score-card { display:flex; flex-direction:column; gap:10px; }
-    .score { font-size:40px; font-weight:760; line-height:1; }
-    .label { color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }
-    .value { margin-top:8px; font-size:18px; font-weight:720; overflow-wrap:anywhere; }
-    .badge { border-radius:999px; padding:3px 8px; font-size:12px; font-weight:800; display:inline-flex; width:max-content; }
-    .badge.pass { color:var(--pass); background:var(--pass-bg); }
-    .badge.fail { color:var(--fail); background:var(--fail-bg); }
-    .badge.warn { color:var(--warn); background:var(--warn-bg); }
-    .badge.skip { color:var(--skip); background:var(--skip-bg); }
-    .layer-card { min-height:132px; display:flex; flex-direction:column; justify-content:space-between; }
-    .layer-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
-    .layer-stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--soft); padding-top:10px; }
-    .layer-stats strong { display:block; font-size:20px; }
-    .layer-stats span { color:var(--muted); font-size:12px; }
-    .table-wrap { overflow:auto; padding:0; }
-    table { width:100%; border-collapse:collapse; min-width:760px; }
-    th,td { text-align:left; vertical-align:top; border-bottom:1px solid var(--soft); padding:9px 10px; }
-    th { color:#475467; font-size:12px; text-transform:uppercase; background:#f9fafb; }
-    td { overflow-wrap:anywhere; }
-    tr:last-child td { border-bottom:0; }
-    @media (max-width: 980px) { .hero { align-items:flex-start; flex-direction:column; } .summary, .layers { grid-template-columns:1fr; } .wrap { width:min(100vw - 24px, 1440px); } }
-  </style>"""
+        ]
 
 
 __all__ = ["Phase1CodebookReport"]
