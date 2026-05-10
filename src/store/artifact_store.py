@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import polars as pl
+
 from ..phase1.checkpoint import (
     Phase1Checkpoint,
     Phase1CheckpointConfig,
@@ -131,6 +133,7 @@ class DataFileStore:
         tensorboard_dir = root / "tensorboard"
         latent_snapshot_dir = root / "latent_snapshots"
         failure_case_dir = root / "failure_cases"
+        label_dir = root / "labels"
         best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
 
         for directory in (
@@ -140,6 +143,7 @@ class DataFileStore:
             tensorboard_dir,
             latent_snapshot_dir,
             failure_case_dir,
+            label_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -150,6 +154,8 @@ class DataFileStore:
             "tensorboard": tensorboard_dir,
             "latent_snapshots": latent_snapshot_dir,
             "failure_cases": failure_case_dir,
+            "labels": label_dir,
+            "horizon_train_labels": label_dir / "sampled_horizon_labels_train.feather",
             "best_checkpoint": best_checkpoint_path,
         }
 
@@ -346,7 +352,25 @@ class DataFileStore:
             训练和审计复用。
         """
 
-        ...
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        if isinstance(labels, pl.DataFrame):
+            label_frame = labels
+        else:
+            label_frame = pl.DataFrame(labels)
+
+        suffix = path.suffix.lower()
+        if suffix in {".feather", ".ipc", ".arrow"}:
+            label_frame.write_ipc(path)
+        elif suffix == ".parquet":
+            label_frame.write_parquet(path)
+        elif suffix == ".csv":
+            label_frame.write_csv(path)
+        else:
+            raise ValueError(
+                "unsupported horizon label format; use .feather, .ipc, .parquet, or .csv"
+            )
 
     def load_phase1_horizon_labels(
         self,
@@ -361,7 +385,17 @@ class DataFileStore:
             返回 label 表，供 Phase II/III 训练、评估或审计使用。
         """
 
-        ...
+        path = Path(input_path)
+        suffix = path.suffix.lower()
+        if suffix in {".feather", ".ipc", ".arrow"}:
+            return pl.read_ipc(path)
+        if suffix == ".parquet":
+            return pl.read_parquet(path)
+        if suffix == ".csv":
+            return pl.read_csv(path)
+        raise ValueError(
+            "unsupported horizon label format; use .feather, .ipc, .parquet, or .csv"
+        )
 
     def save_phase1_report(
         self,

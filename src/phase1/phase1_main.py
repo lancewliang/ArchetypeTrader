@@ -24,6 +24,10 @@ from .checkpoint import (
     Phase1CheckpointSelector,
 )
 from .evaluators import Phase1Evaluator
+from .horizon_train_label_builder import (
+    HorizonTrainLabelBuilder,
+    HorizonTrainLabelBuilderConfig,
+)
 from .metrics import Phase1Metrics
 from .report import Phase1Report
 
@@ -129,6 +133,7 @@ class Phase1MainFlow:
         self.evaluator: Phase1Evaluator | None = None
         self.report: Phase1Report | None = None
         self.best_checkpoint_selection: Phase1CheckpointSelectionResult | None = None
+        self.horizon_train_label_builder: HorizonTrainLabelBuilder | None = None
  
     def _resolve_device(self, device: str) -> torch.device:
         requested_device = torch.device(device)
@@ -282,6 +287,14 @@ class Phase1MainFlow:
             lr=self.config.learning_rate,
         )
         self.selector = Phase1CheckpointSelector()
+        self.horizon_train_label_builder = HorizonTrainLabelBuilder(
+            data_store=self.data_store,
+            config=HorizonTrainLabelBuilderConfig(
+                horizon=self.config.horizon,
+                batch_size=self.config.batch_size,
+                device=self.device,
+            ),
+        )
 
     def validate_components(self) -> None:
         """集中校验 Phase I 后续训练和评估步骤依赖的组件。"""
@@ -398,9 +411,26 @@ class Phase1MainFlow:
         )
         
     def export_horizon_labels(self) -> None:
-        """导出 Phase I horizon-level archetype labels 的骨架入口。"""
+        """导出 Phase I horizon-level archetype labels。
 
-        ...
+        论文中的 Phase II selector 需要每个固定 horizon 的 VQ archetype
+        label ``hat{a}^{sel}`` 作为监督/一致性信号。这里使用 best
+        checkpoint 的 encoder 与 codebook 对 DP demonstration trajectories
+        离线编码，并通过 ``HorizonTrainLabelBuilder`` 写出 label 文件。
+        """
+
+        if self.best_checkpoint_selection is None:
+            return
+
+        self.model.load_state_dict(
+            self.best_checkpoint_selection.checkpoint.model_state_dict
+        )
+        for split_name, trajectory_dataset in self.trajectory_datasets.items():
+            self.horizon_train_label_builder.build_and_store(
+                model=self.model,
+                trajectory_dataset=trajectory_dataset,
+                split_name=split_name,
+            )
         
     def _run_epoch(
         self,
