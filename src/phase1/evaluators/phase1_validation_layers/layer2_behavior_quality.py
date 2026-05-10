@@ -1,0 +1,636 @@
+"""Phase I validation Layer 2: archetype behavior quality raw metrics。
+
+文件功能说明:
+    本文件负责计算每个 active code 的行为结构质量 raw metrics，包括 support、
+    morphology/motif/pair 纯度、morphology lift、code 内行为一致性、code 间
+    分离度、latent silhouette、重复 code pair 数量和盈利 code 覆盖率。
+
+设计边界:
+    - 只计算 archetype 行为结构和 code-level diagnostics；
+    - 不直接计算交易收益，盈利性信息通过 Layer 3 的 per-code profitability 输入；
+    - 不做 hard gate pass/fail 判定；
+    - 缺失 prices 时 morphology 相关指标按 weak/missing 处理，最终由 rules 层失败。
+
+使用场景:
+    ``Phase1CodebookEvaluator`` 通常先计算 Layer 3，再把
+    ``per_code_profitability`` 传入 ``compute_behavior_quality_metrics()``，
+    生成 ``Phase1BehaviorQualityMetrics`` 和 code diagnostics。
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from collections.abc import Mapping, Sequence
+
+import numpy as np
+
+from ...metrics import (
+    Phase1BehaviorQualityMetrics,
+    Phase1BehaviorQualityThresholds,
+    Phase1CodeDiagnostic,
+    Phase1EvaluationSnapshot,
+    Phase1LayerComputation,
+    Phase1PerCodeProfitability,
+    Phase1ValidationRuntimeConfig,
+)
+
+
+_EPS = 1e-12
+
+
+def _nan() -> float:
+    """返回标准 NaN 标记。
+
+    输入参数:
+        无。
+
+    输出:
+        ``float("nan")``。
+
+    使用场景:
+        active code 不足、prices 缺失或统计量无法计算时作为 raw metric 值。
+    """
+
+    return float("nan")
+
+
+def _positions(actions: np.ndarray) -> np.ndarray:
+    """将动作 id 映射为持仓值。
+
+    输入参数:
+        actions: 动作数组，约定 ``0=short``、``1=flat``、``2=long``。
+
+    输出:
+        同形状持仓数组，取值为 ``-1/0/1``。
+
+    使用场景:
+        action motif、prototype similarity、intra similarity 和 separation 计算。
+    """
+
+    return np.asarray(actions, dtype=np.float64) - 1.0
+
+
+def _prices_2d(prices: np.ndarray | None) -> np.ndarray | None:
+    """把价格数组标准化为二维 ``[sample, horizon]``。
+
+    输入参数:
+        prices: 原始价格数组，可为 ``[N, H]``、``[N, H, 1]`` 或 ``None``。
+
+    输出:
+        二维价格数组；缺失、维度不合法或 horizon 不足时返回 ``None``。
+
+    使用场景:
+        morphology 和部分 motif 计算前统一价格形状。
+    """
+
+    if prices is None:
+        return None
+    values = np.asarray(prices, dtype=np.float64)
+    if values.ndim == 3 and values.shape[-1] == 1:
+        values = values[..., 0]
+    if values.ndim != 2 or values.shape[1] < 2:
+        return None
+    return values
+
+
+def classify_market_morphology(
+    prices: np.ndarray | None,
+    *,
+    fee_rate: float = 0.0002,
+) -> np.ndarray:
+    """根据价格路径分类市场形态。
+
+    输入参数:
+        prices: 价格数组，可为 ``[N, H]``、``[N, H, 1]`` 或 ``None``。
+        fee_rate: 手续费率，用于设定 neutral band。
+
+    输出:
+        ``[N]`` 形状的 morphology 标签数组；价格不可用时返回空数组。
+
+    使用场景:
+        统计每个 code 的 dominant morphology、morphology purity 和 lift。
+    """
+
+    price_values = _prices_2d(prices)
+    if price_values is None:
+        return np.asarray([], dtype=object)
+    returns = price_values[:, 1:] / np.maximum(price_values[:, :-1], _EPS) - 1.0
+    total_return = price_values[:, -1] / np.maximum(price_values[:, 0], _EPS) - 1.0
+    realized_vol = np.std(returns, axis=1)
+    neutral_band = np.maximum(2.0 * fee_rate, 0.5 * realized_vol)
+
+    labels = np.full(price_values.shape[0], "neutral", dtype=object)
+    labels[total_return > neutral_band] = "trend_up"
+    labels[total_return < -neutral_band] = "trend_down"
+    volatile = (labels == "neutral") & (realized_vol > 4.0 * fee_rate)
+    labels[volatile] = "range_volatile"
+    return labels
+
+
+def classify_action_motif(
+    actions: np.ndarray,
+    prices: np.ndarray | None = None,
+) -> np.ndarray:
+    """根据 decoded action sequence 分类交易 motif。
+
+    输入参数:
+        actions: decoded action 数组，形状为 ``[N, H]``。
+        prices: 预留参数，当前简化实现不依赖价格。
+
+    输出:
+        ``[N]`` 形状的 motif 标签数组，例如 ``flat``、``long_bias``、
+        ``short_bias``、``reversal``、``single_entry_hold`` 或 ``active_switching``。
+
+    使用场景:
+        统计每个 code 的 dominant motif 和 morphology-motif pair。
+    """
+
+    del prices
+    positions = _positions(actions)
+    motifs = np.full(positions.shape[0], "flat", dtype=object)
+    has_long = np.any(positions > 0, axis=1)
+    has_short = np.any(positions < 0, axis=1)
+    motifs[has_long & ~has_short] = "long_bias"
+    motifs[has_short & ~has_long] = "short_bias"
+    motifs[has_long & has_short] = "reversal"
+
+    turnover = np.sum(
+        np.abs(
+            np.diff(
+                np.concatenate(
+                    [np.zeros((positions.shape[0], 1)), positions],
+                    axis=1,
+                ),
+                axis=1,
+            )
+        ),
+        axis=1,
+    )
+    motifs[(motifs != "flat") & (turnover <= 1.0)] = "single_entry_hold"
+    motifs[(motifs != "flat") & (turnover >= 4.0)] = "active_switching"
+    return motifs
+
+
+def _active_codes(
+    code_ids: np.ndarray,
+    runtime_config: Phase1ValidationRuntimeConfig,
+) -> tuple[int, ...]:
+    """根据 occupancy 找出 active code。
+
+    输入参数:
+        code_ids: 每个样本的 assigned code id。
+        runtime_config: 提供 ``active_code_min_occupancy``。
+
+    输出:
+        active code id tuple。
+
+    使用场景:
+        只对 active code 计算 support、purity、diagnostics 和结构分离度。
+    """
+
+    if code_ids.size == 0:
+        return ()
+    counts = np.bincount(code_ids.astype(np.int64))
+    occupancy = counts / max(1, code_ids.size)
+    return tuple(
+        int(code_id)
+        for code_id, ratio in enumerate(occupancy)
+        if ratio >= runtime_config.active_code_min_occupancy
+    )
+
+
+def _dominant(values: np.ndarray) -> tuple[str | None, float | None]:
+    """计算一组离散标签的 dominant value 和占比。
+
+    输入参数:
+        values: 字符串或可转字符串的离散标签数组。
+
+    输出:
+        ``(dominant_label, ratio)``；输入为空时返回 ``(None, None)``。
+
+    使用场景:
+        per-code dominant morphology、motif 和 pair 统计。
+    """
+
+    if values.size == 0:
+        return None, None
+    counts = Counter(str(value) for value in values)
+    label, count = counts.most_common(1)[0]
+    return label, count / values.size
+
+
+def _global_distribution(values: np.ndarray) -> dict[str, float]:
+    """计算全体验证集离散标签分布。
+
+    输入参数:
+        values: 离散标签数组。
+
+    输出:
+        ``label -> probability`` 字典。
+
+    使用场景:
+        计算 per-code dominant morphology 相对全局分布的 lift。
+    """
+
+    counts = Counter(str(value) for value in values)
+    total = sum(counts.values())
+    return {label: count / max(1, total) for label, count in counts.items()}
+
+
+def _prototype_similarity(left: np.ndarray, right: np.ndarray) -> float:
+    """计算两个 action prototype 的简化相似度。
+
+    输入参数:
+        left: 左侧 code 的 action prototype。
+        right: 右侧 code 的 action prototype。
+
+    输出:
+        ``[0, 1]`` 附近的相似度值，越高表示两个原型越接近。
+
+    使用场景:
+        duplicate code pair 检测。
+    """
+
+    return float(1.0 - np.mean(np.abs(left - right)) / 2.0)
+
+
+def _action_prototypes(
+    actions: np.ndarray,
+    code_ids: np.ndarray,
+    active_codes: Sequence[int],
+) -> dict[int, np.ndarray]:
+    """计算每个 active code 的 decoded action prototype。
+
+    输入参数:
+        actions: decoded action 数组，形状为 ``[N, H]``。
+        code_ids: 每个样本的 assigned code id。
+        active_codes: 需要统计的 active code 列表。
+
+    输出:
+        ``code_id -> prototype`` 字典，prototype 为该 code 内持仓序列均值。
+
+    使用场景:
+        intra-code similarity、inter/intra separation 和 duplicate pair 计算。
+    """
+
+    positions = _positions(actions)
+    return {
+        int(code_id): np.mean(positions[code_ids == code_id], axis=0)
+        for code_id in active_codes
+        if np.any(code_ids == code_id)
+    }
+
+
+def _intra_code_similarity(
+    actions: np.ndarray,
+    code_ids: np.ndarray,
+    active_codes: Sequence[int],
+) -> float:
+    """计算同一 code 内 decoded action 的平均相似度。
+
+    输入参数:
+        actions: decoded action 数组。
+        code_ids: 每个样本的 assigned code id。
+        active_codes: active code 列表。
+
+    输出:
+        active code 内样本到本 code prototype 的平均相似度；无有效样本时返回 NaN。
+
+    使用场景:
+        衡量每个 archetype 内部行为是否一致。
+    """
+
+    positions = _positions(actions)
+    values: list[float] = []
+    for code_id in active_codes:
+        members = positions[code_ids == code_id]
+        if members.shape[0] == 0:
+            continue
+        prototype = np.mean(members, axis=0)
+        similarities = 1.0 - np.mean(np.abs(members - prototype), axis=1) / 2.0
+        values.extend(similarities.tolist())
+    return float(np.mean(values)) if values else _nan()
+
+
+def _inter_intra_separation(
+    actions: np.ndarray,
+    code_ids: np.ndarray,
+    active_codes: Sequence[int],
+) -> float:
+    """计算 code 间距离与 code 内距离的分离度。
+
+    输入参数:
+        actions: decoded action 数组。
+        code_ids: 每个样本的 assigned code id。
+        active_codes: active code 列表。
+
+    输出:
+        ``mean_inter_distance / mean_intra_distance``；active code 少于 2 时返回 NaN。
+
+    使用场景:
+        衡量不同 archetype 是否足够可区分。
+    """
+
+    prototypes = _action_prototypes(actions, code_ids, active_codes)
+    if len(prototypes) < 2:
+        return _nan()
+    positions = _positions(actions)
+    intra_values: list[float] = []
+    for code_id, prototype in prototypes.items():
+        members = positions[code_ids == code_id]
+        intra_values.extend(np.linalg.norm(members - prototype, axis=1).tolist())
+    inter_values: list[float] = []
+    proto_items = list(prototypes.items())
+    for index, (_, left) in enumerate(proto_items):
+        for _, right in proto_items[index + 1 :]:
+            inter_values.append(float(np.linalg.norm(left - right)))
+    return float(np.mean(inter_values) / (np.mean(intra_values) + _EPS))
+
+
+def _duplicate_pair_count(
+    actions: np.ndarray,
+    code_ids: np.ndarray,
+    active_codes: Sequence[int],
+    *,
+    threshold: float,
+) -> int:
+    """统计相似度超过阈值的重复 code pair 数量。
+
+    输入参数:
+        actions: decoded action 数组。
+        code_ids: 每个样本的 assigned code id。
+        active_codes: active code 列表。
+        threshold: 判定重复 code 的 prototype similarity 阈值。
+
+    输出:
+        重复 code pair 数量。
+
+    使用场景:
+        检查 codebook 是否把多个 code 学成几乎相同的行为原型。
+    """
+
+    prototypes = list(_action_prototypes(actions, code_ids, active_codes).values())
+    duplicates = 0
+    for index, left in enumerate(prototypes):
+        for right in prototypes[index + 1 :]:
+            duplicates += int(_prototype_similarity(left, right) > threshold)
+    return duplicates
+
+
+def _approx_silhouette(
+    z_e: np.ndarray,
+    code_ids: np.ndarray,
+    active_codes: Sequence[int],
+) -> float:
+    """计算基于 code centroid 的近似 latent silhouette score。
+
+    输入参数:
+        z_e: encoder latent 数组，形状为 ``[N, latent_dim]``。
+        code_ids: 每个样本的 assigned code id。
+        active_codes: active code 列表。
+
+    输出:
+        近似 silhouette score；active code 少于 2 或输入维度不合法时返回 NaN。
+
+    使用场景:
+        诊断 latent 空间中 assigned code 是否有聚类分离度。
+    """
+
+    if len(active_codes) < 2:
+        return _nan()
+    values = np.asarray(z_e, dtype=np.float64)
+    if values.ndim != 2 or values.shape[0] != code_ids.shape[0]:
+        return _nan()
+    centroids = {
+        int(code_id): np.mean(values[code_ids == code_id], axis=0)
+        for code_id in active_codes
+        if np.any(code_ids == code_id)
+    }
+    scores: list[float] = []
+    for value, code_id in zip(values, code_ids, strict=False):
+        if int(code_id) not in centroids:
+            continue
+        own = np.linalg.norm(value - centroids[int(code_id)])
+        other = min(
+            np.linalg.norm(value - centroid)
+            for other_code, centroid in centroids.items()
+            if other_code != int(code_id)
+        )
+        scores.append((other - own) / max(other, own, _EPS))
+    return float(np.mean(scores)) if scores else _nan()
+
+
+def _per_code_profitability_map(
+    per_code_profitability: Sequence[Phase1PerCodeProfitability] | None,
+) -> Mapping[int, Phase1PerCodeProfitability]:
+    """把 Layer 3 per-code profitability 转成按 code id 查询的映射。
+
+    输入参数:
+        per_code_profitability: Layer 3 输出的 per-code 盈利性列表；可为 ``None``。
+
+    输出:
+        ``code_id -> Phase1PerCodeProfitability`` 映射；输入为空时返回空 dict。
+
+    使用场景:
+        layer2 统计 profitable code coverage 和 weak-lift-but-profitable 诊断。
+    """
+
+    if per_code_profitability is None:
+        return {}
+    return {item.code_id: item for item in per_code_profitability}
+
+
+def compute_behavior_quality_metrics(
+    *,
+    train_snapshot: Phase1EvaluationSnapshot,
+    val_snapshot: Phase1EvaluationSnapshot,
+    runtime_config: Phase1ValidationRuntimeConfig,
+    per_code_profitability: Sequence[Phase1PerCodeProfitability] | None = None,
+    thresholds: Phase1BehaviorQualityThresholds | None = None,
+) -> Phase1LayerComputation:
+    """计算 Layer 2 archetype 行为质量 raw metrics 和 code diagnostics。
+
+    功能说明:
+        对 validation split 的 active code 逐个统计 support、dominant morphology、
+        dominant motif、dominant pair、lift 和盈利性摘要，再聚合为 layer-level
+        behavior quality metrics。
+
+    输入参数:
+        train_snapshot: 训练集 snapshot，当前不参与计算，保留用于统一接口。
+        val_snapshot: 验证集 snapshot，读取 prices、decoded_actions、code_ids 和 z_e。
+        runtime_config: validation 运行参数，提供 active code 占用阈值和手续费率。
+        per_code_profitability: Layer 3 输出的 per-code 盈利性摘要；缺失时盈利覆盖率
+            返回 NaN。
+        thresholds: Layer 2 阈值配置；不传时使用默认 ``Phase1BehaviorQualityThresholds``。
+
+    输出:
+        ``Phase1LayerComputation``，其中 ``metrics`` 为
+        ``Phase1BehaviorQualityMetrics``，``code_diagnostics`` 为 per-code report
+        诊断表，``extra_payload`` 包含 morphology、motif 和 active code 列表。
+
+    使用场景:
+        full checkpoint validation 的第二层行为结构 raw metric 计算；结果交给
+        ``evaluate_behavior_quality_rules()`` 判定 hard gate。
+    """
+
+    del train_snapshot
+    thresholds = thresholds or Phase1BehaviorQualityThresholds()
+    code_ids = np.asarray(val_snapshot.code_ids, dtype=np.int64)
+    active_codes = _active_codes(code_ids, runtime_config)
+    active_count = len(active_codes)
+
+    morphologies = classify_market_morphology(
+        val_snapshot.prices,
+        fee_rate=runtime_config.fee_rate,
+    )
+    missing_morphology = morphologies.size != code_ids.size
+    if missing_morphology:
+        morphologies = np.full(code_ids.size, "missing", dtype=object)
+    motifs = classify_action_motif(val_snapshot.decoded_actions, val_snapshot.prices)
+    pairs = np.asarray(
+        [
+            f"{morphology}:{motif}"
+            for morphology, motif in zip(morphologies, motifs, strict=False)
+        ],
+        dtype=object,
+    )
+    global_morphology = _global_distribution(morphologies)
+    profitability_map = _per_code_profitability_map(per_code_profitability)
+
+    min_support = max(
+        thresholds.min_code_support_abs,
+        int(np.ceil(thresholds.min_code_support_ratio * max(1, code_ids.size))),
+    )
+    weak_support = 0
+    weak_morphology = 0
+    weak_motif = 0
+    weak_pair = 0
+    weak_lift_nonprofitable = 0
+    profitable_count = 0
+    diagnostics: list[Phase1CodeDiagnostic] = []
+
+    for code_id in active_codes:
+        mask = code_ids == code_id
+        support = int(np.sum(mask))
+        occupancy = support / max(1, code_ids.size)
+        dominant_morphology, dominant_morphology_ratio = _dominant(morphologies[mask])
+        dominant_motif, dominant_motif_ratio = _dominant(motifs[mask])
+        dominant_pair, dominant_pair_ratio = _dominant(pairs[mask])
+        global_ratio = (
+            global_morphology.get(dominant_morphology, 0.0)
+            if dominant_morphology is not None
+            else 0.0
+        )
+        morphology_lift = (
+            float(dominant_morphology_ratio / (global_ratio + _EPS))
+            if dominant_morphology_ratio is not None
+            else None
+        )
+        profitability = profitability_map.get(code_id)
+        profitable = bool(profitability and profitability.passed)
+        profitable_count += int(profitable)
+
+        weak_support += int(support < min_support)
+        weak_morphology += int(
+            missing_morphology
+            or dominant_morphology_ratio is None
+            or dominant_morphology_ratio < thresholds.dominant_morphology_ratio_min
+        )
+        weak_motif += int(
+            dominant_motif_ratio is None
+            or dominant_motif_ratio < thresholds.dominant_motif_ratio_min
+        )
+        weak_pair += int(
+            missing_morphology
+            or dominant_pair_ratio is None
+            or dominant_pair_ratio < thresholds.dominant_pair_ratio_min
+        )
+        weak_lift_nonprofitable += int(
+            (
+                missing_morphology
+                or morphology_lift is None
+                or morphology_lift < thresholds.morphology_lift_min
+            )
+            and not profitable
+        )
+
+        diagnostics.append(
+            Phase1CodeDiagnostic(
+                code_id=code_id,
+                support=support,
+                occupancy=occupancy,
+                dominant_morphology=dominant_morphology,
+                dominant_morphology_ratio=dominant_morphology_ratio,
+                morphology_lift=morphology_lift,
+                dominant_motif=dominant_motif,
+                dominant_motif_ratio=dominant_motif_ratio,
+                dominant_pair=dominant_pair,
+                dominant_pair_ratio=dominant_pair_ratio,
+                decoded_mean_advantage=(
+                    profitability.mean_advantage if profitability else None
+                ),
+                decoded_win_rate=profitability.win_rate if profitability else None,
+                retention_ratio=profitability.retention_ratio if profitability else None,
+                fee_drag=profitability.fee_drag if profitability else None,
+                status="pass"
+                if support >= min_support and profitable
+                else "weak",
+            )
+        )
+
+    denominator = active_count if active_count > 0 else 0
+    metrics = Phase1BehaviorQualityMetrics(
+        weak_support_code_ratio=weak_support / denominator if denominator else _nan(),
+        weak_morphology_code_ratio=(
+            weak_morphology / denominator if denominator else _nan()
+        ),
+        weak_motif_code_ratio=weak_motif / denominator if denominator else _nan(),
+        weak_pair_code_ratio=weak_pair / denominator if denominator else _nan(),
+        weak_lift_nonprofitable_code_ratio=(
+            weak_lift_nonprofitable / denominator if denominator else _nan()
+        ),
+        intra_code_action_similarity=_intra_code_similarity(
+            val_snapshot.decoded_actions,
+            code_ids,
+            active_codes,
+        ),
+        inter_intra_separation=_inter_intra_separation(
+            val_snapshot.decoded_actions,
+            code_ids,
+            active_codes,
+        ),
+        latent_silhouette_score=_approx_silhouette(
+            val_snapshot.z_e,
+            code_ids,
+            active_codes,
+        ),
+        duplicate_code_pair_count=_duplicate_pair_count(
+            val_snapshot.decoded_actions,
+            code_ids,
+            active_codes,
+            threshold=thresholds.duplicate_code_similarity_max,
+        ),
+        profitable_code_coverage=(
+            profitable_count / denominator
+            if denominator and per_code_profitability is not None
+            else _nan()
+        ),
+    )
+    return Phase1LayerComputation(
+        layer_id=2,
+        layer_name="behavior_quality",
+        metrics=metrics,
+        code_diagnostics=tuple(diagnostics),
+        extra_payload={
+            "morphology_labels": morphologies,
+            "motif_labels": motifs,
+            "active_codes": active_codes,
+        },
+    )
+
+
+__all__ = [
+    "classify_action_motif",
+    "classify_market_morphology",
+    "compute_behavior_quality_metrics",
+]

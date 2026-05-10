@@ -20,8 +20,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, is_dataclass
-from typing import Any, Mapping, TypeVar
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from typing import Any, Mapping, TypeAlias, TypeVar
 
 import numpy as np
 
@@ -641,6 +641,47 @@ class Phase1PerCodeProfitability:
         return _dataclass_from_mapping(cls, payload)
 
 
+Phase1LayerMetrics: TypeAlias = (
+    Phase1TeacherQualityMetrics
+    | Phase1VQInternalMetrics
+    | Phase1BehaviorQualityMetrics
+    | Phase1OracleProfitabilityMetrics
+    | Phase1LabelPredictabilityMetrics
+)
+"""单个 validation layer calculator 输出的强类型 metrics 类型。"""
+
+
+@dataclass(frozen=True)
+class Phase1LayerComputation:
+    """单个 validation layer 的 raw metric 计算结果。
+
+    功能说明:
+        五个 ``phase1_validation_layers/layer*.py`` 文件只负责 raw metric 计算，
+        不做 hard gate pass/fail 判定。该对象把本层强类型 metrics、可选
+        code-level diagnostics 和后续 layer 需要复用的额外 payload 打包返回。
+
+    使用场景:
+        ``Phase1CodebookEvaluator`` 调用 layer calculator 后，读取 ``metrics``
+        交给 ``phase1_validation_rules.py``，并把 ``code_diagnostics`` 和
+        ``extra_payload`` 合并进 checkpoint/report payload。
+    """
+
+    # layer 数字编号，0 到 4。
+    layer_id: int
+
+    # layer 稳定名称，例如 "teacher_quality"。
+    layer_name: str
+
+    # 本层强类型 raw metrics。
+    metrics: Phase1LayerMetrics
+
+    # 可选 code-level 诊断表，主要由 layer2/layer3 填充。
+    code_diagnostics: tuple[Phase1CodeDiagnostic, ...] = ()
+
+    # 可选额外中间产物，例如 per-code profitability 或 probe diagnostics。
+    extra_payload: Mapping[str, object] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class Phase1ValidationMetrics:
     """五层 validation raw metrics 聚合对象。
@@ -719,6 +760,8 @@ __all__ = [
     "Phase1CodeDiagnostic",
     "Phase1EvaluationSnapshot",
     "Phase1LabelPredictabilityMetrics",
+    "Phase1LayerComputation",
+    "Phase1LayerMetrics",
     "Phase1OracleProfitabilityMetrics",
     "Phase1PerCodeProfitability",
     "Phase1TeacherQualityMetrics",
