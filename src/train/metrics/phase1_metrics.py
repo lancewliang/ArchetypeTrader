@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .vq_archetype import VqModelOutputs
+from ...model.vq_archetype import VqModelOutputs
 
 
 @dataclass

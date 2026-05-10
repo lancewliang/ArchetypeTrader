@@ -3,8 +3,8 @@ from __future__ import annotations
 import torch
 from torch.utils.data import DataLoader
 
-from ...model.phase1_metrics import Phase1Metrics
 from ...model.vq_archetype import ArchetypeVQModel
+from ..metrics import Phase1Metrics
 
 
 class Phase1Evaluator:
