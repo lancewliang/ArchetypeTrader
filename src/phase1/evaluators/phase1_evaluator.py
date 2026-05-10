@@ -32,7 +32,6 @@ class Phase1Evaluator:
         self,
         dataloader: DataLoader[TrajectoryTensorBatch],
         *,
-        use_vq: bool,
         stage: str | None = None,
         split: str | None = None,
         epoch: int | None = None,
@@ -41,12 +40,7 @@ class Phase1Evaluator:
         totals = Phase1Metrics(stage=stage, split=split, epoch=epoch)
         for batch in dataloader:
             batch = move_trajectory_batch_to_device(batch, self.device)
-            outputs = (
-                self.model(batch)
-                if use_vq
-                else self.model.forward_pretrain(batch)
-            )
+            outputs = self.model(batch)
             totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs)
         return totals.averaged()
-
 

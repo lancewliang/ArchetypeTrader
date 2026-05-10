@@ -374,7 +374,6 @@ class Phase1MainFlow:
             )
             val_metrics:Phase1Metrics = self.evaluator.evaluate(
                 val_loader,
-                use_vq=True,
                 stage="vq",
                 split="val",
                 epoch=epoch,
