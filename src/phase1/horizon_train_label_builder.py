@@ -1,4 +1,4 @@
-"""生成并保存 Phase I 输出的 horizon-level archetype 训练标签。
+"""生成 Phase I 输出的 horizon-level archetype 训练标签。
 
 论文背景:
     ArchetypeTrader 的 Phase I 是 Archetype Discovery。它先从训练数据中切出
@@ -29,15 +29,14 @@
        写出的 ``latent_*`` 和 ``demo_return`` 辅助分析。
 
 设计边界:
-    本模块只做离线 label 生成和保存，不重新运行 DP planner，不训练模型，也不
-    决定 best checkpoint。调用方必须传入已经加载好 best checkpoint 权重的
-    ``ArchetypeVQModel``。
+    本模块只做离线 label 生成，不重新运行 DP planner，不训练模型，不保存
+    文件，也不决定 best checkpoint。调用方必须传入已经加载好 best checkpoint
+    权重的 ``ArchetypeVQModel``，并负责持久化返回的 label 表。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import polars as pl
 import torch
@@ -49,7 +48,6 @@ from ..model.tensor_data_types import (
     move_trajectory_batch_to_device,
 )
 from ..model.vq_archetype import ArchetypeVQModel
-from ..store.artifact_store import DataFileStore
 
 
 @dataclass(frozen=True)
@@ -87,31 +85,28 @@ class HorizonTrainLabelBuilder:
         从 DP demonstrations 中自监督发现出来的离散 archetype 分配。
 
     使用方式:
-        ``Phase1MainFlow.build_components`` 中初始化 builder，使其绑定
-        ``DataFileStore`` 和生成配置；``export_horizon_labels`` 中再传入已加载
-        best checkpoint 权重的 ``model``、对应 split 的 ``trajectory_dataset``
-        和 ``split_name`` 调用 ``build_and_store``。
+        ``Phase1MainFlow.build_components`` 中初始化 builder，使其绑定生成配置；
+        ``export_horizon_labels`` 中再传入已加载 best checkpoint 权重的
+        ``model``、对应 split 的 ``trajectory_dataset`` 和 ``split_name`` 调用
+        ``build``，并由主流程负责保存返回的 label 表。
     """
 
     def __init__(
         self,
         *,
-        data_store: DataFileStore,
         config: HorizonTrainLabelBuilderConfig | None = None,
     ) -> None:
-        self.data_store = data_store
         self.config = config or HorizonTrainLabelBuilderConfig()
         self.device = torch.device(self.config.device)
 
-    def build_and_store(
+    def build(
         self,
         *,
         model: ArchetypeVQModel,
         trajectory_dataset: TrajectoryDataset,
         split_name: str = "train",
-        output_path: str | Path | None = None,
     ) -> pl.DataFrame:
-        """构建 horizon-level archetype labels，并通过 ``DataFileStore`` 保存。
+        """构建 horizon-level archetype labels。
 
         输入:
             model: 已加载 best checkpoint 权重的 ``ArchetypeVQModel``。本方法只
@@ -120,8 +115,6 @@ class HorizonTrainLabelBuilder:
                 trajectories，数据形式为 ``[(s_demo, a_demo, r_demo), ...]``。
             split_name: 当前数据 split 名称，例如 ``train``、``val``、``test``。
                 该字段会写入 label 表，方便后续阶段审计来源。
-            output_path: 可选输出路径。不传时由 ``DataFileStore`` 的 Phase I
-                标准产物路径决定。
 
         论文算法步骤:
             1. 保持 ``trajectory_dataset`` 原始顺序，禁止 shuffle。这样
@@ -132,14 +125,12 @@ class HorizonTrainLabelBuilder:
                ``model.encode((states, actions, rewards))``。
             4. ``model.encode`` 内部先用 trajectory encoder 生成 ``z_e``，
                再通过 VQ codebook 取最近 code，返回 ``code_labels``。
-            5. 为每个 horizon 写出一行 label:
+            5. 为每个 horizon 生成一行 label:
                ``sample_id``、``horizon_start_idx``、``horizon_end_idx``、
                ``code_label``、``demo_return`` 和 ``latent_*``。
-            6. 调用 ``DataFileStore.save_phase1_horizon_labels`` 保存为 feather、
-               parquet 或 csv 文件。
 
         输出:
-            返回写出的 ``polars.DataFrame``。最核心字段是:
+            返回 ``polars.DataFrame``。最核心字段是:
                 ``sample_id``: horizon 样本序号。
                 ``code_label``: Phase I VQ codebook 分配的 archetype id。
                 ``demo_return``: DP demonstration 在该 horizon 内的累计 reward。
@@ -160,111 +151,49 @@ class HorizonTrainLabelBuilder:
             shuffle=False,
         )
 
-        # 离线生成 label 时必须关闭 dropout/训练态行为；结束后恢复调用前状态。
-        previous_training = model.training
+        # 离线生成 label 时必须关闭 dropout/训练态行为。
         model.to(self.device)
         model.eval()
 
         rows: list[dict[str, object]] = []
         sample_offset = 0
-        try:
-            with torch.no_grad():
-                for batch in dataloader:
-                    states, actions, rewards = move_trajectory_batch_to_device(
-                        batch,
-                        self.device,
-                    )
-                    # encode 对应论文中的 q_theta_e + VQ nearest-code assignment。
-                    code_labels, latent = model.encode((states, actions, rewards))
-                    code_labels_cpu = code_labels.detach().cpu()
-                    latent_cpu = latent.detach().cpu()
-                    rewards_cpu = rewards.detach().cpu()
 
-                    batch_size = int(code_labels_cpu.shape[0])
-                    for batch_index in range(batch_size):
-                        sample_id = sample_offset + batch_index
-                        row: dict[str, object] = {
-                            "split": split_name,
-                            "sample_id": sample_id,
-                            # HorizonBuilder 当前按固定长度连续切块，因此可用
-                            # sample_id 和 horizon 恢复该样本覆盖的相对 bar 范围。
-                            "horizon_start_idx": sample_id * self.config.horizon,
-                            "horizon_end_idx": (sample_id + 1) * self.config.horizon - 1,
-                            "code_label": int(code_labels_cpu[batch_index].item()),
-                            "demo_return": float(rewards_cpu[batch_index].sum().item()),
-                        }
-                        for latent_index, value in enumerate(
-                            latent_cpu[batch_index].tolist()
-                        ):
-                            row[f"latent_{latent_index}"] = float(value)
-                        rows.append(row)
-                    sample_offset += batch_size
-        finally:
-            if previous_training:
-                model.train()
+        with torch.no_grad():
+            for batch in dataloader:
+                states, actions, rewards = move_trajectory_batch_to_device(
+                    batch,
+                    self.device,
+                )
+                # encode 对应论文中的 q_theta_e + VQ nearest-code assignment。
+                code_labels, latent = model.encode((states, actions, rewards))
+                code_labels_cpu = code_labels.detach().cpu()
+                latent_cpu = latent.detach().cpu()
+                rewards_cpu = rewards.detach().cpu()
 
-        labels = pl.DataFrame(rows)
-        path = (
-            Path(output_path)
-            if output_path is not None
-            else self._default_output_path(split_name)
-        )
-        self.data_store.save_phase1_horizon_labels(labels, path)
-        return labels
+                batch_size = int(code_labels_cpu.shape[0])
+                for batch_index in range(batch_size):
+                    sample_id = sample_offset + batch_index
+                    row: dict[str, object] = {
+                        "split": split_name,
+                        "sample_id": sample_id,
+                        # HorizonBuilder 当前按固定长度连续切块，因此可用
+                        # sample_id 和 horizon 恢复该样本覆盖的相对 bar 范围。
+                        "horizon_start_idx": sample_id * self.config.horizon,
+                        "horizon_end_idx": (sample_id + 1) * self.config.horizon - 1,
+                        "code_label": int(code_labels_cpu[batch_index].item()),
+                        "demo_return": float(rewards_cpu[batch_index].sum().item()),
+                    }
+                    for latent_index, value in enumerate(
+                        latent_cpu[batch_index].tolist()
+                    ):
+                        row[f"latent_{latent_index}"] = float(value)
+                    rows.append(row)
+                sample_offset += batch_size
 
-    def _default_output_path(self, split_name: str) -> Path:
-        """根据 Phase I 产物目录约定生成默认 label 输出路径。"""
-
-        if split_name == "train":
-            train_labels = self.data_store.artifact_paths.get("horizon_train_labels")
-            if train_labels is not None:
-                return Path(train_labels)
-        label_dir = self.data_store.artifact_paths.get("labels")
-        if label_dir is not None:
-            return Path(label_dir) / f"sampled_horizon_labels_{split_name}.feather"
-        output_dir = self.data_store.artifact_paths.get("output_dir")
-        if output_dir is None:
-            raise ValueError("data_store must be initialized with phase1 artifact paths")
-        return Path(output_dir) / f"sampled_horizon_labels_{split_name}.feather"
-
-
-def build_and_store(
-    *,
-    model: ArchetypeVQModel,
-    data_store: DataFileStore,
-    trajectory_dataset: TrajectoryDataset,
-    split_name: str = "train",
-    horizon: int = 72,
-    batch_size: int = 256,
-    device: str | torch.device = "cpu",
-    output_path: str | Path | None = None,
-) -> pl.DataFrame:
-    """模块级便捷入口，用于一次性构建并保存 horizon labels。
-
-    使用场景:
-        当调用方不需要长期持有 ``HorizonTrainLabelBuilder`` 实例时，可以直接
-        调用这个函数。Phase I 主流程中因为 builder 会在 ``build_components``
-        阶段初始化并复用，所以更适合直接使用类方法。
-    """
-
-    builder = HorizonTrainLabelBuilder(
-        data_store=data_store,
-        config=HorizonTrainLabelBuilderConfig(
-            horizon=horizon,
-            batch_size=batch_size,
-            device=device,
-        ),
-    )
-    return builder.build_and_store(
-        model=model,
-        trajectory_dataset=trajectory_dataset,
-        split_name=split_name,
-        output_path=output_path,
-    )
+        return pl.DataFrame(rows)
 
 
 __all__ = [
     "HorizonTrainLabelBuilder",
     "HorizonTrainLabelBuilderConfig",
-    "build_and_store",
 ]

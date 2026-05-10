@@ -337,22 +337,22 @@ class DataFileStore:
     def save_phase1_horizon_labels(
         self,
         labels: Any,
-        output_path: str | Path,
+        split_name: str = "train",
     ) -> None:
         """保存 Phase I horizon-level archetype labels。
 
         参数:
             labels: horizon label 表。后续实现可使用 polars/pandas DataFrame，
                 至少应包含 ``sample_id`` 和 ``code_label``。
-            output_path: label 文件路径，例如
-                ``sampled_horizon_labels_train.feather``。
+            split_name: 数据 split 名称，例如 ``train``、``val`` 或 ``test``。
+                文件路径由当前 ``DataFileStore`` 的 Phase I 产物路径决定。
 
         方法作用:
             保存由 best checkpoint 生成的离线 archetype label，供 Phase II/III
             训练和审计复用。
         """
 
-        path = Path(output_path)
+        path = self._phase1_horizon_label_path(split_name)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         if isinstance(labels, pl.DataFrame):
@@ -374,18 +374,19 @@ class DataFileStore:
 
     def load_phase1_horizon_labels(
         self,
-        input_path: str | Path,
+        split_name: str = "train",
     ) -> Any:
         """读取 Phase I horizon-level archetype labels。
 
         参数:
-            input_path: horizon label 文件路径。
+            split_name: 数据 split 名称，例如 ``train``、``val`` 或 ``test``。
+                文件路径由当前 ``DataFileStore`` 的 Phase I 产物路径决定。
 
         输出:
             返回 label 表，供 Phase II/III 训练、评估或审计使用。
         """
 
-        path = Path(input_path)
+        path = self._phase1_horizon_label_path(split_name)
         suffix = path.suffix.lower()
         if suffix in {".feather", ".ipc", ".arrow"}:
             return pl.read_ipc(path)
@@ -396,6 +397,24 @@ class DataFileStore:
         raise ValueError(
             "unsupported horizon label format; use .feather, .ipc, .parquet, or .csv"
         )
+
+    def _phase1_horizon_label_path(self, split_name: str = "train") -> Path:
+        """返回 Phase I horizon label 的标准路径。"""
+
+        if split_name == "train":
+            train_labels = self.artifact_paths.get("horizon_train_labels")
+            if train_labels is not None:
+                return Path(train_labels)
+
+        label_dir = self.artifact_paths.get("labels")
+        if label_dir is not None:
+            return Path(label_dir) / f"sampled_horizon_labels_{split_name}.feather"
+
+        output_dir = self.artifact_paths.get("output_dir")
+        if output_dir is not None:
+            return Path(output_dir) / f"sampled_horizon_labels_{split_name}.feather"
+
+        raise ValueError("data_store must be initialized with phase1 artifact paths")
 
     def save_phase1_report(
         self,

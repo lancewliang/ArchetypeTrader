@@ -288,7 +288,6 @@ class Phase1MainFlow:
         )
         self.selector = Phase1CheckpointSelector()
         self.horizon_train_label_builder = HorizonTrainLabelBuilder(
-            data_store=self.data_store,
             config=HorizonTrainLabelBuilderConfig(
                 horizon=self.config.horizon,
                 batch_size=self.config.batch_size,
@@ -416,7 +415,7 @@ class Phase1MainFlow:
         论文中的 Phase II selector 需要每个固定 horizon 的 VQ archetype
         label ``hat{a}^{sel}`` 作为监督/一致性信号。这里使用 best
         checkpoint 的 encoder 与 codebook 对 DP demonstration trajectories
-        离线编码，并通过 ``HorizonTrainLabelBuilder`` 写出 label 文件。
+        离线编码，再通过 ``DataFileStore`` 写出 label 文件。
         """
 
         if self.best_checkpoint_selection is None:
@@ -426,9 +425,13 @@ class Phase1MainFlow:
             self.best_checkpoint_selection.checkpoint.model_state_dict
         )
         for split_name, trajectory_dataset in self.trajectory_datasets.items():
-            self.horizon_train_label_builder.build_and_store(
+            labels = self.horizon_train_label_builder.build(
                 model=self.model,
                 trajectory_dataset=trajectory_dataset,
+                split_name=split_name,
+            )
+            self.data_store.save_phase1_horizon_labels(
+                labels,
                 split_name=split_name,
             )
         
