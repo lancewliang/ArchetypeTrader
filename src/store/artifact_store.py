@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from ..model.data_types import (
     ArtifactPaths,
     HorizonDataset,
@@ -64,7 +66,20 @@ class DataFileStore:
             路径命名规则应集中管理，避免 train/test/validation 各自拼路径，
             导致产物位置和命名不一致。
         """
-        ...
+        root = self._dataset_root(Path(path))
+        horizon_path = root / "horizon_datasets" / f"{split_name}.npz"
+        trajectory_path = root / "trajectory_datasets" / f"{split_name}.npz"
+        horizon_path.parent.mkdir(parents=True, exist_ok=True)
+        trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+
+        paths: ArtifactPaths = {
+            "horizon_dataset": horizon_path,
+            "trajectory_dataset": trajectory_path,
+            f"{split_name}_horizon_dataset": horizon_path,
+            f"{split_name}_trajectory_dataset": trajectory_path,
+        }
+        self.artifact_paths.update(paths)
+        return paths
 
     def save_horizon_dataset(
         self,
@@ -90,7 +105,14 @@ class DataFileStore:
             horizon 数据是从 feature 文件到 trajectory 数据之间的重要中间结果。
             单独保存可以支持复查 ``close`` 价格切分、状态 shape 和后续 DP 输入。
         """
-        ...
+        states, prices = horizon_dataset
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            output,
+            states=np.asarray(states, dtype=np.float32),
+            prices=np.asarray(prices, dtype=np.float32),
+        )
 
     def load_horizon_dataset(
         self,
@@ -114,7 +136,12 @@ class DataFileStore:
             ``trajectory_dataset`` 时，应能直接读取已固化的 horizon 数据，
             而不是重新读取 feature 文件并重新切分。
         """
-        ...
+        path = self._resolve_dataset_path("horizon", split_name)
+        with np.load(path) as payload:
+            return (
+                payload["states"].astype(np.float32, copy=False),
+                payload["prices"].astype(np.float32, copy=False),
+            )
 
     def save_trajectory_dataset(
         self,
@@ -139,7 +166,26 @@ class DataFileStore:
             Phase I 训练应消费已经固化的 trajectory 数据集，
             而不是在训练过程中重新读取 feature 文件或重新运行 DP。
         """
-        ...
+        if not trajectory_dataset:
+            raise ValueError("trajectory_dataset must not be empty")
+
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            output,
+            states=np.stack([tau[0] for tau in trajectory_dataset]).astype(
+                np.float32,
+                copy=False,
+            ),
+            actions=np.stack([tau[1] for tau in trajectory_dataset]).astype(
+                np.int64,
+                copy=False,
+            ),
+            rewards=np.stack([tau[2] for tau in trajectory_dataset]).astype(
+                np.float32,
+                copy=False,
+            ),
+        )
 
     def load_trajectory_dataset(
         self,
@@ -163,7 +209,60 @@ class DataFileStore:
             读取方法可以让训练流程、验证流程和审计流程复用同一份产物，
             避免重复运行 DP teacher。
         """
-        ...
+        path = self._resolve_dataset_path("trajectory", split_name)
+        with np.load(path) as payload:
+            states = payload["states"].astype(np.float32, copy=False)
+            actions = payload["actions"].astype(np.int64, copy=False)
+            rewards = payload["rewards"].astype(np.float32, copy=False)
+
+        if states.shape[0] != actions.shape[0] or states.shape[0] != rewards.shape[0]:
+            raise ValueError(f"invalid trajectory dataset file: {path}")
+        return [
+            (states[index], actions[index], rewards[index])
+            for index in range(states.shape[0])
+        ]
+
+    def _dataset_root(self, input_path: Path | None = None) -> Path:
+        """返回数据集产物根目录。"""
+
+        root = self.artifacts_root
+        if self.pair:
+            root = root / self.pair
+            if self.batchid:
+                root = root / self.batchid
+            return root
+        if input_path is not None:
+            return input_path.parent
+        return root
+
+    def _resolve_dataset_path(
+        self,
+        dataset_kind: str,
+        split_name: str | Path,
+    ) -> Path:
+        """解析 horizon/trajectory 数据集的读取路径。"""
+
+        candidate = Path(split_name)
+        if candidate.suffix:
+            return candidate
+
+        split = str(split_name)
+        key = f"{split}_{dataset_kind}_dataset"
+        stored_path = self.artifact_paths.get(key)
+        if stored_path is not None:
+            return Path(stored_path)
+
+        fallback_key = f"{dataset_kind}_dataset"
+        fallback_path = self.artifact_paths.get(fallback_key)
+        if fallback_path is not None and Path(fallback_path).stem == split:
+            return Path(fallback_path)
+
+        directory = (
+            "horizon_datasets"
+            if dataset_kind == "horizon"
+            else "trajectory_datasets"
+        )
+        return self._dataset_root() / directory / f"{split}.npz"
 
 
 DataStore = DataFileStore

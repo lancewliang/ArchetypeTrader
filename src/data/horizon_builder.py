@@ -71,7 +71,11 @@ class HorizonBuilder:
         if "close" not in dataframe.columns:
             raise ValueError("dataframe must contain a 'close' column")
 
-        state_columns = [column for column in dataframe.columns if column != "close"]
+        state_columns = [
+            column
+            for column, dtype in dataframe.schema.items()
+            if column != "close" and dtype.is_numeric()
+        ]
         if not state_columns:
             raise ValueError("dataframe must contain at least one state feature column")
 

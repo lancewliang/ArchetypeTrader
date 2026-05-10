@@ -5,8 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from .data_load import DataLoad
+from .horizon_builder import HorizonBuilder
 from ..model.data_types import TrajectoryDataset
 from ..store.artifact_store import DataStore
+from ..tool.SingleTrade_DP_Planner import SingleTrade_DP_Planner
 
 
 class DataPreparer:
@@ -59,7 +61,11 @@ class DataPreparer:
             train/test/validation 必须使用相同的 horizon 长度和同一套
             数据读取、产物读写规则，否则数据集之间的 schema 和审计方式会不一致。
         """
-        ...
+        self.horizon = horizon
+        self.data_load = data_load or DataLoad()
+        self.data_store = data_store or DataStore(artifacts_root="data")
+        self.horizon_builder = HorizonBuilder(horizon=horizon)
+        self.dp_planner = SingleTrade_DP_Planner(horizon=horizon)
 
     def _prepare_dataset(
         self,
@@ -99,7 +105,19 @@ class DataPreparer:
             抽成内部方法可以减少重复逻辑，并确保 train/test/validation
             使用完全一致的数据准备契约。
         """
-        ...
+        dataframe = self.data_load.load_feature_file(path)
+        horizon_dataset = self.horizon_builder.build(dataframe)
+        trajectory_dataset = self.dp_planner.build_trajectory_dataset(horizon_dataset)
+        artifact_paths = self.data_store.build_artifact_paths(path, split_name)
+        self.data_store.save_horizon_dataset(
+            horizon_dataset,
+            artifact_paths["horizon_dataset"],
+        )
+        self.data_store.save_trajectory_dataset(
+            trajectory_dataset,
+            artifact_paths["trajectory_dataset"],
+        )
+        return trajectory_dataset
 
     def prepare_train_dataset(
         self,
@@ -123,7 +141,7 @@ class DataPreparer:
             VQ encoder-decoder 的参数学习只依赖训练数据集。
             训练集准备必须独立、可复现，避免混入测试或校验数据。
         """
-        ...
+        return self._prepare_dataset(path, "train")
 
     def prepare_test_dataset(
         self,
@@ -147,7 +165,7 @@ class DataPreparer:
             测试集用于最终评估模型泛化能力。
             它必须和训练集格式一致，但不能参与模型训练或超参数选择。
         """
-        ...
+        return self._prepare_dataset(path, "test")
 
     def prepare_validation_dataset(
         self,
@@ -171,4 +189,4 @@ class DataPreparer:
             校验集用于训练过程中的模型选择、早停和超参数判断。
             它需要独立于训练集和测试集，避免评估结果被数据泄漏污染。
         """
-        ...
+        return self._prepare_dataset(path, "val")
