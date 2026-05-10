@@ -21,8 +21,8 @@ from ..model.tensor_data_types import (
 from ..model.vq_archetype import ArchetypeVQModel
 from ..store.artifact_store import DataFileStore
 from ..tool.SingleTrade_DP_Planner import SingleTrade_DP_Planner
-from .evaluators import Phase1Evaluator
-from .metrics import Phase1Metrics
+from ..train.evaluators import Phase1Evaluator
+from ..train.metrics import Phase1Metrics
 
 
 class Phase1FatalError(RuntimeError):
@@ -321,15 +321,13 @@ class Phase1MainFlow:
                 epoch=epoch,
             )
             data_store.save_phase1_checkpoint(
-                {
-                    "stage": "pretrain",
-                    "epoch": epoch,
-                    "is_best": False,
-                    "config": asdict(self.config),
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "metrics": {"train": train_metrics.to_dict(include_context=True)},
-                }
+                stage="pretrain",
+                epoch=epoch,
+                is_best=False,
+                config=asdict(self.config),
+                model_state_dict=model.state_dict(),
+                optimizer_state_dict=optimizer.state_dict(),
+                metrics={"train": train_metrics.to_dict(include_context=True)},
             )
 
     def train(self) -> None:
@@ -377,32 +375,14 @@ class Phase1MainFlow:
                 "val": val_metrics.to_dict(include_context=True),
             }
             data_store.save_phase1_checkpoint(
-                {
-                    "stage": "vq",
-                    "epoch": epoch,
-                    "is_best": False,
-                    "config": asdict(self.config),
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "metrics": metrics,
-                }
-            )
-
-            metric = float(val_metrics.total_loss)
-            if metric < best_metric:
-                best_metric = metric
-                self.best_metric = metric
-                data_store.save_phase1_checkpoint(
-                    {
-                        "stage": "vq",
-                        "epoch": epoch,
-                        "is_best": True,
-                        "config": asdict(self.config),
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "metrics": metrics,
-                    }
-                )
+                stage="vq",
+                epoch=epoch,
+                is_best=False,
+                config=asdict(self.config),
+                model_state_dict=model.state_dict(),
+                optimizer_state_dict=optimizer.state_dict(),
+                metrics=metrics,
+            )             
 
     def _run_epoch(
         self,

@@ -5,7 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..model.data_types import ArtifactPaths, HorizonDataset, TrajectoryDataset
+from ..checkpoint import (
+    Phase1Checkpoint,
+    Phase1CheckpointConfig,
+    Phase1CheckpointMetrics,
+    Phase1CheckpointStage,
+    Phase1StateDict,
+)
+from ..model.data_types import (
+    ArtifactPaths,
+    HorizonDataset,
+    TrajectoryDataset,
+)
 from ..model.vq_archetype import (
     ArchetypeActionDecoder,
     ArchetypeTrajectoryEncoder,
@@ -136,13 +147,25 @@ class DataFileStore:
 
     def save_phase1_checkpoint(
         self,
-        checkpoint: Any 
+        *,
+        stage: Phase1CheckpointStage,
+        epoch: int,
+        is_best: bool,
+        config: Phase1CheckpointConfig,
+        model_state_dict: Phase1StateDict,
+        optimizer_state_dict: Phase1StateDict,
+        metrics: Phase1CheckpointMetrics,
     ) -> None:
         """保存 Phase I checkpoint。
 
         参数:
-            checkpoint: checkpoint 内容。后续实现通常是包含 model/optimizer/
-                scheduler/epoch/metrics/config hash 的字典。
+            stage: checkpoint 所属阶段，例如 ``pretrain`` 或 ``vq``。
+            epoch: checkpoint 所属 epoch，从 1 开始。
+            is_best: 是否为当前 best checkpoint。
+            config: 训练配置快照。
+            model_state_dict: 模型参数状态。
+            optimizer_state_dict: 优化器状态。
+            metrics: 按 split 组织的 epoch 指标。
            
 
         方法作用:
@@ -150,6 +173,16 @@ class DataFileStore:
             记录 sha256 供审计。
         """
 
+        checkpoint = Phase1Checkpoint(
+            stage=stage,
+            epoch=epoch,
+            is_best=is_best,
+            config=config,
+            model_state_dict=model_state_dict,
+            optimizer_state_dict=optimizer_state_dict,
+            metrics=metrics,
+        )
+        checkpoint.to_dict()
         ...
 
     def load_phase1_checkpoint(
