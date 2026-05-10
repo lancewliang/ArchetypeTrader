@@ -28,7 +28,6 @@ from .horizon_train_label_builder import (
     HorizonTrainLabelBuilder,
     HorizonTrainLabelBuilderConfig,
 )
-from .metrics import Phase1Metrics
 from .report import Phase1Report
 
 

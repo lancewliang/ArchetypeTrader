@@ -8,7 +8,7 @@ from ...model.tensor_data_types import (
     move_trajectory_batch_to_device,
 )
 from ...model.vq_archetype import ArchetypeVQModel
-from ..metrics import Phase1Metrics
+
 
 
 class Phase1Evaluator:
