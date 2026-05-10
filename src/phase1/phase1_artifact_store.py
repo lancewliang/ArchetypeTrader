@@ -76,6 +76,7 @@ class Phase1ArtifactStore(DataFileStore):
         failure_case_dir = root / "failure_cases"
         label_dir = root / "labels"
         best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
+        last_checkpoint_path = checkpoint_dir / "last_checkpoint.pt"
 
         for directory in (
             root,
@@ -98,6 +99,11 @@ class Phase1ArtifactStore(DataFileStore):
             "labels": label_dir,
             "horizon_train_labels": label_dir / "sampled_horizon_labels_train.feather",
             "best_checkpoint": best_checkpoint_path,
+            "last_checkpoint": last_checkpoint_path,
+            "encoder": root / "encoder.pt",
+            "decoder": root / "decoder.pt",
+            "codebook": root / "codebook.pt",
+            "phase1_report": root / "phase1_report.json",
         }
 
         return None
@@ -107,7 +113,6 @@ class Phase1ArtifactStore(DataFileStore):
         *,
         stage: Phase1CheckpointStage,
         epoch: int,
-        is_best: bool,
         config: Phase1CheckpointConfig,
         model_state_dict: Phase1StateDict,
         optimizer_state_dict: Phase1StateDict,
@@ -118,7 +123,6 @@ class Phase1ArtifactStore(DataFileStore):
         参数:
             stage: checkpoint 所属阶段，例如 ``pretrain`` 或 ``vq``。
             epoch: checkpoint 所属 epoch，从 1 开始。
-            is_best: 是否为当前 best checkpoint。
             config: 训练配置快照。
             model_state_dict: 模型参数状态。
             optimizer_state_dict: 优化器状态。
@@ -132,41 +136,53 @@ class Phase1ArtifactStore(DataFileStore):
         checkpoint = Phase1Checkpoint(
             stage=stage,
             epoch=epoch,
-            is_best=is_best,
+            is_best=False,
             config=config,
             model_state_dict=model_state_dict,
             optimizer_state_dict=optimizer_state_dict,
             metrics=metrics,
         )
+        _ = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
         checkpoint.to_dict()
         ...
 
     def load_phase1_checkpoint(
         self,
-        input_path: str | Path,
+        *,
+        stage: Phase1CheckpointStage | None = None,
+        epoch: int | None = None,
+        best: bool = False,
     ) -> Any:
         """读取 Phase I checkpoint。
 
         参数:
-            input_path: checkpoint 文件路径。
+            stage: checkpoint 所属阶段；读取非 best checkpoint 时必填。
+            epoch: checkpoint 所属 epoch；读取非 best checkpoint 时必填。
+            best: 是否读取当前 best checkpoint。为 ``True`` 时忽略
+                ``stage`` 和 ``epoch``。
 
         输出:
             返回 checkpoint 内容，供恢复训练、best 选择和模型导出使用。
         """
 
+        if best:
+            _ = self._phase1_best_checkpoint_path()
+        else:
+            if stage is None or epoch is None:
+                raise ValueError(
+                    "stage and epoch are required when loading a non-best checkpoint"
+                )
+            _ = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
         ...
 
     def save_best_checkpoint(
         self,
         checkpoint: Phase1Checkpoint,
-        output_path: str | Path | None = None,
     ) -> None:
         """保存 Phase I best checkpoint。
 
         参数:
             checkpoint: ``Phase1CheckpointSelector`` 选出的 best checkpoint payload。
-            output_path: 可选覆盖保存路径；默认使用
-                ``artifact_paths["best_checkpoint"]``。
 
         方法作用:
             为 ``Phase1MainFlow.export_phase2_artifacts`` 提供单独的 best
@@ -174,103 +190,92 @@ class Phase1ArtifactStore(DataFileStore):
             后续再补齐原子写入、索引更新、校验和审计元数据。
         """
 
+        _ = self._phase1_best_checkpoint_path()
         ...
 
     def save_phase1_encoder(
         self,
         encoder: ArchetypeTrajectoryEncoder,
-        output_path: str | Path,
     ) -> None:
         """保存 Phase I encoder 导出产物。
 
         参数:
             encoder: 训练完成后从 best checkpoint 导出的 trajectory encoder。
-            output_path: encoder 保存路径，例如 ``encoder.pt``。
 
         方法作用:
             将 Phase II 离线 label 生成需要复用的 encoder 以统一方式写出。
         """
 
+        _ = self._phase1_artifact_path("encoder")
         ...
 
     def load_phase1_encoder(
         self,
-        input_path: str | Path,
     ) -> ArchetypeTrajectoryEncoder:
         """读取 Phase I encoder 导出产物。
-
-        参数:
-            input_path: ``encoder.pt`` 路径。
 
         输出:
             返回 trajectory encoder，供 Phase II label 生成或离线诊断加载。
         """
 
+        _ = self._phase1_artifact_path("encoder")
         ...
 
     def save_phase1_decoder(
         self,
         decoder: ArchetypeActionDecoder,
-        output_path: str | Path,
     ) -> None:
         """保存 Phase I decoder 导出产物。
 
         参数:
             decoder: 训练完成后从 best checkpoint 导出的 causal action decoder。
-            output_path: decoder 保存路径，例如 ``decoder.pt``。
 
         方法作用:
             将 Phase II/III 在线生成基础动作需要复用的 decoder 以统一方式写出。
         """
 
+        _ = self._phase1_artifact_path("decoder")
         ...
 
     def load_phase1_decoder(
         self,
-        input_path: str | Path,
     ) -> ArchetypeActionDecoder:
         """读取 Phase I decoder 导出产物。
-
-        参数:
-            input_path: ``decoder.pt`` 路径。
 
         输出:
             返回 causal action decoder，供 Phase II/III 或离线诊断加载。
         """
 
+        _ = self._phase1_artifact_path("decoder")
         ...
 
     def save_phase1_codebook(
         self,
         codebook: VectorQuantizer,
-        output_path: str | Path,
     ) -> None:
         """保存 Phase I codebook 导出产物。
 
         参数:
             codebook: 训练完成后从 best checkpoint 导出的 VQ codebook。
-            output_path: codebook 保存路径，例如 ``codebook.pt``。
 
         方法作用:
             将 Phase II/III 离散 archetype 选择和解码需要复用的 codebook
             以统一方式写出。
         """
 
+        _ = self._phase1_artifact_path("codebook")
         ...
 
     def load_phase1_codebook(
         self,
-        input_path: str | Path,
     ) -> VectorQuantizer:
         """读取 Phase I codebook 导出产物。
-
-        参数:
-            input_path: ``codebook.pt`` 路径。
 
         输出:
             返回 VQ codebook，供 Phase II/III 或离线诊断加载。
         """
 
+        _ = self._phase1_artifact_path("codebook")
         ...
 
     def save_phase1_horizon_labels(
@@ -358,36 +363,58 @@ class Phase1ArtifactStore(DataFileStore):
     def save_phase1_report(
         self,
         report: dict[str, Any],
-        output_path: str | Path,
     ) -> None:
         """保存 Phase I 训练报告。
 
         参数:
             report: 训练报告内容，包含配置摘要、best checkpoint、评估指标、
                 guardrail 结果、warning 和 collapse 诊断。
-            output_path: 报告保存路径，通常为 ``phase1_report.json``。
 
         方法作用:
             统一封装 Phase I report 写入。正式实现应在写入前校验 report
             schema，并使用稳定 JSON 格式。
         """
 
+        _ = self._phase1_artifact_path("phase1_report")
         ...
 
     def load_phase1_report(
         self,
-        input_path: str | Path,
     ) -> dict[str, Any]:
         """读取 Phase I 训练报告。
-
-        参数:
-            input_path: ``phase1_report.json`` 路径。
 
         输出:
             返回训练报告字典，供复查、resume 和后续阶段读取。
         """
 
+        _ = self._phase1_artifact_path("phase1_report")
         ...
+
+    def _phase1_artifact_path(self, key: str) -> Path:
+        """返回 Phase I 标准产物路径。"""
+
+        path = self.artifact_paths.get(key)
+        if path is None:
+            raise ValueError(
+                "data_store must be initialized with phase1 artifact paths"
+            )
+        return Path(path)
+
+    def _phase1_checkpoint_path(
+        self,
+        *,
+        stage: Phase1CheckpointStage,
+        epoch: int,
+    ) -> Path:
+        """返回指定阶段和 epoch 的 Phase I checkpoint 标准路径。"""
+
+        checkpoint_dir = self._phase1_artifact_path("checkpoints")
+        return checkpoint_dir / f"{stage}_epoch_{epoch:04d}.pt"
+
+    def _phase1_best_checkpoint_path(self) -> Path:
+        """返回 Phase I best checkpoint 标准路径。"""
+
+        return self._phase1_artifact_path("best_checkpoint")
 
 
 Phase1Store = Phase1ArtifactStore

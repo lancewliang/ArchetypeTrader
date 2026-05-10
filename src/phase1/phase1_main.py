@@ -338,7 +338,6 @@ class Phase1MainFlow:
             self.data_store.save_phase1_checkpoint(
                 stage="pretrain",
                 epoch=epoch,
-                is_best=False,
                 config=asdict(self.config),
                 model_state_dict=self.model.state_dict(),
                 optimizer_state_dict=self.optimizer.state_dict(),
@@ -387,7 +386,6 @@ class Phase1MainFlow:
             self.data_store.save_phase1_checkpoint(
                 stage="vq",
                 epoch=epoch,
-                is_best=False,
                 config=asdict(self.config),
                 model_state_dict=self.model.state_dict(),
                 optimizer_state_dict=self.optimizer.state_dict(),

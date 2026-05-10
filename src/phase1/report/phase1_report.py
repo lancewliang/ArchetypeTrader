@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from ..phase1_artifact_store import Phase1ArtifactStore
@@ -34,7 +33,6 @@ class Phase1Report:
         best_checkpoint_selection: Phase1CheckpointSelectionResult | None = None,
         metrics: dict[str, Any] | None = None,
         diagnostics: dict[str, Any] | None = None,
-        output_path: str | Path | None = None,
     ) -> None:
         """Write the Phase I training report.
 
@@ -43,7 +41,6 @@ class Phase1Report:
             best_checkpoint_selection: selector 输出的 best checkpoint 选择结果。
             metrics: 训练、验证和测试指标摘要。
             diagnostics: collapse、边界样本、action distribution 等诊断摘要。
-            output_path: 可选报告输出路径；默认由 ``Phase1ArtifactStore`` 管理。
 
         方法作用:
             定义 Phase I report 的独立写出入口。当前方法只保留骨架，正式实现
