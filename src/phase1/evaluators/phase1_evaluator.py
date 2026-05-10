@@ -15,9 +15,8 @@ class Phase1Evaluator:
     """Phase I 评估与导出骨架。
 
     功能描述:
-        承接 Phase I 训练后的评估、导出和报告生成逻辑。当前只保留流程骨架，
-        后续实现会在这里补齐 checkpoint 选择、Phase II 产物导出、horizon label
-        生成和报告写出。
+        承接 Phase I 训练后的评估和 horizon label 导出逻辑。当前只保留流程
+        骨架，后续实现会在这里补齐离线评估和 horizon label 生成。
     """
 
     def __init__(
@@ -49,3 +48,5 @@ class Phase1Evaluator:
             )
             totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs)
         return totals.averaged()
+
+

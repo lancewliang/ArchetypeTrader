@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..checkpoint import (
+from ..phase1.checkpoint import (
     Phase1Checkpoint,
     Phase1CheckpointConfig,
     Phase1CheckpointMetrics,
@@ -125,12 +125,13 @@ class DataFileStore:
             不加载数据，也不创建空产物文件。
         """
 
-        root = Path(self.artifacts_root) / self.pair / self.batch_id / "phase1"
+        root = Path(self.artifacts_root) / self.pair / self.batchid / "phase1"
         checkpoint_dir = root / "checkpoints"
         diagnostics_dir = root / "diagnostics"
         tensorboard_dir = root / "tensorboard"
         latent_snapshot_dir = root / "latent_snapshots"
         failure_case_dir = root / "failure_cases"
+        best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
 
         for directory in (
             root,
@@ -141,6 +142,16 @@ class DataFileStore:
             failure_case_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
+
+        self.artifact_paths = {
+            "output_dir": root,
+            "checkpoints": checkpoint_dir,
+            "diagnostics": diagnostics_dir,
+            "tensorboard": tensorboard_dir,
+            "latent_snapshots": latent_snapshot_dir,
+            "failure_cases": failure_case_dir,
+            "best_checkpoint": best_checkpoint_path,
+        }
 
         return None
         
@@ -196,6 +207,26 @@ class DataFileStore:
 
         输出:
             返回 checkpoint 内容，供恢复训练、best 选择和模型导出使用。
+        """
+
+        ...
+
+    def save_best_checkpoint(
+        self,
+        checkpoint: Phase1Checkpoint,
+        output_path: str | Path | None = None,
+    ) -> None:
+        """保存 Phase I best checkpoint。
+
+        参数:
+            checkpoint: ``Phase1CheckpointSelector`` 选出的 best checkpoint payload。
+            output_path: 可选覆盖保存路径；默认使用
+                ``artifact_paths["best_checkpoint"]``。
+
+        方法作用:
+            为 ``Phase1MainFlow.export_phase2_artifacts`` 提供单独的 best
+            checkpoint 固化入口。当前方法只定义 store 层调用契约，正式实现
+            后续再补齐原子写入、索引更新、校验和审计元数据。
         """
 
         ...

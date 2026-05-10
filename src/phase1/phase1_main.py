@@ -2,14 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, cast
 import torch
 from torch.utils.data import DataLoader
 
 from ..data.data_load import DataLoad
 from ..data.horizon_builder import HorizonBuilder
 from ..model.data_types import (
-    ArtifactPaths,
     HorizonDataset,
     TrajectoryDataset,
 )
@@ -21,8 +19,13 @@ from ..model.tensor_data_types import (
 from ..model.vq_archetype import ArchetypeVQModel
 from ..store.artifact_store import DataFileStore
 from ..tool.SingleTrade_DP_Planner import SingleTrade_DP_Planner
-from ..train.evaluators import Phase1Evaluator
-from ..train.metrics import Phase1Metrics
+from .checkpoint import (
+    Phase1CheckpointSelectionResult,
+    Phase1CheckpointSelector,
+)
+from .evaluators import Phase1Evaluator
+from .metrics import Phase1Metrics
+from .report import Phase1Report
 
 
 class Phase1FatalError(RuntimeError):
@@ -113,8 +116,7 @@ class Phase1MainFlow:
         """
 
         self.config = config
-        self.device = self._resolve_device(config.device)
-        
+        self.device = self._resolve_device(config.device)        
         self.horizon_datasets: dict[str, HorizonDataset] = {}
         self.trajectory_datasets: dict[str, TrajectoryDataset] = {}   
         self.data_load: DataLoad | None = None
@@ -124,8 +126,9 @@ class Phase1MainFlow:
         self.optimizer: torch.optim.Optimizer | None = None
         self.dataloaders: dict[str, DataLoader[TrajectoryTensorBatch]] = {}
         self.data_store: DataFileStore | None = None
-        self.best_metric: float | None = None
         self.evaluator: Phase1Evaluator | None = None
+        self.report: Phase1Report | None = None
+        self.best_checkpoint_selection: Phase1CheckpointSelectionResult | None = None
  
     def _resolve_device(self, device: str) -> torch.device:
         requested_device = torch.device(device)
@@ -193,6 +196,7 @@ class Phase1MainFlow:
             batchid=self.config.train_batch_id,
         )   
         self.data_store.initialize_phase1_artifact_dirs()
+        self.report = Phase1Report(data_store=self.data_store)
         self.data_load = DataLoad()
         self.horizon_builder = HorizonBuilder(horizon=self.config.horizon)
         self.dp_planner = SingleTrade_DP_Planner(
@@ -224,12 +228,11 @@ class Phase1MainFlow:
             "val": self.config.val_file,
             "test": self.config.test_file,
         }
-        data_store = cast(DataFileStore, self.data_store)
         for split_name, path in split_files.items():
             if path is None:
                 continue
-            self.horizon_datasets[split_name] = data_store.load_horizon_dataset(split_name)
-            self.trajectory_datasets[split_name] = data_store.load_trajectory_dataset(split_name)
+            self.horizon_datasets[split_name] = self.data_store.load_horizon_dataset(split_name)
+            self.trajectory_datasets[split_name] = self.data_store.load_trajectory_dataset(split_name)
 
     def build_components(self) -> None:
         """构建 DP 示范生成与 VQ 训练组件。
@@ -278,6 +281,7 @@ class Phase1MainFlow:
             model.parameters(),
             lr=self.config.learning_rate,
         )
+        self.selector = Phase1CheckpointSelector()
 
     def validate_components(self) -> None:
         """集中校验 Phase I 后续训练和评估步骤依赖的组件。"""
@@ -294,6 +298,8 @@ class Phase1MainFlow:
             raise Phase1FatalError("optimizer must be initialized")
         if self.evaluator is None:
             raise Phase1FatalError("evaluator must be initialized")
+        if self.report is None:
+            raise Phase1FatalError("report must be initialized")
 
     def pretrain(self) -> None:
         """预训练 Phase I encoder-decoder 并保存 checkpoint。
@@ -309,9 +315,6 @@ class Phase1MainFlow:
         """
 
         train_loader = self.dataloaders["train"]
-        data_store = cast(DataFileStore, self.data_store)
-        model = cast(ArchetypeVQModel, self.model)
-        optimizer = cast(torch.optim.Optimizer, self.optimizer)
         for epoch in range(1, self.config.pretrain_epochs + 1):
             train_metrics = self._run_epoch(
                 train_loader,
@@ -320,13 +323,13 @@ class Phase1MainFlow:
                 split="train",
                 epoch=epoch,
             )
-            data_store.save_phase1_checkpoint(
+            self.data_store.save_phase1_checkpoint(
                 stage="pretrain",
                 epoch=epoch,
                 is_best=False,
                 config=asdict(self.config),
-                model_state_dict=model.state_dict(),
-                optimizer_state_dict=optimizer.state_dict(),
+                model_state_dict=self.model.state_dict(),
+                optimizer_state_dict=self.optimizer.state_dict(),
                 metrics={"train": train_metrics.to_dict(include_context=True)},
             )
 
@@ -349,11 +352,6 @@ class Phase1MainFlow:
 
         train_loader = self.dataloaders["train"]
         val_loader = self.dataloaders["train"]
-        data_store = cast(DataFileStore, self.data_store)
-        model = cast(ArchetypeVQModel, self.model)
-        evaluator = cast(Phase1Evaluator, self.evaluator)
-        optimizer = cast(torch.optim.Optimizer, self.optimizer)
-        best_metric = float("inf")  
 
         for epoch in range(1, self.config.epochs + 1):
             train_metrics = self._run_epoch(
@@ -363,7 +361,7 @@ class Phase1MainFlow:
                 split="train",
                 epoch=epoch,
             )
-            val_metrics:Phase1Metrics = evaluator.evaluate(
+            val_metrics:Phase1Metrics = self.evaluator.evaluate(
                 val_loader,
                 use_vq=True,
                 stage="vq",
@@ -374,16 +372,36 @@ class Phase1MainFlow:
                 "train": train_metrics.to_dict(include_context=True),
                 "val": val_metrics.to_dict(include_context=True),
             }
-            data_store.save_phase1_checkpoint(
+            self.data_store.save_phase1_checkpoint(
                 stage="vq",
                 epoch=epoch,
                 is_best=False,
                 config=asdict(self.config),
-                model_state_dict=model.state_dict(),
-                optimizer_state_dict=optimizer.state_dict(),
+                model_state_dict=self.model.state_dict(),
+                optimizer_state_dict=self.optimizer.state_dict(),
                 metrics=metrics,
             )             
 
+
+    def select_best_checkpoint(self) -> None:       
+        self.best_checkpoint_selection = self.selector.select_best_from_dir(
+            self.data_store.artifact_paths["checkpoints"],
+        )
+
+    def export_phase2_artifacts(self) -> None:
+        self.data_store.save_best_checkpoint(self.best_checkpoint_selection.checkpoint)
+
+    def write_report(self) -> None:
+        self.report.write_report(
+            config=asdict(self.config),
+            best_checkpoint_selection=self.best_checkpoint_selection,
+        )
+        
+    def export_horizon_labels(self) -> None:
+        """导出 Phase I horizon-level archetype labels 的骨架入口。"""
+
+        ...
+        
     def _run_epoch(
         self,
         dataloader: DataLoader[TrajectoryTensorBatch],
@@ -393,36 +411,17 @@ class Phase1MainFlow:
         split: str | None = None,
         epoch: int | None = None,
     ) -> Phase1Metrics:
-        model = cast(ArchetypeVQModel, self.model)
-        optimizer = cast(torch.optim.Optimizer, self.optimizer)
-
-        model.train()
+        self.model.train()
         totals = Phase1Metrics(stage=stage, split=split, epoch=epoch)
         for batch in dataloader:
             batch = move_trajectory_batch_to_device(batch, self.device)
-            optimizer.zero_grad(set_to_none=True)
+            self.optimizer.zero_grad(set_to_none=True)
             outputs = (
-                model(batch)
+                self.model(batch)
                 if use_vq
-                else model.forward_pretrain(batch)
+                else self.model.forward_pretrain(batch)
             )
             outputs.total_loss.backward()
-            optimizer.step()
+            self.optimizer.step()
             totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs)
         return totals.averaged()
-
-    def select_best_checkpoint(self) -> None:
-        evaluator = cast(Any, self.evaluator)
-        evaluator.select_best_checkpoint()
-
-    def export_phase2_artifacts(self) -> None:
-        evaluator = cast(Any, self.evaluator)
-        evaluator.export_phase2_artifacts()
-
-    def export_horizon_labels(self) -> None:
-        evaluator = cast(Any, self.evaluator)
-        evaluator.export_horizon_labels()
-
-    def write_report(self) -> None:
-        evaluator = cast(Any, self.evaluator)
-        evaluator.write_report()
