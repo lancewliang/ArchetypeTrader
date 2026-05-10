@@ -220,19 +220,32 @@ class Phase1CodebookEvaluator:
         reconstruction_loss = loss_weighted_sum / total_samples
         action_accuracy = correct_actions / total_actions if total_actions > 0 else 0.0
 
+        # Shape legend after concatenating all dataloader batches on axis=0:
+        # N=total horizon samples, H=horizon length, F=state feature dim,
+        # A=action classes, K=codebook size, D=latent/code embedding dim.
         return Phase1EvaluationSnapshot(
             split=split,
             epoch=epoch,
             sample_ids=sample_ids,
+            # [N, H, F]
             states=np.concatenate(state_parts, axis=0),
+            # None or [N, H]. HorizonDataset [N, H, 1] prices are normalized below.
             prices=prices,
+            # [N, H]
             demo_actions=np.concatenate(action_parts, axis=0),
+            # [N, H]
             demo_rewards=np.concatenate(reward_parts, axis=0),
+            # [N, H]
             decoded_actions=np.concatenate(decoded_action_parts, axis=0),
+            # [N, H, A]
             decoded_logits=np.concatenate(decoded_logit_parts, axis=0),
+            # [N]
             code_ids=np.concatenate(code_id_parts, axis=0),
+            # [N, D]
             z_e=np.concatenate(z_e_parts, axis=0),
+            # [N, D]
             z_q=np.concatenate(z_q_parts, axis=0),
+            # [N, K]
             distances=np.concatenate(distance_parts, axis=0),
             reconstruction_loss=reconstruction_loss,
             action_accuracy=action_accuracy,
@@ -406,7 +419,7 @@ class Phase1CodebookEvaluator:
             expected_samples: 当前 dataloader 实际收集到的样本数。
 
         输出:
-            prices 数组；未提供 horizon dataset 或样本数不匹配时返回 ``None``。
+            prices 数组，shape=[N, H]；未提供 horizon dataset 或样本数不匹配时返回 ``None``。
 
         使用场景:
             ``collect_snapshot()`` 将 dataloader 中的 trajectory 与外部 horizon prices
@@ -420,6 +433,13 @@ class Phase1CodebookEvaluator:
         price_values = np.asarray(prices)
         if price_values.shape[0] != expected_samples:
             return None
+        if price_values.ndim == 3 and price_values.shape[-1] == 1:
+            return price_values[..., 0]
+        if price_values.ndim != 2:
+            raise ValueError(
+                "horizon_dataset prices must have shape [N, H] or [N, H, 1], "
+                f"got {price_values.shape}"
+            )
         return price_values
 
 

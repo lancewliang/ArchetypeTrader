@@ -108,8 +108,7 @@ TrajectoryTensorBatch: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tenso
         batch 内多条 DP teacher 动作序列。
 
     ``rewards``: ``[batch, h]``
-        batch 内多条逐步 reward 序列。
-        如果上游保留为 ``[batch, h, 1]``，进入模型前应压缩最后一维。
+        batch 内多条逐步 reward 序列。 
 
 dtype:
     ``states`` 通常为 ``torch.float32``。

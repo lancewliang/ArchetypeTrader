@@ -79,6 +79,36 @@ def _array_from_payload(value: Any) -> np.ndarray | None:
     return np.asarray(value)
 
 
+def _require_ndarray(field_name: str, value: Any) -> np.ndarray:
+    """校验 snapshot 字段必须是 numpy array。"""
+
+    if not isinstance(value, np.ndarray):
+        raise TypeError(f"{field_name} must be np.ndarray, got {type(value).__name__}")
+    return value
+
+
+def _require_shape(
+    field_name: str,
+    value: np.ndarray,
+    expected_shape: tuple[int, ...],
+) -> None:
+    """校验数组形状完全匹配。"""
+
+    if value.shape != expected_shape:
+        raise ValueError(
+            f"{field_name} must have shape {expected_shape}, got {value.shape}"
+        )
+
+
+def _require_ndim(field_name: str, value: np.ndarray, expected_ndim: int) -> None:
+    """校验数组维度数量。"""
+
+    if value.ndim != expected_ndim:
+        raise ValueError(
+            f"{field_name} must be {expected_ndim}D, got shape {value.shape}"
+        )
+
+
 def _flatten_dataclass(prefix: str, value: Any, output: dict[str, int | float]) -> None:
     """把嵌套 dataclass 中的数值字段展开为 ``prefix.field`` 形式。
 
@@ -132,13 +162,13 @@ class Phase1EvaluationSnapshot:
     # horizon 状态特征数组，shape=[N, H, F]。用于 label predictability probe 和部分 morphology 诊断。
     states: np.ndarray
 
-    # horizon 价格序列，shape=[N, H] 或 [N, H, 1]。用于收益、fee drag、morphology 和 oracle profitability 计算；缺失时可为 None。
+    # horizon 价格序列，shape=[N, H]。用于收益、fee drag、morphology 和 oracle profitability 计算；缺失时可为 None。
     prices: np.ndarray | None
 
     # DP teacher 动作序列，shape=[N, H]。用于重构准确率、direction accuracy、teacher return 计算。
     demo_actions: np.ndarray
 
-    # DP teacher reward 序列，shape=[N, H] 或 [N, H, 1]。用于 teacher quality 和 retention ratio 计算。
+    # DP teacher reward 序列，shape=[N, H]。用于 teacher quality 和 retention ratio 计算。
     demo_rewards: np.ndarray
 
     # decoder 在 assigned code 条件下输出的离散动作序列，shape=[N, H]，通常为 decoded_logits 的 argmax。
@@ -165,12 +195,60 @@ class Phase1EvaluationSnapshot:
     # 当前 split 的动作重构准确率。用于第一层 VQ internal hard gate。
     action_accuracy: float
 
+    def __post_init__(self) -> None:
+        """校验 snapshot 初始化时的数组维度一致性。"""
+
+        sample_ids = _require_ndarray("sample_ids", self.sample_ids)
+        states = _require_ndarray("states", self.states)
+        demo_actions = _require_ndarray("demo_actions", self.demo_actions)
+        demo_rewards = _require_ndarray("demo_rewards", self.demo_rewards)
+        decoded_actions = _require_ndarray("decoded_actions", self.decoded_actions)
+        decoded_logits = _require_ndarray("decoded_logits", self.decoded_logits)
+        code_ids = _require_ndarray("code_ids", self.code_ids)
+        z_e = _require_ndarray("z_e", self.z_e)
+        z_q = _require_ndarray("z_q", self.z_q)
+        distances = _require_ndarray("distances", self.distances)
+
+        _require_ndim("states", states, 3)
+        n_samples, horizon, _ = states.shape
+        nh_shape = (n_samples, horizon)
+        n_shape = (n_samples,)
+
+        _require_shape("sample_ids", sample_ids, n_shape)
+        _require_shape("demo_actions", demo_actions, nh_shape)
+        _require_shape("demo_rewards", demo_rewards, nh_shape)
+        _require_shape("decoded_actions", decoded_actions, nh_shape)
+        _require_shape("code_ids", code_ids, n_shape)
+
+        if self.prices is not None:
+            prices = _require_ndarray("prices", self.prices)
+            _require_shape("prices", prices, nh_shape)
+
+        _require_ndim("decoded_logits", decoded_logits, 3)
+        if decoded_logits.shape[:2] != nh_shape:
+            raise ValueError(
+                f"decoded_logits must have leading shape {nh_shape}, got {decoded_logits.shape}"
+            )
+
+        _require_ndim("z_e", z_e, 2)
+        _require_ndim("z_q", z_q, 2)
+        _require_ndim("distances", distances, 2)
+        if z_e.shape[0] != n_samples:
+            raise ValueError(f"z_e must have leading shape {n_shape}, got {z_e.shape}")
+        if z_q.shape[0] != n_samples:
+            raise ValueError(f"z_q must have leading shape {n_shape}, got {z_q.shape}")
+        if distances.shape[0] != n_samples:
+            raise ValueError(
+                f"distances must have leading shape {n_shape}, got {distances.shape}"
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """序列化 snapshot。
 
         数组形状:
             所有 ``np.ndarray`` 字段会按原 shape 转为嵌套 list，例如
-            ``sample_ids=[N]``、``states=[N,H,F]``、``decoded_logits=[N,H,A]``、
+            ``sample_ids=[N]``、``states=[N,H,F]``、``prices=[N,H]``、
+            ``demo_rewards=[N,H]``、``decoded_logits=[N,H,A]``、
             ``distances=[N,K]``。
 
         使用场景:
@@ -202,9 +280,10 @@ class Phase1EvaluationSnapshot:
 
         数组形状:
             期望 payload 中数组字段保持 ``to_dict()`` 写出的嵌套 list 形状：
-            ``sample_ids=[N]``、``states=[N,H,F]``、``prices=[N,H]`` 或
-            ``[N,H,1]``、``demo_actions=[N,H]``、``decoded_logits=[N,H,A]``、
-            ``code_ids=[N]``、``z_e/z_q=[N,D]``、``distances=[N,K]``。
+            ``sample_ids=[N]``、``states=[N,H,F]``、``prices=[N,H]``、
+            ``demo_actions=[N,H]``、``demo_rewards=[N,H]``、
+            ``decoded_logits=[N,H,A]``、``code_ids=[N]``、``z_e/z_q=[N,D]``、
+            ``distances=[N,K]``。
         """
 
         return cls(
