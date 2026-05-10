@@ -8,7 +8,12 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from ..data.data_load import DataLoad
 from ..data.horizon_builder import HorizonBuilder
-from ..model.data_types import ArtifactPaths, HorizonDataset, TrajectoryDataset
+from ..model.data_types import (
+    ArtifactPaths,
+    HorizonDataset,
+    TrajectoryDataset,
+)
+from ..model.phase1_metrics import Phase1Metrics
 from ..model.vq_archetype import ArchetypeVQModel
 from ..store.artifact_store import DataFileStore
 from ..tool.SingleTrade_DP_Planner import SingleTrade_DP_Planner
@@ -103,19 +108,36 @@ class Phase1MainFlow:
         """
 
         self.config = config
+        self.device = self._resolve_device(config.device)
         
         self.horizon_datasets: dict[str, HorizonDataset] = {}
         self.trajectory_datasets: dict[str, TrajectoryDataset] = {}   
         self.data_load: DataLoad | None = None
         self.horizon_builder: HorizonBuilder | None = None
         self.dp_planner: SingleTrade_DP_Planner | None = None
+        self.model: ArchetypeVQModel | None = None
         self.optimizer: torch.optim.Optimizer | None = None
         self.dataloaders: dict[str, DataLoader[tuple[torch.Tensor, ...]]] = {}
         self.data_store: DataFileStore | None = None
         self.best_metric: float | None = None
-        self.evaluator = Phase1Evaluator(self)
-        self.device = torch.device("cpu")
+        self.evaluator: Phase1Evaluator | None = None
  
+    def _resolve_device(self, device: str) -> torch.device:
+        requested_device = torch.device(device)
+        if requested_device.type == "cuda" and not torch.cuda.is_available():
+            return torch.device("cpu")
+        return requested_device
+
+    def _require_evaluator(self) -> Phase1Evaluator:
+        if self.evaluator is None:
+            raise Phase1FatalError("evaluator must be initialized")
+        return self.evaluator
+
+    def _require_model(self) -> ArchetypeVQModel:
+        if self.model is None:
+            raise Phase1FatalError("model must be initialized")
+        return self.model
+
 
     def run(self) -> None:
         """按论文 Phase I 顺序执行 Archetype Discovery。
@@ -183,13 +205,6 @@ class Phase1MainFlow:
             initial_action=1,
             gamma=self.config.gamma,
         )
-        
-        requested_device = torch.device(self.config.device)
-        if requested_device.type == "cuda" and not torch.cuda.is_available():
-            requested_device = torch.device("cpu")
-        self.device = requested_device
-
-
 
     def load_inputs(self) -> None:
         """加载输入 split，并形成 Phase I 训练数据基础。
@@ -252,7 +267,7 @@ class Phase1MainFlow:
 
         first_states, _, _ = train_dataset[0]
         state_dim = int(first_states.shape[-1])
-        self.evaluator.model = ArchetypeVQModel(
+        model = ArchetypeVQModel(
             state_dim=state_dim,
             action_dim=self.config.action_dim,
             hidden_dim=self.config.hidden_dim,
@@ -262,8 +277,10 @@ class Phase1MainFlow:
             num_layers=self.config.num_layers,
             dropout=self.config.dropout,
         ).to(self.device)
+        self.model = model
+        self.evaluator = Phase1Evaluator(model=model, device=self.device)
         self.optimizer = torch.optim.Adam(
-            self.evaluator.model.parameters(),
+            model.parameters(),
             lr=self.config.learning_rate,
         )
 
@@ -281,26 +298,30 @@ class Phase1MainFlow:
         """
 
         train_loader = self.dataloaders.get("train")     
-        val_loader = self.dataloaders.get("val")
         if train_loader is None:
             raise Phase1FatalError("train dataloader is required")
         if self.data_store is None:
             raise Phase1FatalError("data store must be initialized")
-        if self.evaluator.model is None or self.optimizer is None:
+        model = self._require_model()
+        if self.optimizer is None:
             raise Phase1FatalError("model and optimizer must be initialized")
         for epoch in range(1, self.config.pretrain_epochs + 1):
-            train_metrics = self._run_epoch(train_loader, use_vq=False)
-            eval_loader = val_loader or train_loader
-            val_metrics = self.evaluator.evaluate(eval_loader, use_vq=False)
+            train_metrics = self._run_epoch(
+                train_loader,
+                use_vq=False,
+                stage="pretrain",
+                split="train",
+                epoch=epoch,
+            )
             self.data_store.save_phase1_checkpoint(
                 {
                     "stage": "pretrain",
                     "epoch": epoch,
                     "is_best": False,
                     "config": asdict(self.config),
-                    "model_state_dict": self.evaluator.model.state_dict(),
+                    "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": self.optimizer.state_dict(),
-                    "metrics": {"train": train_metrics, "val": val_metrics},
+                    "metrics": {"train": train_metrics.to_dict(include_context=True)},
                 }
             )
 
@@ -327,28 +348,46 @@ class Phase1MainFlow:
             raise Phase1FatalError("train dataloader is required")
         if self.data_store is None:
             raise Phase1FatalError("data store must be initialized")
-        if self.evaluator.model is None or self.optimizer is None:
+        model = self._require_model()
+        evaluator = self._require_evaluator()
+        if self.optimizer is None:
             raise Phase1FatalError("model and optimizer must be initialized")
         best_metric = float("inf")
+        eval_loader = val_loader or train_loader
+        eval_split = "val" if val_loader is not None else "train"
 
         for epoch in range(1, self.config.epochs + 1):
-            train_metrics = self._run_epoch(train_loader, use_vq=True)
-            eval_loader = val_loader or train_loader
-            val_metrics = self.evaluator.evaluate(eval_loader, use_vq=True)
-            metrics = {"train": train_metrics, "val": val_metrics}
+            train_metrics = self._run_epoch(
+                train_loader,
+                use_vq=True,
+                stage="vq",
+                split="train",
+                epoch=epoch,
+            )
+            val_metrics = evaluator.evaluate(
+                eval_loader,
+                use_vq=True,
+                stage="vq",
+                split=eval_split,
+                epoch=epoch,
+            )
+            metrics = {
+                "train": train_metrics.to_dict(include_context=True),
+                "val": val_metrics.to_dict(include_context=True),
+            }
             self.data_store.save_phase1_checkpoint(
                 {
                     "stage": "vq",
                     "epoch": epoch,
                     "is_best": False,
                     "config": asdict(self.config),
-                    "model_state_dict": self.evaluator.model.state_dict(),
+                    "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": self.optimizer.state_dict(),
                     "metrics": metrics,
                 }
             )
 
-            metric = float(val_metrics["total_loss"])
+            metric = float(val_metrics.total_loss)
             if metric < best_metric:
                 best_metric = metric
                 self.best_metric = metric
@@ -358,7 +397,7 @@ class Phase1MainFlow:
                         "epoch": epoch,
                         "is_best": True,
                         "config": asdict(self.config),
-                        "model_state_dict": self.evaluator.model.state_dict(),
+                        "model_state_dict": model.state_dict(),
                         "optimizer_state_dict": self.optimizer.state_dict(),
                         "metrics": metrics,
                     }
@@ -387,33 +426,48 @@ class Phase1MainFlow:
         dataloader: DataLoader[tuple[torch.Tensor, ...]],
         *,
         use_vq: bool,
-    ) -> dict[str, float]:
-        if self.evaluator.model is None or self.optimizer is None:
+        stage: str | None = None,
+        split: str | None = None,
+        epoch: int | None = None,
+    ) -> Phase1Metrics:
+        model = self._require_model()
+        if self.optimizer is None:
             raise Phase1FatalError("model and optimizer must be initialized")
 
-        self.evaluator.model.train()
-        totals = self.evaluator._empty_metric_totals()
+        model.train()
+        totals = Phase1Metrics(stage=stage, split=split, epoch=epoch)
         for batch in dataloader:
-            batch = self.evaluator._move_batch(batch)
+            batch = self._move_batch(batch)
             self.optimizer.zero_grad(set_to_none=True)
             outputs = (
-                self.evaluator.model(batch)
+                model(batch)
                 if use_vq
-                else self.evaluator.model.forward_pretrain(batch)
+                else model.forward_pretrain(batch)
             )
             outputs.total_loss.backward()
             self.optimizer.step()
-            self.evaluator._accumulate_metrics(totals, outputs, batch_size=batch[0].shape[0])
-        return self.evaluator._finalize_metrics(totals)
+            totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs)
+        return totals.averaged()
+
+    def _move_batch(
+        self,
+        batch: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        states, actions, rewards = batch
+        return (
+            states.to(self.device),
+            actions.to(self.device),
+            rewards.to(self.device),
+        )
 
     def select_best_checkpoint(self) -> None:
-        self.evaluator.select_best_checkpoint()
+        self._require_evaluator().select_best_checkpoint()
 
     def export_phase2_artifacts(self) -> None:
-        self.evaluator.export_phase2_artifacts()
+        self._require_evaluator().export_phase2_artifacts()
 
     def export_horizon_labels(self) -> None:
-        self.evaluator.export_horizon_labels()
+        self._require_evaluator().export_horizon_labels()
 
     def write_report(self) -> None:
-        self.evaluator.write_report()
+        self._require_evaluator().write_report()

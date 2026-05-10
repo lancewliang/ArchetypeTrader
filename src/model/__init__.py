@@ -6,6 +6,7 @@ from .data_types import (
     HorizonDataset,
     TrajectoryDataset,
 )
+from .phase1_metrics import Phase1Metrics
 from .tensor_data_types import (
     ActionLogitTensor,
     ArchetypeLabelTensor,
@@ -44,6 +45,7 @@ __all__ = [
     "HorizonTensorDataset",
     "LatentTensor",
     "ModelOutputs",
+    "Phase1Metrics",
     "QuantizeOutput",
     "TrajectoryDataset",
     "TrajectoryTensorBatch",

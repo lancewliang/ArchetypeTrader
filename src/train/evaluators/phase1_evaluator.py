@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
-
 import torch
 from torch.utils.data import DataLoader
 
+from ...model.phase1_metrics import Phase1Metrics
 from ...model.vq_archetype import ArchetypeVQModel
-
-if TYPE_CHECKING:
-    from ..phase1_main import Phase1MainFlow
 
 
 class Phase1Evaluator:
@@ -20,9 +16,13 @@ class Phase1Evaluator:
         生成和报告写出。
     """
 
-    def __init__(self, flow: Phase1MainFlow) -> None:
-        self.flow = flow
-        self.model: ArchetypeVQModel | None = None
+    def __init__(
+        self,
+        model: ArchetypeVQModel,
+        device: torch.device | str,
+    ) -> None:
+        self.device = torch.device(device)
+        self.model = model.to(self.device)
 
     @torch.no_grad()
     def evaluate(
@@ -30,12 +30,12 @@ class Phase1Evaluator:
         dataloader: DataLoader[tuple[torch.Tensor, ...]],
         *,
         use_vq: bool,
-    ) -> dict[str, float]:
-        if self.model is None:
-            raise RuntimeError("model must be initialized")
-
+        stage: str | None = None,
+        split: str | None = None,
+        epoch: int | None = None,
+    ) -> Phase1Metrics:
         self.model.eval()
-        totals = self._empty_metric_totals()
+        totals = Phase1Metrics(stage=stage, split=split, epoch=epoch)
         for batch in dataloader:
             batch = self._move_batch(batch)
             outputs = (
@@ -43,8 +43,8 @@ class Phase1Evaluator:
                 if use_vq
                 else self.model.forward_pretrain(batch)
             )
-            self._accumulate_metrics(totals, outputs, batch_size=batch[0].shape[0])
-        return self._finalize_metrics(totals)
+            totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs)
+        return totals.averaged()
 
     def _move_batch(
         self,
@@ -52,42 +52,7 @@ class Phase1Evaluator:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         states, actions, rewards = batch
         return (
-            states.to(self.flow.device),
-            actions.to(self.flow.device),
-            rewards.to(self.flow.device),
+            states.to(self.device),
+            actions.to(self.device),
+            rewards.to(self.device),
         )
-
-    def _empty_metric_totals(self) -> dict[str, float]:
-        return {
-            "samples": 0.0,
-            "total_loss": 0.0,
-            "reconstruction_loss": 0.0,
-            "vq_loss": 0.0,
-            "codebook_loss": 0.0,
-            "commitment_loss": 0.0,
-        }
-
-    def _accumulate_metrics(
-        self,
-        totals: dict[str, float],
-        outputs: Any,
-        *,
-        batch_size: int,
-    ) -> None:
-        totals["samples"] += batch_size
-        totals["total_loss"] += float(outputs.total_loss.detach().cpu()) * batch_size
-        totals["reconstruction_loss"] += (
-            float(outputs.reconstruction_loss.detach().cpu()) * batch_size
-        )
-        totals["vq_loss"] += float(outputs.vq_loss.detach().cpu()) * batch_size
-        totals["codebook_loss"] += (
-            float(outputs.codebook_loss.detach().cpu()) * batch_size
-        )
-        totals["commitment_loss"] += (
-            float(outputs.commitment_loss.detach().cpu()) * batch_size
-        )
-
-    def _finalize_metrics(self, totals: dict[str, float]) -> dict[str, float]:
-        samples = max(totals.pop("samples"), 1.0)
-        return {name: value / samples for name, value in totals.items()}
- 
