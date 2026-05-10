@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...store.artifact_store import DataFileStore
+from ..phase1_artifact_store import Phase1ArtifactStore
 from ..checkpoint import Phase1CheckpointSelectionResult
 
 
@@ -25,7 +25,7 @@ class Phase1Report:
         使用。
     """
 
-    data_store: DataFileStore
+    data_store: Phase1ArtifactStore
 
     def write_report(
         self,
@@ -43,12 +43,12 @@ class Phase1Report:
             best_checkpoint_selection: selector 输出的 best checkpoint 选择结果。
             metrics: 训练、验证和测试指标摘要。
             diagnostics: collapse、边界样本、action distribution 等诊断摘要。
-            output_path: 可选报告输出路径；默认由 ``DataFileStore`` 管理。
+            output_path: 可选报告输出路径；默认由 ``Phase1ArtifactStore`` 管理。
 
         方法作用:
             定义 Phase I report 的独立写出入口。当前方法只保留骨架，正式实现
             后续再补齐 report payload 组装、schema 校验和
-            ``DataFileStore.save_phase1_report`` 调用。
+            ``Phase1ArtifactStore.save_phase1_report`` 调用。
         """
 
         ...

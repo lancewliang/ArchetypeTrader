@@ -17,7 +17,7 @@ from ..model.tensor_data_types import (
     move_trajectory_batch_to_device,
 )
 from ..model.vq_archetype import ArchetypeVQModel
-from ..store.artifact_store import DataFileStore
+from .phase1_artifact_store import Phase1ArtifactStore
 from ..tool.SingleTrade_DP_Planner import SingleTrade_DP_Planner
 from .checkpoint import (
     Phase1CheckpointSelectionResult,
@@ -111,7 +111,7 @@ class Phase1MainFlow:
         功能描述:
             根据 ``pair`` 和 ``train_batch_id`` 绑定一次训练批次的产物命名空间，
             后续所有 checkpoint、模型导出、label 和报告路径都通过
-            ``DataFileStore`` 统一管理。
+            ``Phase1ArtifactStore`` 统一管理。
 
         论文描述:
             Phase I 的离线产物是 Phase II 选择策略和 Phase III refinement 的
@@ -129,7 +129,7 @@ class Phase1MainFlow:
         self.model: ArchetypeVQModel | None = None
         self.optimizer: torch.optim.Optimizer | None = None
         self.dataloaders: dict[str, DataLoader[TrajectoryTensorBatch]] = {}
-        self.data_store: DataFileStore | None = None
+        self.data_store: Phase1ArtifactStore | None = None
         self.evaluator: Phase1Evaluator | None = None
         self.report: Phase1Report | None = None
         self.best_checkpoint_selection: Phase1CheckpointSelectionResult | None = None
@@ -196,7 +196,7 @@ class Phase1MainFlow:
             这些产物必须在训练前有稳定路径，才能保证后续 Phase II selector
             使用的是同一组离散 archetypes，而不是混用不同实验批次。
         """
-        self.data_store = DataFileStore(
+        self.data_store = Phase1ArtifactStore(
             pair=self.config.pair,
             batchid=self.config.train_batch_id,
         )   
@@ -318,7 +318,7 @@ class Phase1MainFlow:
 
         功能描述:
             执行可选 reconstruction pretrain，让 encoder/decoder 具备基础动作
-            重构能力。checkpoint 保存委托给 ``DataFileStore``，具体持久化策略
+            重构能力。checkpoint 保存委托给 ``Phase1ArtifactStore``，具体持久化策略
             后续在 store 层实现。
 
         论文描述:
@@ -350,7 +350,7 @@ class Phase1MainFlow:
 
         功能描述:
             启用 VQ codebook 训练，按 epoch 计算训练/验证指标，并通过
-            ``DataFileStore.save_phase1_checkpoint`` 交给 store 层保存 checkpoint。
+            ``Phase1ArtifactStore.save_phase1_checkpoint`` 交给 store 层保存 checkpoint。
 
         论文描述:
             训练目标对应论文式 (4):
@@ -415,7 +415,7 @@ class Phase1MainFlow:
         论文中的 Phase II selector 需要每个固定 horizon 的 VQ archetype
         label ``hat{a}^{sel}`` 作为监督/一致性信号。这里使用 best
         checkpoint 的 encoder 与 codebook 对 DP demonstration trajectories
-        离线编码，再通过 ``DataFileStore`` 写出 label 文件。
+        离线编码，再通过 ``Phase1ArtifactStore`` 写出 label 文件。
         """
 
         if self.best_checkpoint_selection is None:
