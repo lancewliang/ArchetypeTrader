@@ -8,6 +8,7 @@ from ...model.tensor_data_types import (
     move_trajectory_batch_to_device,
 )
 from ...model.vq_archetype import ArchetypeVQModel
+from ..metrics import Phase1Metrics
 
 
 
@@ -41,6 +42,5 @@ class Phase1Evaluator:
         for batch in dataloader:
             batch = move_trajectory_batch_to_device(batch, self.device)
             outputs = self.model(batch)
-            totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs)
+            totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs, actions=batch[1])
         return totals.averaged()
-

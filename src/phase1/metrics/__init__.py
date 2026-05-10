@@ -1,3 +1,10 @@
+from .phase1_metrics import Phase1Metrics
+from .phase1_metric_results import (
+    MetricSeverity,
+    Phase1LayerResult,
+    Phase1MetricResult,
+    Phase1ValidationResult,
+)
 from .phase1_validation_data_schema import (
     CodeAssignmentSnapshot,
     Phase1BehaviorQualityMetrics,
@@ -20,9 +27,35 @@ from .phase1_validation_config import (
     Phase1ValidationScoreWeights,
     Phase1VQInternalThresholds,
 )
+from .phase1_validation_rules import (
+    aggregate_validation_result,
+    evaluate_behavior_quality_rules,
+    evaluate_label_predictability_rules,
+    evaluate_oracle_profitability_rules,
+    evaluate_teacher_quality_rules,
+    evaluate_vq_internal_rules,
+)
+from .phase1_validation_score import (
+    DEFAULT_TIE_SCORE_TOLERANCE,
+    build_tie_breaker_metrics,
+    compare_phase1_tie_breaker,
+    compute_behavior_structure_score,
+    compute_codebook_health_score,
+    compute_label_predictability_score,
+    compute_oracle_profitability_score,
+    compute_phase1_validation_score,
+    compute_reconstruction_score,
+    compute_teacher_quality_score,
+    scores_are_tied,
+)
 
 __all__ = [
     "CodeAssignmentSnapshot",
+    "DEFAULT_TIE_SCORE_TOLERANCE",
+    "MetricSeverity",
+    "Phase1LayerResult",
+    "Phase1MetricResult",
+    "Phase1Metrics",
     "Phase1BehaviorQualityMetrics",
     "Phase1BehaviorQualityThresholds",
     "Phase1CodeDiagnostic",
@@ -37,7 +70,24 @@ __all__ = [
     "Phase1TieBreakerMetrics",
     "Phase1VQInternalMetrics",
     "Phase1ValidationMetrics",
+    "Phase1ValidationResult",
     "Phase1ValidationRuntimeConfig",
     "Phase1ValidationScoreWeights",
     "Phase1VQInternalThresholds",
+    "aggregate_validation_result",
+    "build_tie_breaker_metrics",
+    "compare_phase1_tie_breaker",
+    "compute_behavior_structure_score",
+    "compute_codebook_health_score",
+    "compute_label_predictability_score",
+    "compute_oracle_profitability_score",
+    "compute_phase1_validation_score",
+    "compute_reconstruction_score",
+    "compute_teacher_quality_score",
+    "evaluate_behavior_quality_rules",
+    "evaluate_label_predictability_rules",
+    "evaluate_oracle_profitability_rules",
+    "evaluate_teacher_quality_rules",
+    "evaluate_vq_internal_rules",
+    "scores_are_tied",
 ]

@@ -28,6 +28,7 @@ from .horizon_train_label_builder import (
     HorizonTrainLabelBuilder,
     HorizonTrainLabelBuilderConfig,
 )
+from .metrics import Phase1Metrics
 from .report import Phase1Report
 
 
@@ -452,5 +453,5 @@ class Phase1MainFlow:
             )
             outputs.total_loss.backward()
             self.optimizer.step()
-            totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs)
+            totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs, actions=batch[1])
         return totals.averaged()
