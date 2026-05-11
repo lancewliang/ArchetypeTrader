@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
@@ -69,9 +68,6 @@ class Phase1MainConfig:
 
     pair: str
     train_batch_id: str
-    train_file: Path | None = None
-    val_file: Path | None = None
-    test_file: Path | None = None
     epochs: int = 100
     pretrain_epochs: int = 10
     batch_size: int = 256
@@ -85,7 +81,7 @@ class Phase1MainConfig:
     commitment_cost: float = 0.25
     num_layers: int = 1
     dropout: float = 0.0
-    gamma: float = 1.0
+    gamma: float = 0.9
 
 
 class Phase1MainFlow:
@@ -215,10 +211,9 @@ class Phase1MainFlow:
         """加载输入 split，并形成 Phase I 训练数据基础。
 
         功能描述:
-            读取 train/val/test 文件或默认数据源，校验 feature schema，构建固定
-            horizon 的市场状态窗口，并为训练集采样 demonstration chunks。正式
-            实现应避免跨 split 泄漏，并保存输入 schema、feature provenance 和
-            normalizer 信息。
+            读取前置数据处理已经固化的 train/val/test horizon 与 trajectory
+            数据集。训练入口不再接收原始 feature split 文件路径，避免训练阶段
+            重新读 feature 文件或重新运行 DP teacher。
 
         论文描述:
             论文先从训练数据中采样 n 个长度为 h 的 data chunks，再对每个 chunk
@@ -228,16 +223,14 @@ class Phase1MainFlow:
             VQ archetype extraction 的训练数据集 D。
         """
       
-        split_files: dict[str, Path | None] = {
-            "train": self.config.train_file,
-            "val": self.config.val_file,
-            "test": self.config.test_file,
-        }
-        for split_name, path in split_files.items():
-            if path is None:
-                continue
-            self.horizon_datasets[split_name] = self.data_store.load_horizon_dataset(split_name)
-            self.trajectory_datasets[split_name] = self.data_store.load_trajectory_dataset(split_name)
+        for split_name in ("train", "val", "test"):
+            self.horizon_datasets[split_name] = (
+                    self.data_store.load_horizon_dataset(split_name)
+                )
+            self.trajectory_datasets[split_name] = (
+                    self.data_store.load_trajectory_dataset(split_name)
+                )
+          
 
     def build_components(self) -> None:
         """构建 DP 示范生成与 VQ 训练组件。
@@ -362,8 +355,8 @@ class Phase1MainFlow:
         """
 
         train_loader = self.dataloaders["train"]
-        val_loader = self.dataloaders["train"]
-
+        val_loader = self.dataloaders["val"]
+                
         for epoch in range(1, self.config.epochs + 1):
             train_metrics = self._run_epoch(
                 train_loader,

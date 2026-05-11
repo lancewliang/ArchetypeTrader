@@ -2,44 +2,37 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python Debugger: train_phase1",
+            "name": "Python Debugger: prepare_datasets.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/prepare_datasets.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--pair",
+                "FU",
+                "--data-root",
+                "${workspaceFolder}/data",
+                "--horizon",
+                "72",
+                "--train-file",
+                "${workspaceFolder}/data/FU/train.feather",
+                "--val-file",
+                "${workspaceFolder}/data/FU/val.feather",
+                "--test-file",
+                "${workspaceFolder}/data/FU/test.feather"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Python Debugger: train_phase1.py",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/scripts/train_phase1.py",
             "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}"
-            },
-            "console": "integratedTerminal"
-        },
-                {
-            "name": "Python Debugger: train_phase2",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/scripts/train_phase2.py",
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}"
-            },
-            "console": "integratedTerminal"
-        },
-                {
-            "name": "Python Debugger: train_phase3",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/scripts/train_phase3.py",
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}"
-            },
-            "console": "integratedTerminal"
-        },
-                {
-            "name": "Python Debugger: evaluate",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/scripts/evaluate.py",
-            "cwd": "${workspaceFolder}",
+            "python": "/home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             },
