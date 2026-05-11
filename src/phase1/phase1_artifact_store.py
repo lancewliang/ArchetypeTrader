@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import tempfile
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, cast
 
 import polars as pl
+import torch
 
 from ..model.vq_archetype import (
     ArchetypeActionDecoder,
@@ -142,9 +146,11 @@ class Phase1ArtifactStore(DataFileStore):
             optimizer_state_dict=optimizer_state_dict,
             metrics=metrics,
         )
-        _ = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
-        checkpoint.to_dict()
-        ...
+        checkpoint_path = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
+        self._save_phase1_checkpoint_payload(checkpoint, checkpoint_path)
+
+        last_checkpoint_path = self._phase1_artifact_path("last_checkpoint")
+        self._save_phase1_checkpoint_payload(checkpoint, last_checkpoint_path)
 
     def load_phase1_checkpoint(
         self,
@@ -166,14 +172,14 @@ class Phase1ArtifactStore(DataFileStore):
         """
 
         if best:
-            _ = self._phase1_best_checkpoint_path()
+            path = self._phase1_best_checkpoint_path()
         else:
             if stage is None or epoch is None:
                 raise ValueError(
                     "stage and epoch are required when loading a non-best checkpoint"
                 )
-            _ = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
-        ...
+            path = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
+        return self._load_phase1_checkpoint_payload(path)
 
     def save_best_checkpoint(
         self,
@@ -190,8 +196,11 @@ class Phase1ArtifactStore(DataFileStore):
             后续再补齐原子写入、索引更新、校验和审计元数据。
         """
 
-        _ = self._phase1_best_checkpoint_path()
-        ...
+        best_checkpoint = replace(checkpoint, is_best=True)
+        self._save_phase1_checkpoint_payload(
+            best_checkpoint,
+            self._phase1_best_checkpoint_path(),
+        )
 
     def save_phase1_encoder(
         self,
@@ -415,6 +424,158 @@ class Phase1ArtifactStore(DataFileStore):
         """返回 Phase I best checkpoint 标准路径。"""
 
         return self._phase1_artifact_path("best_checkpoint")
+
+    def _save_phase1_checkpoint_payload(
+        self,
+        checkpoint: Phase1Checkpoint,
+        path: Path,
+    ) -> None:
+        """以原子替换方式保存 checkpoint payload 并写出 sha256 sidecar。"""
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = checkpoint.to_dict()
+
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+
+        try:
+            torch.save(payload, temp_path)
+            digest = self._sha256_file(temp_path)
+            temp_path.replace(path)
+            self._write_sha256_sidecar(path, digest)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    def _load_phase1_checkpoint_payload(self, path: Path) -> Phase1Checkpoint:
+        """读取 checkpoint 文件并恢复为 ``Phase1Checkpoint``。"""
+
+        if not path.exists():
+            raise FileNotFoundError(f"phase1 checkpoint not found: {path}")
+
+        try:
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:
+            payload = torch.load(path, map_location="cpu")
+
+        if isinstance(payload, Phase1Checkpoint):
+            return payload
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"invalid phase1 checkpoint payload: {path}")
+        return self._phase1_checkpoint_from_mapping(payload, path)
+
+    def _phase1_checkpoint_from_mapping(
+        self,
+        payload: Mapping[str, object],
+        path: Path,
+    ) -> Phase1Checkpoint:
+        """校验 checkpoint 字段并恢复强类型 payload。"""
+
+        required_keys = {
+            "stage",
+            "epoch",
+            "is_best",
+            "config",
+            "model_state_dict",
+            "optimizer_state_dict",
+            "metrics",
+        }
+        missing_keys = required_keys.difference(payload)
+        if missing_keys:
+            missing = ", ".join(sorted(missing_keys))
+            raise ValueError(f"invalid phase1 checkpoint {path}: missing {missing}")
+
+        stage = payload["stage"]
+        if stage not in {"pretrain", "vq"}:
+            raise ValueError(f"invalid phase1 checkpoint {path}: unsupported stage")
+        stage = cast(Phase1CheckpointStage, stage)
+
+        config = payload["config"]
+        model_state_dict = payload["model_state_dict"]
+        optimizer_state_dict = payload["optimizer_state_dict"]
+        metrics = payload["metrics"]
+        if not isinstance(config, Mapping):
+            raise ValueError(
+                f"invalid phase1 checkpoint {path}: config must be a mapping"
+            )
+        if not isinstance(model_state_dict, Mapping):
+            raise ValueError(
+                f"invalid phase1 checkpoint {path}: model_state_dict must be a mapping"
+            )
+        if not isinstance(optimizer_state_dict, Mapping):
+            raise ValueError(
+                f"invalid phase1 checkpoint {path}: optimizer_state_dict must be a mapping"
+            )
+        if not isinstance(metrics, Mapping):
+            raise ValueError(
+                f"invalid phase1 checkpoint {path}: metrics must be a mapping"
+            )
+
+        try:
+            epoch = int(payload["epoch"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid phase1 checkpoint {path}: epoch must be an integer"
+            ) from exc
+
+        is_best = payload["is_best"]
+        if not isinstance(is_best, bool):
+            raise ValueError(f"invalid phase1 checkpoint {path}: is_best must be a bool")
+
+        restored_metrics: dict[str, dict[str, object]] = {}
+        for split, split_metrics in metrics.items():
+            if not isinstance(split_metrics, Mapping):
+                raise ValueError(
+                    f"invalid phase1 checkpoint {path}: "
+                    f"metrics[{split!r}] must be a mapping"
+                )
+            restored_metrics[str(split)] = dict(split_metrics)
+
+        return Phase1Checkpoint(
+            stage=stage,
+            epoch=epoch,
+            is_best=is_best,
+            config=dict(config),
+            model_state_dict=dict(model_state_dict),
+            optimizer_state_dict=dict(optimizer_state_dict),
+            metrics=restored_metrics,
+        )
+
+    def _write_sha256_sidecar(self, path: Path, digest: str) -> None:
+        """写出与 checkpoint 同名的 sha256 审计文件。"""
+
+        sidecar_path = path.with_suffix(f"{path.suffix}.sha256")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=sidecar_path.parent,
+            prefix=f".{sidecar_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(f"{digest}  {path.name}\n")
+
+        try:
+            temp_path.replace(sidecar_path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        """计算文件 sha256。"""
+
+        digest = hashlib.sha256()
+        with path.open("rb") as payload_file:
+            for chunk in iter(lambda: payload_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
 
 Phase1Store = Phase1ArtifactStore

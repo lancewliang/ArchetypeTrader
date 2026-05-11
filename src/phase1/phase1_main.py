@@ -28,7 +28,7 @@ from .horizon_train_label_builder import (
     HorizonTrainLabelBuilderConfig,
 )
 from .metrics import Phase1Metrics
-from .report import Phase1Report
+from .report import Phase1CodebookReport
 
 
 class Phase1FatalError(RuntimeError):
@@ -127,7 +127,7 @@ class Phase1MainFlow:
         self.dataloaders: dict[str, DataLoader[TrajectoryTensorBatch]] = {}
         self.data_store: Phase1ArtifactStore | None = None
         self.evaluator: Phase1Evaluator | None = None
-        self.report: Phase1Report | None = None
+        self.report: Phase1CodebookReport | None = None
         self.best_checkpoint_selection: Phase1CheckpointSelectionResult | None = None
         self.horizon_train_label_builder: HorizonTrainLabelBuilder | None = None
  
@@ -197,7 +197,7 @@ class Phase1MainFlow:
             batchid=self.config.train_batch_id,
         )   
         self.data_store.initialize_phase1_artifact_dirs()
-        self.report = Phase1Report(data_store=self.data_store)
+        self.report = Phase1CodebookReport()
         self.data_load = DataLoad()
         self.horizon_builder = HorizonBuilder(horizon=self.config.horizon)
         self.dp_planner = SingleTrade_DP_Planner(

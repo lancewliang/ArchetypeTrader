@@ -50,7 +50,7 @@ src/phase1/
     phase1_checkpoint.py
     phase1_checkpoint_selector.py
   report/
-    phase1_report.py
+    phase1_codebook_report.py
   phase1_main.py
 ```
 
@@ -60,7 +60,7 @@ src/phase1/
   `Phase1Metrics`；
 - `metrics/phase1_metrics.py` 当前尚未实现；
 - `Phase1CheckpointSelector` 当前仍是骨架，默认按单个 metric 选择；
-- `Phase1Report` 当前仍是 report 写出骨架；
+- `Phase1CodebookReport` 负责 codebook validation report 的 JSON/HTML 写出；
 - `phase1_codebook_validation_criteria.md` 已经定义完整五层验证标准。
 
 因此实现顺序应先让 `metrics` 的数据契约稳定，再扩展 evaluator 和 selector。
@@ -140,7 +140,6 @@ src/phase1/evaluators/
 
 src/phase1/report/
   __init__.py
-  phase1_report.py
   phase1_codebook_report.py
 ```
 
@@ -185,10 +184,10 @@ Phase1CheckpointSelector.select_best_from_dir()
 report 流程：
 
 ```text
-Phase1Report.write_report()
+Phase1CodebookReport.write_report()
   -> load best checkpoint / selection result
   -> read Phase1ValidationResult dict
-  -> Phase1CodebookReport render JSON/HTML
+  -> render JSON/HTML
 ```
 
 ## 7. 训练期指标设计
@@ -1800,8 +1799,7 @@ class Phase1CodebookReport:
         ...
 ```
 
-`Phase1Report.write_report()` 可以作为总入口，内部委托
-`Phase1CodebookReport`。
+`Phase1CodebookReport.write_report()` 可以作为总入口写出 JSON/HTML。
 
 ## 17. Phase1MainFlow 集成设计
 

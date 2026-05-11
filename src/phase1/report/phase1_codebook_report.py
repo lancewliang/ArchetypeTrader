@@ -12,9 +12,8 @@
     - HTML 是静态审计视图，不依赖外部 JS/CSS 文件。
 
 使用场景:
-    ``Phase1Report.write_report()`` 或训练主流程在拿到
-    ``Phase1ValidationResult`` 后，调用本类写出 JSON/HTML，供人工审计、
-    实验复盘和后续 Phase II/III 读取摘要。
+    训练主流程在拿到 ``Phase1ValidationResult`` 后，调用本类写出 JSON/HTML，
+    供人工审计、实验复盘和后续 Phase II/III 读取摘要。
 """
 
 from __future__ import annotations
@@ -177,6 +176,63 @@ class Phase1CodebookReport:
             "artifacts": dict(artifacts or {}),
         }
         return _json_safe(payload)
+
+    def write_report(
+        self,
+        *,
+        validation_result: Phase1ValidationResult | None = None,
+        output_json_path: str | Path | None = None,
+        output_html_path: str | Path | None = None,
+        config: Mapping[str, object] | None = None,
+        artifacts: Mapping[str, str | Path] | None = None,
+        metadata: Mapping[str, object] | None = None,
+        best_checkpoint_selection: Any | None = None,
+        metrics: Mapping[str, object] | None = None,
+        diagnostics: Mapping[str, object] | None = None,
+    ) -> dict[str, Path]:
+        """写出 Phase I codebook validation report。
+
+        输入参数:
+            validation_result: 五层 validation 完整结果。为空时保留旧主流程骨架的
+                空操作行为。
+            output_json_path: JSON report 输出路径。
+            output_html_path: HTML report 输出路径。
+            config: Phase I 配置快照，可为空。
+            artifacts: 产物路径索引，可为空。
+            metadata: 额外 report 元数据。
+            best_checkpoint_selection: 主流程传入的 best checkpoint 结果，当前
+                codebook report 不直接消费。
+            metrics: 训练期指标摘要，当前 codebook report 不直接消费。
+            diagnostics: 诊断摘要，当前 codebook report 不直接消费。
+
+        输出:
+            已写出的 report 路径字典，key 为 ``json`` 或 ``html``。
+        """
+
+        _ = best_checkpoint_selection
+        _ = metrics
+        _ = diagnostics
+        if validation_result is None:
+            return {}
+
+        written_paths: dict[str, Path] = {}
+        if output_json_path is not None:
+            written_paths["json"] = self.write_json(
+                validation_result=validation_result,
+                output_path=output_json_path,
+                config=config,
+                artifacts=artifacts,
+                metadata=metadata,
+            )
+        if output_html_path is not None:
+            written_paths["html"] = self.write_html(
+                validation_result=validation_result,
+                output_path=output_html_path,
+                config=config,
+                artifacts=artifacts,
+                metadata=metadata,
+            )
+        return written_paths
 
     def write_json(
         self,
