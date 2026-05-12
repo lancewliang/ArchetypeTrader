@@ -673,6 +673,9 @@ class Phase1LabelPredictabilityMetrics:
     # probe top-1 label decoded return 相对 oracle assigned-label decoded return 的保留比例。
     probe_return_retention: float
 
+    # 当前 validation split 中的 codebook size，用于 top-k accuracy 自适应阈值。
+    num_codes: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为 dict，供 checkpoint/report 落盘。"""
 

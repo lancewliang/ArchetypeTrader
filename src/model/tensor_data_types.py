@@ -126,7 +126,12 @@ dtype:
 def build_trajectory_tensor_dataset(
     trajectory_dataset: TrajectoryDataset,
 ) -> TensorDataset:
-    """将 numpy ``TrajectoryDataset`` 转为 Phase I 训练用 ``TensorDataset``。"""
+    """将 numpy ``TrajectoryDataset`` 转为 Phase I 训练用 ``TensorDataset``。
+
+    返回的 ``TensorDataset`` 包含第四列稳定 ``sample_ids``。模型训练和评估仍通过
+    ``move_trajectory_batch_to_device()`` 只消费前三列 ``states/actions/rewards``；
+    codebook validation evaluator 可读取第四列做 assignment churn 和 prices 对齐。
+    """
 
     states = torch.as_tensor(
         np.stack([trajectory[0] for trajectory in trajectory_dataset]),
@@ -140,16 +145,23 @@ def build_trajectory_tensor_dataset(
         np.stack([trajectory[2] for trajectory in trajectory_dataset]),
         dtype=torch.float32,
     )
-    return TensorDataset(states, actions, rewards)
+    sample_ids = torch.arange(len(trajectory_dataset), dtype=torch.long)
+    return TensorDataset(states, actions, rewards, sample_ids)
 
 
 def move_trajectory_batch_to_device(
     batch: tuple[torch.Tensor, ...],
     device: torch.device | str,
 ) -> TrajectoryTensorBatch:
-    """将 Phase I trajectory batch 搬到目标 device。"""
+    """将 Phase I trajectory batch 搬到目标 device。
 
-    states, actions, rewards = batch
+    输入 batch 可包含第四列 ``sample_ids``。模型只需要前三列，因此这里保留返回
+    ``(states, actions, rewards)`` 的稳定契约。
+    """
+
+    if len(batch) < 3:
+        raise ValueError("trajectory batch must contain at least states, actions, rewards")
+    states, actions, rewards = batch[:3]
     return (
         states.to(device),
         actions.to(device),

@@ -653,18 +653,27 @@ def evaluate_label_predictability_rules(
     """
 
     layer = "label_predictability"
+    num_codes = max(1, int(metrics.num_codes))
+    top1_threshold = max(
+        thresholds.probe_top1_floor,
+        thresholds.probe_top1_k_factor / num_codes,
+    )
+    top3_threshold = max(
+        thresholds.probe_top3_floor,
+        thresholds.probe_top3_k_factor / num_codes,
+    )
     results = (
         _ge(
             name="probe_top1_accuracy",
             value=metrics.probe_top1_accuracy,
-            threshold_value=thresholds.probe_top1_floor,
+            threshold_value=top1_threshold,
             layer=layer,
             message="probe top-1 accuracy 需要明显高于随机水平",
         ),
         _ge(
             name="probe_top3_accuracy",
             value=metrics.probe_top3_accuracy,
-            threshold_value=thresholds.probe_top3_floor,
+            threshold_value=top3_threshold,
             layer=layer,
             message="probe top-3 accuracy 需要能缩小 selector 候选范围",
         ),

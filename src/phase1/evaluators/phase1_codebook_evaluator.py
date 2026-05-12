@@ -39,9 +39,11 @@ from ..metrics import (
     Phase1EvaluationSnapshot,
     Phase1LabelPredictabilityMetrics,
     Phase1LabelPredictabilityThresholds,
+    Phase1LayerComputation,
     Phase1OracleProfitabilityMetrics,
     Phase1OracleProfitabilityThresholds,
     Phase1PerCodeProfitability,
+    Phase1MetricResult,
     Phase1TeacherQualityMetrics,
     Phase1TeacherQualityThresholds,
     Phase1VQInternalMetrics,
@@ -65,6 +67,10 @@ from .phase1_validation_layers import (
     compute_oracle_profitability_metrics,
     compute_teacher_quality_metrics,
     compute_vq_internal_metrics,
+)
+from .phase1_validation_layers.layer2_behavior_quality import (
+    classify_action_motif,
+    classify_market_morphology,
 )
 
 
@@ -180,12 +186,14 @@ class Phase1CodebookEvaluator:
         z_e_parts: list[np.ndarray] = []
         z_q_parts: list[np.ndarray] = []
         distance_parts: list[np.ndarray] = []
+        sample_id_parts: list[np.ndarray] = []
         loss_weighted_sum = 0.0
         correct_actions = 0
         total_actions = 0
         total_samples = 0
 
         for batch in dataloader:
+            raw_batch = batch
             batch = move_trajectory_batch_to_device(batch, self.device)
             states, actions, rewards = batch
             outputs = self.model(batch)
@@ -209,15 +217,28 @@ class Phase1CodebookEvaluator:
             z_e_parts.append(outputs.z_e.detach().cpu().numpy())
             z_q_parts.append(quantize_output.z_q_no_grad.detach().cpu().numpy())
             distance_parts.append(quantize_output.distances.detach().cpu().numpy())
+            if len(raw_batch) >= 4:
+                sample_id_parts.append(raw_batch[3].detach().cpu().numpy())
 
         if total_samples <= 0:
             raise ValueError("validation dataloader produced no samples")
 
+        states_array = np.concatenate(state_parts, axis=0)
+        if sample_id_parts:
+            sample_ids = np.concatenate(sample_id_parts, axis=0).astype(np.int64)
+            if sample_ids.shape != (total_samples,):
+                raise ValueError(
+                    "sample_ids must have shape [N], "
+                    f"got {sample_ids.shape} for {total_samples} samples"
+                )
+        else:
+            sample_ids = np.arange(total_samples, dtype=np.int64)
         prices = self._prices_from_horizon_dataset(
             horizon_dataset=horizon_dataset,
             expected_samples=total_samples,
+            sample_ids=sample_ids,
+            collected_states=states_array,
         )
-        sample_ids = np.arange(total_samples, dtype=np.int64)
         reconstruction_loss = loss_weighted_sum / total_samples
         action_accuracy = correct_actions / total_actions if total_actions > 0 else 0.0
 
@@ -229,7 +250,7 @@ class Phase1CodebookEvaluator:
             epoch=epoch,
             sample_ids=sample_ids,
             # [N, H, F]
-            states=np.concatenate(state_parts, axis=0),
+            states=states_array,
             # None or [N, H]. HorizonDataset [N, H, 1] prices are normalized below.
             prices=prices,
             # [N, H]
@@ -401,6 +422,12 @@ class Phase1CodebookEvaluator:
             metrics,
             reconstruction_loss=val_snapshot.reconstruction_loss,
         )
+        drift_diagnostics = self._build_drift_diagnostics(
+            train_snapshot=train_snapshot,
+            val_snapshot=val_snapshot,
+            val_oracle_computation=oracle_computation,
+            label_computation=label_computation,
+        )
 
         return aggregate_validation_result(
             checkpoint_id=checkpoint_id,
@@ -409,9 +436,263 @@ class Phase1CodebookEvaluator:
             layers=layers,
             metrics=metrics,
             code_diagnostics=behavior_computation.code_diagnostics,
-            drift_diagnostics={},
+            drift_diagnostics=drift_diagnostics,
             score=score,
             tie_breaker_metrics=tie_breaker_metrics,
+        )
+
+    def _build_drift_diagnostics(
+        self,
+        *,
+        train_snapshot: Phase1EvaluationSnapshot,
+        val_snapshot: Phase1EvaluationSnapshot,
+        val_oracle_computation: Phase1LayerComputation,
+        label_computation: Phase1LayerComputation,
+    ) -> dict[str, Phase1MetricResult]:
+        """计算 train/validation 横向 drift diagnostics。
+
+        这些指标只用于 report 解释，不参与 hard gate。触发阈值时以
+        ``severity="warn"`` 写入，但 ``passed`` 保持 True，避免 selector 把 drift
+        warning 当作 checkpoint 淘汰条件。
+        """
+
+        diagnostics: dict[str, Phase1MetricResult] = {}
+
+        train_morphology = classify_market_morphology(
+            train_snapshot.prices,
+            fee_rate=self.runtime_config.fee_rate,
+        )
+        val_morphology = classify_market_morphology(
+            val_snapshot.prices,
+            fee_rate=self.runtime_config.fee_rate,
+        )
+        diagnostics["morphology_distribution_kl"] = self._drift_kl_metric(
+            name="morphology_distribution_kl",
+            train_values=train_morphology,
+            val_values=val_morphology,
+            threshold_value=0.20,
+            message="validation 市场形态分布不应明显偏离 train",
+        )
+
+        diagnostics["code_usage_kl"] = self._drift_kl_metric(
+            name="code_usage_kl",
+            train_values=train_snapshot.code_ids,
+            val_values=val_snapshot.code_ids,
+            threshold_value=0.20,
+            message="validation code usage 不应明显偏离 train",
+        )
+
+        train_motifs = classify_action_motif(
+            train_snapshot.decoded_actions,
+            train_snapshot.prices,
+        )
+        val_motifs = classify_action_motif(
+            val_snapshot.decoded_actions,
+            val_snapshot.prices,
+        )
+        diagnostics["motif_distribution_kl"] = self._drift_kl_metric(
+            name="motif_distribution_kl",
+            train_values=train_motifs,
+            val_values=val_motifs,
+            threshold_value=0.20,
+            message="validation motif 分布不应明显偏离 train",
+        )
+
+        reconstruction_gap = val_snapshot.reconstruction_loss / (
+            train_snapshot.reconstruction_loss + 1e-12
+        )
+        diagnostics["reconstruction_generalization_gap"] = self._drift_upper_metric(
+            name="reconstruction_generalization_gap",
+            value=float(reconstruction_gap),
+            threshold_value=1.25,
+            message="validation/train reconstruction loss gap 过大时提示重构泛化风险",
+        )
+
+        predictability_gap = label_computation.extra_payload.get(
+            "probe_predictability_gap"
+        )
+        diagnostics["label_predictability_gap"] = self._drift_upper_metric(
+            name="label_predictability_gap",
+            value=(
+                float(predictability_gap)
+                if isinstance(predictability_gap, (int, float))
+                else None
+            ),
+            threshold_value=0.15,
+            message="probe train/validation accuracy gap 过大时提示 selector 可学习性过拟合",
+        )
+
+        diagnostics["per_code_return_gap"] = self._per_code_return_gap_metric(
+            train_snapshot=train_snapshot,
+            val_oracle_computation=val_oracle_computation,
+        )
+        return diagnostics
+
+    @staticmethod
+    def _drift_result(
+        *,
+        name: str,
+        value: float | None,
+        threshold: str,
+        triggered: bool,
+        message: str,
+    ) -> Phase1MetricResult:
+        """构造 drift diagnostic metric result。"""
+
+        if value is None or not np.isfinite(value):
+            return Phase1MetricResult(
+                name=name,
+                value=None,
+                threshold=threshold,
+                severity="skip",
+                passed=True,
+                layer="drift",
+                message=f"{message}；诊断输入缺失，跳过 drift 判定",
+            )
+        return Phase1MetricResult(
+            name=name,
+            value=float(value),
+            threshold=threshold,
+            severity="warn" if triggered else "pass",
+            passed=True,
+            layer="drift",
+            message=message,
+        )
+
+    @classmethod
+    def _drift_upper_metric(
+        cls,
+        *,
+        name: str,
+        value: float | None,
+        threshold_value: float,
+        message: str,
+    ) -> Phase1MetricResult:
+        """构造越低越好的 drift warning metric。"""
+
+        triggered = (
+            value is not None and np.isfinite(value) and value > threshold_value
+        )
+        return cls._drift_result(
+            name=name,
+            value=value,
+            threshold=f"warn if > {threshold_value:g}",
+            triggered=bool(triggered),
+            message=message,
+        )
+
+    @classmethod
+    def _drift_kl_metric(
+        cls,
+        *,
+        name: str,
+        train_values: np.ndarray,
+        val_values: np.ndarray,
+        threshold_value: float,
+        message: str,
+    ) -> Phase1MetricResult:
+        """构造 KL(P_val || P_train) drift warning metric。"""
+
+        if train_values.size == 0 or val_values.size == 0:
+            value = None
+        else:
+            value = cls._categorical_kl(train_values, val_values)
+        return cls._drift_upper_metric(
+            name=name,
+            value=value,
+            threshold_value=threshold_value,
+            message=message,
+        )
+
+    @staticmethod
+    def _categorical_kl(train_values: np.ndarray, val_values: np.ndarray) -> float:
+        """计算 KL(P_val || P_train)。"""
+
+        train_flat = np.asarray(train_values).reshape(-1)
+        val_flat = np.asarray(val_values).reshape(-1)
+        labels = sorted(
+            set(str(value) for value in train_flat)
+            | set(str(value) for value in val_flat)
+        )
+        if not labels:
+            return float("nan")
+        train_counts = np.asarray(
+            [np.sum(train_flat.astype(str) == label) for label in labels],
+            dtype=np.float64,
+        )
+        val_counts = np.asarray(
+            [np.sum(val_flat.astype(str) == label) for label in labels],
+            dtype=np.float64,
+        )
+        train_prob = train_counts / max(1.0, float(np.sum(train_counts)))
+        val_prob = val_counts / max(1.0, float(np.sum(val_counts)))
+        eps = 1e-12
+        return float(np.sum(val_prob * np.log((val_prob + eps) / (train_prob + eps))))
+
+    def _per_code_return_gap_metric(
+        self,
+        *,
+        train_snapshot: Phase1EvaluationSnapshot,
+        val_oracle_computation: Phase1LayerComputation,
+    ) -> Phase1MetricResult:
+        """计算 per-code train/validation return gap drift warning。"""
+
+        if train_snapshot.prices is None:
+            return self._drift_result(
+                name="per_code_return_gap",
+                value=None,
+                threshold="warn if > train per-code return std",
+                triggered=False,
+                message="per-code return train/validation gap 需要 prices 才能诊断",
+            )
+
+        train_oracle = compute_oracle_profitability_metrics(
+            model=self.model,
+            val_snapshot=train_snapshot,
+            runtime_config=self.runtime_config,
+            device=self.device,
+            thresholds=self.oracle_profitability_thresholds,
+        )
+        train_items = train_oracle.extra_payload.get("per_code_profitability", ())
+        val_items = val_oracle_computation.extra_payload.get(
+            "per_code_profitability",
+            (),
+        )
+        train_map = {
+            item.code_id: item.mean_advantage
+            for item in train_items
+            if isinstance(item, Phase1PerCodeProfitability)
+            and np.isfinite(item.mean_advantage)
+        }
+        val_map = {
+            item.code_id: item.mean_advantage
+            for item in val_items
+            if isinstance(item, Phase1PerCodeProfitability)
+            and np.isfinite(item.mean_advantage)
+        }
+        common_codes = sorted(set(train_map) & set(val_map))
+        if not common_codes:
+            return self._drift_result(
+                name="per_code_return_gap",
+                value=None,
+                threshold="warn if > train per-code return std",
+                triggered=False,
+                message="没有可对齐的 train/validation per-code return",
+            )
+
+        gaps = np.asarray(
+            [abs(val_map[code_id] - train_map[code_id]) for code_id in common_codes],
+            dtype=np.float64,
+        )
+        train_returns = np.asarray(list(train_map.values()), dtype=np.float64)
+        threshold_value = float(np.std(train_returns))
+        value = float(np.mean(gaps))
+        return self._drift_result(
+            name="per_code_return_gap",
+            value=value,
+            threshold=f"warn if > {threshold_value:g}",
+            triggered=value > threshold_value,
+            message="per-code return train/validation gap 过大时提示 code 局部失效",
         )
 
     @staticmethod
@@ -419,12 +700,17 @@ class Phase1CodebookEvaluator:
         *,
         horizon_dataset: HorizonDataset | None,
         expected_samples: int,
+        sample_ids: np.ndarray,
+        collected_states: np.ndarray,
     ) -> np.ndarray | None:
         """从可选 horizon dataset 中提取 prices。
 
         输入参数:
             horizon_dataset: ``(states, prices)`` 或 ``None``。
             expected_samples: 当前 dataloader 实际收集到的样本数。
+            sample_ids: 当前 dataloader batch 携带的稳定样本 ID。
+            collected_states: dataloader 实际遍历得到的 states，用于校验 sample_id
+                与 horizon dataset 的顺序是否一致。
 
         输出:
             prices 数组，shape=[N, H]；未提供 horizon dataset 或样本数不匹配时返回 ``None``。
@@ -437,10 +723,32 @@ class Phase1CodebookEvaluator:
 
         if horizon_dataset is None:
             return None
-        _, prices = horizon_dataset
+        horizon_states, prices = horizon_dataset
+        horizon_state_values = np.asarray(horizon_states)
         price_values = np.asarray(prices)
-        if price_values.shape[0] != expected_samples:
-            return None
+        if sample_ids.shape != (expected_samples,):
+            raise ValueError(
+                "sample_ids must match collected sample count, "
+                f"got {sample_ids.shape} and {expected_samples}"
+            )
+        if np.any(sample_ids < 0) or np.any(sample_ids >= price_values.shape[0]):
+            raise ValueError("sample_ids are outside horizon_dataset bounds")
+        if horizon_state_values.shape[0] <= int(np.max(sample_ids, initial=-1)):
+            raise ValueError("sample_ids are outside horizon_dataset state bounds")
+
+        selected_states = horizon_state_values[sample_ids]
+        if selected_states.shape != collected_states.shape:
+            raise ValueError(
+                "horizon_dataset states and collected states are not shape-aligned, "
+                f"got {selected_states.shape} and {collected_states.shape}"
+            )
+        if not np.allclose(selected_states, collected_states, rtol=1e-5, atol=1e-6):
+            raise ValueError(
+                "horizon_dataset states do not align with dataloader sample_ids; "
+                "use an eval dataloader with stable sample ids and shuffle=False"
+            )
+
+        price_values = price_values[sample_ids]
         if price_values.ndim == 3 and price_values.shape[-1] == 1:
             return price_values[..., 0]
         if price_values.ndim != 2:

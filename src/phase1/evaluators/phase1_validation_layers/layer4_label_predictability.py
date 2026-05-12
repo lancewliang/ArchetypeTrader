@@ -413,6 +413,7 @@ def compute_label_predictability_metrics(
             label_entropy_given_morphology=_nan(),
             mutual_information_lift=_nan(),
             probe_return_retention=_nan(),
+            num_codes=int(max(np.unique(train_y).size, np.unique(val_y).size)),
         )
         return Phase1LayerComputation(
             layer_id=4,
@@ -426,6 +427,12 @@ def compute_label_predictability_metrics(
     top1 = ranked_labels[:, 0]
     top_k = min(3, ranked_labels.shape[1])
     active_codes = np.unique(val_y)
+    num_codes = (
+        int(val_snapshot.distances.shape[1])
+        if np.asarray(val_snapshot.distances).ndim == 2
+        and val_snapshot.distances.shape[1] > 0
+        else int(max(np.max(train_y), np.max(val_y)) + 1)
+    )
     morphologies = classify_market_morphology(
         val_snapshot.prices,
         fee_rate=runtime_config.fee_rate,
@@ -453,6 +460,7 @@ def compute_label_predictability_metrics(
             runtime_config=runtime_config,
             device=device,
         ),
+        num_codes=num_codes,
     )
     train_top1 = _predict_probe(probe, train_x)[:, 0]
     return Phase1LayerComputation(
