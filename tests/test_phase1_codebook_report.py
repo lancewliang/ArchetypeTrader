@@ -3,6 +3,31 @@ from __future__ import annotations
 from src.phase1.report.phase1_codebook_report import Phase1CodebookReport
 
 
+class _ValidationResult:
+    checkpoint_id = "vq_epoch_0007"
+    stage = "vq"
+    epoch = 7
+    passed = True
+    score = 0.9
+    failed_layers = ()
+    layers = ()
+    code_diagnostics = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "checkpoint_id": self.checkpoint_id,
+            "stage": self.stage,
+            "epoch": self.epoch,
+            "passed": self.passed,
+            "score": self.score,
+            "failed_layers": [],
+            "layers": [],
+            "code_diagnostics": [],
+            "drift_diagnostics": {},
+            "tie_breaker_metrics": {},
+        }
+
+
 def _metric_payload(
     *,
     name: str = "validation_action_accuracy",
@@ -110,6 +135,19 @@ def test_render_html_uses_template_and_escapes_values() -> None:
     assert "risk_adjusted_return" in html
     assert "{%" not in html
     assert "{{" not in html
+
+
+def test_build_html_builds_payload_and_renders_template() -> None:
+    html = Phase1CodebookReport().build_html(
+        validation_result=_ValidationResult(),
+        config={"codebook_size": 32},
+        artifacts={"checkpoint": "/tmp/ckpt.pt"},
+    )
+
+    assert "<!doctype html>" in html
+    assert "vq_epoch_0007" in html
+    assert "codebook_size" in html
+    assert "/tmp/ckpt.pt" in html
 
 
 def test_empty_optional_sections_are_omitted() -> None:

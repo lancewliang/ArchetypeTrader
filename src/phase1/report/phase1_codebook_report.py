@@ -115,8 +115,9 @@ class Phase1CodebookReport:
     """Phase I codebook validation 报告渲染器。
 
     功能说明:
-        提供 ``build_payload()`` 和 ``render_html()`` 两个入口。payload 保留完整
-        机器可读结构，HTML 提供人工审计视图；文件写入由 datastore 统一负责。
+        提供 ``build_payload()``、``build_html()`` 和 ``render_html()`` 入口。
+        payload 保留完整机器可读结构，HTML 提供人工审计视图；文件写入由
+        datastore 统一负责。
 
     使用场景:
         full validation 完成后，把 ``Phase1ValidationResult`` 转成 payload 并
@@ -175,6 +176,24 @@ class Phase1CodebookReport:
             "artifacts": dict(artifacts or {}),
         }
         return _json_safe(payload)
+
+    def build_html(
+        self,
+        *,
+        validation_result: Phase1ValidationResult,
+        config: Mapping[str, object] | None = None,
+        artifacts: Mapping[str, str | Path] | None = None,
+        metadata: Mapping[str, object] | None = None,
+    ) -> str:
+        """从 validation result 直接构建静态 HTML 报告内容。"""
+
+        payload = self.build_payload(
+            validation_result=validation_result,
+            config=config,
+            artifacts=artifacts,
+            metadata=metadata,
+        )
+        return self.render_html(payload)
 
     def render_html(self, payload: Mapping[str, Any]) -> str:
         """将 report payload 渲染为静态 HTML 字符串。
