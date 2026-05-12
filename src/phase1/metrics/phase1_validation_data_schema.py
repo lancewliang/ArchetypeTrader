@@ -523,6 +523,10 @@ class Phase1VQInternalMetrics:
     # decoded 主方向与 demo 主方向一致率。
     direction_accuracy: float
 
+    # validation quantization distance / train quantization distance。
+    # 旧 checkpoint 可能没有该字段，因此给 NaN 默认值。
+    quantization_distance_gap: float = float("nan")
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为 dict，供 checkpoint/report 落盘。"""
 

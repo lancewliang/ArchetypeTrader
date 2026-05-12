@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -217,12 +218,31 @@ def _top_contribution_ratio(returns: np.ndarray, top_ratio: float) -> float:
         诊断 decoded profit 是否过度依赖少数尾部 horizon。
     """
 
-    positive = returns[np.isfinite(returns) & (returns > 0)]
+    finite = returns[np.isfinite(returns)]
+    positive = finite[finite > 0]
     if positive.size == 0:
         return _nan()
-    count = max(1, int(np.ceil(positive.size * max(0.0, min(1.0, top_ratio)))))
-    top = np.sort(positive)[-count:]
+    count = max(1, int(np.ceil(finite.size * max(0.0, min(1.0, top_ratio)))))
+    top = np.sort(finite)[-count:]
     return float(np.sum(top) / (np.sum(positive) + _EPS))
+
+
+def _active_codes(
+    code_ids: np.ndarray,
+    *,
+    active_code_min_occupancy: float,
+) -> tuple[int, ...]:
+    """按 occupancy 过滤 active code。"""
+
+    if code_ids.size == 0:
+        return ()
+    counts = np.bincount(code_ids.astype(np.int64))
+    occupancy = counts / max(1, code_ids.size)
+    return tuple(
+        int(code_id)
+        for code_id, ratio in enumerate(occupancy)
+        if ratio >= active_code_min_occupancy
+    )
 
 
 def _trimmed_mean(values: np.ndarray, trim_ratio: float) -> float:
@@ -292,6 +312,7 @@ def _per_code_profitability(
     decoded_gross_returns: np.ndarray,
     decoded_fees: np.ndarray,
     thresholds: Phase1OracleProfitabilityThresholds,
+    active_codes: Sequence[int] | None = None,
 ) -> tuple[Phase1PerCodeProfitability, ...]:
     """计算每个 code 的 profitability 摘要。
 
@@ -311,7 +332,8 @@ def _per_code_profitability(
     """
 
     output: list[Phase1PerCodeProfitability] = []
-    for code_id in np.unique(code_ids):
+    code_iterable = active_codes if active_codes is not None else np.unique(code_ids)
+    for code_id in code_iterable:
         mask = code_ids == code_id
         if not np.any(mask):
             continue
@@ -342,6 +364,8 @@ def _per_code_profitability(
 def _dominant_pair_positive_ratio(
     snapshot: Phase1EvaluationSnapshot,
     decoded_advantage: np.ndarray,
+    *,
+    active_code_min_occupancy: float = 0.0,
 ) -> float:
     """计算 active code dominant morphology-motif pair 的正优势比例。
 
@@ -369,9 +393,13 @@ def _dominant_pair_positive_ratio(
         dtype=object,
     )
     code_ids = np.asarray(snapshot.code_ids, dtype=np.int64)
+    active_codes = _active_codes(
+        code_ids,
+        active_code_min_occupancy=active_code_min_occupancy,
+    )
     positive = 0
     total = 0
-    for code_id in np.unique(code_ids):
+    for code_id in active_codes:
         code_mask = code_ids == code_id
         if not np.any(code_mask):
             continue
@@ -438,6 +466,10 @@ def compute_oracle_profitability_metrics(
     decoded_advantage = decoded_execution.returns - flat_returns
     dp_advantage = dp_execution.returns - flat_returns
     random_advantage = random_returns - flat_returns
+    active_codes = _active_codes(
+        np.asarray(val_snapshot.code_ids, dtype=np.int64),
+        active_code_min_occupancy=runtime_config.active_code_min_occupancy,
+    )
     per_code = _per_code_profitability(
         code_ids=np.asarray(val_snapshot.code_ids, dtype=np.int64),
         decoded_advantage=decoded_advantage,
@@ -446,6 +478,7 @@ def compute_oracle_profitability_metrics(
         decoded_gross_returns=decoded_execution.gross_returns,
         decoded_fees=decoded_execution.fees,
         thresholds=thresholds,
+        active_codes=active_codes,
     )
 
     random_label_risk_adjusted_return = _risk_adjusted_return(random_returns)
@@ -490,6 +523,7 @@ def compute_oracle_profitability_metrics(
         dominant_pair_positive_ratio=_dominant_pair_positive_ratio(
             val_snapshot,
             decoded_advantage,
+            active_code_min_occupancy=runtime_config.active_code_min_occupancy,
         ),
         random_label_risk_adjusted_return=random_label_risk_adjusted_return,
         risk_adjusted_return_vs_random=(

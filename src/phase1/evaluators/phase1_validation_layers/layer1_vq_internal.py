@@ -329,6 +329,18 @@ def _main_direction(actions: np.ndarray) -> np.ndarray:
     return labels
 
 
+def _quantization_distance(snapshot: Phase1EvaluationSnapshot) -> float:
+    """计算 snapshot 的 mean(||z_e - z_q||_2)。"""
+
+    z_e = np.asarray(snapshot.z_e, dtype=np.float64)
+    z_q = np.asarray(snapshot.z_q, dtype=np.float64)
+    return (
+        float(np.mean(np.linalg.norm(z_e - z_q, axis=-1)))
+        if z_e.shape == z_q.shape and z_e.size
+        else _nan()
+    )
+
+
 def compute_vq_internal_metrics(
     *,
     train_snapshot: Phase1EvaluationSnapshot,
@@ -375,13 +387,8 @@ def compute_vq_internal_metrics(
     train_loss = float(train_snapshot.reconstruction_loss)
     val_loss = float(val_snapshot.reconstruction_loss)
 
-    z_e = np.asarray(val_snapshot.z_e, dtype=np.float64)
-    z_q = np.asarray(val_snapshot.z_q, dtype=np.float64)
-    quantization_distance = (
-        float(np.mean(np.linalg.norm(z_e - z_q, axis=-1)))
-        if z_e.shape == z_q.shape and z_e.size
-        else _nan()
-    )
+    train_quantization_distance = _quantization_distance(train_snapshot)
+    quantization_distance = _quantization_distance(val_snapshot)
 
     demo_turnover = _turnover(val_snapshot.demo_actions)
     decoded_turnover = _turnover(val_snapshot.decoded_actions)
@@ -434,6 +441,12 @@ def compute_vq_internal_metrics(
                 == _main_direction(val_snapshot.decoded_actions)
             )
         ),
+        quantization_distance_gap=float(
+            quantization_distance / (train_quantization_distance + _EPS)
+        )
+        if np.isfinite(quantization_distance)
+        and np.isfinite(train_quantization_distance)
+        else _nan(),
     )
     return Phase1LayerComputation(
         layer_id=1,

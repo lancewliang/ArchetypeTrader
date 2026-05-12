@@ -125,6 +125,9 @@ class Phase1VQInternalThresholds:
     # decoded 与 demo 的换手误差上限，单位为 horizon 归一化换手次数。
     decoder_turnover_error_max: float = 0.25
 
+    # validation/train 量化距离比值上限。用于检查 validation latent 是否仍贴近 codebook。
+    quantization_distance_gap_max: float = 1.25
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
 
@@ -171,11 +174,17 @@ class Phase1BehaviorQualityThresholds:
     # dominant motif 占比下限。用于判断 code 是否对应清晰的交易行为意图。
     dominant_motif_ratio_min: float = 0.40
 
+    # motif entropy purity 下限。dominant motif 未达标但 purity 达标时仍可视为结构清晰。
+    motif_purity_min: float = 0.35
+
     # dominant morphology-motif pair 占比下限。用于判断市场形态和行为是否形成稳定组合。
     dominant_pair_ratio_min: float = 0.30
 
     # morphology lift 下限。用于判断某 code 是否真的富集某类市场结构。
     morphology_lift_min: float = 1.25
+
+    # morphology entropy purity 下限。dominant morphology 未达标但 purity 达标时仍可视为结构清晰。
+    morphology_purity_min: float = 0.30
 
     # 同一 code 内 decoded action sequence 相似度下限。用于衡量 archetype 内部一致性。
     intra_code_similarity_min: float = 0.65

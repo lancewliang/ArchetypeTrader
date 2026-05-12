@@ -368,6 +368,22 @@ def _dominant(values: np.ndarray) -> tuple[str | None, float | None]:
     return label, count / values.size
 
 
+def _entropy_purity(values: np.ndarray) -> float | None:
+    """计算 1 - normalized entropy purity。
+
+    单一类别视为完全纯净；空输入返回 None。
+    """
+
+    if values.size == 0:
+        return None
+    counts = np.asarray(list(Counter(str(value) for value in values).values()))
+    if counts.size <= 1:
+        return 1.0
+    probabilities = counts / np.sum(counts)
+    entropy = -float(np.sum(probabilities * np.log(probabilities + _EPS)))
+    return float(1.0 - entropy / (np.log(counts.size) + _EPS))
+
+
 def _global_distribution(values: np.ndarray) -> dict[str, float]:
     """计算全体验证集离散标签分布。
 
@@ -664,7 +680,9 @@ def compute_behavior_quality_metrics(
         support = int(np.sum(mask))
         occupancy = support / max(1, code_ids.size)
         dominant_morphology, dominant_morphology_ratio = _dominant(morphologies[mask])
+        morphology_purity = _entropy_purity(morphologies[mask])
         dominant_motif, dominant_motif_ratio = _dominant(motifs[mask])
+        motif_purity = _entropy_purity(motifs[mask])
         dominant_pair, dominant_pair_ratio = _dominant(pairs[mask])
         global_ratio = (
             global_morphology.get(dominant_morphology, 0.0)
@@ -683,12 +701,27 @@ def compute_behavior_quality_metrics(
         weak_support += int(support < min_support)
         weak_morphology += int(
             missing_morphology
-            or dominant_morphology_ratio is None
-            or dominant_morphology_ratio < thresholds.dominant_morphology_ratio_min
+            or (
+                (
+                    dominant_morphology_ratio is None
+                    or dominant_morphology_ratio
+                    < thresholds.dominant_morphology_ratio_min
+                )
+                and (
+                    morphology_purity is None
+                    or morphology_purity < thresholds.morphology_purity_min
+                )
+            )
         )
         weak_motif += int(
-            dominant_motif_ratio is None
-            or dominant_motif_ratio < thresholds.dominant_motif_ratio_min
+            (
+                dominant_motif_ratio is None
+                or dominant_motif_ratio < thresholds.dominant_motif_ratio_min
+            )
+            and (
+                motif_purity is None
+                or motif_purity < thresholds.motif_purity_min
+            )
         )
         weak_pair += int(
             missing_morphology

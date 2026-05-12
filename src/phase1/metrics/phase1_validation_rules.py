@@ -395,6 +395,13 @@ def evaluate_vq_internal_rules(
             layer=layer,
             message="样本到最近和第二近 code 的距离 margin 需要清晰",
         ),
+        _le(
+            name="quantization_distance_gap",
+            value=metrics.quantization_distance_gap,
+            threshold_value=thresholds.quantization_distance_gap_max,
+            layer=layer,
+            message="validation 量化距离不能明显高于 train，避免 codebook 泛化贴合度不足",
+        ),
         _ge(
             name="direction_accuracy",
             value=metrics.direction_accuracy,
