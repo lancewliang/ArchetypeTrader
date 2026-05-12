@@ -32,6 +32,7 @@ from ...metrics import (
     Phase1EvaluationSnapshot,
     Phase1LayerComputation,
     Phase1OracleProfitabilityMetrics,
+    Phase1OracleProfitabilityThresholds,
     Phase1PerCodeProfitability,
     Phase1ValidationRuntimeConfig,
 )
@@ -276,6 +277,7 @@ def _per_code_profitability(
     decoded_returns: np.ndarray,
     dp_advantage: np.ndarray,
     fee_drag_by_sample: np.ndarray,
+    thresholds: Phase1OracleProfitabilityThresholds,
 ) -> tuple[Phase1PerCodeProfitability, ...]:
     """计算每个 code 的 profitability 摘要。
 
@@ -313,8 +315,9 @@ def _per_code_profitability(
                 fee_drag=fee_drag,
                 passed=(
                     mean_advantage > 0.0
-                    and win_rate >= 0.5
-                    and retention_ratio > 0.0
+                    and win_rate >= thresholds.per_code_win_rate_min
+                    and retention_ratio >= thresholds.per_code_retention_ratio_min
+                    and fee_drag <= thresholds.per_code_fee_drag_max
                 ),
             )
         )
@@ -366,6 +369,7 @@ def compute_oracle_profitability_metrics(
     val_snapshot: Phase1EvaluationSnapshot,
     runtime_config: Phase1ValidationRuntimeConfig,
     device: torch.device | str,
+    thresholds: Phase1OracleProfitabilityThresholds | None = None,
 ) -> Phase1LayerComputation:
     """计算 Layer 3 oracle assigned-label 盈利性 raw metrics。
 
@@ -380,6 +384,8 @@ def compute_oracle_profitability_metrics(
         runtime_config: validation 运行参数，提供手续费率、random trials、seed 和
             top contribution ratio。
         device: decoder 推理设备。
+        thresholds: oracle profitability 阈值配置，用于构造 per-code profitability
+            的 ``passed`` 字段；不传则使用默认阈值。
 
     输出:
         ``Phase1LayerComputation``，其中 ``metrics`` 为
@@ -392,6 +398,7 @@ def compute_oracle_profitability_metrics(
         profitability 传给 Layer 2。
     """
 
+    thresholds = thresholds or Phase1OracleProfitabilityThresholds()
     dp_execution = _demo_returns(val_snapshot, runtime_config)
     decoded_execution = ActionExecutionCalculator.execute_actions(
         val_snapshot.prices,
@@ -418,6 +425,7 @@ def compute_oracle_profitability_metrics(
         decoded_returns=decoded_execution.returns,
         dp_advantage=dp_advantage,
         fee_drag_by_sample=fee_drag_by_sample,
+        thresholds=thresholds,
     )
 
     metrics = Phase1OracleProfitabilityMetrics(

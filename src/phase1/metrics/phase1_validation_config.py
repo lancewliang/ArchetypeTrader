@@ -119,6 +119,12 @@ class Phase1VQInternalThresholds:
     # 入场时点误差占 horizon 长度的比例上限。用于判断 decoded entry timing 是否偏移过大。
     entry_timing_error_ratio_max: float = 0.15
 
+    # active code 中 lifetime 达标的比例下限。用于判断 code 是否已经形成稳定语义。
+    code_lifetime_pass_ratio_min: float = 0.80
+
+    # decoded 与 demo 的换手误差上限，单位为 horizon 归一化换手次数。
+    decoder_turnover_error_max: float = 0.25
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
 
@@ -174,6 +180,15 @@ class Phase1BehaviorQualityThresholds:
     # 任意两个 code 原型 decoded action 相似度上限。用于识别重复 code。
     duplicate_code_similarity_max: float = 0.85
 
+    # latent silhouette score 下限。用于判断 latent 空间中的 code assignment 是否清晰。
+    latent_silhouette_score_min: float = 0.10
+
+    # 具备 per-code 盈利能力的 active code 覆盖率下限。
+    profitable_code_coverage_min: float = 0.60
+
+    # 重复 code pair 数量上限。默认值对应论文实验常用 K=10；自定义 K 时可显式覆盖。
+    duplicate_code_pair_count_max: int = 10
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
 
@@ -216,6 +231,27 @@ class Phase1OracleProfitabilityThresholds:
 
     # dominant pair 中正优势 pair 的比例下限。用于判断主要市场-行为组合是否真正盈利。
     dominant_pair_positive_ratio_min: float = 0.60
+
+    # decoded 策略相对 DP teacher 的最大回撤比例上限。
+    downside_control_max: float = 1.50
+
+    # decoded 风险调整收益下限。0 表示至少不能为负。
+    risk_adjusted_return_min: float = 0.0
+
+    # 全局手续费拖累比例上限。
+    fee_drag_max: float = 0.35
+
+    # horizon turnover 与 decoded return 相关性下限。
+    turnover_return_correlation_min: float = -0.10
+
+    # per-code 胜率下限。用于构造 Layer 3 per-code profitability passed 字段。
+    per_code_win_rate_min: float = 0.52
+
+    # per-code retention ratio 下限。
+    per_code_retention_ratio_min: float = 0.40
+
+    # per-code fee drag 上限。
+    per_code_fee_drag_max: float = 0.40
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""

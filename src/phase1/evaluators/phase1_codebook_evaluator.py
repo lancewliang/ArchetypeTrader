@@ -326,6 +326,7 @@ class Phase1CodebookEvaluator:
             val_snapshot=val_snapshot,
             runtime_config=self.runtime_config,
             device=self.device,
+            thresholds=self.oracle_profitability_thresholds,
         )
         per_code_profitability = oracle_computation.extra_payload.get(
             "per_code_profitability",

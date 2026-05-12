@@ -382,6 +382,13 @@ def evaluate_vq_internal_rules(
             message="近期 assignment churn 需要足够低，保证 label 语义稳定",
         ),
         _ge(
+            name="code_lifetime_pass_ratio",
+            value=metrics.code_lifetime_pass_ratio,
+            threshold_value=thresholds.code_lifetime_pass_ratio_min,
+            layer=layer,
+            message="active code 需要有足够比例保持稳定生命周期",
+        ),
+        _ge(
             name="nearest_second_margin_median",
             value=metrics.nearest_second_margin_median,
             threshold_value=thresholds.margin_median_min,
@@ -401,6 +408,13 @@ def evaluate_vq_internal_rules(
             threshold_value=thresholds.entry_timing_error_ratio_max,
             layer=layer,
             message="入场时点误差相对 horizon 的比例不能过大",
+        ),
+        _le(
+            name="decoder_turnover_error",
+            value=metrics.decoder_turnover_error,
+            threshold_value=thresholds.decoder_turnover_error_max,
+            layer=layer,
+            message="decoded 不能相对 DP demo 引入过多额外换手",
         ),
     )
     return _build_layer_result(layer_id=1, name=layer, metrics=results)
@@ -477,17 +491,24 @@ def evaluate_behavior_quality_rules(
             layer=layer,
             message="不同 code 的行为中心需要和 code 内差异拉开距离",
         ),
+        _ge(
+            name="latent_silhouette_score",
+            value=metrics.latent_silhouette_score,
+            threshold_value=thresholds.latent_silhouette_score_min,
+            layer=layer,
+            message="latent 空间中的 assigned code 需要有清晰聚类边界",
+        ),
         _le(
             name="duplicate_code_pair_count",
             value=metrics.duplicate_code_pair_count,
-            threshold_value=0,
+            threshold_value=thresholds.duplicate_code_pair_count_max,
             layer=layer,
             message="不能存在超过重复相似度阈值的 code pair",
         ),
         _ge(
             name="profitable_code_coverage",
             value=metrics.profitable_code_coverage,
-            threshold_value=1.0 - thresholds.weak_code_ratio_max,
+            threshold_value=thresholds.profitable_code_coverage_min,
             layer=layer,
             message="具备盈利潜力的 active code 覆盖率需要足够高",
         ),
@@ -554,6 +575,20 @@ def evaluate_oracle_profitability_rules(
             message="decoded 策略需要保留足够 DP teacher 盈利能力",
         ),
         _le(
+            name="downside_control",
+            value=metrics.downside_control,
+            threshold_value=thresholds.downside_control_max,
+            layer=layer,
+            message="decoded 策略相对 DP teacher 的回撤放大不能过高",
+        ),
+        _gt(
+            name="risk_adjusted_return",
+            value=metrics.risk_adjusted_return,
+            threshold_value=thresholds.risk_adjusted_return_min,
+            layer=layer,
+            message="decoded 策略风险调整收益必须为正",
+        ),
+        _le(
             name="top_5_contribution",
             value=metrics.top_5_contribution,
             threshold_value=thresholds.top_5_contribution_max,
@@ -566,6 +601,20 @@ def evaluate_oracle_profitability_rules(
             threshold_value=0.0,
             layer=layer,
             message="去除尾部样本后 decoded 策略仍应有正优势",
+        ),
+        _le(
+            name="fee_drag",
+            value=metrics.fee_drag,
+            threshold_value=thresholds.fee_drag_max,
+            layer=layer,
+            message="手续费拖累比例不能过高",
+        ),
+        _ge(
+            name="turnover_return_correlation",
+            value=metrics.turnover_return_correlation,
+            threshold_value=thresholds.turnover_return_correlation_min,
+            layer=layer,
+            message="换手与收益的相关性不能显著为负",
         ),
         _le(
             name="bad_code_ratio",
