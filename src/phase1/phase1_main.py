@@ -365,8 +365,9 @@ class Phase1MainFlow:
         """训练 Phase I VQ encoder-decoder 并保存 checkpoint。
 
         功能描述:
-            启用 VQ codebook 训练，按 epoch 计算训练/验证指标和五层 codebook
-            validation。模型状态通过 checkpoint 保存，指标通过 datastore JSON 保存。
+            启用 VQ codebook 训练，并按 ``validation_interval`` 计算训练/验证
+            指标和五层 codebook validation。模型状态通过 checkpoint 保存，指标
+            通过 datastore JSON 保存。
 
         论文描述:
             训练目标对应论文式 (4):
@@ -388,6 +389,9 @@ class Phase1MainFlow:
                 split="train",
                 epoch=epoch,
             )
+            if not self._should_validate_checkpoint(epoch):
+                continue
+
             epoch_metrics = self._evaluate_checkpoint(
                 epoch=epoch,
                 train_metrics=train_metrics,
@@ -412,7 +416,6 @@ class Phase1MainFlow:
                 config=asdict(self.config),
                 artifacts=self.data_store.artifact_paths,
             )
-
 
     def select_and_save_best_checkpoint(self) -> None:       
         self.best_checkpoint_selection = self.selector.select_best_from_dir(
@@ -506,3 +509,6 @@ class Phase1MainFlow:
             "codebook_validation": validation_result.to_dict(),
             "codebook_validation_flat": validation_result.to_flat_dict(),
         }
+        
+    def _should_validate_checkpoint(self, epoch: int) -> bool:
+        return epoch % self.config.validation_interval == 0
