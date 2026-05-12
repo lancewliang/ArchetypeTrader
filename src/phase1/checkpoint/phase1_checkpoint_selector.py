@@ -235,11 +235,15 @@ class Phase1CheckpointSelector:
             ``result.has_selection`` 显式判断。
         """
 
+        # rejected 用来保存所有未进入最终选择的 checkpoint 摘要，便于后续审计
+        # 或写入 report；eligible 只保存通过 hard gate 且具备 score 的候选。
         rejected: list[Phase1RejectedCheckpointSummary] = []
         eligible: list[Phase1ValidationCheckpoint] = []
 
         for checkpoint in validation_checkpoints:
             validation = checkpoint.codebook_validation
+            # 第一层过滤: 五层 validation hard gate 必须全部通过。失败候选不参与
+            # best checkpoint 竞争，只记录失败 layer 和排除原因。
             if not validation.passed:
                 rejected.append(
                     self._rejected_summary(
@@ -248,6 +252,8 @@ class Phase1CheckpointSelector:
                     )
                 )
                 continue
+            # 第二层过滤: 通过 hard gate 后还必须有综合 score。没有 score 的候选
+            # 无法参与排序，因此也视为 selector 层不可用。
             if validation.score is None:
                 rejected.append(
                     self._rejected_summary(
@@ -256,8 +262,11 @@ class Phase1CheckpointSelector:
                     )
                 )
                 continue
+            # 同时满足 passed=True 和 score 非空，才进入后续评分排序流程。
             eligible.append(checkpoint)
 
+        # 没有任何输入候选时，返回 no_candidates。这里和 no_passed_checkpoint 区分，
+        # 便于调用方判断是训练过程没有生成 checkpoint，还是生成后全部未通过。
         if not validation_checkpoints:
             return Phase1CheckpointSelectionResult(
                 selected=None,
@@ -270,6 +279,8 @@ class Phase1CheckpointSelector:
                 reason="no_candidates",
             )
 
+        # 有输入但没有合格候选时，明确失败，不回退到最低 loss 或最后一个 checkpoint。
+        # 这保证 Phase II artifact export 只能基于真正通过 validation 的 Phase I 模型。
         if not eligible:
             return Phase1CheckpointSelectionResult(
                 selected=None,
@@ -282,6 +293,8 @@ class Phase1CheckpointSelector:
                 reason="no_passed_checkpoint",
             )
 
+        # 以第一个合格候选作为初始 best，然后逐个比较剩余合格候选。
+        # _candidate_is_better() 内部按 score、tie-breaker、epoch 三级规则判断。
         selected = eligible[0]
         selection_reason = "selected_highest_score"
         for candidate in eligible[1:]:
@@ -289,6 +302,8 @@ class Phase1CheckpointSelector:
                 selection_reason = self._selection_reason(candidate, selected)
                 selected = candidate
 
+        # 合格但未被选中的 checkpoint 也加入 rejected 摘要。它们不是 validation 失败，
+        # 而是在 selector 竞争中因为 lower_score、tie_breaker_loser 或 later_epoch_tie 落选。
         for checkpoint in eligible:
             if checkpoint is selected:
                 continue
@@ -299,6 +314,8 @@ class Phase1CheckpointSelector:
                 )
             )
 
+        # 只把 selected 的关键字段展开到结果摘要中；完整 validation payload 仍保留在
+        # selected.codebook_validation，避免 selection result 重复承载大对象。
         validation = selected.codebook_validation
         return Phase1CheckpointSelectionResult(
             selected=selected,
@@ -317,9 +334,21 @@ class Phase1CheckpointSelector:
         *,
         reason: str,
     ) -> Phase1RejectedCheckpointSummary:
-        """Build selector-level audit summary for a rejected checkpoint."""
+        """构造 selector 层的失败或落选 checkpoint 审计摘要。
+
+        输入:
+            checkpoint:
+                被过滤掉或未被最终选中的 checkpoint。
+            reason:
+                selector 给出的排除原因。该原因描述选择流程中的状态，不替代
+                validation.failed_layers 的底层失败原因。
+
+        输出:
+            ``Phase1RejectedCheckpointSummary``，仅包含 report 和日志所需字段。
+        """
 
         validation = checkpoint.codebook_validation
+        # 从完整 validation result 中抽取稳定摘要字段，避免向上层暴露完整对象结构。
         return Phase1RejectedCheckpointSummary(
             stage=checkpoint.stage,
             epoch=checkpoint.epoch,
@@ -335,22 +364,33 @@ class Phase1CheckpointSelector:
         candidate: Phase1ValidationCheckpoint,
         current_best: Phase1ValidationCheckpoint,
     ) -> bool:
-        """Return whether candidate should replace current_best."""
+        """判断 candidate 是否应该替换当前 best checkpoint。
+
+        比较顺序:
+            1. score 不接近时，score 更高者胜出；
+            2. score 接近时，调用 metrics 层 tie-breaker 比较；
+            3. tie-breaker 仍相同时，选择更早 epoch。
+        """
 
         candidate_score = candidate.codebook_validation.score
         best_score = current_best.codebook_validation.score
+        # 理论上进入 eligible 的候选都应有 score；这里保留防御式判断，避免调用方
+        # 直接复用私有函数时因 None 比较导致异常。
         if candidate_score is None or best_score is None:
             return False
 
+        # score 超出 tie tolerance 时，不再看 tie-breaker，直接按综合分高低选择。
         if not scores_are_tied(best_score, candidate_score):
             return candidate_score > best_score
 
+        # score 视为打平时，使用预先计算好的 tie_breaker_metrics 做细粒度比较。
         tie_breaker_comparison = compare_phase1_tie_breaker(
             candidate.codebook_validation.tie_breaker_metrics,
             current_best.codebook_validation.tie_breaker_metrics,
         )
         if tie_breaker_comparison != 0:
             return tie_breaker_comparison > 0
+        # score 和 tie-breaker 都无法区分时，选择更早 epoch，减少训练后期漂移风险。
         return candidate.epoch < current_best.epoch
 
     def _selection_reason(
@@ -358,21 +398,28 @@ class Phase1CheckpointSelector:
         candidate: Phase1ValidationCheckpoint,
         previous_best: Phase1ValidationCheckpoint,
     ) -> str:
-        """Explain why candidate replaced previous_best."""
+        """解释 candidate 为什么替换 previous_best。
+
+        返回值用于 ``Phase1CheckpointSelectionResult.reason``，让 report 能说明最终
+        best checkpoint 是因为最高 score、tie-breaker，还是更早 epoch 被选中。
+        """
 
         candidate_score = candidate.codebook_validation.score
         best_score = previous_best.codebook_validation.score
+        # None 分支是防御式兜底；正常 select_best 流程中 eligible 不会出现 None score。
         if candidate_score is None or best_score is None:
             return "selected_highest_score"
         if not scores_are_tied(best_score, candidate_score):
             return "selected_highest_score"
 
+        # 只有 score 在 tolerance 内打平时，才检查 tie-breaker 的胜负原因。
         tie_breaker_comparison = compare_phase1_tie_breaker(
             candidate.codebook_validation.tie_breaker_metrics,
             previous_best.codebook_validation.tie_breaker_metrics,
         )
         if tie_breaker_comparison != 0:
             return "selected_tie_breaker"
+        # score 和 tie-breaker 都打平，candidate 只能因为 epoch 更早而替换 previous_best。
         return "selected_earlier_epoch"
 
     def _eligible_rejection_reason(
@@ -380,19 +427,26 @@ class Phase1CheckpointSelector:
         selected: Phase1ValidationCheckpoint,
         rejected: Phase1ValidationCheckpoint,
     ) -> str:
-        """Explain why an eligible checkpoint was not selected."""
+        """解释合格 checkpoint 为什么没有被选中。
+
+        这里处理的是已经通过 validation 的候选，因此原因描述的是排序竞争结果，
+        而不是 hard gate 失败原因。
+        """
 
         selected_score = selected.codebook_validation.score
         rejected_score = rejected.codebook_validation.score
+        # 正常情况下不会进入该分支；保留兜底可让摘要原因保持可序列化。
         if selected_score is None or rejected_score is None:
             return "missing_score"
         if not scores_are_tied(selected_score, rejected_score):
             return "lower_score"
 
+        # score 近似打平时，若 selected 的 tie-breaker 更优，则 rejected 是 tie-breaker 落败。
         tie_breaker_comparison = compare_phase1_tie_breaker(
             selected.codebook_validation.tie_breaker_metrics,
             rejected.codebook_validation.tie_breaker_metrics,
         )
         if tie_breaker_comparison != 0:
             return "tie_breaker_loser"
+        # score 和 tie-breaker 都相同，则更晚 epoch 的候选落选。
         return "later_epoch_tie"
