@@ -5,6 +5,11 @@ import numpy as np
 from src.phase1.evaluators.phase1_validation_layers.layer3_oracle_profitability import (
     _dominant_pair_positive_ratio,
     _fee_drag,
+    _per_code_profitability,
+    _top_contribution_ratio,
+)
+from src.phase1.evaluators.phase1_validation_layers.layer2_behavior_quality import (
+    _entropy_purity,
 )
 from src.phase1.evaluators.phase1_validation_layers.layer4_label_predictability import (
     _fit_linear_probe,
@@ -18,10 +23,13 @@ from src.phase1.metrics import (
     Phase1LabelPredictabilityThresholds,
     Phase1OracleProfitabilityMetrics,
     Phase1OracleProfitabilityThresholds,
+    Phase1VQInternalMetrics,
+    Phase1VQInternalThresholds,
     Phase1ValidationRuntimeConfig,
     evaluate_behavior_quality_rules,
     evaluate_label_predictability_rules,
     evaluate_oracle_profitability_rules,
+    evaluate_vq_internal_rules,
 )
 
 
@@ -80,6 +88,27 @@ def _passing_oracle_metrics(**overrides) -> Phase1OracleProfitabilityMetrics:
     return Phase1OracleProfitabilityMetrics(**values)
 
 
+def _passing_vq_metrics(**overrides) -> Phase1VQInternalMetrics:
+    values = {
+        "validation_action_accuracy": 0.90,
+        "reconstruction_loss_gap": 1.10,
+        "active_code_ratio": 0.90,
+        "max_code_occupancy": 0.30,
+        "normalized_code_perplexity": 0.70,
+        "dead_code_ratio": 0.10,
+        "assignment_churn_recent_mean": 0.10,
+        "code_lifetime_pass_ratio": 0.90,
+        "quantization_distance": 0.20,
+        "nearest_second_margin_median": 0.20,
+        "decoder_turnover_error": 0.10,
+        "entry_timing_error_median": 0.10,
+        "direction_accuracy": 0.90,
+        "quantization_distance_gap": 1.0,
+    }
+    values.update(overrides)
+    return Phase1VQInternalMetrics(**values)
+
+
 def test_behavior_rules_use_distinct_support_and_structure_weak_thresholds() -> None:
     thresholds = Phase1BehaviorQualityThresholds()
 
@@ -112,6 +141,12 @@ def test_behavior_duplicate_code_pair_limit_defaults_to_codebook_size() -> None:
     assert not above_k.passed
 
 
+def test_behavior_entropy_purity_can_support_structure_gate() -> None:
+    values = np.asarray(["a"] * 70 + ["b"] * 10 + ["c"] * 10 + ["d"] * 10)
+
+    assert _entropy_purity(values) > 0.20
+
+
 def test_label_entropy_given_morphology_is_hard_gate() -> None:
     thresholds = Phase1LabelPredictabilityThresholds()
 
@@ -140,6 +175,34 @@ def test_fee_drag_uses_total_fee_over_gross_profit() -> None:
     assert math.isinf(_fee_drag(fees, np.asarray([-1.0, 0.0, -2.0])))
 
 
+def test_top_contribution_uses_top_fraction_of_all_horizons() -> None:
+    returns = np.asarray([100.0, 50.0] + [-1.0] * 18)
+
+    assert math.isclose(_top_contribution_ratio(returns, 0.10), 1.0)
+
+
+def test_per_code_profitability_filters_to_active_codes() -> None:
+    code_ids = np.asarray([0, 0, 0, 1])
+    decoded_advantage = np.asarray([1.0, 1.0, 1.0, -10.0])
+    decoded_returns = decoded_advantage
+    dp_advantage = np.asarray([1.0, 1.0, 1.0, 1.0])
+    gross_returns = np.asarray([1.0, 1.0, 1.0, 1.0])
+    fees = np.asarray([0.0, 0.0, 0.0, 0.0])
+
+    per_code = _per_code_profitability(
+        code_ids=code_ids,
+        decoded_advantage=decoded_advantage,
+        decoded_returns=decoded_returns,
+        dp_advantage=dp_advantage,
+        decoded_gross_returns=gross_returns,
+        decoded_fees=fees,
+        thresholds=Phase1OracleProfitabilityThresholds(),
+        active_codes=(0,),
+    )
+
+    assert [item.code_id for item in per_code] == [0]
+
+
 def test_oracle_rules_require_risk_adjusted_return_above_random() -> None:
     thresholds = Phase1OracleProfitabilityThresholds()
 
@@ -149,6 +212,22 @@ def test_oracle_rules_require_risk_adjusted_return_above_random() -> None:
     )
     failing = evaluate_oracle_profitability_rules(
         _passing_oracle_metrics(risk_adjusted_return_vs_random=-0.01),
+        thresholds,
+    )
+
+    assert passing.passed
+    assert not failing.passed
+
+
+def test_vq_rules_require_quantization_distance_gap() -> None:
+    thresholds = Phase1VQInternalThresholds()
+
+    passing = evaluate_vq_internal_rules(
+        _passing_vq_metrics(quantization_distance_gap=1.25),
+        thresholds,
+    )
+    failing = evaluate_vq_internal_rules(
+        _passing_vq_metrics(quantization_distance_gap=1.26),
         thresholds,
     )
 
@@ -186,6 +265,37 @@ def test_dominant_pair_positive_ratio_is_computed_per_active_code() -> None:
     decoded_advantage = np.asarray([-1.0, -1.0, 10.0, 1.0, 1.0])
 
     assert _dominant_pair_positive_ratio(snapshot, decoded_advantage) == 0.5
+
+
+def test_dominant_pair_positive_ratio_ignores_inactive_codes() -> None:
+    sample_count = 101
+    snapshot = Phase1EvaluationSnapshot(
+        split="val",
+        epoch=1,
+        sample_ids=np.arange(sample_count),
+        states=np.zeros((sample_count, 4, 2), dtype=np.float32),
+        prices=np.ones((sample_count, 4), dtype=np.float32),
+        demo_actions=np.ones((sample_count, 4), dtype=np.int64),
+        demo_rewards=np.zeros((sample_count, 4), dtype=np.float32),
+        decoded_actions=np.ones((sample_count, 4), dtype=np.int64),
+        decoded_logits=np.zeros((sample_count, 4, 3), dtype=np.float32),
+        code_ids=np.asarray([0] * 100 + [1], dtype=np.int64),
+        z_e=np.zeros((sample_count, 2), dtype=np.float32),
+        z_q=np.zeros((sample_count, 2), dtype=np.float32),
+        distances=np.zeros((sample_count, 2), dtype=np.float32),
+        reconstruction_loss=0.0,
+        action_accuracy=1.0,
+    )
+    decoded_advantage = np.asarray([1.0] * 100 + [-10.0])
+
+    assert (
+        _dominant_pair_positive_ratio(
+            snapshot,
+            decoded_advantage,
+            active_code_min_occupancy=0.02,
+        )
+        == 1.0
+    )
 
 
 def test_linear_probe_is_trainable_and_deterministic() -> None:
