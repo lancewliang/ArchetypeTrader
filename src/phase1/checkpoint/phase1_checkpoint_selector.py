@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import List, Literal, Sequence
+
+from .phase1_checkpoint import Phase1ValidationCheckpoint
 
 
 

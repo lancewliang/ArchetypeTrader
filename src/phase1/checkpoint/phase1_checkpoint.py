@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
 from ..metrics import Phase1Metrics, Phase1ValidationResult
-
-
 
 @dataclass(frozen=True)
 class Phase1ValidationCheckpoint:

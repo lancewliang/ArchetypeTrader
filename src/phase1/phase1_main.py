@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import List
 import torch
 from torch.utils.data import DataLoader
-
 from ..data.data_load import DataLoad
 from ..data.horizon_builder import HorizonBuilder
 from ..model.data_types import (
@@ -19,8 +19,8 @@ from ..model.vq_archetype import ArchetypeVQModel
 from .phase1_artifact_store import Phase1ArtifactStore
 from ..tool.SingleTrade_DP_Planner import SingleTrade_DP_Planner
 from .checkpoint import (
-    Phase1CheckpointSelectionResult,
-    Phase1CheckpointSelector,
+    Phase1ValidationCheckpoint,
+    Phase1CheckpointSelector
 )
 from .evaluators import Phase1CodebookEvaluator, Phase1Evaluator
 from .horizon_train_label_builder import (
@@ -136,7 +136,6 @@ class Phase1MainFlow:
         self.codebook_evaluator: Phase1CodebookEvaluator | None = None
         self.report: Phase1CodebookReport | None = None
         self.selector: Phase1CheckpointSelector | None = None
-        self.best_checkpoint_selection: Phase1CheckpointSelectionResult | None = None
         self.validation_results: dict[int, Phase1ValidationResult] = {}
         self.assignment_history: list[CodeAssignmentSnapshot] = []
         self.horizon_train_label_builder: HorizonTrainLabelBuilder | None = None
@@ -417,11 +416,12 @@ class Phase1MainFlow:
                 html=report_html
             )
 
-    def select_and_save_best_checkpoint(self) -> None:       
-        self.best_checkpoint_selection = self.selector.select_best_from_dir(
-            self.data_store.artifact_paths["checkpoints"],
+    def select_and_save_best_checkpoint(self) -> None:     
+        validation_checkpoints: List[Phase1ValidationCheckpoint] = []
+        best_checkpoint_selection = self.selector.select_best(
+            validation_checkpoints,
         )
-        self.data_store.save_best_checkpoint(self.best_checkpoint_selection.checkpoint)
+        
         
     def export_horizon_labels(self) -> None:
         """导出 Phase I horizon-level archetype labels。
