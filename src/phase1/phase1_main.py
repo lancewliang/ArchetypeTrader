@@ -82,6 +82,11 @@ class Phase1MainConfig:
     num_layers: int = 1
     dropout: float = 0.0
     gamma: float = 0.9
+    validation_interval: int = 5
+
+    def __post_init__(self) -> None:
+        if self.validation_interval < 1:
+            raise ValueError("validation_interval must be >= 1")
 
 
 class Phase1MainFlow:
@@ -383,14 +388,30 @@ class Phase1MainFlow:
                 split="train",
                 epoch=epoch,
             )
-            self._evaluate_checkpoint(epoch=epoch, train_metrics=train_metrics)
+            epoch_metrics = self._evaluate_checkpoint(
+                epoch=epoch,
+                train_metrics=train_metrics,
+            )
+            self.data_store.save_phase1_epoch_metrics(
+                stage="vq",
+                epoch=epoch,
+                metrics=epoch_metrics,
+            )
             self.data_store.save_phase1_checkpoint(
                 stage="vq",
                 epoch=epoch,
                 config=asdict(self.config),
                 model_state_dict=self.model.state_dict(),
                 optimizer_state_dict=self.optimizer.state_dict()             
-            )             
+            )
+            self.report.write_html(
+                validation_result=self.validation_results[epoch],
+                output_path=self.data_store.artifact_paths[
+                    "phase1_codebook_validation_html"
+                ],
+                config=asdict(self.config),
+                artifacts=self.data_store.artifact_paths,
+            )
 
 
     def select_and_save_best_checkpoint(self) -> None:       
@@ -454,8 +475,8 @@ class Phase1MainFlow:
         *,
         epoch: int,
         train_metrics: Phase1Metrics,
-    ) -> Phase1ValidationResult:
-        """运行 checkpoint 评估，并通过 datastore 保存基础指标和五层验证结果。"""
+    ) -> dict[str, object]:
+        """运行 checkpoint 评估，并返回本轮完整 metrics payload。"""
 
         val_metrics: Phase1Metrics = self.evaluator.evaluate(
             self.dataloaders["val"],
@@ -475,19 +496,13 @@ class Phase1MainFlow:
             assignment_history=tuple(self.assignment_history),
         )
         self.validation_results[epoch] = validation_result
-        self.data_store.save_phase1_validation_result(validation_result)
-        self.data_store.save_phase1_epoch_metrics(
-            stage="vq",
-            epoch=epoch,
-            metrics={
-                "train": train_metrics.to_dict(include_context=True),
-                "val": val_metrics.to_dict(include_context=True),
-                "codebook_validation": validation_result.to_dict(),
-                "codebook_validation_flat": validation_result.to_flat_dict(),
-            },
-        )
 
         current_assignment = self.codebook_evaluator.last_assignment_snapshot
         if current_assignment is not None:
             self.assignment_history.append(current_assignment)
-        return validation_result
+        return {
+            "train": train_metrics.to_dict(include_context=True),
+            "val": val_metrics.to_dict(include_context=True),
+            "codebook_validation": validation_result.to_dict(),
+            "codebook_validation_flat": validation_result.to_flat_dict(),
+        }
