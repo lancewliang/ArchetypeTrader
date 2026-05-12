@@ -91,7 +91,10 @@ def classify_market_morphology(
         fee_rate: 手续费率，用于设定 neutral band。
 
     输出:
-        ``[N]`` 形状的 morphology 标签数组；价格不可用时返回空数组。
+        ``[N]`` 形状的 morphology 标签数组；价格不可用时返回空数组。标签遵循
+        validation criteria 文档定义:
+        ``uptrend``、``downtrend``、``reversal-up``、``reversal-down``、
+        ``range-high-vol``、``range-low-vol``、``volatile-mixed``、``neutral``。
 
     使用场景:
         统计每个 code 的 dominant morphology、morphology purity 和 lift。
@@ -100,16 +103,72 @@ def classify_market_morphology(
     price_values = _prices_2d(prices)
     if price_values is None:
         return np.asarray([], dtype=object)
-    returns = price_values[:, 1:] / np.maximum(price_values[:, :-1], _EPS) - 1.0
+    horizon = price_values.shape[1]
+    mid = max(1, horizon // 2)
+    log_returns = np.diff(np.log(np.maximum(price_values, _EPS)), axis=1)
     total_return = price_values[:, -1] / np.maximum(price_values[:, 0], _EPS) - 1.0
-    realized_vol = np.std(returns, axis=1)
-    neutral_band = np.maximum(2.0 * fee_rate, 0.5 * realized_vol)
+    ret_first = price_values[:, mid] / np.maximum(price_values[:, 0], _EPS) - 1.0
+    ret_second = price_values[:, -1] / np.maximum(price_values[:, mid], _EPS) - 1.0
+    realized_vol = np.std(log_returns, axis=1) * np.sqrt(horizon)
+    range_ratio = (
+        np.max(price_values, axis=1) - np.min(price_values, axis=1)
+    ) / np.maximum(price_values[:, 0], _EPS)
+    path_length = np.sum(np.abs(np.diff(price_values, axis=1)), axis=1)
+    trend_efficiency = np.abs(price_values[:, -1] - price_values[:, 0]) / (
+        path_length + _EPS
+    )
+
+    vol_high = float(np.quantile(realized_vol, 0.70))
+    vol_low = float(np.quantile(realized_vol, 0.30))
+    range_high = float(np.quantile(range_ratio, 0.70))
+    trend_ret_threshold = max(
+        float(np.quantile(np.abs(total_return), 0.60)),
+        3.0 * fee_rate,
+    )
+    reversal_leg_threshold = max(
+        float(np.quantile(np.abs(np.concatenate([ret_first, ret_second])), 0.60)),
+        2.0 * fee_rate,
+    )
 
     labels = np.full(price_values.shape[0], "neutral", dtype=object)
-    labels[total_return > neutral_band] = "trend_up"
-    labels[total_return < -neutral_band] = "trend_down"
-    volatile = (labels == "neutral") & (realized_vol > 4.0 * fee_rate)
-    labels[volatile] = "range_volatile"
+
+    reversal_up = (
+        (ret_first < -reversal_leg_threshold)
+        & (ret_second > reversal_leg_threshold)
+    )
+    reversal_down = (
+        (ret_first > reversal_leg_threshold)
+        & (ret_second < -reversal_leg_threshold)
+    )
+    labels[reversal_up] = "reversal-up"
+    labels[reversal_down] = "reversal-down"
+
+    unassigned = labels == "neutral"
+    labels[
+        unassigned
+        & (total_return > trend_ret_threshold)
+        & (trend_efficiency >= 0.35)
+    ] = "uptrend"
+    labels[
+        unassigned
+        & (total_return < -trend_ret_threshold)
+        & (trend_efficiency >= 0.35)
+    ] = "downtrend"
+
+    unassigned = labels == "neutral"
+    labels[
+        unassigned
+        & (np.abs(total_return) <= trend_ret_threshold)
+        & (range_ratio >= range_high)
+    ] = "range-high-vol"
+    labels[
+        unassigned
+        & (np.abs(total_return) <= trend_ret_threshold)
+        & (realized_vol <= vol_low)
+    ] = "range-low-vol"
+
+    unassigned = labels == "neutral"
+    labels[unassigned & (realized_vol >= vol_high)] = "volatile-mixed"
     return labels
 
 
@@ -121,40 +180,135 @@ def classify_action_motif(
 
     输入参数:
         actions: decoded action 数组，形状为 ``[N, H]``。
-        prices: 预留参数，当前简化实现不依赖价格。
+        prices: 可选价格路径，用于判断入场方向和入场前 recent move 的关系。
 
     输出:
-        ``[N]`` 形状的 motif 标签数组，例如 ``flat``、``long_bias``、
-        ``short_bias``、``reversal``、``single_entry_hold`` 或 ``active_switching``。
+        ``[N]`` 形状的 motif 标签数组，格式为
+        ``{direction} + {entry_bucket} + {holding_style}``，必要时追加
+        ``+ {reversal_type}``。
 
     使用场景:
         统计每个 code 的 dominant motif 和 morphology-motif pair。
     """
 
-    del prices
     positions = _positions(actions)
-    motifs = np.full(positions.shape[0], "flat", dtype=object)
-    has_long = np.any(positions > 0, axis=1)
-    has_short = np.any(positions < 0, axis=1)
-    motifs[has_long & ~has_short] = "long_bias"
-    motifs[has_short & ~has_long] = "short_bias"
-    motifs[has_long & has_short] = "reversal"
+    price_values = _prices_2d(prices)
+    motifs: list[str] = []
+    horizon = max(1, positions.shape[1])
 
-    turnover = np.sum(
-        np.abs(
-            np.diff(
-                np.concatenate(
-                    [np.zeros((positions.shape[0], 1)), positions],
-                    axis=1,
-                ),
-                axis=1,
-            )
-        ),
-        axis=1,
-    )
-    motifs[(motifs != "flat") & (turnover <= 1.0)] = "single_entry_hold"
-    motifs[(motifs != "flat") & (turnover >= 4.0)] = "active_switching"
-    return motifs
+    for sample_index, position_path in enumerate(positions):
+        non_flat = position_path != 0
+        non_flat_ratio = float(np.mean(non_flat))
+        long_ratio = float(np.mean(position_path > 0))
+        short_ratio = float(np.mean(position_path < 0))
+
+        if non_flat_ratio < 0.20:
+            motifs.append("flat + none + mostly-flat")
+            continue
+
+        if long_ratio >= 0.35 and long_ratio >= short_ratio + 0.15:
+            direction = "long"
+        elif short_ratio >= 0.35 and short_ratio >= long_ratio + 0.15:
+            direction = "short"
+        else:
+            direction = "mixed"
+
+        first_trade_t = int(np.argmax(non_flat))
+        entry_position = float(position_path[first_trade_t])
+        entry_ratio = first_trade_t / horizon
+        if entry_ratio < 1.0 / 3.0:
+            entry_bucket = "early"
+        elif entry_ratio < 2.0 / 3.0:
+            entry_bucket = "middle"
+        else:
+            entry_bucket = "late"
+
+        position_with_initial = np.concatenate(
+            [np.zeros(1, dtype=np.float64), position_path]
+        )
+        change_count = int(np.sum(np.diff(position_with_initial) != 0))
+        after_entry = position_path[first_trade_t:]
+        holding_ratio_after_entry = float(
+            np.mean(after_entry == entry_position)
+        ) if after_entry.size else 0.0
+
+        if entry_bucket in {"middle", "late"} and holding_ratio_after_entry >= 0.70:
+            holding_style = "delayed-hold"
+        elif holding_ratio_after_entry >= 0.70 and change_count <= 2:
+            holding_style = "hold"
+        elif 0.20 <= non_flat_ratio < 0.50 and _has_contiguous_non_flat(non_flat):
+            holding_style = "brief-trade"
+        elif change_count > 2:
+            holding_style = "switching"
+        else:
+            holding_style = "hold"
+
+        reversal_type = _classify_reversal_type(
+            position_path=position_path,
+            price_path=(
+                price_values[sample_index]
+                if price_values is not None and sample_index < price_values.shape[0]
+                else None
+            ),
+            first_trade_t=first_trade_t,
+            long_ratio=long_ratio,
+            short_ratio=short_ratio,
+        )
+        motif = f"{direction} + {entry_bucket} + {holding_style}"
+        if reversal_type != "none":
+            motif = f"{motif} + {reversal_type}"
+        motifs.append(motif)
+    return np.asarray(motifs, dtype=object)
+
+
+def _has_contiguous_non_flat(non_flat: np.ndarray) -> bool:
+    """判断非空仓片段是否主要为连续单段。"""
+
+    indices = np.flatnonzero(non_flat)
+    if indices.size == 0:
+        return False
+    return int(indices[-1] - indices[0] + 1) == int(indices.size)
+
+
+def _classify_reversal_type(
+    *,
+    position_path: np.ndarray,
+    price_path: np.ndarray | None,
+    first_trade_t: int,
+    long_ratio: float,
+    short_ratio: float,
+) -> str:
+    """分类 motif 的反转/近期价格关系附加标签。"""
+
+    non_zero = position_path[position_path != 0]
+    if non_zero.size:
+        first_direction = float(non_zero[0])
+        last_direction = float(non_zero[-1])
+        if (
+            first_direction > 0
+            and last_direction < 0
+            and long_ratio >= 0.20
+            and short_ratio >= 0.20
+        ):
+            return "long-to-short"
+        if (
+            first_direction < 0
+            and last_direction > 0
+            and long_ratio >= 0.20
+            and short_ratio >= 0.20
+        ):
+            return "short-to-long"
+
+    if price_path is None or first_trade_t <= 0:
+        return "none"
+    lookback_start = max(0, first_trade_t - 12)
+    recent_move = price_path[first_trade_t] - price_path[lookback_start]
+    entry_direction = position_path[first_trade_t]
+    if abs(recent_move) <= _EPS or entry_direction == 0:
+        return "none"
+    if np.sign(recent_move) == np.sign(entry_direction):
+        return "with-recent-move"
+    return "against-recent-move"
 
 
 def _active_codes(

@@ -29,6 +29,7 @@ from ...metrics import (
     Phase1TeacherQualityMetrics,
     Phase1ValidationRuntimeConfig,
 )
+from .layer2_behavior_quality import classify_market_morphology
 
 
 _EPS = 1e-12
@@ -91,38 +92,6 @@ def _demo_returns(
         snapshot.demo_actions,
         fee_rate,
     ).returns
-
-
-def _morphology_labels(prices: np.ndarray, *, fee_rate: float) -> np.ndarray:
-    """根据价格路径生成简化市场形态标签。
-
-    输入参数:
-        prices: 价格数组，形状为 ``[N, H]`` 或 ``[N, H, 1]``。
-        fee_rate: 用于设置 neutral band 的手续费率。
-
-    输出:
-        ``[N]`` 形状的字符串标签数组，例如 ``trend_up``、``trend_down``、
-        ``range_volatile`` 或 ``neutral``。价格不可用时返回空数组。
-
-    使用场景:
-        计算 Layer 0 的非 neutral morphology coverage。
-    """
-
-    price_values = _prices_2d(prices)
-    if price_values is None:
-        return np.asarray([], dtype=object)
-
-    bar_returns = price_values[:, 1:] / np.maximum(price_values[:, :-1], _EPS) - 1.0
-    total_return = price_values[:, -1] / np.maximum(price_values[:, 0], _EPS) - 1.0
-    realized_vol = np.std(bar_returns, axis=1)
-    neutral_band = np.maximum(2.0 * fee_rate, 0.5 * realized_vol)
-
-    labels = np.full(price_values.shape[0], "neutral", dtype=object)
-    labels[total_return > neutral_band] = "trend_up"
-    labels[total_return < -neutral_band] = "trend_down"
-    volatile_mask = (labels == "neutral") & (realized_vol > 4.0 * fee_rate)
-    labels[volatile_mask] = "range_volatile"
-    return labels
 
 
 def _top_removed_total_advantage(advantages: np.ndarray, top_ratio: float) -> float:
@@ -198,7 +167,10 @@ def compute_teacher_quality_metrics(
             np.nansum(doubled_fee_returns - flat_returns)
             / (np.nansum(advantages) + _EPS)
         )
-        labels = _morphology_labels(price_values, fee_rate=runtime_config.fee_rate)
+        labels = classify_market_morphology(
+            price_values,
+            fee_rate=runtime_config.fee_rate,
+        )
         morphology_coverage = float(np.mean(labels != "neutral")) if labels.size else _nan()
 
     metrics = Phase1TeacherQualityMetrics(
