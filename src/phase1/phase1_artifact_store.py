@@ -7,22 +7,13 @@ import json
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping, cast
+from typing import Any, List, Mapping, cast
 
 import polars as pl
 import torch
 
-from ..model.vq_archetype import (
-    ArchetypeActionDecoder,
-    ArchetypeTrajectoryEncoder,
-    VectorQuantizer,
-)
 from .checkpoint import (
-    Phase1Checkpoint,
-    Phase1CheckpointConfig,
-    Phase1CheckpointMetrics,
-    Phase1CheckpointStage,
-    Phase1StateDict,
+    Phase1ValidationCheckpoint,
 )
 from .metrics import Phase1ValidationResult
 from ..store.artifact_store import DataFileStore
@@ -319,18 +310,10 @@ class Phase1ArtifactStore(DataFileStore):
         return path
 
     def load_phase1_epoch_metrics(
-        self,
-        *,
-        stage: str,
-        epoch: int,
-    ) -> Phase1ValidationResult:
+        self,       
+    ) -> List[Phase1ValidationCheckpoint]:
         """读取单个 Phase I epoch 的训练/评估指标 JSON。"""
-
-        path = self._phase1_epoch_metrics_path(stage=stage, epoch=epoch)
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, Mapping):
-            raise ValueError(f"invalid phase1 epoch metrics payload: {path}")
-        return dict(payload)
+        return []
 
     def load_phase1_validation_result(
         self,
