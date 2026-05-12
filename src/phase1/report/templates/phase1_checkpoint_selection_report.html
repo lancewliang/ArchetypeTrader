@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <style>
+    :root { color-scheme: light; --bg:#f7f8fb; --panel:#fff; --ink:#182230; --muted:#667085; --line:#d8dee8; --soft:#eef2f6; --head:#102033; --pass:#147a4d; --pass-bg:#e8f6ef; --fail:#b42318; --fail-bg:#ffe8e5; --warn:#a15c00; --warn-bg:#fff4df; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .wrap { width:min(1280px, calc(100vw - 40px)); margin:0 auto; }
+    header { background:var(--head); color:#fff; border-bottom:1px solid #0b1220; }
+    .hero { display:flex; justify-content:space-between; gap:24px; padding:28px 0; align-items:flex-end; }
+    h1,h2,h3,p { margin:0; }
+    h1 { font-size:28px; line-height:1.2; }
+    h2 { font-size:18px; margin:22px 0 10px; }
+    h3 { font-size:14px; }
+    .subtitle { margin-top:8px; color:#d0d7e2; }
+    .meta { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; color:#d1d5db; font-size:12px; }
+    .meta span { border:1px solid rgba(255,255,255,.18); border-radius:6px; padding:6px 8px; }
+    main { padding:22px 0 48px; }
+    .grid { display:grid; gap:14px; }
+    .summary { grid-template-columns:280px repeat(4, minmax(130px, 1fr)); align-items:stretch; }
+    .two { grid-template-columns:1fr 1fr; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; box-shadow:0 8px 24px rgba(16,24,40,.06); overflow:hidden; padding:14px; }
+    .panel-head { padding-bottom:10px; border-bottom:1px solid var(--soft); margin-bottom:8px; display:flex; justify-content:space-between; gap:10px; align-items:center; }
+    .score-card { display:flex; flex-direction:column; gap:10px; }
+    .score { font-size:38px; font-weight:760; line-height:1; }
+    .label { color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }
+    .value { margin-top:8px; font-size:18px; font-weight:720; overflow-wrap:anywhere; }
+    .badge { border-radius:999px; padding:3px 8px; font-size:12px; font-weight:800; display:inline-flex; width:max-content; }
+    .badge.pass { color:var(--pass); background:var(--pass-bg); }
+    .badge.fail { color:var(--fail); background:var(--fail-bg); }
+    .badge.warn { color:var(--warn); background:var(--warn-bg); }
+    .with-tip { position:relative; cursor:help; }
+    .with-tip::after { content:attr(data-tip); position:absolute; left:0; bottom:calc(100% + 8px); z-index:20; display:none; width:max-content; max-width:min(320px, calc(100vw - 32px)); padding:8px 10px; border-radius:6px; background:#101828; color:#fff; font-size:12px; line-height:1.45; font-weight:500; text-transform:none; box-shadow:0 10px 24px rgba(16,24,40,.22); white-space:normal; }
+    .with-tip::before { content:""; position:absolute; left:14px; bottom:calc(100% + 2px); z-index:21; display:none; border:6px solid transparent; border-top-color:#101828; }
+    .with-tip:hover::after, .with-tip:focus::after, .with-tip:hover::before, .with-tip:focus::before { display:block; }
+    .table-wrap { overflow:auto; padding:0; }
+    table { width:100%; border-collapse:collapse; min-width:720px; }
+    th,td { text-align:left; vertical-align:top; border-bottom:1px solid var(--soft); padding:9px 10px; }
+    th { color:#475467; font-size:12px; text-transform:uppercase; background:#f9fafb; }
+    td { overflow-wrap:anywhere; }
+    tr:last-child td { border-bottom:0; }
+    @media (max-width: 980px) { .hero { align-items:flex-start; flex-direction:column; } .summary, .two { grid-template-columns:1fr; } .wrap { width:min(100vw - 24px, 1280px); } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap hero">
+      <div>
+        <h1>{{ header_title }}</h1>
+        <p class="subtitle">选择原因 {{ summary.reason }} · 选中检验点 {{ summary.selected_checkpoint_id }}</p>
+      </div>
+      <div class="meta">
+        <span>生成时间 {{ report.generated_at }}</span>
+        <span>结构版本 {{ report.schema }}</span>
+      </div>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="grid summary">
+      <article class="panel score-card">
+        <div class="label">选择状态</div>
+        <div class="score">{{ summary.selected_score }}</div>
+        <span class="badge {{ summary.badge_class }}">{{ summary.status_label }}</span>
+      </article>
+      <article class="panel"><div class="label">选中检验点</div><div class="value">{{ summary.selected_checkpoint_id }}</div></article>
+      <article class="panel"><div class="label">选中轮次</div><div class="value">{{ summary.selected_epoch }}</div></article>
+      <article class="panel"><div class="label">候选总数</div><div class="value">{{ summary.candidate_count }}</div></article>
+      <article class="panel"><div class="label">合格 / 落选</div><div class="value">{{ summary.eligible_count }} / {{ summary.rejected_count }}</div></article>
+    </section>
+
+    {% if selected.exists %}
+    <section>
+      <h2 class="with-tip" tabindex="0" data-tip="selector 最终选出的 Phase I 检验点，后续 best checkpoint 保存和 Phase II 标签导出会基于该项。">选中检验点</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead><tr><th class="with-tip" tabindex="0" data-tip="检验点稳定 ID，通常对应 stage 和 epoch。">检验点</th><th class="with-tip" tabindex="0" data-tip="训练阶段，例如 vq。">阶段</th><th class="with-tip" tabindex="0" data-tip="该检验点对应的训练轮次。">轮次</th><th class="with-tip" tabindex="0" data-tip="五层 codebook validation hard gate 是否全部通过。">是否通过</th><th class="with-tip" tabindex="0" data-tip="通过 hard gate 后计算的综合选择评分，越高越优。">评分</th><th class="with-tip" tabindex="0" data-tip="未通过的 validation layer 名称；选中项通常为空。">失败层</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>{{ selected.checkpoint_id }}</td>
+              <td>{{ selected.stage }}</td>
+              <td>{{ selected.epoch }}</td>
+              <td>{{ selected.passed }}</td>
+              <td>{{ selected.score }}</td>
+              <td>{{ selected.failed_layers }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if rejected_rows %}
+    <section>
+      <h2 class="with-tip" tabindex="0" data-tip="未被最终选中的候选列表，包含 validation 失败、缺少评分或排序竞争落败的检验点。">排除检验点</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead><tr><th class="with-tip" tabindex="0" data-tip="被排除候选的稳定 ID。">检验点</th><th class="with-tip" tabindex="0" data-tip="被排除候选所属训练阶段。">阶段</th><th class="with-tip" tabindex="0" data-tip="被排除候选对应的训练轮次。">轮次</th><th class="with-tip" tabindex="0" data-tip="该候选是否通过五层 hard gate。">是否通过</th><th class="with-tip" tabindex="0" data-tip="该候选的综合评分；validation 失败或缺失时可能为空。">评分</th><th class="with-tip" tabindex="0" data-tip="导致 validation 失败的 layer 名称。">失败层</th><th class="with-tip" tabindex="0" data-tip="selector 层给出的排除原因，例如 validation_failed、lower_score 或 tie_breaker_loser。">排除原因</th></tr></thead>
+          <tbody>
+            {% for row in rejected_rows %}
+            <tr>
+              <td>{{ row.checkpoint_id }}</td>
+              <td>{{ row.stage }}</td>
+              <td>{{ row.epoch }}</td>
+              <td><span class="badge {{ row.badge_class }}">{{ row.passed }}</span></td>
+              <td>{{ row.score }}</td>
+              <td>{{ row.failed_layers }}</td>
+              <td>{{ row.reason }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if train_metric_rows %}
+    <section>
+      <h2 class="with-tip" tabindex="0" data-tip="选中检验点对应的训练集和验证集基础指标，用于复查 best checkpoint 的训练表现。">选中检验点指标</h2>
+      <div class="grid two">
+        <article class="panel table-wrap">
+          <div class="panel-head"><h3 class="with-tip" tabindex="0" data-tip="选中检验点在训练 split 上聚合得到的基础训练指标。">训练集</h3></div>
+          <table>
+            <thead><tr><th class="with-tip" tabindex="0" data-tip="训练集基础指标名称，例如 total_loss 或 action_accuracy。">指标</th><th class="with-tip" tabindex="0" data-tip="该训练集指标在选中轮次的取值。">数值</th></tr></thead>
+            <tbody>
+              {% for row in train_metric_rows %}
+              <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </article>
+        <article class="panel table-wrap">
+          <div class="panel-head"><h3 class="with-tip" tabindex="0" data-tip="选中检验点在验证 split 上聚合得到的基础评估指标。">验证集</h3></div>
+          <table>
+            <thead><tr><th class="with-tip" tabindex="0" data-tip="验证集基础指标名称，例如 total_loss 或 action_accuracy。">指标</th><th class="with-tip" tabindex="0" data-tip="该验证集指标在选中轮次的取值。">数值</th></tr></thead>
+            <tbody>
+              {% for row in val_metric_rows %}
+              <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </article>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tie_breaker_rows %}
+    <section>
+      <h2 class="with-tip" tabindex="0" data-tip="当多个候选综合评分接近时，用这些指标决定优先选择哪一个检验点。">平分决胜指标</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead><tr><th class="with-tip" tabindex="0" data-tip="tie-breaker 指标名称。">字段</th><th class="with-tip" tabindex="0" data-tip="tie-breaker 指标取值，具体胜负方向由 metrics 比较规则定义。">数值</th></tr></thead>
+          <tbody>
+            {% for row in tie_breaker_rows %}
+            <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if config_rows %}
+    <section>
+      <h2 class="with-tip" tabindex="0" data-tip="生成本次 checkpoint selection report 时记录的 Phase I 配置快照。">配置快照</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead><tr><th class="with-tip" tabindex="0" data-tip="配置项名称。">字段</th><th class="with-tip" tabindex="0" data-tip="配置项在本次 Phase I 运行中的取值。">数值</th></tr></thead>
+          <tbody>
+            {% for row in config_rows %}
+            <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if artifact_rows %}
+    <section>
+      <h2 class="with-tip" tabindex="0" data-tip="本次 Phase I 运行中与 checkpoint selection 相关的标准产物路径。">产物路径</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead><tr><th class="with-tip" tabindex="0" data-tip="产物路径 key。">字段</th><th class="with-tip" tabindex="0" data-tip="该产物在 data_store 中规划或保存的文件路径。">路径</th></tr></thead>
+          <tbody>
+            {% for row in artifact_rows %}
+            <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+  </main>
+</body>
+</html>

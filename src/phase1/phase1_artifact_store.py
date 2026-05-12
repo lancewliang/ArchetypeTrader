@@ -115,6 +115,7 @@ class Phase1ArtifactStore(DataFileStore):
             "phase1_report": root / "phase1_report.json",
             "phase1_codebook_validation_json": root / "phase1_codebook_validation.json",
             "phase1_codebook_validation_html": report_dir / "phase1_codebook_validation.html",
+            "phase1_checkpoint_selection_html": report_dir / "phase1_checkpoint_selection.html",
         }
 
         return None
@@ -318,6 +319,17 @@ class Phase1ArtifactStore(DataFileStore):
         self._save_text_payload(html, path)
         return path
 
+    def save_phase1_checkpoint_selection_html(
+        self,
+        *,
+        html: str,
+    ) -> Path:
+        """保存 Phase I checkpoint selection HTML 报告。"""
+
+        path = self._phase1_checkpoint_selection_html_path()
+        self._save_text_payload(html, path)
+        return path
+
     def load_phase1_all_epoch_metrics(
         self        
     ) -> List[Phase1ValidationCheckpoint]:
@@ -455,6 +467,11 @@ class Phase1ArtifactStore(DataFileStore):
 
         report_dir = self._phase1_artifact_path("reports")
         return report_dir / f"{stage}_epoch_{epoch:04d}_codebook_validation.html"
+
+    def _phase1_checkpoint_selection_html_path(self) -> Path:
+        """返回 checkpoint selection HTML 报告路径。"""
+
+        return self._phase1_artifact_path("phase1_checkpoint_selection_html")
 
     def _save_phase1_checkpoint_payload(
         self,

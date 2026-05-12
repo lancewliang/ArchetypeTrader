@@ -30,7 +30,7 @@ from .horizon_train_label_builder import (
     HorizonTrainLabelBuilderConfig,
 )
 from .metrics import CodeAssignmentSnapshot, Phase1Metrics, Phase1ValidationResult
-from .report import Phase1CodebookReport
+from .report import Phase1CheckpointSelectionReport, Phase1CodebookReport
 
 
 class Phase1FatalError(RuntimeError):
@@ -137,6 +137,7 @@ class Phase1MainFlow:
         self.evaluator: Phase1Evaluator | None = None
         self.codebook_evaluator: Phase1CodebookEvaluator | None = None
         self.report: Phase1CodebookReport | None = None
+        self.selection_report: Phase1CheckpointSelectionReport | None = None
         self.selector: Phase1CheckpointSelector | None = None
         self.validation_results: dict[int, Phase1ValidationResult] = {}
         self.assignment_history: list[CodeAssignmentSnapshot] = []
@@ -205,6 +206,7 @@ class Phase1MainFlow:
         )   
         self.data_store.initialize_phase1_artifact_dirs()
         self.report = Phase1CodebookReport()
+        self.selection_report = Phase1CheckpointSelectionReport()
         self.data_load = DataLoad()
         self.horizon_builder = HorizonBuilder(horizon=self.config.horizon)
         self.dp_planner = SingleTrade_DP_Planner(
@@ -323,6 +325,8 @@ class Phase1MainFlow:
             raise Phase1FatalError("codebook evaluator must be initialized")
         if self.report is None:
             raise Phase1FatalError("report must be initialized")
+        if self.selection_report is None:
+            raise Phase1FatalError("checkpoint selection report must be initialized")
         if self.selector is None:
             raise Phase1FatalError("checkpoint selector must be initialized")
         if "val" not in self.dataloaders:
@@ -423,6 +427,12 @@ class Phase1MainFlow:
         best_checkpoint_selection: Phase1CheckpointSelectionResult = self.selector.select_best(
             validation_checkpoints,
         )
+        report_html = self.selection_report.build_html(
+            selection_result=best_checkpoint_selection,
+            config=asdict(self.config),
+            artifacts=self.data_store.artifact_paths,
+        )
+        self.data_store.save_phase1_checkpoint_selection_html(html=report_html)
         if not best_checkpoint_selection.has_selection:
             print("no passed checkpoint found!!!")
             return
