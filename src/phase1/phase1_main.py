@@ -19,6 +19,8 @@ from ..model.vq_archetype import ArchetypeVQModel
 from .phase1_artifact_store import Phase1ArtifactStore
 from ..tool.SingleTrade_DP_Planner import SingleTrade_DP_Planner
 from .checkpoint import (
+    Phase1Checkpoint,
+    Phase1CheckpointSelectionResult,
     Phase1ValidationCheckpoint,
     Phase1CheckpointSelector
 )
@@ -139,7 +141,7 @@ class Phase1MainFlow:
         self.validation_results: dict[int, Phase1ValidationResult] = {}
         self.assignment_history: list[CodeAssignmentSnapshot] = []
         self.horizon_train_label_builder: HorizonTrainLabelBuilder | None = None
- 
+
     def _resolve_device(self, device: str) -> torch.device:
         requested_device = torch.device(device)
         if requested_device.type == "cuda" and not torch.cuda.is_available():
@@ -417,11 +419,19 @@ class Phase1MainFlow:
             )
 
     def select_and_save_best_checkpoint(self) -> None:     
-        validation_checkpoints: List[Phase1ValidationCheckpoint] = []
-        best_checkpoint_selection = self.selector.select_best(
+        validation_checkpoints: List[Phase1ValidationCheckpoint] = self.data_store.load_phase1_all_epoch_metrics()
+        best_checkpoint_selection: Phase1CheckpointSelectionResult = self.selector.select_best(
             validation_checkpoints,
         )
-        
+        if not best_checkpoint_selection.has_selection:
+            print("no passed checkpoint found!!!")
+            return
+        best_validation_checkpoint_selection = best_checkpoint_selection.selected
+        best_checkpoint = self.data_store.load_phase1_checkpoint(
+            stage="vq",
+            epoch=best_validation_checkpoint_selection.epoch,
+        )         
+        self.data_store.save_best_checkpoint(best_checkpoint)         
         
     def export_horizon_labels(self) -> None:
         """导出 Phase I horizon-level archetype labels。
@@ -431,12 +441,12 @@ class Phase1MainFlow:
         checkpoint 的 encoder 与 codebook 对 DP demonstration trajectories
         离线编码，再通过 ``Phase1ArtifactStore`` 写出 label 文件。
         """
-
-        if self.best_checkpoint_selection is None:
+        best_checkpoint = self.data_store.load_best_checkpoint()
+        if best_checkpoint is None:
             return
 
         self.model.load_state_dict(
-            self.best_checkpoint_selection.checkpoint.model_state_dict
+            best_checkpoint.model_state_dict
         )
         for split_name, trajectory_dataset in self.trajectory_datasets.items():
             labels = self.horizon_train_label_builder.build(

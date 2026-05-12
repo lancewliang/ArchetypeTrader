@@ -36,6 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .phase1_checkpoint import Phase1ValidationCheckpoint
+from ..metrics import compare_phase1_tie_breaker, scores_are_tied
 
 
 @dataclass(frozen=True)
@@ -234,4 +235,164 @@ class Phase1CheckpointSelector:
             ``result.has_selection`` 显式判断。
         """
 
-        ...
+        rejected: list[Phase1RejectedCheckpointSummary] = []
+        eligible: list[Phase1ValidationCheckpoint] = []
+
+        for checkpoint in validation_checkpoints:
+            validation = checkpoint.codebook_validation
+            if not validation.passed:
+                rejected.append(
+                    self._rejected_summary(
+                        checkpoint,
+                        reason="validation_failed",
+                    )
+                )
+                continue
+            if validation.score is None:
+                rejected.append(
+                    self._rejected_summary(
+                        checkpoint,
+                        reason="missing_score",
+                    )
+                )
+                continue
+            eligible.append(checkpoint)
+
+        if not validation_checkpoints:
+            return Phase1CheckpointSelectionResult(
+                selected=None,
+                selected_checkpoint_id=None,
+                selected_epoch=None,
+                selected_score=None,
+                candidate_count=0,
+                eligible_count=0,
+                rejected=(),
+                reason="no_candidates",
+            )
+
+        if not eligible:
+            return Phase1CheckpointSelectionResult(
+                selected=None,
+                selected_checkpoint_id=None,
+                selected_epoch=None,
+                selected_score=None,
+                candidate_count=len(validation_checkpoints),
+                eligible_count=0,
+                rejected=tuple(rejected),
+                reason="no_passed_checkpoint",
+            )
+
+        selected = eligible[0]
+        selection_reason = "selected_highest_score"
+        for candidate in eligible[1:]:
+            if self._candidate_is_better(candidate, selected):
+                selection_reason = self._selection_reason(candidate, selected)
+                selected = candidate
+
+        for checkpoint in eligible:
+            if checkpoint is selected:
+                continue
+            rejected.append(
+                self._rejected_summary(
+                    checkpoint,
+                    reason=self._eligible_rejection_reason(selected, checkpoint),
+                )
+            )
+
+        validation = selected.codebook_validation
+        return Phase1CheckpointSelectionResult(
+            selected=selected,
+            selected_checkpoint_id=validation.checkpoint_id,
+            selected_epoch=selected.epoch,
+            selected_score=validation.score,
+            candidate_count=len(validation_checkpoints),
+            eligible_count=len(eligible),
+            rejected=tuple(rejected),
+            reason=selection_reason,
+        )
+
+    def _rejected_summary(
+        self,
+        checkpoint: Phase1ValidationCheckpoint,
+        *,
+        reason: str,
+    ) -> Phase1RejectedCheckpointSummary:
+        """Build selector-level audit summary for a rejected checkpoint."""
+
+        validation = checkpoint.codebook_validation
+        return Phase1RejectedCheckpointSummary(
+            stage=checkpoint.stage,
+            epoch=checkpoint.epoch,
+            checkpoint_id=validation.checkpoint_id,
+            passed=validation.passed,
+            score=validation.score,
+            failed_layers=validation.failed_layers,
+            reason=reason,
+        )
+
+    def _candidate_is_better(
+        self,
+        candidate: Phase1ValidationCheckpoint,
+        current_best: Phase1ValidationCheckpoint,
+    ) -> bool:
+        """Return whether candidate should replace current_best."""
+
+        candidate_score = candidate.codebook_validation.score
+        best_score = current_best.codebook_validation.score
+        if candidate_score is None or best_score is None:
+            return False
+
+        if not scores_are_tied(best_score, candidate_score):
+            return candidate_score > best_score
+
+        tie_breaker_comparison = compare_phase1_tie_breaker(
+            candidate.codebook_validation.tie_breaker_metrics,
+            current_best.codebook_validation.tie_breaker_metrics,
+        )
+        if tie_breaker_comparison != 0:
+            return tie_breaker_comparison > 0
+        return candidate.epoch < current_best.epoch
+
+    def _selection_reason(
+        self,
+        candidate: Phase1ValidationCheckpoint,
+        previous_best: Phase1ValidationCheckpoint,
+    ) -> str:
+        """Explain why candidate replaced previous_best."""
+
+        candidate_score = candidate.codebook_validation.score
+        best_score = previous_best.codebook_validation.score
+        if candidate_score is None or best_score is None:
+            return "selected_highest_score"
+        if not scores_are_tied(best_score, candidate_score):
+            return "selected_highest_score"
+
+        tie_breaker_comparison = compare_phase1_tie_breaker(
+            candidate.codebook_validation.tie_breaker_metrics,
+            previous_best.codebook_validation.tie_breaker_metrics,
+        )
+        if tie_breaker_comparison != 0:
+            return "selected_tie_breaker"
+        return "selected_earlier_epoch"
+
+    def _eligible_rejection_reason(
+        self,
+        selected: Phase1ValidationCheckpoint,
+        rejected: Phase1ValidationCheckpoint,
+    ) -> str:
+        """Explain why an eligible checkpoint was not selected."""
+
+        selected_score = selected.codebook_validation.score
+        rejected_score = rejected.codebook_validation.score
+        if selected_score is None or rejected_score is None:
+            return "missing_score"
+        if not scores_are_tied(selected_score, rejected_score):
+            return "lower_score"
+
+        tie_breaker_comparison = compare_phase1_tie_breaker(
+            selected.codebook_validation.tie_breaker_metrics,
+            rejected.codebook_validation.tie_breaker_metrics,
+        )
+        if tie_breaker_comparison != 0:
+            return "tie_breaker_loser"
+        return "later_epoch_tie"

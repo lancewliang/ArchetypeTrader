@@ -13,6 +13,11 @@ import polars as pl
 import torch
 
 from .checkpoint import (
+    Phase1Checkpoint,
+    Phase1CheckpointConfig,
+    Phase1CheckpointMetrics,
+    Phase1CheckpointStage,
+    Phase1StateDict,
     Phase1ValidationCheckpoint,
 )
 from .metrics import Phase1ValidationResult
@@ -121,8 +126,7 @@ class Phase1ArtifactStore(DataFileStore):
         epoch: int,
         config: Phase1CheckpointConfig,
         model_state_dict: Phase1StateDict,
-        optimizer_state_dict: Phase1StateDict
-       
+        optimizer_state_dict: Phase1StateDict      
     ) -> None:
         """保存 Phase I checkpoint。
 
@@ -145,7 +149,7 @@ class Phase1ArtifactStore(DataFileStore):
             is_best=False,
             config=config,
             model_state_dict=model_state_dict,
-            optimizer_state_dict=optimizer_state_dict          
+            optimizer_state_dict=optimizer_state_dict
         )
         checkpoint_path = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
         self._save_phase1_checkpoint_payload(checkpoint, checkpoint_path)
@@ -154,9 +158,8 @@ class Phase1ArtifactStore(DataFileStore):
         self,
         *,
         stage: Phase1CheckpointStage | None = None,
-        epoch: int | None = None,
-        best: bool = False,
-    ) -> Any:
+        epoch: int | None = None     
+    ) -> Phase1Checkpoint:
         """读取 Phase I checkpoint。
 
         参数:
@@ -168,15 +171,8 @@ class Phase1ArtifactStore(DataFileStore):
         输出:
             返回 checkpoint 内容，供恢复训练、best 选择和模型导出使用。
         """
-
-        if best:
-            path = self._phase1_best_checkpoint_path()
-        else:
-            if stage is None or epoch is None:
-                raise ValueError(
-                    "stage and epoch are required when loading a non-best checkpoint"
-                )
-            path = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
+      
+        path = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
         return self._load_phase1_checkpoint_payload(path)
 
     def save_best_checkpoint(
@@ -285,12 +281,25 @@ class Phase1ArtifactStore(DataFileStore):
     def save_phase1_epoch_metrics(
         self,
         *,
-        metrics: Phase1ValidationCheckpoint,
+        metrics: Phase1ValidationCheckpoint | Mapping[str, Any],
+        stage: str | None = None,
+        epoch: int | None = None,
     ) -> Path:
         """保存单个 Phase I epoch 的训练/评估指标 JSON。"""
 
-        path = self._phase1_epoch_metrics_path(stage=metrics.stage, epoch=metrics.epoch)
-        payload = metrics.to_dict()
+        if isinstance(metrics, Phase1ValidationCheckpoint):
+            path = self._phase1_epoch_metrics_path(
+                stage=metrics.stage,
+                epoch=metrics.epoch,
+            )
+            payload = metrics.to_dict()
+        else:
+            if stage is None or epoch is None:
+                raise ValueError(
+                    "stage and epoch are required when saving raw phase1 metrics"
+                )
+            path = self._phase1_epoch_metrics_path(stage=stage, epoch=epoch)
+            payload = {"stage": stage, "epoch": epoch, **dict(metrics)}
         self._save_json_payload(payload, path)
         return path
 
@@ -309,11 +318,22 @@ class Phase1ArtifactStore(DataFileStore):
         self._save_text_payload(html, path)
         return path
 
-    def load_phase1_epoch_metrics(
-        self,       
+    def load_phase1_all_epoch_metrics(
+        self        
     ) -> List[Phase1ValidationCheckpoint]:
-        """读取单个 Phase I epoch 的训练/评估指标 JSON。"""
-        return []
+        """读取 Phase I epoch metrics。
+
+        传入 ``stage`` 和 ``epoch`` 时读取单个 JSON payload；不传时读取 metrics
+        目录下所有 validation checkpoint payload，供 selector 使用。
+        """
+        metrics_dir = self._phase1_artifact_path("metrics")
+        checkpoints: list[Phase1ValidationCheckpoint] = []
+        for path in sorted(metrics_dir.glob("*_metrics.json")):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, Mapping):
+                raise ValueError(f"invalid phase1 epoch metrics payload: {path}")
+            checkpoints.append(Phase1ValidationCheckpoint.from_dict(payload))
+        return checkpoints
 
     def load_phase1_validation_result(
         self,
