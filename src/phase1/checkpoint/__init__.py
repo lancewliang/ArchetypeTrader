@@ -6,6 +6,7 @@ from .phase1_checkpoint import (
     Phase1CheckpointMetrics,
     Phase1CheckpointStage,
     Phase1StateDict,
+    Phase1ValidationCheckpoint,
 )
 from .phase1_checkpoint_selector import (
     Phase1CheckpointMetricMode,
@@ -24,4 +25,5 @@ __all__ = [
     "Phase1CheckpointSelector",
     "Phase1CheckpointStage",
     "Phase1StateDict",
+    "Phase1ValidationCheckpoint",
 ]
