@@ -24,6 +24,7 @@ class RuntimeUtils:
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
     )
     DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+    DEFAULT_CUBLAS_WORKSPACE_CONFIG = ":4096:8"
 
     @classmethod
     def init_logging(
@@ -83,7 +84,7 @@ class RuntimeUtils:
         seed: int,
         *,
         deterministic: bool = True,
-    ) -> dict[str, bool | int]:
+    ) -> dict[str, bool | int | str | None]:
         """初始化 Python、NumPy 和 PyTorch 随机种子。
 
         参数:
@@ -99,6 +100,9 @@ class RuntimeUtils:
             raise ValueError("seed must be a non-negative integer")
 
         os.environ["PYTHONHASHSEED"] = str(seed)
+        cublas_workspace_config = None
+        if deterministic:
+            cublas_workspace_config = cls.configure_cublas_workspace()
         random.seed(seed)
 
         numpy_seeded = cls._try_seed_numpy(seed)
@@ -110,7 +114,17 @@ class RuntimeUtils:
             "numpy_seeded": numpy_seeded,
             "torch_seeded": torch_seeded,
             "deterministic": deterministic,
+            "cublas_workspace_config": cublas_workspace_config,
         }
+
+    @classmethod
+    def configure_cublas_workspace(cls) -> str:
+        """Ensure deterministic CUDA matmul uses a supported CuBLAS workspace."""
+
+        return os.environ.setdefault(
+            "CUBLAS_WORKSPACE_CONFIG",
+            cls.DEFAULT_CUBLAS_WORKSPACE_CONFIG,
+        )
 
     @staticmethod
     def _resolve_log_level(level: int | str) -> int:

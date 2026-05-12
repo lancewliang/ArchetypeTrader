@@ -70,7 +70,7 @@ class Phase1MainConfig:
     train_batch_id: str
     epochs: int = 100
     pretrain_epochs: int = 10
-    batch_size: int = 256
+    batch_size: int = 1024
     learning_rate: float = 1e-3
     device: str = "cuda"
     horizon: int = 72
