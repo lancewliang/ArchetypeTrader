@@ -156,7 +156,13 @@ class Phase1BehaviorQualityThresholds:
     # 单个 active code 的相对最小样本比例。实际 support 阈值取 max(绝对阈值, 相对阈值 * N)。
     min_code_support_ratio: float = 0.02
 
-    # 弱 code 比例上限。用于第二层聚合 per-code 行为质量失败比例。
+    # support 不足的弱 code 比例上限。设计标准要求超过 20% 时淘汰。
+    weak_support_code_ratio_max: float = 0.20
+
+    # morphology/motif/pair/lift 等结构弱 code 比例上限。设计标准要求超过 40% 时淘汰。
+    weak_structure_code_ratio_max: float = 0.40
+
+    # 兼容旧配置快照的遗留字段；新规则不再读取该字段。
     weak_code_ratio_max: float = 0.20
 
     # dominant morphology 占比下限。用于判断 code 是否集中对应某类市场形态。
@@ -186,8 +192,8 @@ class Phase1BehaviorQualityThresholds:
     # 具备 per-code 盈利能力的 active code 覆盖率下限。
     profitable_code_coverage_min: float = 0.60
 
-    # 重复 code pair 数量上限。默认值对应论文实验常用 K=10；自定义 K 时可显式覆盖。
-    duplicate_code_pair_count_max: int = 10
+    # 重复 code pair 数量上限。None 表示按当前 codebook size K 动态判定。
+    duplicate_code_pair_count_max: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
@@ -298,6 +304,9 @@ class Phase1LabelPredictabilityThresholds:
 
     # probe label decoded return 相对 oracle assigned-label return 的保留比例下限。
     probe_return_retention_min: float = 0.35
+
+    # H(label | morphology) 相对 H(label) 的上限，用于判断 morphology 是否解释 label 结构。
+    label_entropy_given_morphology_max_ratio: float = 0.80
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""

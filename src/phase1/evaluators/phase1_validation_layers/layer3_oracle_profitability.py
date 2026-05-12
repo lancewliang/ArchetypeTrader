@@ -270,13 +270,27 @@ def _safe_corr(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.corrcoef(left[mask], right[mask])[0, 1])
 
 
+def _fee_drag(fees: np.ndarray, gross_returns: np.ndarray) -> float:
+    """按设计口径计算 fee drag: total_fee / gross_profit。"""
+
+    fee_values = fees[np.isfinite(fees)]
+    gross_profit = gross_returns[np.isfinite(gross_returns) & (gross_returns > 0.0)]
+    if fee_values.size == 0:
+        return _nan()
+    denominator = float(np.sum(gross_profit))
+    if denominator <= 0.0:
+        return float("inf")
+    return float(np.sum(fee_values) / (denominator + _EPS))
+
+
 def _per_code_profitability(
     *,
     code_ids: np.ndarray,
     decoded_advantage: np.ndarray,
     decoded_returns: np.ndarray,
     dp_advantage: np.ndarray,
-    fee_drag_by_sample: np.ndarray,
+    decoded_gross_returns: np.ndarray,
+    decoded_fees: np.ndarray,
     thresholds: Phase1OracleProfitabilityThresholds,
 ) -> tuple[Phase1PerCodeProfitability, ...]:
     """计算每个 code 的 profitability 摘要。
@@ -286,7 +300,8 @@ def _per_code_profitability(
         decoded_advantage: decoded return 相对 flat 的优势。
         decoded_returns: decoded 策略净收益。
         dp_advantage: DP teacher 相对 flat 的优势。
-        fee_drag_by_sample: 每个样本的手续费拖累比例。
+        decoded_gross_returns: 每个样本的 decoded gross return。
+        decoded_fees: 每个样本的手续费。
 
     输出:
         ``Phase1PerCodeProfitability`` tuple。
@@ -305,7 +320,7 @@ def _per_code_profitability(
         retention_ratio = float(
             np.nansum(decoded_advantage[mask]) / (np.nansum(dp_advantage[mask]) + _EPS)
         )
-        fee_drag = float(np.nanmean(fee_drag_by_sample[mask]))
+        fee_drag = _fee_drag(decoded_fees[mask], decoded_gross_returns[mask])
         output.append(
             Phase1PerCodeProfitability(
                 code_id=int(code_id),
@@ -416,15 +431,13 @@ def compute_oracle_profitability_metrics(
     decoded_advantage = decoded_execution.returns - flat_returns
     dp_advantage = dp_execution.returns - flat_returns
     random_advantage = random_returns - flat_returns
-    fee_drag_by_sample = decoded_execution.fees / (
-        np.abs(decoded_execution.gross_returns) + _EPS
-    )
     per_code = _per_code_profitability(
         code_ids=np.asarray(val_snapshot.code_ids, dtype=np.int64),
         decoded_advantage=decoded_advantage,
         decoded_returns=decoded_execution.returns,
         dp_advantage=dp_advantage,
-        fee_drag_by_sample=fee_drag_by_sample,
+        decoded_gross_returns=decoded_execution.gross_returns,
+        decoded_fees=decoded_execution.fees,
         thresholds=thresholds,
     )
 
@@ -454,10 +467,7 @@ def compute_oracle_profitability_metrics(
             decoded_advantage,
             runtime_config.top_contribution_ratio,
         ),
-        fee_drag=float(
-            np.nansum(decoded_execution.fees)
-            / (np.nansum(np.abs(decoded_execution.gross_returns)) + _EPS)
-        ),
+        fee_drag=_fee_drag(decoded_execution.fees, decoded_execution.gross_returns),
         turnover_return_correlation=_safe_corr(
             decoded_execution.turnover,
             decoded_execution.returns,

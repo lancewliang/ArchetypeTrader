@@ -339,6 +339,15 @@ def _active_codes(
     )
 
 
+def _num_codes(snapshot: Phase1EvaluationSnapshot, code_ids: np.ndarray) -> int:
+    """推断当前 codebook size K。"""
+
+    distances = np.asarray(snapshot.distances)
+    if distances.ndim == 2 and distances.shape[1] > 0:
+        return int(distances.shape[1])
+    return int(np.max(code_ids) + 1) if code_ids.size else 0
+
+
 def _dominant(values: np.ndarray) -> tuple[str | None, float | None]:
     """计算一组离散标签的 dominant value 和占比。
 
@@ -616,6 +625,7 @@ def compute_behavior_quality_metrics(
     del train_snapshot
     thresholds = thresholds or Phase1BehaviorQualityThresholds()
     code_ids = np.asarray(val_snapshot.code_ids, dtype=np.int64)
+    num_codes = _num_codes(val_snapshot, code_ids)
     active_codes = _active_codes(code_ids, runtime_config)
     active_count = len(active_codes)
 
@@ -755,6 +765,7 @@ def compute_behavior_quality_metrics(
             if denominator and per_code_profitability is not None
             else _nan()
         ),
+        num_codes=num_codes,
     )
     return Phase1LayerComputation(
         layer_id=2,

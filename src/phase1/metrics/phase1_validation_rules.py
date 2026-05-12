@@ -441,39 +441,44 @@ def evaluate_behavior_quality_rules(
     """
 
     layer = "behavior_quality"
+    duplicate_pair_count_max = (
+        thresholds.duplicate_code_pair_count_max
+        if thresholds.duplicate_code_pair_count_max is not None
+        else max(0, int(metrics.num_codes))
+    )
     results = (
         _le(
             name="weak_support_code_ratio",
             value=metrics.weak_support_code_ratio,
-            threshold_value=thresholds.weak_code_ratio_max,
+            threshold_value=thresholds.weak_support_code_ratio_max,
             layer=layer,
             message="support 不足的 active code 比例不能过高",
         ),
         _le(
             name="weak_morphology_code_ratio",
             value=metrics.weak_morphology_code_ratio,
-            threshold_value=thresholds.weak_code_ratio_max,
+            threshold_value=thresholds.weak_structure_code_ratio_max,
             layer=layer,
             message="市场形态不清晰的 active code 比例不能过高",
         ),
         _le(
             name="weak_motif_code_ratio",
             value=metrics.weak_motif_code_ratio,
-            threshold_value=thresholds.weak_code_ratio_max,
+            threshold_value=thresholds.weak_structure_code_ratio_max,
             layer=layer,
             message="交易 motif 不清晰的 active code 比例不能过高",
         ),
         _le(
             name="weak_pair_code_ratio",
             value=metrics.weak_pair_code_ratio,
-            threshold_value=thresholds.weak_code_ratio_max,
+            threshold_value=thresholds.weak_structure_code_ratio_max,
             layer=layer,
             message="dominant morphology-motif pair 不清晰的 active code 比例不能过高",
         ),
         _le(
             name="weak_lift_nonprofitable_code_ratio",
             value=metrics.weak_lift_nonprofitable_code_ratio,
-            threshold_value=thresholds.weak_code_ratio_max,
+            threshold_value=thresholds.weak_structure_code_ratio_max,
             layer=layer,
             message="缺少结构 lift 或盈利性的弱 code 比例不能过高",
         ),
@@ -501,7 +506,7 @@ def evaluate_behavior_quality_rules(
         _le(
             name="duplicate_code_pair_count",
             value=metrics.duplicate_code_pair_count,
-            threshold_value=thresholds.duplicate_code_pair_count_max,
+            threshold_value=duplicate_pair_count_max,
             layer=layer,
             message="不能存在超过重复相似度阈值的 code pair",
         ),
@@ -662,6 +667,11 @@ def evaluate_label_predictability_rules(
         thresholds.probe_top3_floor,
         thresholds.probe_top3_k_factor / num_codes,
     )
+    label_entropy_threshold = (
+        metrics.label_entropy * thresholds.label_entropy_given_morphology_max_ratio
+        if not _is_missing(metrics.label_entropy) and metrics.label_entropy > 0.0
+        else float("nan")
+    )
     results = (
         _ge(
             name="probe_top1_accuracy",
@@ -683,6 +693,26 @@ def evaluate_label_predictability_rules(
             threshold_value=thresholds.probe_balanced_accuracy_min,
             layer=layer,
             message="balanced accuracy 需要避免只预测高频 code",
+        ),
+        _metric_result(
+            name="label_entropy_given_morphology",
+            value=(
+                metrics.label_entropy_given_morphology
+                if not _is_missing(label_entropy_threshold)
+                else None
+            ),
+            threshold=(
+                "<= "
+                f"{thresholds.label_entropy_given_morphology_max_ratio:g} * H(label)"
+            ),
+            passed=(
+                metrics.label_entropy_given_morphology <= label_entropy_threshold
+                if not _is_missing(metrics.label_entropy_given_morphology)
+                and not _is_missing(label_entropy_threshold)
+                else False
+            ),
+            layer=layer,
+            message="给定 morphology 后的 label 条件熵需要明显低于全局 label 熵",
         ),
         _ge(
             name="mutual_information_lift",

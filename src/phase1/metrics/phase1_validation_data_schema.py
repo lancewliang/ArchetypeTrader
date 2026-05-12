@@ -574,6 +574,9 @@ class Phase1BehaviorQualityMetrics:
     # 具备第三层 per-code 盈利能力的 active code 覆盖率。
     profitable_code_coverage: float
 
+    # 当前 codebook size K，用于 duplicate code pair 上限按 K 动态判定。
+    num_codes: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为 dict，供 checkpoint/report 落盘。"""
 
@@ -672,6 +675,9 @@ class Phase1LabelPredictabilityMetrics:
 
     # probe top-1 label decoded return 相对 oracle assigned-label decoded return 的保留比例。
     probe_return_retention: float
+
+    # validation split assigned label 的全局熵 H(label)。
+    label_entropy: float = float("nan")
 
     # 当前 validation split 中的 codebook size，用于 top-k accuracy 自适应阈值。
     num_codes: int = 0

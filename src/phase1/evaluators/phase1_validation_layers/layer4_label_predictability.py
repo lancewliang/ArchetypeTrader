@@ -283,6 +283,16 @@ def _label_entropy_given_morphology(
     return float(total_entropy)
 
 
+def _label_entropy(labels: np.ndarray) -> float:
+    """计算 assigned label 的全局熵 H(label)。"""
+
+    if labels.size == 0:
+        return _nan()
+    counts = np.bincount(labels.astype(np.int64))
+    probabilities = counts[counts > 0] / max(1, np.sum(counts))
+    return float(-np.sum(probabilities * np.log(probabilities + _EPS)))
+
+
 def _decode_labels(
     *,
     model: Any,
@@ -413,6 +423,7 @@ def compute_label_predictability_metrics(
             label_entropy_given_morphology=_nan(),
             mutual_information_lift=_nan(),
             probe_return_retention=_nan(),
+            label_entropy=_label_entropy(val_y),
             num_codes=int(max(np.unique(train_y).size, np.unique(val_y).size)),
         )
         return Phase1LayerComputation(
@@ -460,6 +471,7 @@ def compute_label_predictability_metrics(
             runtime_config=runtime_config,
             device=device,
         ),
+        label_entropy=_label_entropy(val_y),
         num_codes=num_codes,
     )
     train_top1 = _predict_probe(probe, train_x)[:, 0]

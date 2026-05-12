@@ -300,15 +300,24 @@ def compute_label_predictability_score(metrics: Phase1ValidationMetrics) -> floa
         - ``probe_top1_accuracy``: probe 直接命中 assigned label 的能力；
         - ``probe_top3_accuracy``: probe 缩小候选 label 范围的能力；
         - ``probe_balanced_accuracy``: 是否避免只预测高频 code；
+        - ``label_entropy_given_morphology``: morphology 对 label 不确定性的解释程度；
         - ``mutual_information_lift``: label 与可见状态之间的统计关系强度；
         - ``probe_return_retention``: 使用 probe 预测 label 执行后保留的 oracle 收益。
     """
 
     label = metrics.label_predictability
+    entropy_ratio_score = (
+        1.0 - _clip01(label.label_entropy_given_morphology / label.label_entropy)
+        if not math.isnan(label.label_entropy)
+        and label.label_entropy > 0.0
+        and not math.isnan(label.label_entropy_given_morphology)
+        else 0.0
+    )
     parts = (
         _threshold_progress(label.probe_top1_accuracy, 0.25),
         _threshold_progress(label.probe_top3_accuracy, 0.55),
         _threshold_progress(label.probe_balanced_accuracy, 0.25),
+        entropy_ratio_score,
         _threshold_progress(label.mutual_information_lift, 2.0),
         _threshold_progress(label.probe_return_retention, 0.35),
     )
