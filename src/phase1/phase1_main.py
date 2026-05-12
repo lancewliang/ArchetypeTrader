@@ -171,9 +171,7 @@ class Phase1MainFlow:
             # Step 6: 训练 VQ encoder-decoder，使 codebook 学到可复用 trading archetypes。
             self.train()
             # Step 7: 根据验证指标选择最能代表稳定 archetype 发现结果的 checkpoint。
-            self.select_best_checkpoint()
-            # Step 8: 从 best checkpoint 导出 Phase II/III 复用的 encoder、decoder 和 codebook。
-            self.export_phase2_artifacts()
+            self.select_and_save_best_checkpoint()
             # Step 9: 用训练好的 encoder/codebook 为 sampled horizons 生成 archetype labels。
             self.export_horizon_labels()
         except Phase1FatalError:
@@ -355,8 +353,7 @@ class Phase1MainFlow:
                 epoch=epoch,
                 config=asdict(self.config),
                 model_state_dict=self.model.state_dict(),
-                optimizer_state_dict=self.optimizer.state_dict(),
-                metrics={},
+                optimizer_state_dict=self.optimizer.state_dict()               
             )
 
     def train(self) -> None:
@@ -396,14 +393,11 @@ class Phase1MainFlow:
             )             
 
 
-    def select_best_checkpoint(self) -> None:       
+    def select_and_save_best_checkpoint(self) -> None:       
         self.best_checkpoint_selection = self.selector.select_best_from_dir(
             self.data_store.artifact_paths["checkpoints"],
         )
-
-    def export_phase2_artifacts(self) -> None:
         self.data_store.save_best_checkpoint(self.best_checkpoint_selection.checkpoint)
-
         
     def export_horizon_labels(self) -> None:
         """导出 Phase I horizon-level archetype labels。
