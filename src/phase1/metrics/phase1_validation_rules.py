@@ -444,7 +444,7 @@ def evaluate_behavior_quality_rules(
     duplicate_pair_count_max = (
         thresholds.duplicate_code_pair_count_max
         if thresholds.duplicate_code_pair_count_max is not None
-        else max(0, int(metrics.num_codes))
+        else (int(metrics.num_codes) if metrics.num_codes > 0 else 10)
     )
     results = (
         _le(
