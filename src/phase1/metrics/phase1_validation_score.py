@@ -262,7 +262,7 @@ def compute_oracle_profitability_score(metrics: Phase1ValidationMetrics) -> floa
         - ``mean_advantage_vs_random_label`` 和 ``random_label_relative_lift``:
           assigned label 相对随机 label 是否有信息量；
         - ``retention_ratio``: decoded 策略保留 DP teacher 盈利能力的比例；
-        - ``risk_adjusted_return``: 风险调整后的收益表现；
+        - ``risk_adjusted_return`` 和 ``risk_adjusted_return_vs_random``: 风险调整后的收益表现；
         - ``top_5_contribution`` 和 ``trimmed_decoded_advantage``: 收益是否依赖尾部样本；
         - ``fee_drag``: 手续费拖累越低越好；
         - ``turnover_return_correlation``: turnover 与收益的相关关系，从 [-1, 1]
@@ -279,6 +279,7 @@ def compute_oracle_profitability_score(metrics: Phase1ValidationMetrics) -> floa
         _threshold_progress(oracle.random_label_relative_lift, 0.20),
         _threshold_progress(oracle.retention_ratio, 0.50),
         _positive_score(oracle.risk_adjusted_return),
+        _positive_score(oracle.risk_adjusted_return_vs_random),
         _inverse_ratio_score(oracle.top_5_contribution, 0.60),
         _positive_score(oracle.trimmed_decoded_advantage),
         1.0 - _clip01(oracle.fee_drag),

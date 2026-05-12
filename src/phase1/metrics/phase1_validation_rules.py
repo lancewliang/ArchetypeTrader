@@ -593,6 +593,13 @@ def evaluate_oracle_profitability_rules(
             layer=layer,
             message="decoded 策略风险调整收益必须为正",
         ),
+        _gt(
+            name="risk_adjusted_return_vs_random",
+            value=metrics.risk_adjusted_return_vs_random,
+            threshold_value=0.0,
+            layer=layer,
+            message="decoded 策略风险调整收益必须优于 random label baseline",
+        ),
         _le(
             name="top_5_contribution",
             value=metrics.top_5_contribution,

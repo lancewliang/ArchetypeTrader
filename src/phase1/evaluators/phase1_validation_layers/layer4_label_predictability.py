@@ -9,7 +9,7 @@
     - probe 只使用 horizon 起点可见状态，不读取未来价格路径、demo action 或 reward
       作为分类输入；
     - 本文件只计算 raw metrics，不判断 pass/fail；
-    - probe 当前采用 deterministic centroid baseline，不训练主模型；
+    - probe 当前采用 deterministic linear classifier，不训练主模型；
     - probe return retention 复用 Layer 3 的统一 execution helper；
     - 缺失 prices 时收益保留指标返回 NaN，由 rules 层失败。
 
@@ -42,21 +42,23 @@ _EPS = 1e-12
 
 
 @dataclass(frozen=True)
-class CentroidProbe:
-    """确定性 centroid probe 模型。
+class LinearProbe:
+    """确定性线性 probe 模型。
 
     字段说明:
         labels: probe 训练集中出现过的 code label。
-        centroids: 每个 label 在标准化 feature 空间中的中心。
+        weight: 线性分类器权重，shape=[num_labels, feature_dim]。
+        bias: 线性分类器 bias，shape=[num_labels]。
         feature_mean: 训练集 feature 均值。
         feature_std: 训练集 feature 标准差。
 
     使用场景:
-        Layer 4 用轻量、可复现的 baseline 估计 assigned label 可预测性。
+        Layer 4 用轻量、可复现的可训练 probe 估计 assigned label 可预测性。
     """
 
     labels: np.ndarray
-    centroids: np.ndarray
+    weight: np.ndarray
+    bias: np.ndarray
     feature_mean: np.ndarray
     feature_std: np.ndarray
 
@@ -83,58 +85,92 @@ def build_probe_features(states: np.ndarray) -> np.ndarray:
     return values.reshape(values.shape[0], -1)
 
 
-def _fit_centroid_probe(features: np.ndarray, labels: np.ndarray) -> CentroidProbe:
-    """训练 deterministic centroid probe。
+def _fit_linear_probe(
+    features: np.ndarray,
+    labels: np.ndarray,
+    runtime_config: Phase1ValidationRuntimeConfig,
+) -> LinearProbe:
+    """训练 deterministic linear probe。
 
     输入参数:
         features: probe train features，形状为 ``[N, D]``。
         labels: assigned code labels，形状为 ``[N]``。
 
     输出:
-        ``CentroidProbe``，包含每个 label 的标准化 feature centroid。
+        ``LinearProbe``，包含标准化参数和训练后的线性分类器参数。
 
     使用场景:
-        以低成本、可复现方式估计 label 是否和可见状态存在可学习关系。
+        使用 runtime config 中的 probe_epochs、probe_learning_rate 和
+        probe_batch_size，以低成本、可复现方式估计 label 是否和可见状态存在
+        可学习关系。
     """
 
     feature_mean = np.mean(features, axis=0)
     feature_std = np.std(features, axis=0)
     feature_std[feature_std <= _EPS] = 1.0
-    normalized = (features - feature_mean) / feature_std
+    normalized = ((features - feature_mean) / feature_std).astype(np.float32)
 
     unique_labels = np.unique(labels.astype(np.int64))
-    centroids = np.stack(
-        [np.mean(normalized[labels == label], axis=0) for label in unique_labels],
-        axis=0,
+    label_to_index = {int(label): index for index, label in enumerate(unique_labels)}
+    target_indices = np.asarray(
+        [label_to_index[int(label)] for label in labels],
+        dtype=np.int64,
     )
-    return CentroidProbe(
+
+    torch.manual_seed(int(runtime_config.random_seed))
+    x_tensor = torch.as_tensor(normalized, dtype=torch.float32)
+    y_tensor = torch.as_tensor(target_indices, dtype=torch.long)
+    model = torch.nn.Linear(x_tensor.shape[1], unique_labels.size)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=float(runtime_config.probe_learning_rate),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(runtime_config.random_seed))
+    batch_size = max(1, int(runtime_config.probe_batch_size))
+    epochs = max(1, int(runtime_config.probe_epochs))
+
+    model.train()
+    for _ in range(epochs):
+        order = torch.randperm(x_tensor.shape[0], generator=generator)
+        for start in range(0, x_tensor.shape[0], batch_size):
+            batch_index = order[start : start + batch_size]
+            optimizer.zero_grad(set_to_none=True)
+            loss = torch.nn.functional.cross_entropy(
+                model(x_tensor[batch_index]),
+                y_tensor[batch_index],
+            )
+            loss.backward()
+            optimizer.step()
+
+    weight = model.weight.detach().cpu().numpy().astype(np.float64)
+    bias = model.bias.detach().cpu().numpy().astype(np.float64)
+    return LinearProbe(
         labels=unique_labels,
-        centroids=centroids,
+        weight=weight,
+        bias=bias,
         feature_mean=feature_mean,
         feature_std=feature_std,
     )
 
 
-def _predict_probe(probe: CentroidProbe, features: np.ndarray) -> np.ndarray:
-    """使用 centroid probe 输出按距离排序的候选 label。
+def _predict_probe(probe: LinearProbe, features: np.ndarray) -> np.ndarray:
+    """使用 linear probe 输出按 logit 排序的候选 label。
 
     输入参数:
-        probe: 已拟合的 ``CentroidProbe``。
+        probe: 已拟合的 ``LinearProbe``。
         features: validation features，形状为 ``[N, D]``。
 
     输出:
-        ``[N, K_seen]`` 形状的 label 排名数组，每行按距离从近到远排序。
+        ``[N, K_seen]`` 形状的 label 排名数组，每行按 logit 从高到低排序。
 
     使用场景:
         计算 probe top-1/top-3 accuracy 和 train/validation accuracy gap。
     """
 
     normalized = (features - probe.feature_mean) / probe.feature_std
-    distances = np.linalg.norm(
-        normalized[:, None, :] - probe.centroids[None, :, :],
-        axis=-1,
-    )
-    order = np.argsort(distances, axis=1)
+    logits = normalized @ probe.weight.T + probe.bias
+    order = np.argsort(-logits, axis=1)
     return probe.labels[order]
 
 
@@ -293,6 +329,21 @@ def _label_entropy(labels: np.ndarray) -> float:
     return float(-np.sum(probabilities * np.log(probabilities + _EPS)))
 
 
+def _confusion_matrix(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    *,
+    num_codes: int,
+) -> list[list[int]]:
+    """构造 validation probe confusion matrix。"""
+
+    matrix = np.zeros((num_codes, num_codes), dtype=np.int64)
+    for target, predicted in zip(y_true, y_pred, strict=False):
+        if 0 <= int(target) < num_codes and 0 <= int(predicted) < num_codes:
+            matrix[int(target), int(predicted)] += 1
+    return matrix.tolist()
+
+
 def _decode_labels(
     *,
     model: Any,
@@ -388,7 +439,7 @@ def compute_label_predictability_metrics(
     """计算 Layer 4 assigned-label 可预测性 raw metrics。
 
     功能说明:
-        用 train snapshot 训练 deterministic centroid probe，并在 validation snapshot
+        用 train snapshot 训练 deterministic linear probe，并在 validation snapshot
         上评估 top-k accuracy、balanced accuracy、mutual information lift 和 probe
         return retention。
 
@@ -433,7 +484,7 @@ def compute_label_predictability_metrics(
             extra_payload={"probe_seed": runtime_config.random_seed},
         )
 
-    probe = _fit_centroid_probe(train_x, train_y)
+    probe = _fit_linear_probe(train_x, train_y, runtime_config)
     ranked_labels = _predict_probe(probe, val_x)
     top1 = ranked_labels[:, 0]
     top_k = min(3, ranked_labels.shape[1])
@@ -484,6 +535,11 @@ def compute_label_predictability_metrics(
             "probe_validation_accuracy": metrics.probe_top1_accuracy,
             "probe_predictability_gap": float(
                 np.mean(train_top1 == train_y) - metrics.probe_top1_accuracy
+            ),
+            "probe_confusion_matrix": _confusion_matrix(
+                val_y,
+                top1,
+                num_codes=num_codes,
             ),
             "probe_seed": runtime_config.random_seed,
         },

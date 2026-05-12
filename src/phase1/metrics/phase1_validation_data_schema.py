@@ -637,6 +637,12 @@ class Phase1OracleProfitabilityMetrics:
     # dominant pair 中 decoded advantage 为正的比例。
     dominant_pair_positive_ratio: float
 
+    # random label baseline 的风险调整收益。
+    random_label_risk_adjusted_return: float = float("nan")
+
+    # decoded 风险调整收益相对 random label baseline 的差值。
+    risk_adjusted_return_vs_random: float = float("nan")
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为 dict，供 checkpoint/report 落盘。"""
 

@@ -343,14 +343,15 @@ def _dominant_pair_positive_ratio(
     snapshot: Phase1EvaluationSnapshot,
     decoded_advantage: np.ndarray,
 ) -> float:
-    """计算 dominant morphology-motif pair 中正优势 pair 的比例。
+    """计算 active code dominant morphology-motif pair 的正优势比例。
 
     输入参数:
         snapshot: validation snapshot，读取 prices、decoded_actions 和 code_ids。
         decoded_advantage: 每条 horizon 的 decoded advantage。
 
     输出:
-        正 mean advantage 的 pair 数量占全部 pair 数量的比例；缺少 morphology 时返回 NaN。
+        dominant pair 正 mean advantage 的 active code 数量 / active code 数量；
+        缺少 morphology 时返回 NaN。
 
     使用场景:
         Layer 3 hard gate 检查主要市场-行为组合是否具有正价值。
@@ -367,12 +368,18 @@ def _dominant_pair_positive_ratio(
         ],
         dtype=object,
     )
+    code_ids = np.asarray(snapshot.code_ids, dtype=np.int64)
     positive = 0
     total = 0
-    for pair in np.unique(pairs):
-        mask = pairs == pair
-        if not np.any(mask):
+    for code_id in np.unique(code_ids):
+        code_mask = code_ids == code_id
+        if not np.any(code_mask):
             continue
+        pair_values, pair_counts = np.unique(pairs[code_mask], return_counts=True)
+        if pair_values.size == 0:
+            continue
+        dominant_pair = pair_values[int(np.argmax(pair_counts))]
+        mask = code_mask & (pairs == dominant_pair)
         total += 1
         positive += int(float(np.nanmean(decoded_advantage[mask])) > 0.0)
     return positive / total if total else _nan()
@@ -441,6 +448,9 @@ def compute_oracle_profitability_metrics(
         thresholds=thresholds,
     )
 
+    random_label_risk_adjusted_return = _risk_adjusted_return(random_returns)
+    risk_adjusted_return = _risk_adjusted_return(decoded_execution.returns)
+
     metrics = Phase1OracleProfitabilityMetrics(
         mean_decoded_advantage_vs_flat=float(np.nanmean(decoded_advantage)),
         decoded_win_rate_vs_flat=float(
@@ -458,7 +468,7 @@ def compute_oracle_profitability_metrics(
             _max_drawdown(np.cumsum(decoded_execution.returns))
             / (_max_drawdown(np.cumsum(dp_execution.returns)) + _EPS)
         ),
-        risk_adjusted_return=_risk_adjusted_return(decoded_execution.returns),
+        risk_adjusted_return=risk_adjusted_return,
         top_5_contribution=_top_contribution_ratio(
             decoded_advantage,
             runtime_config.top_contribution_ratio,
@@ -480,6 +490,13 @@ def compute_oracle_profitability_metrics(
         dominant_pair_positive_ratio=_dominant_pair_positive_ratio(
             val_snapshot,
             decoded_advantage,
+        ),
+        random_label_risk_adjusted_return=random_label_risk_adjusted_return,
+        risk_adjusted_return_vs_random=(
+            risk_adjusted_return - random_label_risk_adjusted_return
+            if np.isfinite(risk_adjusted_return)
+            and np.isfinite(random_label_risk_adjusted_return)
+            else _nan()
         ),
     )
     return Phase1LayerComputation(
