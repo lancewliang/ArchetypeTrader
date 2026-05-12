@@ -22,12 +22,12 @@ from .checkpoint import (
     Phase1CheckpointSelectionResult,
     Phase1CheckpointSelector,
 )
-from .evaluators import Phase1Evaluator
+from .evaluators import Phase1CodebookEvaluator, Phase1Evaluator
 from .horizon_train_label_builder import (
     HorizonTrainLabelBuilder,
     HorizonTrainLabelBuilderConfig,
 )
-from .metrics import Phase1Metrics
+from .metrics import CodeAssignmentSnapshot, Phase1Metrics, Phase1ValidationResult
 from .report import Phase1CodebookReport
 
 
@@ -125,10 +125,15 @@ class Phase1MainFlow:
         self.model: ArchetypeVQModel | None = None
         self.optimizer: torch.optim.Optimizer | None = None
         self.dataloaders: dict[str, DataLoader[TrajectoryTensorBatch]] = {}
+        self.evaluation_dataloaders: dict[str, DataLoader[TrajectoryTensorBatch]] = {}
         self.data_store: Phase1ArtifactStore | None = None
         self.evaluator: Phase1Evaluator | None = None
+        self.codebook_evaluator: Phase1CodebookEvaluator | None = None
         self.report: Phase1CodebookReport | None = None
+        self.selector: Phase1CheckpointSelector | None = None
         self.best_checkpoint_selection: Phase1CheckpointSelectionResult | None = None
+        self.validation_results: dict[int, Phase1ValidationResult] = {}
+        self.assignment_history: list[CodeAssignmentSnapshot] = []
         self.horizon_train_label_builder: HorizonTrainLabelBuilder | None = None
  
     def _resolve_device(self, device: str) -> torch.device:
@@ -171,8 +176,6 @@ class Phase1MainFlow:
             self.export_phase2_artifacts()
             # Step 9: 用训练好的 encoder/codebook 为 sampled horizons 生成 archetype labels。
             self.export_horizon_labels()
-            # Step 10: 写出配置、指标、诊断和产物索引，支撑复现实验与后续阶段审计。
-            self.write_report()
         except Phase1FatalError:
             raise
         except Exception as exc:
@@ -260,6 +263,11 @@ class Phase1MainFlow:
                 batch_size=self.config.batch_size,
                 shuffle=(split_name == "train"),
             )
+            self.evaluation_dataloaders[split_name] = DataLoader(
+                tensor_dataset,
+                batch_size=self.config.batch_size,
+                shuffle=False,
+            )
 
         first_states, _, _ = train_dataset[0]
         state_dim = int(first_states.shape[-1])
@@ -275,6 +283,10 @@ class Phase1MainFlow:
         ).to(self.device)
         self.model = model
         self.evaluator = Phase1Evaluator(model=model, device=self.device)
+        self.codebook_evaluator = Phase1CodebookEvaluator(
+            model=model,
+            device=self.device,
+        )
         self.optimizer = torch.optim.Adam(
             model.parameters(),
             lr=self.config.learning_rate,
@@ -303,8 +315,18 @@ class Phase1MainFlow:
             raise Phase1FatalError("optimizer must be initialized")
         if self.evaluator is None:
             raise Phase1FatalError("evaluator must be initialized")
+        if self.codebook_evaluator is None:
+            raise Phase1FatalError("codebook evaluator must be initialized")
         if self.report is None:
             raise Phase1FatalError("report must be initialized")
+        if self.selector is None:
+            raise Phase1FatalError("checkpoint selector must be initialized")
+        if "val" not in self.dataloaders:
+            raise Phase1FatalError("val dataloader is required")
+        if "train" not in self.evaluation_dataloaders:
+            raise Phase1FatalError("train evaluation dataloader is required")
+        if "val" not in self.evaluation_dataloaders:
+            raise Phase1FatalError("val evaluation dataloader is required")
 
     def pretrain(self) -> None:
         """预训练 Phase I encoder-decoder 并保存 checkpoint。
@@ -334,15 +356,15 @@ class Phase1MainFlow:
                 config=asdict(self.config),
                 model_state_dict=self.model.state_dict(),
                 optimizer_state_dict=self.optimizer.state_dict(),
-                metrics={"train": train_metrics.to_dict(include_context=True)},
+                metrics={},
             )
 
     def train(self) -> None:
         """训练 Phase I VQ encoder-decoder 并保存 checkpoint。
 
         功能描述:
-            启用 VQ codebook 训练，按 epoch 计算训练/验证指标，并通过
-            ``Phase1ArtifactStore.save_phase1_checkpoint`` 交给 store 层保存 checkpoint。
+            启用 VQ codebook 训练，按 epoch 计算训练/验证指标和五层 codebook
+            validation。模型状态通过 checkpoint 保存，指标通过 datastore JSON 保存。
 
         论文描述:
             训练目标对应论文式 (4):
@@ -355,7 +377,6 @@ class Phase1MainFlow:
         """
 
         train_loader = self.dataloaders["train"]
-        val_loader = self.dataloaders["val"]
                 
         for epoch in range(1, self.config.epochs + 1):
             train_metrics = self._run_epoch(
@@ -365,23 +386,13 @@ class Phase1MainFlow:
                 split="train",
                 epoch=epoch,
             )
-            val_metrics:Phase1Metrics = self.evaluator.evaluate(
-                val_loader,
-                stage="vq",
-                split="val",
-                epoch=epoch,
-            )
-            metrics = {
-                "train": train_metrics.to_dict(include_context=True),
-                "val": val_metrics.to_dict(include_context=True),
-            }
+            self._evaluate_checkpoint(epoch=epoch, train_metrics=train_metrics)
             self.data_store.save_phase1_checkpoint(
                 stage="vq",
                 epoch=epoch,
                 config=asdict(self.config),
                 model_state_dict=self.model.state_dict(),
-                optimizer_state_dict=self.optimizer.state_dict(),
-                metrics=metrics,
+                optimizer_state_dict=self.optimizer.state_dict()             
             )             
 
 
@@ -393,11 +404,6 @@ class Phase1MainFlow:
     def export_phase2_artifacts(self) -> None:
         self.data_store.save_best_checkpoint(self.best_checkpoint_selection.checkpoint)
 
-    def write_report(self) -> None:
-        self.report.write_report(
-            config=asdict(self.config),
-            best_checkpoint_selection=self.best_checkpoint_selection,
-        )
         
     def export_horizon_labels(self) -> None:
         """导出 Phase I horizon-level archetype labels。
@@ -448,3 +454,46 @@ class Phase1MainFlow:
             self.optimizer.step()
             totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs, actions=batch[1])
         return totals.averaged()
+
+    def _evaluate_checkpoint(
+        self,
+        *,
+        epoch: int,
+        train_metrics: Phase1Metrics,
+    ) -> Phase1ValidationResult:
+        """运行 checkpoint 评估，并通过 datastore 保存基础指标和五层验证结果。"""
+
+        val_metrics: Phase1Metrics = self.evaluator.evaluate(
+            self.dataloaders["val"],
+            stage="vq",
+            split="val",
+            epoch=epoch,
+        )
+
+        validation_result = self.codebook_evaluator.evaluate_checkpoint(
+            train_loader=self.evaluation_dataloaders["train"],
+            val_loader=self.evaluation_dataloaders["val"],
+            epoch=epoch,
+            checkpoint_id=f"vq_epoch_{epoch:04d}",
+            stage="vq",
+            train_horizon_dataset=self.horizon_datasets.get("train"),
+            val_horizon_dataset=self.horizon_datasets.get("val"),
+            assignment_history=tuple(self.assignment_history),
+        )
+        self.validation_results[epoch] = validation_result
+        self.data_store.save_phase1_validation_result(validation_result)
+        self.data_store.save_phase1_epoch_metrics(
+            stage="vq",
+            epoch=epoch,
+            metrics={
+                "train": train_metrics.to_dict(include_context=True),
+                "val": val_metrics.to_dict(include_context=True),
+                "codebook_validation": validation_result.to_dict(),
+                "codebook_validation_flat": validation_result.to_flat_dict(),
+            },
+        )
+
+        current_assignment = self.codebook_evaluator.last_assignment_snapshot
+        if current_assignment is not None:
+            self.assignment_history.append(current_assignment)
+        return validation_result

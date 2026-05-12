@@ -10,7 +10,7 @@
        ``add_batch()``，最后调用 ``averaged()`` 得到 epoch 指标；
     2. ``Phase1Evaluator.evaluate()`` 在 validation/test split 上逐 batch
        统计基础 loss 和 action reconstruction accuracy；
-    3. checkpoint、report 或日志通过 ``to_dict()`` 保存这些训练期基础指标。
+    3. report、datastore JSON 或日志通过 ``to_dict()`` 保存这些训练期基础指标。
 
 设计约束:
     - loss 按 sample 加权累加，避免最后一个小 batch 影响平均值；
@@ -192,7 +192,7 @@ class Phase1Metrics:
         参数:
             include_context:
                 为 True 时包含 ``stage/split/epoch/num_samples``，适合直接写入
-                checkpoint/report；为 False 时只输出指标字段，适合嵌入其他 payload。
+                datastore JSON/report；为 False 时只输出指标字段，适合嵌入其他 payload。
         """
 
         payload: dict[str, Any] = {
@@ -218,7 +218,7 @@ class Phase1Metrics:
         """从 dict 恢复训练期指标。
 
         使用场景:
-            report 或 checkpoint selector 读取历史 metrics 时使用。历史 payload
+            report 或 datastore 读取历史 metrics 时使用。历史 payload
             通常没有 ``correct_actions`` / ``total_actions``，因此默认恢复为 0。
         """
 

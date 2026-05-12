@@ -33,7 +33,7 @@ class Phase1Checkpoint:
     config: Phase1CheckpointConfig
     model_state_dict: Phase1StateDict
     optimizer_state_dict: Phase1StateDict
-    metrics: Phase1CheckpointMetrics
+ 
 
     def to_dict(self) -> dict[str, object]:
         """转换为 torch/json 友好的普通字典。"""
@@ -44,9 +44,5 @@ class Phase1Checkpoint:
             "is_best": self.is_best,
             "config": dict(self.config),
             "model_state_dict": dict(self.model_state_dict),
-            "optimizer_state_dict": dict(self.optimizer_state_dict),
-            "metrics": {
-                split: dict(split_metrics)
-                for split, split_metrics in self.metrics.items()
-            },
+            "optimizer_state_dict": dict(self.optimizer_state_dict)           
         }

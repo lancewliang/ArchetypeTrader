@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -23,6 +24,7 @@ from .checkpoint import (
     Phase1CheckpointStage,
     Phase1StateDict,
 )
+from .metrics import Phase1ValidationResult
 from ..store.artifact_store import DataFileStore
 
 
@@ -57,7 +59,7 @@ class Phase1ArtifactStore(DataFileStore):
             ``output_dir``:
                 Phase I 根目录，保存 config、normalizer、导出模型、label 和报告。
             ``checkpoints``:
-                周期性 epoch checkpoint 与 last/best checkpoint 的目录。
+                周期性 epoch checkpoint 与 best checkpoint 的目录。
             ``diagnostics``:
                 action/risk/archetype/boundary 等诊断 JSON 或图表目录。
             ``tensorboard``:
@@ -79,8 +81,9 @@ class Phase1ArtifactStore(DataFileStore):
         latent_snapshot_dir = root / "latent_snapshots"
         failure_case_dir = root / "failure_cases"
         label_dir = root / "labels"
+        metrics_dir = root / "metrics"
+        validation_dir = root / "validation"
         best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
-        last_checkpoint_path = checkpoint_dir / "last_checkpoint.pt"
 
         for directory in (
             root,
@@ -90,6 +93,8 @@ class Phase1ArtifactStore(DataFileStore):
             latent_snapshot_dir,
             failure_case_dir,
             label_dir,
+            metrics_dir,
+            validation_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -101,13 +106,16 @@ class Phase1ArtifactStore(DataFileStore):
             "latent_snapshots": latent_snapshot_dir,
             "failure_cases": failure_case_dir,
             "labels": label_dir,
+            "metrics": metrics_dir,
+            "validation_results": validation_dir,
             "horizon_train_labels": label_dir / "sampled_horizon_labels_train.feather",
             "best_checkpoint": best_checkpoint_path,
-            "last_checkpoint": last_checkpoint_path,
             "encoder": root / "encoder.pt",
             "decoder": root / "decoder.pt",
             "codebook": root / "codebook.pt",
             "phase1_report": root / "phase1_report.json",
+            "phase1_codebook_validation_json": root / "phase1_codebook_validation.json",
+            "phase1_codebook_validation_html": root / "phase1_codebook_validation.html",
         }
 
         return None
@@ -119,8 +127,8 @@ class Phase1ArtifactStore(DataFileStore):
         epoch: int,
         config: Phase1CheckpointConfig,
         model_state_dict: Phase1StateDict,
-        optimizer_state_dict: Phase1StateDict,
-        metrics: Phase1CheckpointMetrics,
+        optimizer_state_dict: Phase1StateDict
+       
     ) -> None:
         """保存 Phase I checkpoint。
 
@@ -143,14 +151,10 @@ class Phase1ArtifactStore(DataFileStore):
             is_best=False,
             config=config,
             model_state_dict=model_state_dict,
-            optimizer_state_dict=optimizer_state_dict,
-            metrics=metrics,
+            optimizer_state_dict=optimizer_state_dict          
         )
         checkpoint_path = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
         self._save_phase1_checkpoint_payload(checkpoint, checkpoint_path)
-
-        last_checkpoint_path = self._phase1_artifact_path("last_checkpoint")
-        self._save_phase1_checkpoint_payload(checkpoint, last_checkpoint_path)
 
     def load_phase1_checkpoint(
         self,
@@ -266,6 +270,70 @@ class Phase1ArtifactStore(DataFileStore):
             "unsupported horizon label format; use .feather, .ipc, .parquet, or .csv"
         )
 
+    def save_phase1_validation_result(
+        self,
+        validation_result: Phase1ValidationResult,
+    ) -> Path:
+        """保存单个 Phase I codebook validation 结果。
+
+        validation result 是 checkpoint 级五层验证的完整机器可读 payload。这里按
+        stage/epoch 保存一份不可变结果，供 best 选择、报告和后续阶段审计读取。
+        """
+
+        path = self._phase1_validation_result_path(
+            stage=validation_result.stage,
+            epoch=validation_result.epoch,
+        )
+        payload = validation_result.to_dict()
+        self._save_json_payload(payload, path)
+        return path
+
+    def save_phase1_epoch_metrics(
+        self,
+        *,
+        stage: str,
+        epoch: int,
+        metrics: Mapping[str, Any],
+    ) -> Path:
+        """保存单个 Phase I epoch 的训练/评估指标 JSON。"""
+
+        path = self._phase1_epoch_metrics_path(stage=stage, epoch=epoch)
+        payload = {
+            "stage": stage,
+            "epoch": epoch,
+            **dict(metrics),
+        }
+        self._save_json_payload(payload, path)
+        return path
+
+    def load_phase1_epoch_metrics(
+        self,
+        *,
+        stage: str,
+        epoch: int,
+    ) -> dict[str, Any]:
+        """读取单个 Phase I epoch 的训练/评估指标 JSON。"""
+
+        path = self._phase1_epoch_metrics_path(stage=stage, epoch=epoch)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"invalid phase1 epoch metrics payload: {path}")
+        return dict(payload)
+
+    def load_phase1_validation_result(
+        self,
+        *,
+        stage: str,
+        epoch: int,
+    ) -> Phase1ValidationResult:
+        """读取 Phase I codebook validation 结果。"""
+
+        path = self._phase1_validation_result_path(stage=stage, epoch=epoch)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"invalid phase1 validation result payload: {path}")
+        return Phase1ValidationResult.from_dict(payload)
+
     def _phase1_horizon_label_path(self, split_name: str = "train") -> Path:
         """返回 Phase I horizon label 的标准路径。"""
 
@@ -339,6 +407,28 @@ class Phase1ArtifactStore(DataFileStore):
         """返回 Phase I best checkpoint 标准路径。"""
 
         return self._phase1_artifact_path("best_checkpoint")
+
+    def _phase1_validation_result_path(
+        self,
+        *,
+        stage: str,
+        epoch: int,
+    ) -> Path:
+        """返回指定阶段和 epoch 的 validation result 标准路径。"""
+
+        validation_dir = self._phase1_artifact_path("validation_results")
+        return validation_dir / f"{stage}_epoch_{epoch:04d}_validation.json"
+
+    def _phase1_epoch_metrics_path(
+        self,
+        *,
+        stage: str,
+        epoch: int,
+    ) -> Path:
+        """返回指定阶段和 epoch 的基础指标 JSON 标准路径。"""
+
+        metrics_dir = self._phase1_artifact_path("metrics")
+        return metrics_dir / f"{stage}_epoch_{epoch:04d}_metrics.json"
 
     def _save_phase1_checkpoint_payload(
         self,
@@ -491,6 +581,52 @@ class Phase1ArtifactStore(DataFileStore):
             for chunk in iter(lambda: payload_file.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    def _save_json_payload(self, payload: Mapping[str, Any], path: Path) -> None:
+        """以原子替换方式保存 JSON payload 并写出 sha256 sidecar。"""
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            json.dump(
+                self._json_safe(payload),
+                temp_file,
+                ensure_ascii=False,
+                indent=2,
+            )
+            temp_file.write("\n")
+
+        try:
+            digest = self._sha256_file(temp_path)
+            temp_path.replace(path)
+            self._write_sha256_sidecar(path, digest)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    @classmethod
+    def _json_safe(cls, value: Any) -> Any:
+        """把 Path、numpy scalar 等对象转换成 JSON 友好值。"""
+
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, Mapping):
+            return {str(key): cls._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._json_safe(item) for item in value]
+        if hasattr(value, "item") and callable(value.item):
+            try:
+                return value.item()
+            except (TypeError, ValueError):
+                return value
+        return value
 
 
 Phase1Store = Phase1ArtifactStore

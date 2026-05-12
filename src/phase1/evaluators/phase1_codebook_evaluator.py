@@ -136,6 +136,7 @@ class Phase1CodebookEvaluator:
         )
         self.score_weights = score_weights or Phase1ValidationScoreWeights()
         self.runtime_config = runtime_config or Phase1ValidationRuntimeConfig()
+        self.last_assignment_snapshot: CodeAssignmentSnapshot | None = None
 
     @torch.no_grad()
     def collect_snapshot(
@@ -313,6 +314,12 @@ class Phase1CodebookEvaluator:
             val_snapshot=val_snapshot,
             assignment_history=assignment_history,
             runtime_config=self.runtime_config,
+        )
+        current_assignment = vq_computation.extra_payload.get("current_assignment")
+        self.last_assignment_snapshot = (
+            current_assignment
+            if isinstance(current_assignment, CodeAssignmentSnapshot)
+            else None
         )
         oracle_computation = compute_oracle_profitability_metrics(
             model=self.model,
