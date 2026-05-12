@@ -294,18 +294,12 @@ class Phase1ArtifactStore(DataFileStore):
     def save_phase1_epoch_metrics(
         self,
         *,
-        stage: str,
-        epoch: int,
-        metrics: Mapping[str, Any],
+        metrics: Phase1ValidationCheckpoint,
     ) -> Path:
         """保存单个 Phase I epoch 的训练/评估指标 JSON。"""
 
-        path = self._phase1_epoch_metrics_path(stage=stage, epoch=epoch)
-        payload = {
-            "stage": stage,
-            "epoch": epoch,
-            **dict(metrics),
-        }
+        path = self._phase1_epoch_metrics_path(stage=metrics.stage, epoch=metrics.epoch)
+        payload = metrics.to_dict()
         self._save_json_payload(payload, path)
         return path
 
@@ -329,7 +323,7 @@ class Phase1ArtifactStore(DataFileStore):
         *,
         stage: str,
         epoch: int,
-    ) -> dict[str, Any]:
+    ) -> Phase1ValidationResult:
         """读取单个 Phase I epoch 的训练/评估指标 JSON。"""
 
         path = self._phase1_epoch_metrics_path(stage=stage, epoch=epoch)

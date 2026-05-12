@@ -397,8 +397,6 @@ class Phase1MainFlow:
                 train_metrics=train_metrics,
             )
             self.data_store.save_phase1_epoch_metrics(
-                stage="vq",
-                epoch=epoch,
                 metrics=epoch_metrics,
             )
             self.data_store.save_phase1_checkpoint(
@@ -480,7 +478,7 @@ class Phase1MainFlow:
         *,
         epoch: int,
         train_metrics: Phase1Metrics,
-    ) -> dict[str, object]:
+    ) -> Phase1ValidationCheckpoint:
         """运行 checkpoint 评估，并返回本轮完整 metrics payload。"""
 
         val_metrics: Phase1Metrics = self.evaluator.evaluate(
@@ -505,12 +503,13 @@ class Phase1MainFlow:
         current_assignment = self.codebook_evaluator.last_assignment_snapshot
         if current_assignment is not None:
             self.assignment_history.append(current_assignment)
-        return {
-            "train": train_metrics.to_dict(include_context=True),
-            "val": val_metrics.to_dict(include_context=True),
-            "codebook_validation": validation_result.to_dict(),
-            "codebook_validation_flat": validation_result.to_flat_dict(),
-        }
+        return Phase1ValidationCheckpoint(
+            stage="vq",
+            epoch=epoch,
+            train=train_metrics,
+            val=val_metrics,
+            codebook_validation=validation_result)
+        
         
     def _should_validate_checkpoint(self, epoch: int) -> bool:
         return epoch % self.config.validation_interval == 0
