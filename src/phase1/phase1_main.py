@@ -408,13 +408,15 @@ class Phase1MainFlow:
                 model_state_dict=self.model.state_dict(),
                 optimizer_state_dict=self.optimizer.state_dict()             
             )
-            self.report.write_html(
-                validation_result=self.validation_results[epoch],
-                output_path=self.data_store.artifact_paths[
-                    "phase1_codebook_validation_html"
-                ],
+            validation_result = self.validation_results[epoch]
+            report_payload = self.report.build_payload(
+                validation_result=validation_result,
                 config=asdict(self.config),
                 artifacts=self.data_store.artifact_paths,
+            )
+            self.data_store.save_phase1_codebook_validation_html(
+                validation_result=validation_result,
+                html=self.report.render_html(report_payload),
             )
 
     def select_and_save_best_checkpoint(self) -> None:       

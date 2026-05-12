@@ -82,6 +82,7 @@ class Phase1ArtifactStore(DataFileStore):
         failure_case_dir = root / "failure_cases"
         label_dir = root / "labels"
         metrics_dir = root / "metrics"
+        report_dir = root / "reports"
         validation_dir = root / "validation"
         best_checkpoint_path = checkpoint_dir / "best_checkpoint.pt"
 
@@ -94,6 +95,7 @@ class Phase1ArtifactStore(DataFileStore):
             failure_case_dir,
             label_dir,
             metrics_dir,
+            report_dir,
             validation_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
@@ -107,6 +109,7 @@ class Phase1ArtifactStore(DataFileStore):
             "failure_cases": failure_case_dir,
             "labels": label_dir,
             "metrics": metrics_dir,
+            "reports": report_dir,
             "validation_results": validation_dir,
             "horizon_train_labels": label_dir / "sampled_horizon_labels_train.feather",
             "best_checkpoint": best_checkpoint_path,
@@ -115,7 +118,7 @@ class Phase1ArtifactStore(DataFileStore):
             "codebook": root / "codebook.pt",
             "phase1_report": root / "phase1_report.json",
             "phase1_codebook_validation_json": root / "phase1_codebook_validation.json",
-            "phase1_codebook_validation_html": root / "phase1_codebook_validation.html",
+            "phase1_codebook_validation_html": report_dir / "phase1_codebook_validation.html",
         }
 
         return None
@@ -306,6 +309,21 @@ class Phase1ArtifactStore(DataFileStore):
         self._save_json_payload(payload, path)
         return path
 
+    def save_phase1_codebook_validation_html(
+        self,
+        *,
+        validation_result: Phase1ValidationResult,
+        html: str,
+    ) -> Path:
+        """保存单个 Phase I codebook validation HTML 报告。"""
+
+        path = self._phase1_codebook_validation_html_path(
+            stage=validation_result.stage,
+            epoch=validation_result.epoch,
+        )
+        self._save_text_payload(html, path)
+        return path
+
     def load_phase1_epoch_metrics(
         self,
         *,
@@ -429,6 +447,17 @@ class Phase1ArtifactStore(DataFileStore):
 
         metrics_dir = self._phase1_artifact_path("metrics")
         return metrics_dir / f"{stage}_epoch_{epoch:04d}_metrics.json"
+
+    def _phase1_codebook_validation_html_path(
+        self,
+        *,
+        stage: str,
+        epoch: int,
+    ) -> Path:
+        """返回指定阶段和 epoch 的 codebook validation HTML 报告路径。"""
+
+        report_dir = self._phase1_artifact_path("reports")
+        return report_dir / f"{stage}_epoch_{epoch:04d}_codebook_validation.html"
 
     def _save_phase1_checkpoint_payload(
         self,
@@ -602,6 +631,29 @@ class Phase1ArtifactStore(DataFileStore):
                 indent=2,
             )
             temp_file.write("\n")
+
+        try:
+            digest = self._sha256_file(temp_path)
+            temp_path.replace(path)
+            self._write_sha256_sidecar(path, digest)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    def _save_text_payload(self, payload: str, path: Path) -> None:
+        """以原子替换方式保存文本 payload 并写出 sha256 sidecar。"""
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(payload)
 
         try:
             digest = self._sha256_file(temp_path)

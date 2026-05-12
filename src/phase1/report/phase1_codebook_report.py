@@ -1,8 +1,8 @@
-"""Phase I codebook validation report JSON/HTML 呈现入口。
+"""Phase I codebook validation report payload/HTML 呈现入口。
 
 文件功能说明:
     本文件实现 ``Phase1CodebookReport``，负责把已经计算好的
-    ``Phase1ValidationResult`` 转换为可落盘的 JSON payload 和静态 HTML report。
+    ``Phase1ValidationResult`` 转换为 report payload 和静态 HTML report。
 
 设计边界:
     - 只消费 validation result、config 和 artifacts；
@@ -12,15 +12,14 @@
     - HTML 是静态审计视图，不依赖外部 JS/CSS 文件。
 
 使用场景:
-    训练主流程在拿到 ``Phase1ValidationResult`` 后，调用本类写出 JSON/HTML，
-    供人工审计、实验复盘和后续 Phase II/III 读取摘要。
+    训练主流程在拿到 ``Phase1ValidationResult`` 后，调用本类渲染 HTML，
+    再交给 datastore 保存，供人工审计和实验复盘。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import json
 import math
 from pathlib import Path
 from typing import Any, Mapping
@@ -116,12 +115,12 @@ class Phase1CodebookReport:
     """Phase I codebook validation 报告渲染器。
 
     功能说明:
-        提供 ``build_payload()``、``write_json()`` 和 ``write_html()`` 三个入口。
-        payload 保留完整机器可读结构，HTML 提供人工审计视图。
+        提供 ``build_payload()`` 和 ``render_html()`` 两个入口。payload 保留完整
+        机器可读结构，HTML 提供人工审计视图；文件写入由 datastore 统一负责。
 
     使用场景:
-        full validation 完成后，把 ``Phase1ValidationResult`` 输出为
-        ``phase1_codebook_validation.json`` 和 ``phase1_codebook_validation.html``。
+        full validation 完成后，把 ``Phase1ValidationResult`` 转成 payload 并
+        渲染为 ``phase1_codebook_validation.html`` 内容。
     """
 
     title: str = "Phase I Codebook Validation Report"
@@ -146,8 +145,8 @@ class Phase1CodebookReport:
             普通 dict，包含 report 元信息、summary、validation、config 和 artifacts。
 
         使用场景:
-            ``write_json()`` 和 ``write_html()`` 的共同前置步骤；外部系统也可直接
-            调用本方法拿到机器可读 payload。
+            ``render_html()`` 的前置步骤；外部系统也可直接调用本方法拿到
+            机器可读 payload。
         """
 
         generated_at = datetime.now(UTC).isoformat()
@@ -177,140 +176,6 @@ class Phase1CodebookReport:
         }
         return _json_safe(payload)
 
-    def write_report(
-        self,
-        *,
-        validation_result: Phase1ValidationResult | None = None,
-        output_json_path: str | Path | None = None,
-        output_html_path: str | Path | None = None,
-        config: Mapping[str, object] | None = None,
-        artifacts: Mapping[str, str | Path] | None = None,
-        metadata: Mapping[str, object] | None = None,
-        best_checkpoint_selection: Any | None = None,
-        metrics: Mapping[str, object] | None = None,
-        diagnostics: Mapping[str, object] | None = None,
-    ) -> dict[str, Path]:
-        """写出 Phase I codebook validation report。
-
-        输入参数:
-            validation_result: 五层 validation 完整结果。为空时保留旧主流程骨架的
-                空操作行为。
-            output_json_path: JSON report 输出路径。
-            output_html_path: HTML report 输出路径。
-            config: Phase I 配置快照，可为空。
-            artifacts: 产物路径索引，可为空。
-            metadata: 额外 report 元数据。
-            best_checkpoint_selection: 主流程传入的 best checkpoint 结果，当前
-                codebook report 不直接消费。
-            metrics: 训练期指标摘要，当前 codebook report 不直接消费。
-            diagnostics: 诊断摘要，当前 codebook report 不直接消费。
-
-        输出:
-            已写出的 report 路径字典，key 为 ``json`` 或 ``html``。
-        """
-
-        _ = best_checkpoint_selection
-        _ = metrics
-        _ = diagnostics
-        if validation_result is None:
-            return {}
-
-        written_paths: dict[str, Path] = {}
-        if output_json_path is not None:
-            written_paths["json"] = self.write_json(
-                validation_result=validation_result,
-                output_path=output_json_path,
-                config=config,
-                artifacts=artifacts,
-                metadata=metadata,
-            )
-        if output_html_path is not None:
-            written_paths["html"] = self.write_html(
-                validation_result=validation_result,
-                output_path=output_html_path,
-                config=config,
-                artifacts=artifacts,
-                metadata=metadata,
-            )
-        return written_paths
-
-    def write_json(
-        self,
-        *,
-        validation_result: Phase1ValidationResult,
-        output_path: str | Path,
-        config: Mapping[str, object] | None = None,
-        artifacts: Mapping[str, str | Path] | None = None,
-        metadata: Mapping[str, object] | None = None,
-    ) -> Path:
-        """写出 codebook validation JSON report。
-
-        输入参数:
-            validation_result: 五层 validation 完整结果。
-            output_path: JSON 输出路径。
-            config: Phase I 配置快照，可为空。
-            artifacts: 产物路径索引，可为空。
-            metadata: 额外 report 元数据。
-
-        输出:
-            实际写出的 ``Path``。
-
-        使用场景:
-            checkpoint validation 完成后保存机器可读 report，供后续脚本、selector
-            或实验审计读取。
-        """
-
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = self.build_payload(
-            validation_result=validation_result,
-            config=config,
-            artifacts=artifacts,
-            metadata=metadata,
-        )
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        return path
-
-    def write_html(
-        self,
-        *,
-        validation_result: Phase1ValidationResult,
-        output_path: str | Path,
-        config: Mapping[str, object] | None = None,
-        artifacts: Mapping[str, str | Path] | None = None,
-        metadata: Mapping[str, object] | None = None,
-    ) -> Path:
-        """写出 codebook validation HTML report。
-
-        输入参数:
-            validation_result: 五层 validation 完整结果。
-            output_path: HTML 输出路径。
-            config: Phase I 配置快照，可为空。
-            artifacts: 产物路径索引，可为空。
-            metadata: 额外 report 元数据。
-
-        输出:
-            实际写出的 ``Path``。
-
-        使用场景:
-            checkpoint validation 完成后保存人工审计报告，展示五层 hard gate、
-            raw metric、code diagnostics 和 tie-breaker。
-        """
-
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = self.build_payload(
-            validation_result=validation_result,
-            config=config,
-            artifacts=artifacts,
-            metadata=metadata,
-        )
-        path.write_text(self.render_html(payload), encoding="utf-8")
-        return path
-
     def render_html(self, payload: Mapping[str, Any]) -> str:
         """将 report payload 渲染为静态 HTML 字符串。
 
@@ -321,7 +186,8 @@ class Phase1CodebookReport:
             完整 HTML 文本。
 
         使用场景:
-            ``write_html()`` 写文件前调用；测试中也可直接校验 HTML 片段。
+            主流程完成 validation 后渲染人工审计 HTML，再交给 datastore 保存；
+            测试中也可直接校验 HTML 片段。
         """
 
         return render_template_file(_TEMPLATE_PATH, self._build_html_context(payload))
