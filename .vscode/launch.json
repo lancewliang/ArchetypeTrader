@@ -11,7 +11,7 @@
                 "--pair",
                 "FU",
                 "--data-root",
-                "${workspaceFolder}/data",
+                "${workspaceFolder}/artifacts",
                 "--horizon",
                 "72",
                 "--train-file",

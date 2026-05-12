@@ -1,8 +1,8 @@
 """前置数据处理入口。
 
 读取 ``data/<PAIR>`` 下的 feature split 文件，生成:
-    - ``data/<PAIR>/horizon_datasets/<split>.npz``
-    - ``data/<PAIR>/trajectory_datasets/<split>.npz``
+    - ``data/<PAIR>/<BATCHID>/horizon_datasets/<split>.npz``
+    - ``data/<PAIR>/<BATCHID>/trajectory_datasets/<split>.npz``
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from src.store.artifact_store import DataStore  # noqa: E402
 
 
 DEFAULT_PAIR = "AL"
+DEFAULT_BATCHID = "batch_001"
 DEFAULT_HORIZON = 72
 SPLIT_CANDIDATES = {
     "train": ("train.feather", "df_train.feather"),
@@ -44,10 +45,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--pair", default=DEFAULT_PAIR, help="交易标的目录名，默认 AL。")
     parser.add_argument(
+        "--batchid",
+        default=DEFAULT_BATCHID,
+        help="数据准备批次 ID，默认 batch_001。",
+    )
+    parser.add_argument(
         "--data-root",
         type=Path,
-        default=PROJECT_ROOT / "data",
-        help="数据根目录，默认项目下的 data。",
+        default=PROJECT_ROOT / "artifacts",
+        help="数据根目录，默认项目下的 artifacts。",
     )
     parser.add_argument(
         "--horizon",
@@ -84,7 +90,11 @@ def main() -> None:
 
     args = parse_args()
     pair_dir = args.data_root / args.pair
-    data_store = DataStore(pair=args.pair, artifacts_root=args.data_root)
+    data_store = DataStore(
+        pair=args.pair,
+        batchid=args.batchid,
+        artifacts_root=args.data_root,
+    )
     preparer = DataPreparer(
         horizon=args.horizon,
         data_store=data_store,
