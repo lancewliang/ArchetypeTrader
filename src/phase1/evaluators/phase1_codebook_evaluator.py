@@ -451,9 +451,21 @@ class Phase1CodebookEvaluator:
     ) -> dict[str, Phase1MetricResult]:
         """计算 train/validation 横向 drift diagnostics。
 
-        这些指标只用于 report 解释，不参与 hard gate。触发阈值时以
-        ``severity="warn"`` 写入，但 ``passed`` 保持 True，避免 selector 把 drift
-        warning 当作 checkpoint 淘汰条件。
+        功能说明:
+            汇总 train 与 validation 之间的分布漂移诊断，包括 market morphology
+            分布 KL、code usage KL、action motif 分布 KL、reconstruction
+            generalization gap、label predictability gap 以及 per-code return gap。
+            返回值统一使用 ``Phase1MetricResult``，便于 report 和审计页面展示。
+
+        设计边界:
+            - 只产生解释性 warning，不参与五层 hard gate；
+            - 触发阈值时 ``severity="warn"``，但 ``passed`` 始终保持 True；
+            - 不重新定义五层 raw metric 或 selector 规则；
+            - 依赖已有 snapshot 和 layer extra payload，不访问文件系统。
+
+        使用场景:
+            ``evaluate_checkpoint()`` 在五层 validation 完成后调用本方法，为
+            checkpoint report 补充 train/validation 分布是否一致的解释信息。
         """
 
         diagnostics: dict[str, Phase1MetricResult] = {}
@@ -537,7 +549,22 @@ class Phase1CodebookEvaluator:
         triggered: bool,
         message: str,
     ) -> Phase1MetricResult:
-        """构造 drift diagnostic metric result。"""
+        """构造单个 drift diagnostic metric result。
+
+        功能说明:
+            把 drift 诊断的数值、阈值、触发状态和说明文本封装成
+            ``Phase1MetricResult``。输入缺失或非有限值时，统一转成
+            ``severity="skip"`` 的可展示结果。
+
+        设计边界:
+            - 只负责结果对象标准化，不计算具体 drift 数值；
+            - drift diagnostic 不作为 hard gate，返回对象的 ``passed`` 固定为 True；
+            - 不修改调用方传入的 metric 名称、阈值文本和业务说明。
+
+        使用场景:
+            被 ``_drift_upper_metric()`` 和 ``_per_code_return_gap_metric()`` 复用，
+            保证 drift 类诊断在 report 中有一致的 pass/warn/skip 表达。
+        """
 
         if value is None or not np.isfinite(value):
             return Phase1MetricResult(
@@ -568,7 +595,22 @@ class Phase1CodebookEvaluator:
         threshold_value: float,
         message: str,
     ) -> Phase1MetricResult:
-        """构造越低越好的 drift warning metric。"""
+        """构造越低越好的 drift warning metric。
+
+        功能说明:
+            判断 ``value`` 是否超过 ``threshold_value``，并把超过阈值的情况标记为
+            drift warning。适用于 KL、generalization gap、predictability gap 等
+            数值越小越稳定的诊断项。
+
+        设计边界:
+            - 只处理 ``value > threshold`` 这一类上界阈值；
+            - 不负责计算 ``value`` 本身；
+            - 不改变 drift diagnostic 不参与 hard gate 的语义。
+
+        使用场景:
+            ``_build_drift_diagnostics()`` 中构造 reconstruction gap、
+            label predictability gap 等上界型 warning 指标。
+        """
 
         triggered = (
             value is not None and np.isfinite(value) and value > threshold_value
@@ -591,7 +633,22 @@ class Phase1CodebookEvaluator:
         threshold_value: float,
         message: str,
     ) -> Phase1MetricResult:
-        """构造 KL(P_val || P_train) drift warning metric。"""
+        """构造 KL(P_val || P_train) drift warning metric。
+
+        功能说明:
+            将 train/validation 的离散标签数组转换为 KL 散度诊断项，度量
+            validation 分布相对 train 分布的偏移程度。KL 值超过阈值时写入
+            warning。
+
+        设计边界:
+            - 只适用于离散类别值，例如 morphology、code id、motif；
+            - 空输入不强行计算，交给 ``_drift_upper_metric()`` 生成 skip 结果；
+            - 只比较整体分布，不解释具体哪个类别贡献了漂移。
+
+        使用场景:
+            ``_build_drift_diagnostics()`` 中用于 morphology distribution、
+            code usage 和 motif distribution 的 train/validation 分布对比。
+        """
 
         if train_values.size == 0 or val_values.size == 0:
             value = None
@@ -606,7 +663,22 @@ class Phase1CodebookEvaluator:
 
     @staticmethod
     def _categorical_kl(train_values: np.ndarray, val_values: np.ndarray) -> float:
-        """计算 KL(P_val || P_train)。"""
+        """计算离散类别分布的 KL(P_val || P_train)。
+
+        功能说明:
+            将任意可转字符串的类别值展开为一维标签，统计 train 和 validation
+            的类别频率分布，然后计算 ``sum(P_val * log(P_val / P_train))``。
+            计算时加入极小 epsilon，避免类别只出现在一侧时产生除零。
+
+        设计边界:
+            - 只处理 categorical/discrete 分布，不适合连续数值特征；
+            - 不做阈值判定，也不返回 ``Phase1MetricResult``；
+            - 类别统一转为字符串后比较，保证 int、str 等标签可以进入同一流程。
+
+        使用场景:
+            作为 ``_drift_kl_metric()`` 的底层数值函数，供 drift report 展示
+            train/validation 类别分布偏移程度。
+        """
 
         train_flat = np.asarray(train_values).reshape(-1)
         val_flat = np.asarray(val_values).reshape(-1)
@@ -635,7 +707,23 @@ class Phase1CodebookEvaluator:
         train_snapshot: Phase1EvaluationSnapshot,
         val_oracle_computation: Phase1LayerComputation,
     ) -> Phase1MetricResult:
-        """计算 per-code train/validation return gap drift warning。"""
+        """计算 per-code train/validation return gap drift warning。
+
+        功能说明:
+            对 train snapshot 重新执行 oracle profitability 计算，并与 validation
+            oracle extra payload 中的 per-code mean advantage 对齐，统计共同 code
+            的平均收益差距。差距超过 train per-code return 标准差时标记 warning。
+
+        设计边界:
+            - 只作为局部 code 稳定性的 drift 诊断，不参与 checkpoint 淘汰；
+            - 需要 train prices 才能重算 train oracle profitability，缺失时返回 skip；
+            - 只比较 train/validation 都存在且 mean advantage 有效的 code；
+            - 不替代 Layer 3 的 oracle profitability hard gate。
+
+        使用场景:
+            ``_build_drift_diagnostics()`` 在 Layer 3 已完成后调用，用于 report
+            提示某些 code 可能在 validation 上出现局部收益失效。
+        """
 
         if train_snapshot.prices is None:
             return self._drift_result(
@@ -704,6 +792,17 @@ class Phase1CodebookEvaluator:
         collected_states: np.ndarray,
     ) -> np.ndarray | None:
         """从可选 horizon dataset 中提取 prices。
+
+        功能说明:
+            根据 dataloader 收集到的 ``sample_ids`` 从 ``horizon_dataset`` 中取回
+            对应 prices，并用 states 做严格对齐校验，防止 shuffled dataloader 或
+            dataset 顺序不一致导致 price/action/reward 错配。
+
+        设计边界:
+            - 只负责 prices 提取和对齐校验，不修正错位数据；
+            - 未提供 ``horizon_dataset`` 时返回 ``None``，由下游 layer 按缺失价格处理；
+            - 价格只接受 ``[N, H]`` 或 ``[N, H, 1]``，输出统一为 ``[N, H]``；
+            - 对齐失败直接抛出 ``ValueError``，避免静默生成不可审计的 metrics。
 
         输入参数:
             horizon_dataset: ``(states, prices)`` 或 ``None``。
