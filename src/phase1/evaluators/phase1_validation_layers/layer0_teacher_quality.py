@@ -29,7 +29,9 @@ from ...metrics import (
     Phase1TeacherQualityMetrics,
     Phase1ValidationRuntimeConfig,
 )
-from .layer2_behavior_quality import classify_market_morphology
+from .layer2_behavior_quality import (
+    classify_market_morphology as _classify_market_morphology,
+)
 
 
 _EPS = 1e-12
@@ -58,10 +60,38 @@ def _prices_2d(prices: np.ndarray | None) -> np.ndarray | None:
     return values
 
 
-def _demo_returns(
+def compute_flat_returns(
+    prices: np.ndarray | None,
+    *,
+    sample_count: int | None = None,
+) -> np.ndarray:
+    """计算 flat baseline 的逐 horizon 收益。
+
+    输入参数:
+        prices: 价格数组，可为 ``[N, H]``、``[N, H, 1]`` 或 ``None``。
+        sample_count: 当价格缺失但调用方已知样本数时，用于返回对齐长度的
+            flat baseline。
+
+    输出:
+        ``[N]`` 形状的全 0 收益数组。flat baseline 表示全程空仓、不交易；
+        第一版不计资金利息或持仓成本。
+
+    使用场景:
+        作为 DP teacher return 的对照基准 ``R_flat``。
+    """
+
+    price_values = _prices_2d(prices)
+    if price_values is not None:
+        return np.zeros(price_values.shape[0], dtype=np.float64)
+    if sample_count is not None:
+        return np.zeros(int(sample_count), dtype=np.float64)
+    return np.asarray([], dtype=np.float64)
+
+
+def compute_demo_returns(
     snapshot: Phase1EvaluationSnapshot,
     *,
-    fee_rate: float,
+    fee_rate: float = 0.0,
 ) -> np.ndarray:
     """计算 DP teacher 每条 horizon 的收益。
 
@@ -94,7 +124,58 @@ def _demo_returns(
     ).returns
 
 
-def _top_removed_total_advantage(advantages: np.ndarray, top_ratio: float) -> float:
+def compute_fee_sensitivity(
+    prices: np.ndarray | None,
+    actions: np.ndarray,
+    fee_rate: float,
+    *,
+    original_advantages: np.ndarray | None = None,
+) -> float:
+    """计算 teacher 策略对手续费的敏感性。
+
+    输入参数:
+        prices: 价格数组，可为 ``[N, H]``、``[N, H, 1]`` 或 ``None``。
+        actions: DP teacher 动作数组，形状为 ``[N, H]``。
+        fee_rate: 原始手续费率；函数使用 ``fee_rate * 2`` 执行敏感性检查。
+        original_advantages: 可选原始优势数组。Layer 0 主流程传入
+            ``R_DP - R_flat``，保证分母和 teacher return 口径一致；缺失时函数
+            使用原始 ``fee_rate`` 下的 execution return 作为分母。
+
+    输出:
+        翻倍手续费后总优势保留比例。价格缺失或不可计算时返回 NaN。
+
+    使用场景:
+        过滤对手续费极度敏感、优势容易被交易成本侵蚀的 teacher 数据。
+    """
+
+    price_values = _prices_2d(prices)
+    if price_values is None:
+        return _nan()
+
+    if original_advantages is None:
+        original_returns = ActionExecutionCalculator.execute_actions(
+            price_values,
+            actions,
+            fee_rate,
+        ).returns
+        denominator_values = original_returns
+    else:
+        denominator_values = np.asarray(original_advantages, dtype=np.float64)
+
+    doubled_fee_returns = ActionExecutionCalculator.execute_actions(
+        price_values,
+        actions,
+        fee_rate * 2.0,
+    ).returns
+    numerator = np.nansum(doubled_fee_returns)
+    denominator = np.nansum(denominator_values)
+    return float(numerator / (denominator + _EPS))
+
+
+def compute_top_removed_total_advantage(
+    advantages: np.ndarray,
+    top_ratio: float,
+) -> float:
     """剔除头部优势样本后计算剩余总优势。
 
     输入参数:
@@ -112,6 +193,10 @@ def _top_removed_total_advantage(advantages: np.ndarray, top_ratio: float) -> fl
     if values.size == 0:
         return _nan()
     remove_count = int(np.ceil(values.size * max(0.0, min(1.0, top_ratio))))
+    if values.size == 1:
+        remove_count = 0
+    else:
+        remove_count = min(remove_count, values.size - 1)
     if remove_count <= 0:
         return float(np.sum(values))
     order = np.argsort(values)
@@ -119,6 +204,30 @@ def _top_removed_total_advantage(advantages: np.ndarray, top_ratio: float) -> fl
     if kept.size == 0:
         return _nan()
     return float(np.sum(kept))
+
+
+def classify_market_morphology(
+    prices: np.ndarray | None,
+    *,
+    fee_rate: float = 0.0002,
+) -> np.ndarray:
+    """根据价格路径分类市场形态。
+
+    输入参数:
+        prices: 价格数组，可为 ``[N, H]``、``[N, H, 1]`` 或 ``None``。
+        fee_rate: 手续费率，用于底层 morphology helper 设置 neutral band。
+
+    输出:
+        ``[N]`` 形状的标签数组；价格缺失或不可用时返回空数组。标签包括
+        ``uptrend``、``downtrend``、``reversal-up``、``reversal-down``、
+        ``range-high-vol``、``range-low-vol``、``volatile-mixed`` 和
+        ``neutral``。
+
+    使用场景:
+        Layer 0 用于计算非 neutral 市场覆盖率，Layer 2/3/4 可复用同一分类口径。
+    """
+
+    return _classify_market_morphology(prices, fee_rate=fee_rate)
 
 
 def compute_teacher_quality_metrics(
@@ -149,29 +258,31 @@ def compute_teacher_quality_metrics(
     """
 
     del train_snapshot
-    dp_returns = _demo_returns(val_snapshot, fee_rate=runtime_config.fee_rate)
-    flat_returns = np.zeros_like(dp_returns)
+    dp_returns = compute_demo_returns(val_snapshot, fee_rate=runtime_config.fee_rate)
+    flat_returns = compute_flat_returns(
+        val_snapshot.prices,
+        sample_count=dp_returns.shape[0],
+    )
     advantages = dp_returns - flat_returns
 
     price_values = _prices_2d(val_snapshot.prices)
     if price_values is None:
         fee_sensitivity = _nan()
         morphology_coverage = _nan()
+        missing_reason = "missing_prices"
     else:
-        doubled_fee_returns = ActionExecutionCalculator.execute_actions(
+        fee_sensitivity = compute_fee_sensitivity(
             price_values,
             val_snapshot.demo_actions,
-            runtime_config.fee_rate * 2.0,
-        ).returns
-        fee_sensitivity = float(
-            np.nansum(doubled_fee_returns - flat_returns)
-            / (np.nansum(advantages) + _EPS)
+            runtime_config.fee_rate,
+            original_advantages=advantages,
         )
         labels = classify_market_morphology(
             price_values,
             fee_rate=runtime_config.fee_rate,
         )
         morphology_coverage = float(np.mean(labels != "neutral")) if labels.size else _nan()
+        missing_reason = None
 
     metrics = Phase1TeacherQualityMetrics(
         dp_advantage_vs_flat=float(np.nanmean(advantages)),
@@ -181,7 +292,7 @@ def compute_teacher_quality_metrics(
         ),
         fee_sensitivity=fee_sensitivity,
         morphology_coverage=morphology_coverage,
-        dp_return_concentration_after_top5_removed=_top_removed_total_advantage(
+        dp_return_concentration_after_top5_removed=compute_top_removed_total_advantage(
             advantages,
             runtime_config.top_contribution_ratio,
         ),
@@ -190,7 +301,20 @@ def compute_teacher_quality_metrics(
         layer_id=0,
         layer_name="teacher_quality",
         metrics=metrics,
+        extra_payload={
+            "dp_returns": dp_returns,
+            "flat_returns": flat_returns,
+            "advantages": advantages,
+            "missing_reason": missing_reason,
+        },
     )
 
 
-__all__ = ["compute_teacher_quality_metrics"]
+__all__ = [
+    "classify_market_morphology",
+    "compute_demo_returns",
+    "compute_fee_sensitivity",
+    "compute_flat_returns",
+    "compute_teacher_quality_metrics",
+    "compute_top_removed_total_advantage",
+]
