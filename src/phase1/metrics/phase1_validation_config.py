@@ -112,6 +112,10 @@ class Phase1ValidationRuntimeConfig:
     # validation 过程随机种子。用于 random label baseline 和 probe 训练可复现。
     random_seed: int = 42
 
+    # codebook size。设置时优先用于 Layer 1 occupancy/perplexity 统计；
+    # 未设置时由 snapshot.distances.shape[-1] 推断。
+    codebook_size: int | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
 

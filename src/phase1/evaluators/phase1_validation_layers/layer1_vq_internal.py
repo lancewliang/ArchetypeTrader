@@ -37,12 +37,17 @@ from ...metrics import (
 _EPS = 1e-12
 
 
-def _num_codes(snapshot: Phase1EvaluationSnapshot) -> int:
+def _num_codes(
+    snapshot: Phase1EvaluationSnapshot,
+    runtime_config: Phase1ValidationRuntimeConfig,
+) -> int:
     """推断当前 snapshot 的 codebook size。
 
     输入参数:
-        snapshot: validation snapshot，从 ``distances.shape[1]`` 读取 codebook
-            size。不能从已使用的 ``code_ids`` 反推，否则会漏掉尾部 dead codes。
+        snapshot: validation snapshot，当运行配置未显式提供 codebook size 时，
+            从 ``distances.shape[1]`` 推断。不能从已使用的 ``code_ids`` 反推，
+            否则会漏掉尾部 dead codes。
+        runtime_config: validation 运行参数；``codebook_size`` 显式设置时优先使用。
 
     输出:
         code 数量；无法推断时返回 0。
@@ -50,6 +55,11 @@ def _num_codes(snapshot: Phase1EvaluationSnapshot) -> int:
     使用场景:
         计算 code occupancy、active ratio、dead ratio 和 normalized perplexity。
     """
+
+    if runtime_config.codebook_size is not None:
+        if runtime_config.codebook_size <= 0:
+            raise ValueError("runtime_config.codebook_size must be positive when set")
+        return int(runtime_config.codebook_size)
 
     distances = np.asarray(snapshot.distances)
     if distances.ndim == 2 and distances.shape[1] > 0:
@@ -208,14 +218,16 @@ def _assignment_churn_by_epoch(
         ],
         key=lambda item: item.epoch,
     )[-window:]
-    snapshots = [*recent, current]
-    if len(snapshots) < 2:
+    if len(recent) < window:
         return {}
-    return {
-        int(right.epoch): value
-        for left, right in zip(snapshots[:-1], snapshots[1:], strict=False)
-        if np.isfinite(value := _churn_between(left, right))
-    }
+    snapshots = [*recent, current]
+    churn_by_epoch = {}
+    for left, right in zip(snapshots[:-1], snapshots[1:], strict=False):
+        value = _churn_between(left, right)
+        if not np.isfinite(value):
+            return {}
+        churn_by_epoch[int(right.epoch)] = value
+    return churn_by_epoch
 
 
 def compute_assignment_churn(
@@ -245,6 +257,9 @@ def compute_code_lifetime_pass_ratio(
     current_active_codes: Sequence[int],
     history: Sequence[CodeAssignmentSnapshot],
     min_lifetime_epochs: int,
+    *,
+    current_epoch: int | None = None,
+    split: str | None = None,
 ) -> float:
     """计算当前 active code 的 lifetime 达标比例。
 
@@ -260,9 +275,25 @@ def compute_code_lifetime_pass_ratio(
         诊断 active code 是否只是短暂出现，还是已经形成稳定 code。
     """
 
+    if len(set(current_active_codes)) != len(current_active_codes):
+        raise ValueError("current_active_codes must be unique")
     if not current_active_codes:
         return _nan()
+    if min_lifetime_epochs <= 0:
+        raise ValueError("min_lifetime_epochs must be positive")
     ordered_history = sorted(history, key=lambda item: item.epoch)
+    history_splits = {item.split for item in ordered_history}
+    if split is not None and any(item.split != split for item in ordered_history):
+        raise ValueError("history split must match current assignment split")
+    if split is None and len(history_splits) > 1:
+        raise ValueError("history must contain snapshots from a single split")
+    if len({item.epoch for item in ordered_history}) != len(ordered_history):
+        raise ValueError("history must not contain duplicate epochs")
+    if current_epoch is not None and any(
+        item.epoch >= current_epoch for item in ordered_history
+    ):
+        raise ValueError("history must contain only epochs before current_epoch")
+
     pass_count = 0
     for code_id in current_active_codes:
         lifetime = 1
@@ -446,8 +477,9 @@ def compute_vq_internal_metrics(
     """
 
     code_ids = np.asarray(val_snapshot.code_ids, dtype=np.int64)
-    num_codes = _num_codes(val_snapshot)
+    num_codes = _num_codes(val_snapshot, runtime_config)
     probabilities = compute_code_distribution(code_ids, num_codes)
+    has_code_samples = probabilities.size > 0 and code_ids.size > 0
     current_assignment = _current_assignment_snapshot(
         val_snapshot,
         probabilities,
@@ -471,6 +503,11 @@ def compute_vq_internal_metrics(
 
     demo_turnover = _turnover(val_snapshot.demo_actions)
     decoded_turnover = _turnover(val_snapshot.decoded_actions)
+    turnover_error = (
+        float(np.mean(np.abs(decoded_turnover - demo_turnover)))
+        if demo_turnover.size
+        else _nan()
+    )
 
     demo_entry = compute_first_trade_t(val_snapshot.demo_actions)
     decoded_entry = compute_first_trade_t(val_snapshot.decoded_actions)
@@ -480,6 +517,13 @@ def compute_vq_internal_metrics(
         if np.any(both_entered)
         else _nan()
     )
+    demo_direction = classify_main_direction(val_snapshot.demo_actions)
+    decoded_direction = classify_main_direction(val_snapshot.decoded_actions)
+    direction_accuracy = (
+        float(np.mean(demo_direction == decoded_direction))
+        if demo_direction.size
+        else _nan()
+    )
 
     metrics = Phase1VQInternalMetrics(
         validation_action_accuracy=action_accuracy,
@@ -487,14 +531,16 @@ def compute_vq_internal_metrics(
         active_code_ratio=float(
             np.mean(probabilities >= runtime_config.active_code_min_occupancy)
         )
-        if probabilities.size
+        if has_code_samples
         else _nan(),
-        max_code_occupancy=float(np.max(probabilities)) if probabilities.size else _nan(),
-        normalized_code_perplexity=compute_normalized_perplexity(probabilities),
+        max_code_occupancy=float(np.max(probabilities)) if has_code_samples else _nan(),
+        normalized_code_perplexity=compute_normalized_perplexity(probabilities)
+        if has_code_samples
+        else _nan(),
         dead_code_ratio=float(
             np.mean(probabilities < runtime_config.dead_code_max_occupancy)
         )
-        if probabilities.size
+        if has_code_samples
         else _nan(),
         assignment_churn_recent_mean=compute_assignment_churn(
             current_assignment,
@@ -505,19 +551,16 @@ def compute_vq_internal_metrics(
             current_assignment.active_codes,
             _previous_assignments(current_assignment, assignment_history),
             10,
+            current_epoch=current_assignment.epoch,
+            split=current_assignment.split,
         ),
         quantization_distance=quantization_distance,
         nearest_second_margin_median=_nearest_second_margin_median(
             val_snapshot.distances,
         ),
-        decoder_turnover_error=float(np.mean(np.abs(decoded_turnover - demo_turnover))),
+        decoder_turnover_error=turnover_error,
         entry_timing_error_median=entry_error,
-        direction_accuracy=float(
-            np.mean(
-                classify_main_direction(val_snapshot.demo_actions)
-                == classify_main_direction(val_snapshot.decoded_actions)
-            )
-        ),
+        direction_accuracy=direction_accuracy,
         quantization_distance_gap=float(
             quantization_distance / (train_quantization_distance + _EPS)
         )
@@ -534,6 +577,9 @@ def compute_vq_internal_metrics(
             "active_codes": current_assignment.active_codes,
             "current_assignment": current_assignment,
             "assignment_churn_by_epoch": assignment_churn_by_epoch,
+            "codebook_size": num_codes,
+            "codebook_size_available": num_codes > 0,
+            "code_distribution_sample_count": int(code_ids.size),
         },
     )
 

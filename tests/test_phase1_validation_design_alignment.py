@@ -219,20 +219,53 @@ def test_oracle_rules_require_risk_adjusted_return_above_random() -> None:
     assert not failing.passed
 
 
-def test_vq_rules_require_quantization_distance_gap() -> None:
+def test_vq_rules_treat_quantization_distance_gap_as_scoring_signal() -> None:
     thresholds = Phase1VQInternalThresholds()
 
     passing = evaluate_vq_internal_rules(
         _passing_vq_metrics(quantization_distance_gap=1.25),
         thresholds,
     )
-    failing = evaluate_vq_internal_rules(
+    still_passing = evaluate_vq_internal_rules(
         _passing_vq_metrics(quantization_distance_gap=1.26),
         thresholds,
     )
 
     assert passing.passed
+    assert still_passing.passed
+
+
+def test_vq_rules_use_raw_entry_timing_timestep_threshold() -> None:
+    thresholds = Phase1VQInternalThresholds(entry_timing_error_max=10.8)
+
+    passing = evaluate_vq_internal_rules(
+        _passing_vq_metrics(entry_timing_error_median=10.8),
+        thresholds,
+    )
+    failing = evaluate_vq_internal_rules(
+        _passing_vq_metrics(entry_timing_error_median=10.9),
+        thresholds,
+    )
+
+    assert passing.passed
     assert not failing.passed
+
+
+def test_vq_rules_warn_on_context_dependent_missing_stability_metrics() -> None:
+    thresholds = Phase1VQInternalThresholds()
+
+    result = evaluate_vq_internal_rules(
+        _passing_vq_metrics(
+            assignment_churn_recent_mean=math.nan,
+            entry_timing_error_median=math.nan,
+        ),
+        thresholds,
+    )
+
+    by_name = {metric.name: metric for metric in result.metrics}
+    assert result.passed
+    assert by_name["assignment_churn_recent_mean"].severity == "warn"
+    assert by_name["entry_timing_error_median"].severity == "warn"
 
 
 def test_dominant_pair_positive_ratio_is_computed_per_active_code() -> None:

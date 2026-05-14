@@ -27,6 +27,8 @@ Layer 1 calculator 返回 `Phase1LayerComputation`，PASS/FAIL 由
 实际使用字段：
 
 - `train_snapshot.reconstruction_loss`
+- `train_snapshot.z_e`
+- `train_snapshot.z_q`
 - `val_snapshot.reconstruction_loss`
 - `val_snapshot.demo_actions`
 - `val_snapshot.decoded_actions`
@@ -162,14 +164,16 @@ def compute_first_trade_t(actions: np.ndarray) -> np.ndarray:
   空数组并由上层转为 `nearest_second_margin_median = nan`。
 
 - `classify_main_direction(actions)`：把每条 action sequence 归类为主方向标签。
-  推荐先将 action 映射为 position 序列，其中 long 为正、short 为负、flat 为
-  0；若非 flat timestep 中正向占多数则为 `long`，负向占多数则为 `short`，
-  全程 flat 则为 `flat`，正负方向都存在且无明确多数时为 `mixed`。返回 shape
-  为 `[N]` 的字符串或枚举标签，用于计算 `direction_accuracy`。
+  动作编码遵循仓库全局约定：`0=short`、`1=flat`、`2=long`，position 可用
+  `action - 1` 映射为 `-1/0/1`。若非 flat timestep 中正向占多数则为 `long`，
+  负向占多数则为 `short`，全程 flat 则为 `flat`，正负方向都存在且无明确多数时
+  为 `mixed`。返回 shape 为 `[N]` 的字符串或枚举标签，用于计算
+  `direction_accuracy`。
 
 - `compute_first_trade_t(actions)`：返回每条 action sequence 第一次进入非 flat
-  交易状态的 timestep。函数基于 position/action 是否非 0 判断 entry；若某条
-  sequence 全程无交易，返回哨兵值 `-1`。`entry_timing_error_median` 只应统计
+  交易状态的 timestep。函数应先按 `0=short, 1=flat, 2=long` 映射为
+  position，再基于 `position != 0` 判断 entry；若某条 sequence 全程无交易，
+  返回哨兵值 `-1`。`entry_timing_error_median` 只应统计
   demo 和 decoded 的 first trade 都不是 `-1` 的样本。
 
 helper 内部应使用同一个 `eps`，并且只负责数值计算与基础输入校验；PASS/FAIL、
@@ -189,11 +193,17 @@ warn 降级以及缺失数据策略统一留给 rules 层和第 8 节描述的�
    按稳定 `sample_ids` 对齐，计算同一 sample 的 label 改变比例，再求均值。
 9. `code_lifetime_pass_ratio`：对当前 active code，统计其连续 active epoch 数，
    计算 lifetime 达到 10 个 epoch 的 active code 比例。
-10. `quantization_distance = mean(norm(z_e - z_q, axis=-1))`。
+10. `quantization_distance = mean(norm(val_z_e - val_z_q, axis=-1))`；
+    同时可计算 `train_quantization_distance = mean(norm(train_z_e - train_z_q,
+    axis=-1))`，并写入
+    `quantization_distance_gap = quantization_distance / (train_quantization_distance + eps)`。
 11. `nearest_second_margin_median`：对每个样本取最近距离 `d1` 和第二近距离 `d2`，
     计算 `(d2 - d1) / (d1 + eps)` 的中位数。
-12. `decoder_turnover_error`：分别计算 demo/decoded action 的 position change
-    次数，取 `mean(abs(turnover_dec - turnover_demo))`。
+12. `decoder_turnover_error`：分别计算 demo/decoded action 的 position turnover
+    magnitude，例如对 `position` 序列拼接初始 flat position 后计算
+    `sum(abs(diff(position_path)))`，再取
+    `mean(abs(turnover_dec - turnover_demo))`。该定义会把 flat 到 long/short 计
+    为 1，把 short 到 long 的反手计为 2，更贴近交易成本语义。
 13. `entry_timing_error_median`：只对 demo 和 decoded 都存在交易的样本统计
     `abs(first_trade_dec - first_trade_demo)` 的中位数。
 14. `direction_accuracy`：把每条 action sequence 归为 `long/short/flat/mixed`，
@@ -237,7 +247,7 @@ Hard gates：
 - `entry_timing_error_median <= 10.8`，固定 `horizon_length=72` 时等价于
   `0.15 * horizon_length`
 - `decoder_turnover_error <= 18.0`，固定 `horizon_length=72` 时等价于平均每条
-  horizon 的换手差异不超过 25% horizon
+  horizon 的 turnover magnitude 差异不超过 25% horizon
 
 `quantization_distance` 和 `quantization_distance_gap` 第一版作为 warn/scoring
 信号；等 train/validation latent 距离统计稳定后，再考虑升级为 hard gate。
@@ -247,7 +257,9 @@ Hard gates：
 - 训练初期 history 不足时，`assignment_churn_recent_mean` 可标记为 `nan`；
   rules 层可在前 `churn_window_epochs` 内降级为 warn，正式 checkpoint selection
   阶段必须有足够 history；
-- 如果 `distances` 未收集，margin 和 quantization distance 视为不可计算；
+- 如果 `distances` 未收集，`nearest_second_margin_median` 视为不可计算；
+  `quantization_distance` 仍应由 `z_e/z_q` 计算，只有 `z_e` 或 `z_q` 缺失、
+  shape 不一致或为空时才标记为不可计算；
 - 如果没有任何样本同时存在 demo/decoded entry，`entry_timing_error_median`
   写入 `nan`，由 rules 层结合 direction/flat ratio 决定 fail 或 warn；
 - 如果 `K` 无法从 model/config 获取，应从 `distances.shape[-1]` 推断；仍失败则
