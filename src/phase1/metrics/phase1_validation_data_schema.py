@@ -420,7 +420,7 @@ class Phase1CodeDiagnostic:
     # 该 code 的手续费拖累比例；不可计算时为 None。
     fee_drag: float | None
 
-    # 该 code 的诊断状态，例如 "pass"、"weak"、"bad" 或 "dead"。
+    # 该 code 的综合诊断状态，由 support、结构清晰度、pair 稳定性和盈利辅助证据共同决定。
     status: str
 
     def to_dict(self) -> dict[str, Any]:

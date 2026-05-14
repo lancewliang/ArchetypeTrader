@@ -402,6 +402,75 @@ def _global_distribution(values: np.ndarray) -> dict[str, float]:
     return {label: count / max(1, total) for label, count in counts.items()}
 
 
+def compute_distribution_by_code(
+    values: np.ndarray,
+    code_ids: np.ndarray,
+) -> dict[int, dict[str, float]]:
+    """计算每个 code 内离散标签的经验分布。
+
+    输入参数:
+        values: ``[N]`` 形状的离散标签数组，例如 morphology、motif 或 pair。
+        code_ids: ``[N]`` 形状的 assigned code id。
+
+    输出:
+        ``code_id -> label -> probability`` 字典；输入为空时返回空字典。
+
+    使用场景:
+        统计 ``P(morphology | code)``、``P(motif | code)`` 和
+        ``P(morphology, motif | code)``，再由分布派生 dominant label、purity
+        和 lift。
+    """
+
+    label_values = np.asarray(values, dtype=object).reshape(-1)
+    codes = np.asarray(code_ids, dtype=np.int64).reshape(-1)
+    if label_values.shape[0] != codes.shape[0]:
+        raise ValueError("values and code_ids must have the same length")
+    distributions: dict[int, dict[str, float]] = {}
+    for code_id in np.unique(codes):
+        labels = label_values[codes == code_id]
+        counts = Counter(str(value) for value in labels)
+        total = sum(counts.values())
+        distributions[int(code_id)] = {
+            label: count / max(1, total) for label, count in counts.items()
+        }
+    return distributions
+
+
+def compute_lift(
+    code_distribution: Mapping[str, float],
+    global_distribution: Mapping[str, float],
+) -> dict[str, float]:
+    """计算 code 内标签分布相对全局分布的 lift。
+
+    输入参数:
+        code_distribution: 单个 code 内的 ``label -> probability`` 分布。
+        global_distribution: 全体验证集上的 ``label -> probability`` 分布。
+
+    输出:
+        ``label -> lift`` 字典，分母带 ``eps`` 保护。
+
+    使用场景:
+        判断某个 code 是否真正富集某类市场形态，而不是只反映全局基准分布。
+    """
+
+    return {
+        str(label): float(probability)
+        / (float(global_distribution.get(label, 0.0)) + _EPS)
+        for label, probability in code_distribution.items()
+    }
+
+
+def _dominant_from_distribution(
+    distribution: Mapping[str, float],
+) -> tuple[str | None, float | None]:
+    """从 label 分布中取 dominant label 和概率。"""
+
+    if not distribution:
+        return None, None
+    label, probability = max(distribution.items(), key=lambda item: item[1])
+    return str(label), float(probability)
+
+
 def _prototype_similarity(left: np.ndarray, right: np.ndarray) -> float:
     """计算两个 action prototype 的简化相似度。
 
@@ -446,17 +515,24 @@ def _action_prototypes(
     }
 
 
-def _intra_code_similarity(
+def _all_present_codes(code_ids: np.ndarray) -> tuple[int, ...]:
+    """返回 code_ids 中出现过的 code，供公开 helper 未显式传 active_codes 时使用。"""
+
+    codes = np.asarray(code_ids, dtype=np.int64).reshape(-1)
+    return tuple(int(code_id) for code_id in np.unique(codes)) if codes.size else ()
+
+
+def compute_intra_code_action_similarity(
     actions: np.ndarray,
     code_ids: np.ndarray,
-    active_codes: Sequence[int],
+    active_codes: Sequence[int] | None = None,
 ) -> float:
     """计算同一 code 内 decoded action 的平均相似度。
 
     输入参数:
         actions: decoded action 数组。
         code_ids: 每个样本的 assigned code id。
-        active_codes: active code 列表。
+        active_codes: active code 列表；不传时使用 ``code_ids`` 中所有出现过的 code。
 
     输出:
         active code 内样本到本 code prototype 的平均相似度；无有效样本时返回 NaN。
@@ -466,9 +542,15 @@ def _intra_code_similarity(
     """
 
     positions = _positions(actions)
+    codes = np.asarray(code_ids, dtype=np.int64).reshape(-1)
+    if positions.shape[0] != codes.shape[0]:
+        raise ValueError("actions and code_ids must have the same number of samples")
+    selected_codes = (
+        tuple(active_codes) if active_codes is not None else _all_present_codes(codes)
+    )
     values: list[float] = []
-    for code_id in active_codes:
-        members = positions[code_ids == code_id]
+    for code_id in selected_codes:
+        members = positions[codes == code_id]
         if members.shape[0] == 0:
             continue
         prototype = np.mean(members, axis=0)
@@ -477,17 +559,27 @@ def _intra_code_similarity(
     return float(np.mean(values)) if values else _nan()
 
 
-def _inter_intra_separation(
+def _intra_code_similarity(
     actions: np.ndarray,
     code_ids: np.ndarray,
     active_codes: Sequence[int],
+) -> float:
+    """兼容旧私有 helper 名称。"""
+
+    return compute_intra_code_action_similarity(actions, code_ids, active_codes)
+
+
+def compute_inter_intra_separation(
+    actions: np.ndarray,
+    code_ids: np.ndarray,
+    active_codes: Sequence[int] | None = None,
 ) -> float:
     """计算 code 间距离与 code 内距离的分离度。
 
     输入参数:
         actions: decoded action 数组。
         code_ids: 每个样本的 assigned code id。
-        active_codes: active code 列表。
+        active_codes: active code 列表；不传时使用 ``code_ids`` 中所有出现过的 code。
 
     输出:
         ``mean_inter_distance / mean_intra_distance``；active code 少于 2 时返回 NaN。
@@ -496,13 +588,19 @@ def _inter_intra_separation(
         衡量不同 archetype 是否足够可区分。
     """
 
-    prototypes = _action_prototypes(actions, code_ids, active_codes)
+    codes = np.asarray(code_ids, dtype=np.int64).reshape(-1)
+    if np.asarray(actions).shape[0] != codes.shape[0]:
+        raise ValueError("actions and code_ids must have the same number of samples")
+    selected_codes = (
+        tuple(active_codes) if active_codes is not None else _all_present_codes(codes)
+    )
+    prototypes = _action_prototypes(actions, codes, selected_codes)
     if len(prototypes) < 2:
         return _nan()
     positions = _positions(actions)
     intra_values: list[float] = []
     for code_id, prototype in prototypes.items():
-        members = positions[code_ids == code_id]
+        members = positions[codes == code_id]
         intra_values.extend(np.linalg.norm(members - prototype, axis=1).tolist())
     inter_values: list[float] = []
     proto_items = list(prototypes.items())
@@ -512,10 +610,20 @@ def _inter_intra_separation(
     return float(np.mean(inter_values) / (np.mean(intra_values) + _EPS))
 
 
-def _duplicate_pair_count(
+def _inter_intra_separation(
     actions: np.ndarray,
     code_ids: np.ndarray,
     active_codes: Sequence[int],
+) -> float:
+    """兼容旧私有 helper 名称。"""
+
+    return compute_inter_intra_separation(actions, code_ids, active_codes)
+
+
+def compute_duplicate_code_pair_count(
+    actions: np.ndarray,
+    code_ids: np.ndarray,
+    active_codes: Sequence[int] | None = None,
     *,
     threshold: float,
 ) -> int:
@@ -524,7 +632,7 @@ def _duplicate_pair_count(
     输入参数:
         actions: decoded action 数组。
         code_ids: 每个样本的 assigned code id。
-        active_codes: active code 列表。
+        active_codes: active code 列表；不传时使用 ``code_ids`` 中所有出现过的 code。
         threshold: 判定重复 code 的 prototype similarity 阈值。
 
     输出:
@@ -534,12 +642,35 @@ def _duplicate_pair_count(
         检查 codebook 是否把多个 code 学成几乎相同的行为原型。
     """
 
-    prototypes = list(_action_prototypes(actions, code_ids, active_codes).values())
+    codes = np.asarray(code_ids, dtype=np.int64).reshape(-1)
+    if np.asarray(actions).shape[0] != codes.shape[0]:
+        raise ValueError("actions and code_ids must have the same number of samples")
+    selected_codes = (
+        tuple(active_codes) if active_codes is not None else _all_present_codes(codes)
+    )
+    prototypes = list(_action_prototypes(actions, codes, selected_codes).values())
     duplicates = 0
     for index, left in enumerate(prototypes):
         for right in prototypes[index + 1 :]:
             duplicates += int(_prototype_similarity(left, right) > threshold)
     return duplicates
+
+
+def _duplicate_pair_count(
+    actions: np.ndarray,
+    code_ids: np.ndarray,
+    active_codes: Sequence[int],
+    *,
+    threshold: float,
+) -> int:
+    """兼容旧私有 helper 名称。"""
+
+    return compute_duplicate_code_pair_count(
+        actions,
+        code_ids,
+        active_codes,
+        threshold=threshold,
+    )
 
 
 def _approx_silhouette(
@@ -605,6 +736,33 @@ def _per_code_profitability_map(
     return {item.code_id: item for item in per_code_profitability}
 
 
+def _code_diagnostic_status(
+    *,
+    weak_support: bool,
+    weak_morphology: bool,
+    weak_motif: bool,
+    weak_pair: bool,
+    weak_lift_nonprofitable: bool,
+) -> str:
+    """把 per-code 支撑度、结构质量和盈利辅助证据聚合为 report 状态。"""
+
+    if weak_support:
+        return "bad"
+    weak_structure_count = sum(
+        (
+            weak_morphology,
+            weak_motif,
+            weak_pair,
+            weak_lift_nonprofitable,
+        )
+    )
+    if weak_structure_count == 0:
+        return "pass"
+    if weak_structure_count >= 3:
+        return "bad"
+    return "weak"
+
+
 def compute_behavior_quality_metrics(
     *,
     train_snapshot: Phase1EvaluationSnapshot,
@@ -661,6 +819,9 @@ def compute_behavior_quality_metrics(
         dtype=object,
     )
     global_morphology = _global_distribution(morphologies)
+    morphology_by_code = compute_distribution_by_code(morphologies, code_ids)
+    motif_by_code = compute_distribution_by_code(motifs, code_ids)
+    pair_by_code = compute_distribution_by_code(pairs, code_ids)
     profitability_map = _per_code_profitability_map(per_code_profitability)
 
     min_support = max(
@@ -679,41 +840,46 @@ def compute_behavior_quality_metrics(
         mask = code_ids == code_id
         support = int(np.sum(mask))
         occupancy = support / max(1, code_ids.size)
-        dominant_morphology, dominant_morphology_ratio = _dominant(morphologies[mask])
+        morphology_distribution = morphology_by_code.get(code_id, {})
+        motif_distribution = motif_by_code.get(code_id, {})
+        pair_distribution = pair_by_code.get(code_id, {})
+        dominant_morphology, dominant_morphology_ratio = _dominant_from_distribution(
+            morphology_distribution
+        )
         morphology_purity = _entropy_purity(morphologies[mask])
-        dominant_motif, dominant_motif_ratio = _dominant(motifs[mask])
+        dominant_motif, dominant_motif_ratio = _dominant_from_distribution(
+            motif_distribution
+        )
         motif_purity = _entropy_purity(motifs[mask])
-        dominant_pair, dominant_pair_ratio = _dominant(pairs[mask])
-        global_ratio = (
-            global_morphology.get(dominant_morphology, 0.0)
-            if dominant_morphology is not None
-            else 0.0
+        dominant_pair, dominant_pair_ratio = _dominant_from_distribution(
+            pair_distribution
+        )
+        morphology_lift_by_label = compute_lift(
+            morphology_distribution,
+            global_morphology,
         )
         morphology_lift = (
-            float(dominant_morphology_ratio / (global_ratio + _EPS))
-            if dominant_morphology_ratio is not None
+            morphology_lift_by_label.get(dominant_morphology)
+            if dominant_morphology is not None
             else None
         )
         profitability = profitability_map.get(code_id)
         profitable = bool(profitability and profitability.passed)
         profitable_count += int(profitable)
 
-        weak_support += int(support < min_support)
-        weak_morphology += int(
-            missing_morphology
-            or (
-                (
-                    dominant_morphology_ratio is None
-                    or dominant_morphology_ratio
-                    < thresholds.dominant_morphology_ratio_min
-                )
-                and (
-                    morphology_purity is None
-                    or morphology_purity < thresholds.morphology_purity_min
-                )
+        code_weak_support = support < min_support
+        code_weak_morphology = missing_morphology or (
+            (
+                dominant_morphology_ratio is None
+                or dominant_morphology_ratio
+                < thresholds.dominant_morphology_ratio_min
+            )
+            and (
+                morphology_purity is None
+                or morphology_purity < thresholds.morphology_purity_min
             )
         )
-        weak_motif += int(
+        code_weak_motif = (
             (
                 dominant_motif_ratio is None
                 or dominant_motif_ratio < thresholds.dominant_motif_ratio_min
@@ -723,18 +889,31 @@ def compute_behavior_quality_metrics(
                 or motif_purity < thresholds.motif_purity_min
             )
         )
-        weak_pair += int(
+        code_weak_pair = (
             missing_morphology
             or dominant_pair_ratio is None
             or dominant_pair_ratio < thresholds.dominant_pair_ratio_min
         )
-        weak_lift_nonprofitable += int(
+        code_weak_lift_nonprofitable = (
             (
                 missing_morphology
                 or morphology_lift is None
                 or morphology_lift < thresholds.morphology_lift_min
             )
             and not profitable
+        )
+
+        weak_support += int(code_weak_support)
+        weak_morphology += int(code_weak_morphology)
+        weak_motif += int(code_weak_motif)
+        weak_pair += int(code_weak_pair)
+        weak_lift_nonprofitable += int(code_weak_lift_nonprofitable)
+        status = _code_diagnostic_status(
+            weak_support=code_weak_support,
+            weak_morphology=code_weak_morphology,
+            weak_motif=code_weak_motif,
+            weak_pair=code_weak_pair,
+            weak_lift_nonprofitable=code_weak_lift_nonprofitable,
         )
 
         diagnostics.append(
@@ -755,9 +934,7 @@ def compute_behavior_quality_metrics(
                 decoded_win_rate=profitability.win_rate if profitability else None,
                 retention_ratio=profitability.retention_ratio if profitability else None,
                 fee_drag=profitability.fee_drag if profitability else None,
-                status="pass"
-                if support >= min_support and profitable
-                else "weak",
+                status=status,
             )
         )
 
@@ -772,12 +949,12 @@ def compute_behavior_quality_metrics(
         weak_lift_nonprofitable_code_ratio=(
             weak_lift_nonprofitable / denominator if denominator else _nan()
         ),
-        intra_code_action_similarity=_intra_code_similarity(
+        intra_code_action_similarity=compute_intra_code_action_similarity(
             val_snapshot.decoded_actions,
             code_ids,
             active_codes,
         ),
-        inter_intra_separation=_inter_intra_separation(
+        inter_intra_separation=compute_inter_intra_separation(
             val_snapshot.decoded_actions,
             code_ids,
             active_codes,
@@ -787,7 +964,7 @@ def compute_behavior_quality_metrics(
             code_ids,
             active_codes,
         ),
-        duplicate_code_pair_count=_duplicate_pair_count(
+        duplicate_code_pair_count=compute_duplicate_code_pair_count(
             val_snapshot.decoded_actions,
             code_ids,
             active_codes,
@@ -816,5 +993,10 @@ def compute_behavior_quality_metrics(
 __all__ = [
     "classify_action_motif",
     "classify_market_morphology",
+    "compute_distribution_by_code",
+    "compute_duplicate_code_pair_count",
+    "compute_intra_code_action_similarity",
+    "compute_inter_intra_separation",
+    "compute_lift",
     "compute_behavior_quality_metrics",
 ]
