@@ -10,7 +10,7 @@
       作为分类输入；
     - 本文件只计算 raw metrics，不判断 pass/fail；
     - probe 当前采用 deterministic linear classifier，不训练主模型；
-    - probe return retention 复用 Layer 3 的统一 execution helper；
+    - probe return retention 直接复用统一交易执行工具；
     - 缺失 prices 时收益保留指标返回 NaN，由 rules 层失败。
 
 使用场景:
@@ -36,6 +36,7 @@ from ...metrics import (
     Phase1ValidationRuntimeConfig,
 )
 from .layer2_behavior_quality import classify_market_morphology
+from .layer3_oracle_profitability import decode_labels
 
 
 _EPS = 1e-12
@@ -63,6 +64,31 @@ class LinearProbe:
     feature_std: np.ndarray
 
 
+ProbeModel = LinearProbe
+
+
+@dataclass(frozen=True)
+class ProbeMetrics:
+    """probe validation 评估结果。
+
+    字段说明:
+        probe_probs: 按 ``probe.labels`` 列顺序排列的预测概率，shape=[N, K_seen]。
+        ranked_labels: 每个样本按 logit 从高到低排序的 label id，shape=[N, K_seen]。
+        top1_predictions: 每个样本的 top-1 label id，shape=[N]。
+        probe_top1_accuracy: validation top-1 label accuracy。
+        probe_top3_accuracy: validation top-3 label accuracy；K<3 时使用 top-K。
+        probe_validation_accuracy: 与 ``probe_top1_accuracy`` 相同，保留明确语义供
+            payload/report 使用。
+    """
+
+    probe_probs: np.ndarray
+    ranked_labels: np.ndarray
+    top1_predictions: np.ndarray
+    probe_top1_accuracy: float
+    probe_top3_accuracy: float
+    probe_validation_accuracy: float
+
+
 def build_probe_features(states: np.ndarray) -> np.ndarray:
     """构造 probe 分类特征。
 
@@ -85,16 +111,17 @@ def build_probe_features(states: np.ndarray) -> np.ndarray:
     return values.reshape(values.shape[0], -1)
 
 
-def _fit_linear_probe(
-    features: np.ndarray,
-    labels: np.ndarray,
+def train_probe_classifier(
+    train_x: np.ndarray,
+    train_y: np.ndarray,
     runtime_config: Phase1ValidationRuntimeConfig,
-) -> LinearProbe:
+) -> ProbeModel:
     """训练 deterministic linear probe。
 
     输入参数:
-        features: probe train features，形状为 ``[N, D]``。
-        labels: assigned code labels，形状为 ``[N]``。
+        train_x: probe train features，形状为 ``[N, D]``。
+        train_y: assigned code labels，形状为 ``[N]``。
+        runtime_config: 提供 probe 训练 epoch、learning rate、batch size 和 seed。
 
     输出:
         ``LinearProbe``，包含标准化参数和训练后的线性分类器参数。
@@ -104,6 +131,17 @@ def _fit_linear_probe(
         probe_batch_size，以低成本、可复现方式估计 label 是否和可见状态存在
         可学习关系。
     """
+
+    features = np.asarray(train_x, dtype=np.float64)
+    labels = np.asarray(train_y, dtype=np.int64)
+    if features.ndim != 2:
+        raise ValueError("train_x must be a 2D feature matrix")
+    if labels.ndim != 1:
+        raise ValueError("train_y must be a 1D label array")
+    if features.shape[0] != labels.shape[0]:
+        raise ValueError("train_x and train_y must have the same sample count")
+    if features.shape[0] == 0:
+        raise ValueError("train_x must contain at least one sample")
 
     feature_mean = np.mean(features, axis=0)
     feature_std = np.std(features, axis=0)
@@ -154,27 +192,74 @@ def _fit_linear_probe(
     )
 
 
-def _predict_probe(probe: LinearProbe, features: np.ndarray) -> np.ndarray:
-    """使用 linear probe 输出按 logit 排序的候选 label。
+def _probe_logits(probe: ProbeModel, features: np.ndarray) -> np.ndarray:
+    """计算 probe logits，列顺序与 ``probe.labels`` 一致。"""
+
+    values = np.asarray(features, dtype=np.float64)
+    normalized = (values - probe.feature_mean) / probe.feature_std
+    return normalized @ probe.weight.T + probe.bias
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    """稳定 softmax。"""
+
+    if logits.shape[0] == 0:
+        return np.zeros_like(logits, dtype=np.float64)
+    shifted = logits - np.max(logits, axis=1, keepdims=True)
+    exp_values = np.exp(shifted)
+    return exp_values / np.sum(exp_values, axis=1, keepdims=True)
+
+
+
+def evaluate_probe(
+    probe: ProbeModel,
+    val_x: np.ndarray,
+    val_y: np.ndarray,
+) -> ProbeMetrics:
+    """在 validation split 上评估 probe label 预测能力。
 
     输入参数:
-        probe: 已拟合的 ``LinearProbe``。
-        features: validation features，形状为 ``[N, D]``。
+        probe: ``train_probe_classifier()`` 返回的 probe。
+        val_x: validation features，形状为 ``[N, D]``。
+        val_y: validation assigned labels，形状为 ``[N]``。
 
     输出:
-        ``[N, K_seen]`` 形状的 label 排名数组，每行按 logit 从高到低排序。
-
-    使用场景:
-        计算 probe top-1/top-3 accuracy 和 train/validation accuracy gap。
+        ``ProbeMetrics``，包含 probability、top-1/top-3 结果和 validation accuracy。
     """
 
-    normalized = (features - probe.feature_mean) / probe.feature_std
-    logits = normalized @ probe.weight.T + probe.bias
-    order = np.argsort(-logits, axis=1)
-    return probe.labels[order]
+    labels = np.asarray(val_y, dtype=np.int64)
+    logits = _probe_logits(probe, val_x)
+    if logits.shape[0] != labels.size:
+        raise ValueError("val_x and val_y must have the same sample count")
+    probe_probs = _softmax(logits)
+    ranked_labels = probe.labels[np.argsort(-logits, axis=1)]
+    if labels.size == 0:
+        top1_predictions = np.asarray([], dtype=np.int64)
+        top1_accuracy = _nan()
+        top3_accuracy = _nan()
+    else:
+        top1_predictions = ranked_labels[:, 0]
+        top_k = min(3, ranked_labels.shape[1])
+        top1_accuracy = float(np.mean(top1_predictions == labels))
+        top3_accuracy = float(
+            np.mean(
+                [
+                    label in row[:top_k]
+                    for label, row in zip(labels, ranked_labels, strict=False)
+                ]
+            )
+        )
+    return ProbeMetrics(
+        probe_probs=probe_probs,
+        ranked_labels=ranked_labels,
+        top1_predictions=top1_predictions,
+        probe_top1_accuracy=top1_accuracy,
+        probe_top3_accuracy=top3_accuracy,
+        probe_validation_accuracy=top1_accuracy,
+    )
 
 
-def _balanced_accuracy(
+def compute_balanced_accuracy(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     active_codes: np.ndarray,
@@ -193,13 +278,18 @@ def _balanced_accuracy(
         防止 probe 只预测高频 code 而获得虚高 top-1 accuracy。
     """
 
+    active = np.asarray(active_codes, dtype=np.int64)
+    if active.size < 2:
+        return _nan()
+    true_values = np.asarray(y_true, dtype=np.int64)
+    pred_values = np.asarray(y_pred, dtype=np.int64)
     recalls: list[float] = []
-    for code_id in active_codes:
-        mask = y_true == code_id
+    for code_id in active:
+        mask = true_values == code_id
         if not np.any(mask):
             recalls.append(0.0)
             continue
-        recalls.append(float(np.mean(y_pred[mask] == code_id)))
+        recalls.append(float(np.mean(pred_values[mask] == code_id)))
     return float(np.mean(recalls)) if recalls else _nan()
 
 
@@ -256,10 +346,9 @@ def _mutual_information(labels: np.ndarray, feature_bins: np.ndarray) -> float:
     return float(np.sum(joint[mask] * np.log(joint[mask] / (expected[mask] + _EPS))))
 
 
-def _mutual_information_lift(
+def compute_mutual_information_lift(
     features: np.ndarray,
     labels: np.ndarray,
-    *,
     seed: int,
 ) -> float:
     """计算 mutual information 相对随机置换 baseline 的提升倍数。
@@ -276,12 +365,15 @@ def _mutual_information_lift(
         判断 label 与 horizon 起点可见状态之间是否存在显著统计关系。
     """
 
-    feature_bins = _discretize_features(features)
-    observed = _mutual_information(labels, feature_bins)
+    label_values = np.asarray(labels, dtype=np.int64)
+    if label_values.size == 0:
+        return _nan()
+    feature_bins = _discretize_features(np.asarray(features, dtype=np.float64))
+    observed = _mutual_information(label_values, feature_bins)
     rng = np.random.default_rng(seed)
     shuffled_values = []
     for _ in range(5):
-        shuffled = np.array(labels, copy=True)
+        shuffled = np.array(label_values, copy=True)
         rng.shuffle(shuffled)
         shuffled_values.append(_mutual_information(shuffled, feature_bins))
     baseline = float(np.mean(shuffled_values))
@@ -344,11 +436,10 @@ def _confusion_matrix(
     return matrix.tolist()
 
 
-def _decode_labels(
-    *,
+def decode_probe_top1_actions(
     model: Any,
     states: np.ndarray,
-    code_ids: np.ndarray,
+    predicted_code_ids: np.ndarray,
     device: torch.device | str,
 ) -> np.ndarray:
     """用指定 label 调用 decoder 生成 probe action。
@@ -366,17 +457,12 @@ def _decode_labels(
         计算 probe top-1 label 执行后的 return retention。
     """
 
-    if model is None:
-        raise ValueError("model is required to decode probe labels")
-    torch_device = torch.device(device)
-    model = model.to(torch_device)
-    model.eval()
-    with torch.no_grad():
-        state_tensor = torch.as_tensor(states, dtype=torch.float32, device=torch_device)
-        label_tensor = torch.as_tensor(code_ids, dtype=torch.long, device=torch_device)
-        z_q = model.quantizer.embedding_from_code(label_tensor)
-        logits = model.decoder(state_tensor, z_q)
-        return logits.argmax(dim=-1).cpu().numpy()
+    return decode_labels(
+        model=model,
+        states=states,
+        code_ids=predicted_code_ids,
+        device=device,
+    )
 
 
 def _probe_return_retention(
@@ -405,10 +491,10 @@ def _probe_return_retention(
 
     if val_snapshot.prices is None:
         return _nan()
-    probe_actions = _decode_labels(
+    probe_actions = decode_probe_top1_actions(
         model=model,
         states=val_snapshot.states,
-        code_ids=predicted_labels,
+        predicted_code_ids=predicted_labels,
         device=device,
     )
     probe_returns = ActionExecutionCalculator.execute_actions(
@@ -484,10 +570,9 @@ def compute_label_predictability_metrics(
             extra_payload={"probe_seed": runtime_config.random_seed},
         )
 
-    probe = _fit_linear_probe(train_x, train_y, runtime_config)
-    ranked_labels = _predict_probe(probe, val_x)
-    top1 = ranked_labels[:, 0]
-    top_k = min(3, ranked_labels.shape[1])
+    probe = train_probe_classifier(train_x, train_y, runtime_config)
+    probe_metrics = evaluate_probe(probe, val_x, val_y)
+    top1 = probe_metrics.top1_predictions
     active_codes = np.unique(val_y)
     num_codes = (
         int(val_snapshot.distances.shape[1])
@@ -501,16 +586,14 @@ def compute_label_predictability_metrics(
     )
 
     metrics = Phase1LabelPredictabilityMetrics(
-        probe_top1_accuracy=float(np.mean(top1 == val_y)),
-        probe_top3_accuracy=float(
-            np.mean([label in row[:top_k] for label, row in zip(val_y, ranked_labels, strict=False)])
-        ),
-        probe_balanced_accuracy=_balanced_accuracy(val_y, top1, active_codes),
+        probe_top1_accuracy=probe_metrics.probe_top1_accuracy,
+        probe_top3_accuracy=probe_metrics.probe_top3_accuracy,
+        probe_balanced_accuracy=compute_balanced_accuracy(val_y, top1, active_codes),
         label_entropy_given_morphology=_label_entropy_given_morphology(
             val_y,
             morphologies,
         ),
-        mutual_information_lift=_mutual_information_lift(
+        mutual_information_lift=compute_mutual_information_lift(
             val_x,
             val_y,
             seed=runtime_config.random_seed,
@@ -525,16 +608,17 @@ def compute_label_predictability_metrics(
         label_entropy=_label_entropy(val_y),
         num_codes=num_codes,
     )
-    train_top1 = _predict_probe(probe, train_x)[:, 0]
+    train_probe_metrics = evaluate_probe(probe, train_x, train_y)
+    train_accuracy = train_probe_metrics.probe_top1_accuracy
     return Phase1LayerComputation(
         layer_id=4,
         layer_name="label_predictability",
         metrics=metrics,
         extra_payload={
-            "probe_train_accuracy": float(np.mean(train_top1 == train_y)),
+            "probe_train_accuracy": train_accuracy,
             "probe_validation_accuracy": metrics.probe_top1_accuracy,
             "probe_predictability_gap": float(
-                np.mean(train_top1 == train_y) - metrics.probe_top1_accuracy
+                train_accuracy - metrics.probe_top1_accuracy
             ),
             "probe_confusion_matrix": _confusion_matrix(
                 val_y,
@@ -547,6 +631,14 @@ def compute_label_predictability_metrics(
 
 
 __all__ = [
+    "LinearProbe",
+    "ProbeMetrics",
+    "ProbeModel",
     "build_probe_features",
+    "compute_balanced_accuracy",
     "compute_label_predictability_metrics",
+    "compute_mutual_information_lift",
+    "decode_probe_top1_actions",
+    "evaluate_probe",
+    "train_probe_classifier",
 ]

@@ -43,6 +43,83 @@ from .layer2_behavior_quality import classify_action_motif, classify_market_morp
 _EPS = 1e-12
 
 
+def _nan_array_like(reference: np.ndarray, *, dtype: np.dtype = np.float64) -> np.ndarray:
+    """返回与 reference 第一维一致的 NaN 数组。"""
+
+    return np.full(np.asarray(reference).shape[0], _nan(), dtype=dtype)
+
+
+def _has_valid_prices(prices: np.ndarray | None) -> bool:
+    """判断 Layer 3 是否具备可执行收益计算的价格输入。"""
+
+    values = ActionExecutionCalculator._prices_2d(prices)
+    return values is not None and np.all(np.isfinite(values))
+
+
+def _safe_retention_ratio(numerator: np.ndarray, denominator: np.ndarray) -> float:
+    """计算 retention ratio，并在 DP teacher 无正优势时返回 NaN。"""
+
+    numerator_values = np.asarray(numerator, dtype=np.float64)
+    denominator_values = np.asarray(denominator, dtype=np.float64)
+    if not np.any(np.isfinite(numerator_values)) or not np.any(
+        np.isfinite(denominator_values)
+    ):
+        return _nan()
+    numerator_sum = float(np.nansum(numerator_values))
+    denominator_sum = float(np.nansum(denominator_values))
+    if not np.isfinite(denominator_sum) or denominator_sum <= _EPS:
+        return _nan()
+    return float(numerator_sum / denominator_sum)
+
+
+def _safe_positive_denominator_ratio(numerator: float, denominator: float) -> float:
+    """计算正分母比例；分母缺失、非正或接近 0 时返回 NaN。"""
+
+    if not np.isfinite(numerator) or not np.isfinite(denominator) or denominator <= _EPS:
+        return _nan()
+    return float(numerator / denominator)
+
+
+def _missing_prices_computation(
+    val_snapshot: Phase1EvaluationSnapshot,
+    *,
+    random_seed: int,
+) -> Phase1LayerComputation:
+    """构造缺失价格时的 skip-as-fail Layer 3 结果。"""
+
+    missing_returns = _nan_array_like(val_snapshot.code_ids)
+    metrics = Phase1OracleProfitabilityMetrics(
+        mean_decoded_advantage_vs_flat=_nan(),
+        decoded_win_rate_vs_flat=_nan(),
+        mean_advantage_vs_random_label=_nan(),
+        random_label_relative_lift=_nan(),
+        retention_ratio=_nan(),
+        downside_control=_nan(),
+        risk_adjusted_return=_nan(),
+        top_5_contribution=_nan(),
+        trimmed_decoded_advantage=_nan(),
+        fee_drag=_nan(),
+        turnover_return_correlation=_nan(),
+        bad_code_ratio=_nan(),
+        dominant_pair_positive_ratio=_nan(),
+        random_label_risk_adjusted_return=_nan(),
+        risk_adjusted_return_vs_random=_nan(),
+    )
+    return Phase1LayerComputation(
+        layer_id=3,
+        layer_name="oracle_profitability",
+        metrics=metrics,
+        extra_payload={
+            "per_code_profitability": tuple(),
+            "decoded_returns": missing_returns,
+            "dp_returns": missing_returns.copy(),
+            "flat_returns": missing_returns.copy(),
+            "random_label_returns": missing_returns.copy(),
+            "random_seed": random_seed,
+        },
+    )
+
+
 def _demo_returns(
     snapshot: Phase1EvaluationSnapshot,
     runtime_config: Phase1ValidationRuntimeConfig,
@@ -80,7 +157,7 @@ def _demo_returns(
     return execution
 
 
-def _decode_labels(
+def decode_labels(
     *,
     model: Any,
     states: np.ndarray,
@@ -117,7 +194,55 @@ def _decode_labels(
         return logits.argmax(dim=-1).cpu().numpy()
 
 
-def _random_label_returns(
+def decode_random_labels(
+    *,
+    model: Any,
+    states: np.ndarray,
+    num_archetypes: int,
+    trials: int,
+    seed: int,
+    device: torch.device | str,
+) -> np.ndarray:
+    """用随机 code label 调用 decoder 生成 baseline actions。
+
+    输入参数:
+        model: ``ArchetypeVQModel`` 或兼容对象。
+        states: 状态序列数组，形状为 ``[N, H, state_dim]``。
+        num_archetypes: random label 采样空间大小。
+        trials: 随机采样 trial 数，最小按 1 处理。
+        seed: deterministic random seed。
+        device: decoder 推理设备。
+
+    输出:
+        ``[trials, N, H]`` 形状的 random-label decoded action 数组。
+
+    使用场景:
+        random label baseline；调用方必须继续使用
+        ``ActionExecutionCalculator.execute_actions()`` 计算收益。
+    """
+
+    rng = np.random.default_rng(seed)
+    sample_count = np.asarray(states).shape[0]
+    trial_actions: list[np.ndarray] = []
+    for _ in range(max(1, int(trials))):
+        random_labels = rng.integers(
+            low=0,
+            high=max(1, int(num_archetypes)),
+            size=sample_count,
+            dtype=np.int64,
+        )
+        trial_actions.append(
+            decode_labels(
+                model=model,
+                states=states,
+                code_ids=random_labels,
+                device=device,
+            )
+        )
+    return np.stack(trial_actions, axis=0)
+
+
+def compute_random_label_returns(
     *,
     model: Any,
     snapshot: Phase1EvaluationSnapshot,
@@ -139,22 +264,20 @@ def _random_label_returns(
         计算 assigned label 相对随机 label 的 mean advantage 和 relative lift。
     """
 
-    rng = np.random.default_rng(runtime_config.random_seed)
+    if not _has_valid_prices(snapshot.prices):
+        return _nan_array_like(snapshot.code_ids)
+
     num_codes = int(getattr(model, "num_archetypes", 0) or (np.max(snapshot.code_ids) + 1))
+    random_action_trials = decode_random_labels(
+        model=model,
+        states=snapshot.states,
+        num_archetypes=num_codes,
+        trials=runtime_config.random_label_trials,
+        seed=runtime_config.random_seed,
+        device=device,
+    )
     trial_returns: list[np.ndarray] = []
-    for _ in range(max(1, runtime_config.random_label_trials)):
-        random_labels = rng.integers(
-            low=0,
-            high=max(1, num_codes),
-            size=np.asarray(snapshot.code_ids).shape[0],
-            dtype=np.int64,
-        )
-        random_actions = _decode_labels(
-            model=model,
-            states=snapshot.states,
-            code_ids=random_labels,
-            device=device,
-        )
+    for random_actions in random_action_trials:
         trial_returns.append(
             ActionExecutionCalculator.execute_actions(
                 snapshot.prices,
@@ -165,7 +288,7 @@ def _random_label_returns(
     return np.mean(np.stack(trial_returns, axis=0), axis=0)
 
 
-def _risk_adjusted_return(returns: np.ndarray) -> float:
+def compute_risk_adjusted_return(returns: np.ndarray) -> float:
     """计算风险调整收益。
 
     输入参数:
@@ -184,7 +307,7 @@ def _risk_adjusted_return(returns: np.ndarray) -> float:
     return float(np.mean(values) / (np.std(values) + _EPS))
 
 
-def _max_drawdown(cumulative_returns: np.ndarray) -> float:
+def compute_max_drawdown(cumulative_returns: np.ndarray) -> float:
     """计算累计收益序列最大回撤。
 
     输入参数:
@@ -204,7 +327,7 @@ def _max_drawdown(cumulative_returns: np.ndarray) -> float:
     return float(np.max(peak - values))
 
 
-def _top_contribution_ratio(returns: np.ndarray, top_ratio: float) -> float:
+def compute_top_contribution_ratio(returns: np.ndarray, top_ratio: float) -> float:
     """计算正收益中头部样本贡献比例。
 
     输入参数:
@@ -227,7 +350,7 @@ def _top_contribution_ratio(returns: np.ndarray, top_ratio: float) -> float:
     return float(np.sum(top) / (np.sum(positive) + _EPS))
 
 
-def _active_codes(
+def compute_active_codes(
     code_ids: np.ndarray,
     *,
     active_code_min_occupancy: float,
@@ -245,7 +368,7 @@ def _active_codes(
     )
 
 
-def _trimmed_mean(values: np.ndarray, trim_ratio: float) -> float:
+def compute_trimmed_mean(values: np.ndarray, trim_ratio: float) -> float:
     """计算双侧截尾均值。
 
     输入参数:
@@ -268,7 +391,7 @@ def _trimmed_mean(values: np.ndarray, trim_ratio: float) -> float:
     return float(np.mean(finite)) if finite.size else _nan()
 
 
-def _safe_corr(left: np.ndarray, right: np.ndarray) -> float:
+def compute_safe_corr(left: np.ndarray, right: np.ndarray) -> float:
     """计算带防御逻辑的 Pearson correlation。
 
     输入参数:
@@ -290,7 +413,7 @@ def _safe_corr(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.corrcoef(left[mask], right[mask])[0, 1])
 
 
-def _fee_drag(fees: np.ndarray, gross_returns: np.ndarray) -> float:
+def compute_fee_drag(fees: np.ndarray, gross_returns: np.ndarray) -> float:
     """按设计口径计算 fee drag: total_fee / gross_profit。"""
 
     fee_values = fees[np.isfinite(fees)]
@@ -303,7 +426,7 @@ def _fee_drag(fees: np.ndarray, gross_returns: np.ndarray) -> float:
     return float(np.sum(fee_values) / (denominator + _EPS))
 
 
-def _per_code_profitability(
+def compute_per_code_profitability(
     *,
     code_ids: np.ndarray,
     decoded_advantage: np.ndarray,
@@ -339,10 +462,11 @@ def _per_code_profitability(
             continue
         mean_advantage = float(np.nanmean(decoded_advantage[mask]))
         win_rate = float(np.nanmean(decoded_returns[mask] > 0.0))
-        retention_ratio = float(
-            np.nansum(decoded_advantage[mask]) / (np.nansum(dp_advantage[mask]) + _EPS)
+        retention_ratio = _safe_retention_ratio(
+            decoded_advantage[mask],
+            dp_advantage[mask],
         )
-        fee_drag = _fee_drag(decoded_fees[mask], decoded_gross_returns[mask])
+        fee_drag = compute_fee_drag(decoded_fees[mask], decoded_gross_returns[mask])
         output.append(
             Phase1PerCodeProfitability(
                 code_id=int(code_id),
@@ -361,7 +485,7 @@ def _per_code_profitability(
     return tuple(output)
 
 
-def _dominant_pair_positive_ratio(
+def compute_dominant_pair_positive_ratio(
     snapshot: Phase1EvaluationSnapshot,
     decoded_advantage: np.ndarray,
     *,
@@ -393,7 +517,7 @@ def _dominant_pair_positive_ratio(
         dtype=object,
     )
     code_ids = np.asarray(snapshot.code_ids, dtype=np.int64)
-    active_codes = _active_codes(
+    active_codes = compute_active_codes(
         code_ids,
         active_code_min_occupancy=active_code_min_occupancy,
     )
@@ -449,6 +573,12 @@ def compute_oracle_profitability_metrics(
     """
 
     thresholds = thresholds or Phase1OracleProfitabilityThresholds()
+    if not _has_valid_prices(val_snapshot.prices):
+        return _missing_prices_computation(
+            val_snapshot,
+            random_seed=runtime_config.random_seed,
+        )
+
     dp_execution = _demo_returns(val_snapshot, runtime_config)
     decoded_execution = ActionExecutionCalculator.execute_actions(
         val_snapshot.prices,
@@ -456,7 +586,7 @@ def compute_oracle_profitability_metrics(
         runtime_config.fee_rate,
     )
     flat_returns = np.zeros_like(decoded_execution.returns)
-    random_returns = _random_label_returns(
+    random_returns = compute_random_label_returns(
         model=model,
         snapshot=val_snapshot,
         runtime_config=runtime_config,
@@ -466,11 +596,12 @@ def compute_oracle_profitability_metrics(
     decoded_advantage = decoded_execution.returns - flat_returns
     dp_advantage = dp_execution.returns - flat_returns
     random_advantage = random_returns - flat_returns
-    active_codes = _active_codes(
+    retention_ratio = _safe_retention_ratio(decoded_advantage, dp_advantage)
+    active_codes = compute_active_codes(
         np.asarray(val_snapshot.code_ids, dtype=np.int64),
         active_code_min_occupancy=runtime_config.active_code_min_occupancy,
     )
-    per_code = _per_code_profitability(
+    per_code = compute_per_code_profitability(
         code_ids=np.asarray(val_snapshot.code_ids, dtype=np.int64),
         decoded_advantage=decoded_advantage,
         decoded_returns=decoded_execution.returns,
@@ -481,8 +612,10 @@ def compute_oracle_profitability_metrics(
         active_codes=active_codes,
     )
 
-    random_label_risk_adjusted_return = _risk_adjusted_return(random_returns)
-    risk_adjusted_return = _risk_adjusted_return(decoded_execution.returns)
+    random_label_risk_adjusted_return = compute_risk_adjusted_return(random_returns)
+    risk_adjusted_return = compute_risk_adjusted_return(decoded_execution.returns)
+    decoded_drawdown = compute_max_drawdown(np.cumsum(decoded_execution.returns))
+    dp_drawdown = compute_max_drawdown(np.cumsum(dp_execution.returns))
 
     metrics = Phase1OracleProfitabilityMetrics(
         mean_decoded_advantage_vs_flat=float(np.nanmean(decoded_advantage)),
@@ -496,22 +629,22 @@ def compute_oracle_profitability_metrics(
             np.nanmean(decoded_execution.returns - random_returns)
             / (abs(np.nanmean(random_advantage)) + _EPS)
         ),
-        retention_ratio=float(np.nansum(decoded_advantage) / (np.nansum(dp_advantage) + _EPS)),
-        downside_control=float(
-            _max_drawdown(np.cumsum(decoded_execution.returns))
-            / (_max_drawdown(np.cumsum(dp_execution.returns)) + _EPS)
+        retention_ratio=retention_ratio,
+        downside_control=_safe_positive_denominator_ratio(
+            decoded_drawdown,
+            dp_drawdown,
         ),
         risk_adjusted_return=risk_adjusted_return,
-        top_5_contribution=_top_contribution_ratio(
+        top_5_contribution=compute_top_contribution_ratio(
             decoded_advantage,
             runtime_config.top_contribution_ratio,
         ),
-        trimmed_decoded_advantage=_trimmed_mean(
+        trimmed_decoded_advantage=compute_trimmed_mean(
             decoded_advantage,
             runtime_config.top_contribution_ratio,
         ),
-        fee_drag=_fee_drag(decoded_execution.fees, decoded_execution.gross_returns),
-        turnover_return_correlation=_safe_corr(
+        fee_drag=compute_fee_drag(decoded_execution.fees, decoded_execution.gross_returns),
+        turnover_return_correlation=compute_safe_corr(
             decoded_execution.turnover,
             decoded_execution.returns,
         ),
@@ -520,7 +653,7 @@ def compute_oracle_profitability_metrics(
         )
         if per_code
         else _nan(),
-        dominant_pair_positive_ratio=_dominant_pair_positive_ratio(
+        dominant_pair_positive_ratio=compute_dominant_pair_positive_ratio(
             val_snapshot,
             decoded_advantage,
             active_code_min_occupancy=runtime_config.active_code_min_occupancy,
@@ -547,7 +680,18 @@ def compute_oracle_profitability_metrics(
         },
     )
 
-
 __all__ = [
+    "compute_active_codes",
+    "compute_dominant_pair_positive_ratio",
+    "compute_fee_drag",
+    "compute_max_drawdown",
     "compute_oracle_profitability_metrics",
+    "compute_per_code_profitability",
+    "compute_random_label_returns",
+    "compute_risk_adjusted_return",
+    "compute_safe_corr",
+    "compute_top_contribution_ratio",
+    "compute_trimmed_mean",
+    "decode_labels",
+    "decode_random_labels",
 ]

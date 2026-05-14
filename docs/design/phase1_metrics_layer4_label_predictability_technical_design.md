@@ -114,7 +114,16 @@ states[:, :visible_window, :]
 Layer 4 的目标是验证 label 可从 selector 可见状态学习，而不是训练一个使用未来信息的
 高精度诊断模型。
 
-## 6. Helper 设计
+## 6. 公共 Helper 设计
+
+Layer 4 的公共 helper 用于把 label predictability 计算拆成可独立测试、可复用的
+步骤。公共 helper 必须保持两个约束：
+
+- 只消费 Phase II selector 推理时可见的信息；
+- 与其他 layer 共享的指标口径必须复用既有 helper，尤其是 Layer 3 的收益执行
+  helper。
+
+推荐公共接口如下：
 
 ```python
 def build_probe_features(states: np.ndarray) -> np.ndarray:
@@ -159,6 +168,225 @@ def decode_probe_top1_actions(
 
 第一版 probe 建议使用 shallow MLP；若需要更快基线，可实现 multinomial logistic
 regression 风格的单层线性分类器。
+
+### 6.1 `build_probe_features()`
+
+功能：把 snapshot 中的 `states` 转成 probe 可使用的二维特征矩阵。
+
+输入：
+
+- `states`: 通常形状为 `[N, H, state_dim]`；其中 `N` 是 horizon 样本数，`H`
+  是 horizon 长度。
+
+输出：
+
+- `features`: 形状为 `[N, feature_dim]` 的二维数组。
+
+第一版实现必须只取 horizon 起点状态：
+
+```python
+features = states[:, 0, :]
+```
+
+如果输入已经是二维 `[N, state_dim]`，可以直接返回或做必要的 dtype 转换。如果输入
+维度更高，应只在不引入未来信息的前提下 reshape。
+
+禁止在本 helper 中读取或派生以下信息：
+
+- 完整未来 horizon 的 price path；
+- demo action、demo reward；
+- decoded action；
+- oracle return；
+- 任何 Phase II selector 在线推理时不可见的字段。
+
+后续如果 Phase II selector 的真实输入从单点状态扩展为可见历史窗口，本 helper
+必须同步调整为：
+
+```python
+features = states[:, :visible_window, :]
+```
+
+然后再 flatten 或送入轻量 temporal encoder。report 中应记录 `visible_window` 和
+最终 feature shape。
+
+### 6.2 `train_probe_classifier()`
+
+功能：用 train snapshot 训练一个轻量 probe，从可见状态预测 assigned label。
+
+输入：
+
+- `train_x`: `build_probe_features(train_snapshot.states)` 的输出，形状 `[N_train, D]`；
+- `train_y`: `train_snapshot.code_ids`，形状 `[N_train]`；
+- `runtime_config`: 提供 `probe_epochs`、`probe_learning_rate`、
+  `probe_batch_size` 和 `random_seed`。
+
+输出：
+
+- `ProbeModel`: 已训练好的 probe，至少应能对 validation features 输出每个 label
+  的 logits 或 probability。
+
+实现要求：
+
+- 训练只允许使用 train split，不允许读取 validation label；
+- 必须固定 `runtime_config.random_seed`，保证同一输入下结果稳定；
+- 第一版推荐 shallow MLP；若追求更快、更容易复现的 baseline，可使用单层线性
+  softmax classifier；
+- label 空间以 train split 中出现过的 code 为主，但 evaluation 时必须能处理
+  validation 中出现、train 中未出现的 code，并把对应 recall 计为 0；
+- probe 是诊断模型，不应反向更新 Phase I 主模型。
+
+建议 `ProbeModel` 至少保存以下内容：
+
+- label id 与 classifier 输出列的映射；
+- feature 标准化参数；
+- 模型权重；
+- probe 类型和 seed，便于写入 report。
+
+### 6.3 `evaluate_probe()`
+
+功能：在 validation split 上评估 probe 的 label 预测能力。
+
+输入：
+
+- `probe`: `train_probe_classifier()` 返回的模型；
+- `val_x`: `build_probe_features(val_snapshot.states)` 的输出；
+- `val_y`: `val_snapshot.code_ids`。
+
+输出：
+
+- `ProbeMetrics`: 建议包含 `probe_probs`、`top1_predictions`、
+  `probe_top1_accuracy`、`probe_top3_accuracy`、`probe_validation_accuracy`。
+
+核心计算：
+
+```python
+top1 = np.argmax(probe_probs, axis=1)
+probe_top1_accuracy = np.mean(top1 == val_y)
+
+top_k = min(3, probe_probs.shape[1])
+probe_top3_accuracy = np.mean(val_y in top_k_predictions)
+```
+
+注意事项：
+
+- `K < 3` 时 top-3 必须退化为 top-`K`，不能越界；
+- `probe_probs` 的列顺序必须能映射回真实 code id，不能默认列号等于 code id；
+- 如果 validation 中存在 train 未见过的 code，top-k 命中只能为 false；
+- train accuracy 与 validation accuracy 应同时记录，用于计算
+  `probe_predictability_gap`。
+
+### 6.4 `compute_balanced_accuracy()`
+
+功能：按 active code 逐个计算 recall 后取平均，避免高频 code 主导 top-1 accuracy。
+
+输入：
+
+- `y_true`: validation assigned label；
+- `y_pred`: probe top-1 预测 label；
+- `active_codes`: 需要纳入统计的 code 集合，通常来自 validation active code。
+
+输出：
+
+- `probe_balanced_accuracy`: 每个 active code recall 的均值。
+
+计算口径：
+
+```python
+recall_k = np.mean(y_pred[y_true == k] == k)
+probe_balanced_accuracy = np.mean([recall_k for k in active_codes])
+```
+
+边界策略：
+
+- 如果某个 `active_code` 在 validation 中没有样本，recall 计为 0；
+- 如果某个 code 在 train 中缺失但在 validation 中出现，也必须作为 active code
+  纳入统计，recall 计为 0；
+- active code 数量小于 2 时，balanced accuracy 没有诊断意义，应返回 `nan`
+  并由 rules 层 fail。
+
+### 6.5 `compute_mutual_information_lift()`
+
+功能：衡量 label 与 selector 可见 feature 之间的统计依赖强度，作为 probe accuracy
+之外的补充证据。
+
+输入：
+
+- `features`: `build_probe_features()` 的输出；
+- `labels`: assigned code ids；
+- `seed`: permutation baseline 使用的随机种子。
+
+输出：
+
+- `mutual_information_lift`: 真实 MI 相对随机置换 label baseline 的提升倍数。
+
+计算流程：
+
+1. 将连续 feature 离散化，或使用可复现的离散/连续 MI estimator。
+2. 计算真实标签下的 `observed_mi = I(features; labels)`。
+3. 固定 `seed`，多次随机置换 `labels`，计算 `shuffled_mi_mean`。
+4. 返回：
+
+```python
+mutual_information_lift = observed_mi / (shuffled_mi_mean + eps)
+```
+
+解释：
+
+- `lift` 接近 1 表示 label 与可见 feature 的关系接近随机；
+- `lift` 明显大于 1 表示 assigned label 至少包含可由可见状态解释的信息；
+- Layer 4 hard gate 第一版要求 `mutual_information_lift >= 2.0`。
+
+实现注意：
+
+- permutation baseline 必须 deterministic；
+- feature 离散化不能使用未来信息；
+- 如果 `observed_mi <= 0`，建议返回 0；
+- 如果样本数过小导致 MI 不稳定，应在 report 中标记 diagnostic 风险。
+
+### 6.6 `decode_probe_top1_actions()`
+
+功能：把 probe top-1 预测 label 通过 frozen decoder 解码成 action 序列，用于计算
+probe decoded return。
+
+输入：
+
+- `model`: `ArchetypeVQModel` 或兼容对象；
+- `states`: validation states，形状通常为 `[N, H, state_dim]`；
+- `predicted_code_ids`: probe top-1 预测 code id，形状 `[N]`；
+- `device`: decoder 推理设备。
+
+输出：
+
+- `probe_decoded_actions`: 形状 `[N, H]` 的 action id 数组。
+
+推荐实现流程：
+
+```python
+z_q = model.quantizer.embedding_from_code(predicted_code_ids)
+decoded_logits = model.decoder(states, z_q)
+probe_decoded_actions = decoded_logits.argmax(axis=-1)
+```
+
+本 helper 不直接计算收益。收益必须交给 Layer 3 同一套 execution helper：
+
+```python
+R_probe = execution_helper(prices, probe_decoded_actions)
+R_oracle = execution_helper(prices, val_snapshot.decoded_actions)
+R_flat = flat_baseline(prices)
+
+probe_return_retention = (
+    sum(R_probe - R_flat) / (sum(R_oracle - R_flat) + eps)
+)
+```
+
+边界策略：
+
+- 缺少 validation prices 时，`probe_return_retention` 不可计算，应返回 `nan`
+  并由 rules 层 fail；
+- model decode 失败时，不能只报告 accuracy，必须将 `probe_return_retention`
+  标记为 `nan` 并 fail；
+- decoder 必须使用 eval/no-grad 模式，不更新模型参数；
+- 收益执行口径必须与 Layer 3 完全一致，包括手续费和 action execution 规则。
 
 ## 7. 计算流程
 

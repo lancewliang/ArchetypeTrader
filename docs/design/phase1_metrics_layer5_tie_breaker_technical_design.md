@@ -12,17 +12,21 @@ Tie-breaker 字段定义建议放在：
 src/phase1/metrics/phase1_validation_data_schema.py
 ```
 
-Tie-breaker 比较逻辑建议放在：
+Tie-breaker selector 编排逻辑建议放在：
 
 ```text
 src/phase1/checkpoint/phase1_checkpoint_selector.py
 ```
 
-Tie-breaker 指标抽取或归一化 helper 可放在：
+Tie-breaker 指标抽取、score 接近判定和字段级比较 helper 可放在：
 
 ```text
 src/phase1/metrics/phase1_validation_score.py
 ```
+
+这样划分后，selector 只负责 checkpoint 级过滤、排序和选择原因记录；
+`phase1_validation_score.py` 负责可复用的数值判断原语，避免 selector 直接理解
+五层 metrics 的内部字段路径。
 
 ## 2. 启用条件
 
@@ -104,7 +108,116 @@ checkpoint.metrics["validation"]["tie_breaker_metrics"]
 checkpoint；随后比较 DP 盈利保留、codebook 使用健康度和基础重构质量。epoch 更早
 作为最后兜底，是为了减少训练后期 codebook 继续漂移带来的风险。
 
-## 5. Selector 算法
+## 5. 公共 Helper 设计
+
+Tie-breaker 相关公共 helper 需要保持无状态、无 I/O、只依赖强类型 validation
+metrics。它们不读取 checkpoint 文件，不重新运行 evaluator，也不判断 hard gate
+是否通过。
+
+### 5.1 `DEFAULT_TIE_SCORE_TOLERANCE`
+
+```python
+DEFAULT_TIE_SCORE_TOLERANCE: float = 0.03
+```
+
+这是 score 接近判定的默认阈值。它只影响 checkpoint selector 的排序决策，不参与
+`validation.score` 计算，也不影响 Layer 0 到 Layer 4 的 pass/fail。
+
+### 5.2 `build_tie_breaker_metrics()`
+
+```python
+def build_tie_breaker_metrics(
+    metrics: Phase1ValidationMetrics,
+    *,
+    reconstruction_loss: float,
+) -> Phase1TieBreakerMetrics:
+    ...
+```
+
+该 helper 从五层强类型 metrics 中抽取 tie-breaker 所需字段，生成稳定的
+`Phase1TieBreakerMetrics`：
+
+| 输出字段 | 读取路径 |
+|---|---|
+| `risk_adjusted_return` | `metrics.oracle_profitability.risk_adjusted_return` |
+| `probe_top3_accuracy` | `metrics.label_predictability.probe_top3_accuracy` |
+| `retention_ratio` | `metrics.oracle_profitability.retention_ratio` |
+| `active_code_ratio` | `metrics.vq_internal.active_code_ratio` |
+| `max_code_occupancy` | `metrics.vq_internal.max_code_occupancy` |
+| `reconstruction_loss` | evaluator 传入的 validation reconstruction loss |
+
+这个 helper 的核心目的不是做复杂计算，而是隔离字段路径。selector、report 和
+checkpoint payload 只依赖 `Phase1TieBreakerMetrics`，不直接访问五层 metrics 的
+内部结构。
+
+### 5.3 `scores_are_tied()`
+
+```python
+def scores_are_tied(
+    best_score: float,
+    candidate_score: float,
+    *,
+    tolerance: float = DEFAULT_TIE_SCORE_TOLERANCE,
+) -> bool:
+    ...
+```
+
+该 helper 只回答两个 score 是否接近：
+
+```python
+abs(best_score - candidate_score) < tolerance
+```
+
+返回 `False` 时，selector 应直接选择 score 更高的 checkpoint；返回 `True` 时，
+selector 才进入 tie-breaker 字段比较。边界值使用严格小于，因此分差正好等于
+`tolerance` 时不触发 tie-breaker。
+
+### 5.4 `compare_phase1_tie_breaker()`
+
+```python
+def compare_phase1_tie_breaker(
+    left: Phase1TieBreakerMetrics,
+    right: Phase1TieBreakerMetrics,
+) -> int:
+    ...
+```
+
+该 helper 对两个 `Phase1TieBreakerMetrics` 做字典序比较：
+
+- 返回 `1` 表示 `left` 更优；
+- 返回 `-1` 表示 `right` 更优；
+- 返回 `0` 表示 tie-breaker 也无法区分。
+
+比较顺序必须与第 4 节一致。前一个字段已经分出胜负时，不继续比较后续字段。
+这样能保持业务优先级可审计，避免把不同量纲的 tie-breaker 字段再次混合成
+二级加权分数。
+
+字段级比较应统一处理缺失值：
+
+- `nan` 视为缺失；
+- 有限数值优于缺失值；
+- 双方同一字段都缺失时继续比较下一个字段；
+- `inf` 和 `-inf` 不视为缺失，应按字段方向参与比较；
+- 对 `reconstruction_loss` 这类越低越好的字段，`inf` 自然是极差值。
+
+建议在该 helper 内部使用私有函数集中处理字段状态，例如：
+
+```python
+def _is_missing_tie_breaker_value(value: float) -> bool:
+    return math.isnan(value)
+
+def _compare_tie_breaker_value(
+    left_value: float,
+    right_value: float,
+    *,
+    higher_is_better: bool,
+) -> int:
+    ...
+```
+
+这样可以保证 selector、report 解释和单元测试使用同一套缺失值语义。
+
+## 6. Selector 算法
 
 建议 selector 流程：
 
@@ -140,7 +253,7 @@ def choose_by_tie_breaker(a: CheckpointRecord, b: CheckpointRecord) -> Checkpoin
     ...
 ```
 
-## 6. 缺失字段策略
+## 7. 缺失字段策略
 
 Tie-breaker 缺失字段不应导致失败 checkpoint 被选中。
 
@@ -157,7 +270,7 @@ Tie-breaker 缺失字段不应导致失败 checkpoint 被选中。
 `nan` 视为缺失。`inf` 只允许用于明确方向的字段；例如 `reconstruction_loss=inf`
 应视为极差。
 
-## 7. 与 Score 的关系
+## 8. 与 Score 的关系
 
 `validation.score` 是主排序分数，由五层 metrics 归一化加权得到。Tie-breaker 不参与
 score 计算，原因是：
@@ -174,7 +287,7 @@ report 应在 selection summary 中显示：
 - 是否触发 tie-breaker；
 - 触发时每个 tie-breaker 字段的比较结果。
 
-## 8. 示例
+## 9. 示例
 
 ```text
 checkpoint A: validation.score = 0.842
@@ -185,11 +298,14 @@ tie_score_tolerance = 0.03
 两者差距为 `0.006`，小于 `0.03`，因此进入 tie-breaker。如果 B 的
 `risk_adjusted_return` 高于 A，则选择 B，即使 A 的综合分略高。
 
-## 9. 测试要点
+## 10. 测试要点
 
 - 分数差距大于等于 tolerance 时不触发 tie-breaker；
 - 分数差距小于 tolerance 时按固定字段顺序比较；
 - `max_code_occupancy` 和 `reconstruction_loss` 使用越低越好；
+- `nan` 在 tie-breaker 字段比较中视为缺失；
+- 单侧缺失时，有值方胜出；双方都缺失时继续比较下一个字段；
+- `inf` 按字段方向参与比较，`reconstruction_loss=inf` 应视为极差；
 - 缺失字段不会抛出不可解释异常；
 - 全部字段相同或缺失时选择 epoch 更早者；
 - 失败 checkpoint 即使 tie-breaker 字段很好，也不能被选中。

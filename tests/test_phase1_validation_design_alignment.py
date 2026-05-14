@@ -1,12 +1,14 @@
 import math
 
 import numpy as np
+import torch
 
 from src.phase1.evaluators.phase1_validation_layers.layer3_oracle_profitability import (
     _dominant_pair_positive_ratio,
     _fee_drag,
     _per_code_profitability,
     _top_contribution_ratio,
+    compute_oracle_profitability_metrics,
 )
 from src.phase1.evaluators.phase1_validation_layers.layer2_behavior_quality import (
     _entropy_purity,
@@ -201,6 +203,101 @@ def test_per_code_profitability_filters_to_active_codes() -> None:
     )
 
     assert [item.code_id for item in per_code] == [0]
+
+
+class _FlatDecoderModel:
+    num_archetypes = 2
+
+    class _Quantizer:
+        @staticmethod
+        def embedding_from_code(code_ids: torch.Tensor) -> torch.Tensor:
+            return torch.zeros(
+                (code_ids.shape[0], 2),
+                dtype=torch.float32,
+                device=code_ids.device,
+            )
+
+    quantizer = _Quantizer()
+
+    def to(self, _device):
+        return self
+
+    def eval(self):
+        return self
+
+    def decoder(self, states: torch.Tensor, _z_q: torch.Tensor) -> torch.Tensor:
+        logits = torch.zeros(
+            (states.shape[0], states.shape[1], 3),
+            dtype=torch.float32,
+            device=states.device,
+        )
+        logits[..., 1] = 1.0
+        return logits
+
+
+def _oracle_snapshot(
+    *,
+    prices: np.ndarray | None,
+    demo_rewards: np.ndarray,
+) -> Phase1EvaluationSnapshot:
+    sample_count, horizon = demo_rewards.shape
+    return Phase1EvaluationSnapshot(
+        split="val",
+        epoch=1,
+        sample_ids=np.arange(sample_count),
+        states=np.zeros((sample_count, horizon, 2), dtype=np.float32),
+        prices=prices,
+        demo_actions=np.ones((sample_count, horizon), dtype=np.int64),
+        demo_rewards=demo_rewards,
+        decoded_actions=np.ones((sample_count, horizon), dtype=np.int64),
+        decoded_logits=np.zeros((sample_count, horizon, 3), dtype=np.float32),
+        code_ids=np.arange(sample_count, dtype=np.int64) % 2,
+        z_e=np.zeros((sample_count, 2), dtype=np.float32),
+        z_q=np.zeros((sample_count, 2), dtype=np.float32),
+        distances=np.zeros((sample_count, 2), dtype=np.float32),
+        reconstruction_loss=0.0,
+        action_accuracy=1.0,
+    )
+
+
+def test_oracle_metrics_skip_when_prices_are_missing() -> None:
+    snapshot = _oracle_snapshot(
+        prices=None,
+        demo_rewards=np.ones((2, 4), dtype=np.float32),
+    )
+
+    computation = compute_oracle_profitability_metrics(
+        model=None,
+        val_snapshot=snapshot,
+        runtime_config=Phase1ValidationRuntimeConfig(),
+        device="cpu",
+    )
+    result = evaluate_oracle_profitability_rules(
+        computation.metrics,
+        Phase1OracleProfitabilityThresholds(),
+    )
+
+    assert math.isnan(computation.metrics.retention_ratio)
+    assert math.isnan(computation.metrics.decoded_win_rate_vs_flat)
+    assert not result.passed
+    assert {metric.severity for metric in result.metrics} == {"skip"}
+
+
+def test_oracle_retention_and_downside_are_nan_when_dp_denominator_is_not_positive() -> None:
+    snapshot = _oracle_snapshot(
+        prices=np.ones((2, 4), dtype=np.float32),
+        demo_rewards=np.zeros((2, 4), dtype=np.float32),
+    )
+
+    computation = compute_oracle_profitability_metrics(
+        model=_FlatDecoderModel(),
+        val_snapshot=snapshot,
+        runtime_config=Phase1ValidationRuntimeConfig(random_label_trials=1),
+        device="cpu",
+    )
+
+    assert math.isnan(computation.metrics.retention_ratio)
+    assert math.isnan(computation.metrics.downside_control)
 
 
 def test_oracle_rules_require_risk_adjusted_return_above_random() -> None:
