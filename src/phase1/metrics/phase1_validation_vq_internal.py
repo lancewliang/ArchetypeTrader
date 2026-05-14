@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
@@ -119,16 +120,16 @@ class Phase1VQInternalThresholds:
     # decoded 主方向和 demo 主方向一致率下限。用于检查 long/short/flat 大方向是否保真。
     direction_accuracy_min: float = 0.88
 
-    # 入场时点误差占 horizon 长度的比例上限。用于判断 decoded entry timing 是否偏移过大。
-    entry_timing_error_ratio_max: float = 0.15
+    # 入场时点误差 timestep 上限。固定 horizon=72 时，10.8 对应 15% horizon。
+    entry_timing_error_max: float = 10.8
 
     # active code 中 lifetime 达标的比例下限。用于判断 code 是否已经形成稳定语义。
     code_lifetime_pass_ratio_min: float = 0.80
 
-    # decoded 与 demo 的换手误差上限，单位为 horizon 归一化换手次数。
-    decoder_turnover_error_max: float = 0.25
+    # decoded 与 demo 的换手误差上限，单位为原始换手次数。
+    decoder_turnover_error_max: float = 18.0
 
-    # validation/train 量化距离比值上限。用于检查 validation latent 是否仍贴近 codebook。
+    # validation/train 量化距离比值 warn/scoring 参考值，不参与当前 hard gate。
     quantization_distance_gap_max: float = 1.25
 
     def to_dict(self) -> dict[str, Any]:
@@ -141,6 +142,28 @@ class Phase1VQInternalThresholds:
         """从 checkpoint/report 中的 dict 恢复第一层阈值配置。"""
 
         return _dataclass_from_mapping(cls, payload)
+
+
+def _missing_warn_result(
+    *,
+    name: str,
+    threshold: str,
+    layer: str,
+    message: str,
+) -> Phase1MetricResult:
+    """构造缺失但可解释的 VQ internal warning。"""
+
+    from .phase1_metric_results import Phase1MetricResult
+
+    return Phase1MetricResult(
+        name=name,
+        value=None,
+        threshold=threshold,
+        severity="warn",
+        passed=True,
+        layer=layer,
+        message=message,
+    )
 
 
 def evaluate_vq_internal_rules(
@@ -157,6 +180,44 @@ def evaluate_vq_internal_rules(
     from .phase1_validation_rule_helpers import _between, _build_layer_result, _ge, _le
 
     layer = "vq_internal"
+    churn_result = (
+        _missing_warn_result(
+            name="assignment_churn_recent_mean",
+            threshold=f"<= {thresholds.churn_recent_mean_max:g}",
+            layer=layer,
+            message=(
+                "近期 assignment churn 缺失，通常表示训练初期 history 不足；"
+                "正式 checkpoint selection 前应补齐 history"
+            ),
+        )
+        if math.isnan(metrics.assignment_churn_recent_mean)
+        else _le(
+            name="assignment_churn_recent_mean",
+            value=metrics.assignment_churn_recent_mean,
+            threshold_value=thresholds.churn_recent_mean_max,
+            layer=layer,
+            message="近期 assignment churn 需要足够低，保证 label 语义稳定",
+        )
+    )
+    entry_timing_result = (
+        _missing_warn_result(
+            name="entry_timing_error_median",
+            threshold=f"<= {thresholds.entry_timing_error_max:g}",
+            layer=layer,
+            message=(
+                "入场时点误差缺失，通常表示没有 demo/decoded 同时入场样本；"
+                "需要结合 direction accuracy 和 flat 样本占比解释"
+            ),
+        )
+        if math.isnan(metrics.entry_timing_error_median)
+        else _le(
+            name="entry_timing_error_median",
+            value=metrics.entry_timing_error_median,
+            threshold_value=thresholds.entry_timing_error_max,
+            layer=layer,
+            message="入场时点误差的 timestep 偏移不能过大",
+        )
+    )
     results = (
         _ge(
             name="validation_action_accuracy",
@@ -201,13 +262,7 @@ def evaluate_vq_internal_rules(
             layer=layer,
             message="dead code 比例不能过高",
         ),
-        _le(
-            name="assignment_churn_recent_mean",
-            value=metrics.assignment_churn_recent_mean,
-            threshold_value=thresholds.churn_recent_mean_max,
-            layer=layer,
-            message="近期 assignment churn 需要足够低，保证 label 语义稳定",
-        ),
+        churn_result,
         _ge(
             name="code_lifetime_pass_ratio",
             value=metrics.code_lifetime_pass_ratio,
@@ -222,13 +277,6 @@ def evaluate_vq_internal_rules(
             layer=layer,
             message="样本到最近和第二近 code 的距离 margin 需要清晰",
         ),
-        _le(
-            name="quantization_distance_gap",
-            value=metrics.quantization_distance_gap,
-            threshold_value=thresholds.quantization_distance_gap_max,
-            layer=layer,
-            message="validation 量化距离不能明显高于 train，避免 codebook 泛化贴合度不足",
-        ),
         _ge(
             name="direction_accuracy",
             value=metrics.direction_accuracy,
@@ -236,13 +284,7 @@ def evaluate_vq_internal_rules(
             layer=layer,
             message="decoded 主方向需要和 DP demo 主方向一致",
         ),
-        _le(
-            name="entry_timing_error_median",
-            value=metrics.entry_timing_error_median,
-            threshold_value=thresholds.entry_timing_error_ratio_max,
-            layer=layer,
-            message="入场时点误差相对 horizon 的比例不能过大",
-        ),
+        entry_timing_result,
         _le(
             name="decoder_turnover_error",
             value=metrics.decoder_turnover_error,

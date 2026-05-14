@@ -57,6 +57,7 @@ class Phase1VQInternalMetrics:
     decoder_turnover_error: float
     entry_timing_error_median: float
     direction_accuracy: float
+    quantization_distance_gap: float = float("nan")
 ```
 
 返回结构：
@@ -69,6 +70,7 @@ Phase1LayerComputation(
     extra_payload={
         "code_distribution": ...,
         "active_codes": ...,
+        "current_assignment": ...,
         "assignment_churn_by_epoch": ...,
     },
 )
@@ -123,6 +125,56 @@ def compute_first_trade_t(actions: np.ndarray) -> np.ndarray:
     ...
 ```
 
+各 helper 的功能定义如下：
+
+- `compute_action_accuracy(demo, decoded)`：计算 decoder 重建 action 的逐
+  timestep 准确率。`demo` 和 `decoded` 必须 shape 一致，推荐为
+  `[N, H]` 或 `[N, H, action_dim]`；函数将除 batch 维以外的所有维度展开，
+  返回 `mean(demo == decoded)`。若 action 是连续值或概率输出，调用方必须先
+  离散化到与 DP demo action 相同的动作编码空间。
+
+- `compute_code_distribution(code_ids, k)`：统计 validation set 的 code 使用
+  分布。`code_ids` 展开为一维后用 `bincount(minlength=k)` 计数，并归一化为
+  概率向量 `p_k`。函数应校验所有 code id 落在 `[0, k)`；若 `N == 0`，返回
+  全 0 分布并由上层将相关 occupancy/perplexity 指标标记为不可用。
+
+- `compute_normalized_perplexity(p)`：根据 code 概率分布计算归一化 perplexity：
+  `exp(-sum(p * log(p + eps))) / K`。零概率 code 不应产生 `nan`；当 `K == 0`
+  或 `sum(p) == 0` 时返回 `nan`，避免把缺失分布误判为 collapse 或均匀分布。
+
+- `compute_assignment_churn(current, history, window)`：计算最近窗口内 code assignment
+  的平均变动率。函数从 `history` 中取当前 epoch 之前最近 `window` 个 snapshot，
+  通过 `sample_ids` 做内连接对齐，只比较同一样本在相邻 snapshot 之间的
+  `code_id` 是否变化；每个相邻 epoch pair 得到一个 churn rate，最终返回这些
+  rate 的均值。若有效相邻 pair 不足或没有共同 `sample_ids`，返回 `nan`。
+
+- `compute_code_lifetime_pass_ratio(current_active_codes, history, min_lifetime_epochs)`：
+  衡量当前 active code 的生命周期稳定性。对每个当前 active code，向历史
+  snapshot 回看其是否连续满足 active 条件；连续 active epoch 数达到
+  `min_lifetime_epochs` 的 code 记为 pass。返回
+  `pass_count / len(current_active_codes)`；若当前没有 active code，返回 `nan`
+  并由 rules 层结合 `active_code_ratio` 判定失败。
+
+- `compute_nearest_second_margin(distances)`：计算每个样本最近 code 和第二近 code
+  的相对距离间隔。`distances` 推荐 shape 为 `[N, K]`，值越小表示越近；函数对
+  每行取最小距离 `d1` 和第二小距离 `d2`，返回 `[N]` 的
+  `(d2 - d1) / (d1 + eps)`。若 `K < 2`，该指标不可计算，应返回全 `nan` 或
+  空数组并由上层转为 `nearest_second_margin_median = nan`。
+
+- `classify_main_direction(actions)`：把每条 action sequence 归类为主方向标签。
+  推荐先将 action 映射为 position 序列，其中 long 为正、short 为负、flat 为
+  0；若非 flat timestep 中正向占多数则为 `long`，负向占多数则为 `short`，
+  全程 flat 则为 `flat`，正负方向都存在且无明确多数时为 `mixed`。返回 shape
+  为 `[N]` 的字符串或枚举标签，用于计算 `direction_accuracy`。
+
+- `compute_first_trade_t(actions)`：返回每条 action sequence 第一次进入非 flat
+  交易状态的 timestep。函数基于 position/action 是否非 0 判断 entry；若某条
+  sequence 全程无交易，返回哨兵值 `-1`。`entry_timing_error_median` 只应统计
+  demo 和 decoded 的 first trade 都不是 `-1` 的样本。
+
+helper 内部应使用同一个 `eps`，并且只负责数值计算与基础输入校验；PASS/FAIL、
+warn 降级以及缺失数据策略统一留给 rules 层和第 8 节描述的调用逻辑处理。
+
 ## 6. 计算流程
 
 1. `validation_action_accuracy = mean(decoded_actions == demo_actions)`，按所有
@@ -164,7 +216,10 @@ class Phase1VQInternalThresholds:
     churn_recent_mean_max: float = 0.15
     margin_median_min: float = 0.10
     direction_accuracy_min: float = 0.88
-    entry_timing_error_ratio_max: float = 0.15
+    entry_timing_error_max: float = 10.8
+    code_lifetime_pass_ratio_min: float = 0.80
+    decoder_turnover_error_max: float = 18.0
+    quantization_distance_gap_max: float = 1.25
 ```
 
 Hard gates：
@@ -176,12 +231,16 @@ Hard gates：
 - `0.50 <= normalized_code_perplexity <= 0.90`
 - `dead_code_ratio <= 0.20`
 - `assignment_churn_recent_mean <= 0.15`
+- `code_lifetime_pass_ratio >= 0.80`
 - `nearest_second_margin_median >= 0.10`
 - `direction_accuracy >= 0.88`
-- `entry_timing_error_median <= 0.15 * horizon_length`
+- `entry_timing_error_median <= 10.8`，固定 `horizon_length=72` 时等价于
+  `0.15 * horizon_length`
+- `decoder_turnover_error <= 18.0`，固定 `horizon_length=72` 时等价于平均每条
+  horizon 的换手差异不超过 25% horizon
 
-`quantization_distance` 和 `code_lifetime_pass_ratio` 第一版可作为 warn/scoring
-信号；如果训练历史足够完整，也可以升级为 hard gate。
+`quantization_distance` 和 `quantization_distance_gap` 第一版作为 warn/scoring
+信号；等 train/validation latent 距离统计稳定后，再考虑升级为 hard gate。
 
 ## 8. 缺失数据策略
 

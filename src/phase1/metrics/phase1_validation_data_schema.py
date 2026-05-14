@@ -323,6 +323,17 @@ class CodeAssignmentSnapshot:
     # 当前 epoch 满足 active 标准的 code id 集合。
     active_codes: tuple[int, ...]
 
+    def __post_init__(self) -> None:
+        """校验 assignment snapshot 的样本和 label 对齐契约。"""
+
+        sample_ids = _require_ndarray("sample_ids", self.sample_ids)
+        code_ids = _require_ndarray("code_ids", self.code_ids)
+        _require_ndim("sample_ids", sample_ids, 1)
+        _require_ndim("code_ids", code_ids, 1)
+        _require_shape("code_ids", code_ids, sample_ids.shape)
+        if np.unique(sample_ids).size != sample_ids.size:
+            raise ValueError("sample_ids must be unique within an assignment snapshot")
+
     def to_dict(self) -> dict[str, Any]:
         """序列化 assignment 快照，供 churn/lifetime 诊断持久化。
 

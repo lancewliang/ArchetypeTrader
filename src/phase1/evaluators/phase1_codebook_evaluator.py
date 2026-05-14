@@ -232,7 +232,10 @@ class Phase1CodebookEvaluator:
                     f"got {sample_ids.shape} for {total_samples} samples"
                 )
         else:
-            sample_ids = np.arange(total_samples, dtype=np.int64)
+            raise ValueError(
+                "validation dataloader must provide stable sample_ids as the fourth "
+                "batch field; rebuild it with build_trajectory_tensor_dataset()"
+            )
         prices = self._prices_from_horizon_dataset(
             horizon_dataset=horizon_dataset,
             expected_samples=total_samples,
