@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import logging
 from typing import List
 import torch
 from torch.utils.data import DataLoader
@@ -31,6 +32,9 @@ from .horizon_train_label_builder import (
 )
 from .metrics import CodeAssignmentSnapshot, Phase1Metrics, Phase1ValidationResult
 from .report import Phase1CheckpointSelectionReport, Phase1CodebookReport
+
+
+logger = logging.getLogger("archetype_trader.phase1")
 
 
 class Phase1FatalError(RuntimeError):
@@ -177,6 +181,7 @@ class Phase1MainFlow:
             self.pretrain()
             # Step 6: 训练 VQ encoder-decoder，使 codebook 学到可复用 trading archetypes。
             self.train()
+            logger.info("Phase I training completed")
             # Step 7: 根据验证指标选择最能代表稳定 archetype 发现结果的 checkpoint。
             self.select_and_save_best_checkpoint()
             # Step 9: 用训练好的 encoder/codebook 为 sampled horizons 生成 archetype labels。
