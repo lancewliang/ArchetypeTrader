@@ -23,10 +23,14 @@ from .phase1_validation_data_schema import (
     Phase1TieBreakerMetrics,
     Phase1ValidationMetrics,
 )
+from .phase1_validation_behavior_quality import Phase1BehaviorQualityPayload
+from .phase1_validation_label_predictability import Phase1LabelPredictabilityPayload
+from .phase1_validation_oracle_profitability import Phase1OracleProfitabilityPayload
+from .phase1_validation_teacher_quality import Phase1TeacherQualityPayload
 from .phase1_validation_vq_internal import Phase1VQInternalPayload
 from .phase1_validation_score import (
     Phase1ValidationScore,
-    Phase1ValidationScoreLike
+    Phase1ValidationScoreLike,
 )
 
 
@@ -190,8 +194,20 @@ class Phase1ValidationResult:
     # score 接近时的决胜指标。
     tie_breaker_metrics: Phase1TieBreakerMetrics
 
+    # 第零层 teacher quality 中间 payload，用于审计 DP/flat return 明细。
+    teacher_quality_payload: Phase1TeacherQualityPayload | None = None
+
     # 第一层 VQ 内部中间 payload，用于 report 展示 code distribution 等非 gate 字段。
     vq_internal_payload: Phase1VQInternalPayload | None = None
+
+    # 第二层 behavior quality 中间 payload，用于审计 morphology/motif 标签。
+    behavior_quality_payload: Phase1BehaviorQualityPayload | None = None
+
+    # 第三层 oracle profitability 中间 payload，用于审计收益曲线和 per-code 盈利。
+    oracle_profitability_payload: Phase1OracleProfitabilityPayload | None = None
+
+    # 第四层 label predictability 中间 payload，用于审计 probe 诊断。
+    label_predictability_payload: Phase1LabelPredictabilityPayload | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 checkpoint/report 可保存的嵌套 dict。"""
@@ -217,9 +233,29 @@ class Phase1ValidationResult:
                 for name, result in self.drift_diagnostics.items()
             },
             "tie_breaker_metrics": self.tie_breaker_metrics.to_dict(),
+            "teacher_quality_payload": (
+                self.teacher_quality_payload.to_dict()
+                if self.teacher_quality_payload is not None
+                else None
+            ),
             "vq_internal_payload": (
                 self.vq_internal_payload.to_dict()
                 if self.vq_internal_payload is not None
+                else None
+            ),
+            "behavior_quality_payload": (
+                self.behavior_quality_payload.to_dict()
+                if self.behavior_quality_payload is not None
+                else None
+            ),
+            "oracle_profitability_payload": (
+                self.oracle_profitability_payload.to_dict()
+                if self.oracle_profitability_payload is not None
+                else None
+            ),
+            "label_predictability_payload": (
+                self.label_predictability_payload.to_dict()
+                if self.label_predictability_payload is not None
                 else None
             ),
         }
@@ -270,9 +306,33 @@ class Phase1ValidationResult:
             tie_breaker_metrics=Phase1TieBreakerMetrics.from_dict(
                 payload["tie_breaker_metrics"]
             ),
+            teacher_quality_payload=(
+                Phase1TeacherQualityPayload.from_dict(teacher_payload)
+                if (teacher_payload := payload.get("teacher_quality_payload"))
+                is not None
+                else None
+            ),
             vq_internal_payload=(
                 Phase1VQInternalPayload.from_dict(vq_payload)
                 if (vq_payload := payload.get("vq_internal_payload")) is not None
+                else None
+            ),
+            behavior_quality_payload=(
+                Phase1BehaviorQualityPayload.from_dict(behavior_payload)
+                if (behavior_payload := payload.get("behavior_quality_payload"))
+                is not None
+                else None
+            ),
+            oracle_profitability_payload=(
+                Phase1OracleProfitabilityPayload.from_dict(oracle_payload)
+                if (oracle_payload := payload.get("oracle_profitability_payload"))
+                is not None
+                else None
+            ),
+            label_predictability_payload=(
+                Phase1LabelPredictabilityPayload.from_dict(label_payload)
+                if (label_payload := payload.get("label_predictability_payload"))
+                is not None
                 else None
             ),
         )

@@ -35,16 +35,20 @@ from ...model.vq_archetype import ArchetypeVQModel
 from ..metrics import (
     CodeAssignmentSnapshot,
     Phase1BehaviorQualityMetrics,
+    Phase1BehaviorQualityPayload,
     Phase1BehaviorQualityThresholds,
     Phase1EvaluationSnapshot,
     Phase1LabelPredictabilityMetrics,
+    Phase1LabelPredictabilityPayload,
     Phase1LabelPredictabilityThresholds,
     Phase1LayerComputation,
     Phase1OracleProfitabilityMetrics,
+    Phase1OracleProfitabilityPayload,
     Phase1OracleProfitabilityThresholds,
     Phase1PerCodeProfitability,
     Phase1MetricResult,
     Phase1TeacherQualityMetrics,
+    Phase1TeacherQualityPayload,
     Phase1TeacherQualityThresholds,
     Phase1VQInternalMetrics,
     Phase1ValidationMetrics,
@@ -448,8 +452,42 @@ class Phase1CodebookEvaluator:
             drift_diagnostics=drift_diagnostics,
             score=score,
             tie_breaker_metrics=tie_breaker_metrics,
+            teacher_quality_payload=(
+                teacher_computation.extra_payload
+                if isinstance(
+                    teacher_computation.extra_payload,
+                    Phase1TeacherQualityPayload,
+                )
+                else None
+            ),
             vq_internal_payload=(
-                vq_payload if isinstance(vq_payload, Phase1VQInternalPayload) else None
+                vq_payload
+                if isinstance(vq_payload, Phase1VQInternalPayload)
+                else None
+            ),
+            behavior_quality_payload=(
+                behavior_computation.extra_payload
+                if isinstance(
+                    behavior_computation.extra_payload,
+                    Phase1BehaviorQualityPayload,
+                )
+                else None
+            ),
+            oracle_profitability_payload=(
+                oracle_computation.extra_payload
+                if isinstance(
+                    oracle_computation.extra_payload,
+                    Phase1OracleProfitabilityPayload,
+                )
+                else None
+            ),
+            label_predictability_payload=(
+                label_computation.extra_payload
+                if isinstance(
+                    label_computation.extra_payload,
+                    Phase1LabelPredictabilityPayload,
+                )
+                else None
             ),
         )
 

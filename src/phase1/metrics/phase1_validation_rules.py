@@ -41,12 +41,26 @@ from .phase1_validation_data_schema import (
     Phase1TieBreakerMetrics,
     Phase1ValidationMetrics,
 )
-from .phase1_validation_behavior_quality import evaluate_behavior_quality_rules
-from .phase1_validation_label_predictability import evaluate_label_predictability_rules
-from .phase1_validation_oracle_profitability import evaluate_oracle_profitability_rules
-from .phase1_validation_teacher_quality import evaluate_teacher_quality_rules
-from .phase1_validation_vq_internal import evaluate_vq_internal_rules
-from .phase1_validation_vq_internal import Phase1VQInternalPayload
+from .phase1_validation_behavior_quality import (
+    Phase1BehaviorQualityPayload,
+    evaluate_behavior_quality_rules,
+)
+from .phase1_validation_label_predictability import (
+    Phase1LabelPredictabilityPayload,
+    evaluate_label_predictability_rules,
+)
+from .phase1_validation_oracle_profitability import (
+    Phase1OracleProfitabilityPayload,
+    evaluate_oracle_profitability_rules,
+)
+from .phase1_validation_teacher_quality import (
+    Phase1TeacherQualityPayload,
+    evaluate_teacher_quality_rules,
+)
+from .phase1_validation_vq_internal import (
+    Phase1VQInternalPayload,
+    evaluate_vq_internal_rules,
+)
 
 
 def aggregate_validation_result(
@@ -60,7 +74,11 @@ def aggregate_validation_result(
     drift_diagnostics: Mapping[str, Phase1MetricResult],
     score: Phase1ValidationScoreLike,
     tie_breaker_metrics: Phase1TieBreakerMetrics,
+    teacher_quality_payload: Phase1TeacherQualityPayload | None = None,
     vq_internal_payload: Phase1VQInternalPayload | None = None,
+    behavior_quality_payload: Phase1BehaviorQualityPayload | None = None,
+    oracle_profitability_payload: Phase1OracleProfitabilityPayload | None = None,
+    label_predictability_payload: Phase1LabelPredictabilityPayload | None = None,
 ) -> Phase1ValidationResult:
     """聚合 checkpoint 级 validation result。
 
@@ -89,7 +107,11 @@ def aggregate_validation_result(
         code_diagnostics=tuple(code_diagnostics),
         drift_diagnostics=dict(drift_diagnostics),
         tie_breaker_metrics=tie_breaker_metrics,
+        teacher_quality_payload=teacher_quality_payload,
         vq_internal_payload=vq_internal_payload,
+        behavior_quality_payload=behavior_quality_payload,
+        oracle_profitability_payload=oracle_profitability_payload,
+        label_predictability_payload=label_predictability_payload,
     )
 
 
