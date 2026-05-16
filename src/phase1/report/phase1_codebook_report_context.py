@@ -111,6 +111,7 @@ class Phase1CodebookReportContextBuilder:
                 "epoch": str(summary.get("epoch", "-")),
                 "score": _format_value(summary.get("score")),
                 "failed_layers": failed_text,
+                "layer_count": str(summary.get("layer_count", len(layers))),
                 "code_diagnostic_count": str(summary.get("code_diagnostic_count", 0)),
                 "risk_finding_count": str(summary.get("risk_finding_count", 0)),
                 "badge_class": _badge_class(passed),
