@@ -16,6 +16,7 @@ from .phase1_codebook_report_schema import (
     Phase1ReportHeader,
     Phase1ReportHeaderItem,
     Phase1ReportKpiRow,
+    Phase1ReportLabelTip,
     Phase1ReportLayerView,
     Phase1ReportLineChart,
     Phase1ReportMappingRow,
@@ -288,7 +289,63 @@ _METRIC_DESCRIPTIONS: dict[str, str] = {
         "train/validation per-code return 的差距；用于定位某些 code 在验证期"
         "盈利结构是否失效。"
     ),
+    "reconstruction_loss": (
+        "validation reconstruction loss；越低表示 decoder 越能重构 DP 示范动作，"
+        "常作为分数接近时的稳定性决胜字段。"
+    ),
 }
+
+
+_MORPHOLOGY_DESCRIPTIONS: dict[str, str] = {
+    "downtrend": "下跌趋势行情，价格整体向下推进；通常更适合观察 short 或防守型行为。",
+    "uptrend": "上涨趋势行情，价格整体向上推进；通常更适合观察 long 或顺势行为。",
+    "neutral": "中性或无明显方向行情，趋势信号弱；该类过多时可能降低 label 的结构可解释性。",
+    "range-high-vol": "高波动震荡行情，价格没有稳定方向但振幅较大；需要关注换手和手续费拖累。",
+    "range-low-vol": "低波动震荡行情，价格方向和振幅都较弱；交易机会可能更接近成本噪声。",
+    "reversal-down": "由上行或强势状态转向下行的反转结构；用于识别潜在做空或止盈切换场景。",
+    "reversal-up": "由下行或弱势状态转向上行的反转结构；用于识别潜在做多或空头回补场景。",
+    "volatile-mixed": "高波动且方向混杂的行情，趋势与反转信号交错；对 selector 和 decoder 稳定性要求更高。",
+}
+
+
+def _describe_morphology(label: str) -> str:
+    """返回 morphology 标签的中文说明。"""
+
+    return _MORPHOLOGY_DESCRIPTIONS.get(
+        label,
+        f"{label} 市场形态；表示由行情结构分类器归纳出的 validation 样本状态。",
+    )
+
+
+def _describe_motif(label: str) -> str:
+    """返回 trading motif 标签的中文说明。"""
+
+    parts = tuple(part.strip() for part in label.split("+"))
+    descriptions: list[str] = []
+    for part in parts:
+        if part == "long":
+            descriptions.append("long 表示以做多或持有多头为主")
+        elif part == "short":
+            descriptions.append("short 表示以做空或持有空头为主")
+        elif part == "flat":
+            descriptions.append("flat 表示以空仓或降低风险暴露为主")
+        elif part == "early":
+            descriptions.append("early 表示动作主要出现在 horizon 前段")
+        elif part == "mid":
+            descriptions.append("mid 表示动作主要出现在 horizon 中段")
+        elif part == "late":
+            descriptions.append("late 表示动作主要出现在 horizon 后段")
+        elif part == "hold":
+            descriptions.append("hold 表示持仓相对连续，换手较少")
+        elif part == "switch":
+            descriptions.append("switch 表示方向切换或换手较多")
+        elif part == "with-recent-move":
+            descriptions.append("with-recent-move 表示顺近期价格运动方向")
+        elif part == "against-recent-move":
+            descriptions.append("against-recent-move 表示逆近期价格运动方向")
+        else:
+            descriptions.append(f"{part} 是 motif 的一个行为标签")
+    return "；".join(descriptions) + "。"
 
 
 @dataclass(frozen=True)
@@ -360,7 +417,8 @@ class Phase1CodebookReportContextBuilder:
             if vq_internal_payload is not None
             else (),
             tie_breaker_rows=self._build_mapping_rows(
-                validation.tie_breaker_metrics.to_dict()
+                validation.tie_breaker_metrics.to_dict(),
+                descriptions=_METRIC_DESCRIPTIONS,
             ),
             score_breakdown_rows=self._build_score_breakdown_rows(
                 validation_score
@@ -821,6 +879,7 @@ class Phase1CodebookReportContextBuilder:
             return Phase1ReportPairProfitabilityMatrix(
                 morphologies=(),
                 motifs=(),
+                motif_headers=(),
                 rows=(),
                 cells=(),
             )
@@ -829,6 +888,7 @@ class Phase1CodebookReportContextBuilder:
             return Phase1ReportPairProfitabilityMatrix(
                 morphologies=(),
                 motifs=(),
+                motif_headers=(),
                 rows=(),
                 cells=(),
             )
@@ -909,12 +969,20 @@ class Phase1CodebookReportContextBuilder:
             rows.append(
                 Phase1ReportPairProfitabilityRow(
                     morphology=morphology,
+                    morphology_description=_describe_morphology(morphology),
                     cells=tuple(row_cells),
                 )
             )
         return Phase1ReportPairProfitabilityMatrix(
             morphologies=morphologies,
             motifs=motifs,
+            motif_headers=tuple(
+                Phase1ReportLabelTip(
+                    label=motif,
+                    description=_describe_motif(motif),
+                )
+                for motif in motifs
+            ),
             rows=tuple(rows),
             cells=tuple(flat_cells),
             grid_template_columns=(
@@ -1261,11 +1329,18 @@ class Phase1CodebookReportContextBuilder:
     def _build_mapping_rows(
         self,
         payload: Mapping[str, Any],
+        *,
+        descriptions: Mapping[str, str] | None = None,
     ) -> tuple[Phase1ReportMappingRow, ...]:
         """构建普通 key-value 表格上下文。"""
 
+        description_map = descriptions or {}
         return tuple(
-            Phase1ReportMappingRow(key=str(key), value=_format_value(value))
+            Phase1ReportMappingRow(
+                key=str(key),
+                value=_format_value(value),
+                description=description_map.get(str(key), ""),
+            )
             for key, value in payload.items()
         )
 

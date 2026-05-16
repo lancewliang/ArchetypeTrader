@@ -531,6 +531,9 @@ class Phase1ReportMappingRow:
     # 已格式化字段值。
     value: str
 
+    # 可选 tooltip 说明。
+    description: str = ""
+
 
 @dataclass(frozen=True)
 class Phase1ReportKpiRow:
@@ -602,6 +605,17 @@ class Phase1ReportCodeDistributionRow:
 
     # ACTIVE/INACTIVE 展示文本。
     status_label: str
+
+
+@dataclass(frozen=True)
+class Phase1ReportLabelTip:
+    """带 tooltip 说明的短标签。"""
+
+    # 展示标签。
+    label: str
+
+    # tooltip 说明。
+    description: str
 
 
 @dataclass(frozen=True)
@@ -780,6 +794,9 @@ class Phase1ReportPairProfitabilityRow:
     # 行对应的 morphology。
     morphology: str
 
+    # morphology tooltip 说明。
+    morphology_description: str
+
     # 该 morphology 下的所有 motif 单元格。
     cells: tuple[Phase1ReportPairProfitabilityCell, ...]
 
@@ -797,6 +814,9 @@ class Phase1ReportPairProfitabilityMatrix:
 
     # 矩阵列维度。
     motifs: tuple[str, ...]
+
+    # 带 tooltip 的矩阵列头。
+    motif_headers: tuple[Phase1ReportLabelTip, ...]
 
     # 按 morphology 分组的矩阵行。
     rows: tuple[Phase1ReportPairProfitabilityRow, ...]
@@ -959,6 +979,7 @@ __all__ = [
     "Phase1ReportRiskSummaryView",
     "Phase1ReportRiskFindingView",
     "Phase1ReportMappingRow",
+    "Phase1ReportLabelTip",
     "Phase1ReportKpiRow",
     "Phase1ReportProfitSeriesRow",
     "Phase1ReportCodeDistributionRow",

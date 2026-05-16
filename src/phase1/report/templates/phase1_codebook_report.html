@@ -884,11 +884,11 @@
       <div class="heatmap-wrap">
         <div class="heatmap" style="grid-template-columns: {{ pair_profitability_matrix.grid_template_columns }}">
           <div class="heatmap-head">Morphology / Motif</div>
-          {% for motif in pair_profitability_matrix.motifs %}
-          <div class="heatmap-head">{{ motif }}</div>
+          {% for motif in pair_profitability_matrix.motif_headers %}
+          <div class="heatmap-head"><span class="metric-with-tip">{{ motif.label }}<span class="tip wide" tabindex="0" data-tip="{{ motif.description }}">?</span></span></div>
           {% endfor %}
           {% for row in pair_profitability_matrix.rows %}
-          <div class="heatmap-row-head">{{ row.morphology }}</div>
+          <div class="heatmap-row-head"><span class="metric-with-tip">{{ row.morphology }}<span class="tip wide" tabindex="0" data-tip="{{ row.morphology_description }}">?</span></span></div>
           {% for cell in row.cells %}
           <div class="heatmap-cell" title="{{ cell.tooltip }}" style="background: {{ cell.background_color }}; color: {{ cell.text_color }};">{{ cell.display_value }}</div>
           {% endfor %}
@@ -1051,7 +1051,7 @@
             <tbody>
               {% for row in tie_breaker_rows %}
               <tr>
-                <td>{{ row.key }}</td>
+                <td>{% if row.description %}<span class="metric-with-tip">{{ row.key }}<span class="tip" tabindex="0" data-tip="{{ row.description }}">?</span></span>{% else %}{{ row.key }}{% endif %}</td>
                 <td class="num">{{ row.value }}</td>
               </tr>
               {% endfor %}
