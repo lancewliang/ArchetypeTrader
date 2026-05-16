@@ -54,10 +54,14 @@ from .phase1_validation_vq_internal import (
 )
 from .phase1_validation_score import (
     DEFAULT_TIE_SCORE_TOLERANCE,
+    Phase1ValidationScore,
+    Phase1ValidationScoreComponent,
+    Phase1ValidationScoreLike,
     build_tie_breaker_metrics,
     compare_phase1_tie_breaker,
     compute_phase1_validation_score,
     compute_reconstruction_score,
+    get_phase1_validation_score_value,
     scores_are_tied,
 )
 
@@ -86,6 +90,9 @@ __all__ = [
     "Phase1ValidationMetrics",
     "Phase1ValidationResult",
     "Phase1ValidationRuntimeConfig",
+    "Phase1ValidationScore",
+    "Phase1ValidationScoreComponent",
+    "Phase1ValidationScoreLike",
     "Phase1ValidationScoreWeights",
     "Phase1VQInternalThresholds",
     "aggregate_validation_result",
@@ -98,6 +105,7 @@ __all__ = [
     "compute_phase1_validation_score",
     "compute_reconstruction_score",
     "compute_teacher_quality_score",
+    "get_phase1_validation_score_value",
     "evaluate_behavior_quality_rules",
     "evaluate_label_predictability_rules",
     "evaluate_oracle_profitability_rules",

@@ -35,6 +35,7 @@ from .phase1_metric_results import (
     Phase1MetricResult,
     Phase1ValidationResult,
 )
+from .phase1_validation_score import Phase1ValidationScoreLike
 from .phase1_validation_data_schema import (
     Phase1CodeDiagnostic,
     Phase1TieBreakerMetrics,
@@ -56,7 +57,7 @@ def aggregate_validation_result(
     metrics: Phase1ValidationMetrics,
     code_diagnostics: Sequence[Phase1CodeDiagnostic],
     drift_diagnostics: Mapping[str, Phase1MetricResult],
-    score: float | None,
+    score: Phase1ValidationScoreLike,
     tie_breaker_metrics: Phase1TieBreakerMetrics,
 ) -> Phase1ValidationResult:
     """聚合 checkpoint 级 validation result。

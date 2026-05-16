@@ -104,7 +104,7 @@ class Phase1CodebookReport:
             "stage": validation_result.stage,
             "epoch": validation_result.epoch,
             "passed": validation_result.passed,
-            "score": validation_result.score,
+            "score": validation_result.score.total_score,
             "failed_layers": list(validation_result.failed_layers),
             "failed_layer_count": len(validation_result.failed_layers),
             "layer_count": len(validation_result.layers),

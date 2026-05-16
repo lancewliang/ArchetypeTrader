@@ -27,7 +27,9 @@ hard gate 全部通过后使用 ``compute_phase1_validation_score()`` 的结果�
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 import math
+from typing import Any, Mapping
 
 from .phase1_validation_config import Phase1ValidationScoreWeights
 from .phase1_validation_data_schema import (
@@ -48,6 +50,115 @@ DEFAULT_TIE_SCORE_TOLERANCE = 0.03
 两个 score 差距小于 3% 时认为综合分无法稳定区分优劣，selector 应继续比较
 ``Phase1TieBreakerMetrics``。该阈值只影响候选排序，不影响 hard gate pass/fail。
 """
+
+
+@dataclass(frozen=True)
+class Phase1ValidationScoreComponent:
+    """单个 validation score 子项的可审计拆解。"""
+
+    # 稳定 snake_case 子项名称，例如 "teacher_quality"。
+    name: str
+
+    # 加权前的归一化子分数，范围通常为 [0, 1]。
+    value: float
+
+    # 当前子项在总分中的权重。
+    weight: float
+
+    # value * weight 后的贡献值。
+    weighted_value: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为普通 dict，供 checkpoint/report 落盘。"""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> "Phase1ValidationScoreComponent":
+        """从 dict 恢复 score component。"""
+
+        value = float(payload["value"])
+        weight = float(payload["weight"])
+        return cls(
+            name=str(payload["name"]),
+            value=value,
+            weight=weight,
+            weighted_value=float(payload.get("weighted_value", value * weight)),
+        )
+
+
+@dataclass(frozen=True)
+class Phase1ValidationScore:
+    """Phase I validation 综合评分及其子项拆解。"""
+
+    # 截断到 [0, 1] 后的最终总分，selector 使用该值排序。
+    total_score: float
+
+    # 每个子项的加权前分数、权重和加权贡献。
+    components: tuple[Phase1ValidationScoreComponent, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为 checkpoint/report 可保存的 dict。"""
+
+        return {
+            "total_score": self.total_score,
+            "components": [component.to_dict() for component in self.components],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1ValidationScore":
+        """从 dict 恢复 score 对象。"""
+
+        components = tuple(
+            Phase1ValidationScoreComponent.from_dict(component)
+            for component in payload.get("components", ())
+        )
+        return cls(
+            total_score=float(payload["total_score"]),
+            components=components,
+        )
+
+    @classmethod
+    def from_float(cls, value: float) -> "Phase1ValidationScore":
+        """兼容历史 checkpoint 中只保存 float score 的 payload。"""
+
+        return cls(total_score=float(value), components=())
+
+
+Phase1ValidationScoreLike = Phase1ValidationScore | float | int | None
+"""代码迁移期允许 selector 读取新 score 对象或历史 float。"""
+
+
+def get_phase1_validation_score_value(
+    score: Phase1ValidationScoreLike,
+) -> float | None:
+    """取出可比较的总分数值。"""
+
+    if score is None:
+        return None
+    if isinstance(score, Phase1ValidationScore):
+        return score.total_score
+    return float(score)
+
+
+def _score_component(
+    *,
+    name: str,
+    value: float,
+    weight: float,
+) -> Phase1ValidationScoreComponent:
+    """构造单个 score component，并统一裁剪异常输入。"""
+
+    component_value = _clip01(value)
+    return Phase1ValidationScoreComponent(
+        name=name,
+        value=component_value,
+        weight=weight,
+        weighted_value=component_value * weight,
+    )
 
 
 def compute_reconstruction_score(metrics: Phase1ValidationMetrics) -> float:
@@ -73,12 +184,13 @@ def compute_reconstruction_score(metrics: Phase1ValidationMetrics) -> float:
 def compute_phase1_validation_score(
     metrics: Phase1ValidationMetrics,
     weights: Phase1ValidationScoreWeights,
-) -> float:
+) -> Phase1ValidationScore:
     """计算 Phase I checkpoint 综合评分。
 
     使用场景:
-        仅在五层 hard gate 全部通过后调用。返回值被截断到 [0, 1]，用于合格
-        checkpoint 之间排序。
+        仅在五层 hard gate 全部通过后调用。返回对象中的 ``total_score`` 被截断到
+        [0, 1]，用于合格 checkpoint 之间排序；``components`` 保留每个子项目的
+        加权前分数、权重和加权贡献，供后续报表展示。
 
     设计说明:
         总分是各子分数的加权和。权重来自 ``Phase1ValidationScoreWeights``，因此
@@ -91,15 +203,44 @@ def compute_phase1_validation_score(
         ``aggregate_validation_result()`` 中置为 ``None``。
     """
 
-    score = (
-        weights.teacher_quality * compute_teacher_quality_score(metrics)
-        + weights.reconstruction * compute_reconstruction_score(metrics)
-        + weights.codebook_health * compute_codebook_health_score(metrics)
-        + weights.behavior_structure * compute_behavior_structure_score(metrics)
-        + weights.oracle_profitability * compute_oracle_profitability_score(metrics)
-        + weights.label_predictability * compute_label_predictability_score(metrics)
+    components = (
+        _score_component(
+            name="teacher_quality",
+            value=compute_teacher_quality_score(metrics),
+            weight=weights.teacher_quality,
+        ),
+        _score_component(
+            name="reconstruction",
+            value=compute_reconstruction_score(metrics),
+            weight=weights.reconstruction,
+        ),
+        _score_component(
+            name="codebook_health",
+            value=compute_codebook_health_score(metrics),
+            weight=weights.codebook_health,
+        ),
+        _score_component(
+            name="behavior_structure",
+            value=compute_behavior_structure_score(metrics),
+            weight=weights.behavior_structure,
+        ),
+        _score_component(
+            name="oracle_profitability",
+            value=compute_oracle_profitability_score(metrics),
+            weight=weights.oracle_profitability,
+        ),
+        _score_component(
+            name="label_predictability",
+            value=compute_label_predictability_score(metrics),
+            weight=weights.label_predictability,
+        ),
     )
-    return _clip01(score)
+    return Phase1ValidationScore(
+        total_score=_clip01(
+            sum(component.weighted_value for component in components)
+        ),
+        components=components,
+    )
 
 
 def build_tie_breaker_metrics(
@@ -137,8 +278,8 @@ def build_tie_breaker_metrics(
 
 
 def scores_are_tied(
-    best_score: float,
-    candidate_score: float,
+    best_score: Phase1ValidationScoreLike,
+    candidate_score: Phase1ValidationScoreLike,
     *,
     tolerance: float = DEFAULT_TIE_SCORE_TOLERANCE,
 ) -> bool:
@@ -154,7 +295,11 @@ def scores_are_tied(
         区分，避免 tie-breaker 触发范围比配置值更宽。
     """
 
-    return abs(best_score - candidate_score) < tolerance
+    best_value = best_score.total_score
+    candidate_value = candidate_score.total_score
+    if best_value is None or candidate_value is None:
+        return False
+    return abs(best_value - candidate_value) < tolerance
 
 
 def compare_phase1_tie_breaker(
@@ -200,6 +345,9 @@ def compare_phase1_tie_breaker(
 
 __all__ = [
     "DEFAULT_TIE_SCORE_TOLERANCE",
+    "Phase1ValidationScore",
+    "Phase1ValidationScoreComponent",
+    "Phase1ValidationScoreLike",
     "build_tie_breaker_metrics",
     "compare_phase1_tie_breaker",
     "compute_behavior_structure_score",
@@ -209,5 +357,6 @@ __all__ = [
     "compute_phase1_validation_score",
     "compute_reconstruction_score",
     "compute_teacher_quality_score",
+    "get_phase1_validation_score_value",
     "scores_are_tied",
 ]

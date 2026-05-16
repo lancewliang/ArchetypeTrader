@@ -23,6 +23,10 @@ from .phase1_validation_data_schema import (
     Phase1TieBreakerMetrics,
     Phase1ValidationMetrics,
 )
+from .phase1_validation_score import (
+    Phase1ValidationScore,
+    Phase1ValidationScoreLike
+)
 
 
 MetricSeverity = Literal["pass", "warn", "fail", "skip"]
@@ -164,8 +168,8 @@ class Phase1ValidationResult:
     # 五层 hard gate 是否全部通过。
     passed: bool
 
-    # 综合评分。只有 passed=True 时通常才有值；失败 checkpoint 推荐为 None。
-    score: float | None
+    # 综合评分对象。只有 passed=True 时通常才有值；失败 checkpoint 推荐为 None。
+    score: Phase1ValidationScoreLike
 
     # 失败 layer 名称列表。
     failed_layers: tuple[str, ...]
@@ -193,7 +197,11 @@ class Phase1ValidationResult:
             "stage": self.stage,
             "epoch": self.epoch,
             "passed": self.passed,
-            "score": self.score,
+            "score": (
+                self.score.to_dict()
+                if isinstance(self.score, Phase1ValidationScore)
+                else self.score
+            ),
             "failed_layers": list(self.failed_layers),
             "layers": [layer.to_dict() for layer in self.layers],
             "metrics": self.metrics.to_dict(),
@@ -217,7 +225,7 @@ class Phase1ValidationResult:
 
         payload: dict[str, int | float | bool | None] = {
             "validation.passed": self.passed,
-            "validation.score": self.score,
+            "validation.score": self.score.total_score,
             "validation.failed_layer_count": len(self.failed_layers),
         }
         for layer in self.layers:
@@ -235,11 +243,7 @@ class Phase1ValidationResult:
             stage=str(payload["stage"]),
             epoch=int(payload["epoch"]),
             passed=bool(payload["passed"]),
-            score=(
-                float(payload["score"])
-                if payload.get("score") is not None
-                else None
-            ),
+            score=_phase1_validation_score_from_payload(payload.get("score")),
             failed_layers=tuple(str(name) for name in payload.get("failed_layers", ())),
             layers=tuple(
                 Phase1LayerResult.from_dict(layer)
@@ -266,3 +270,17 @@ __all__ = [
     "Phase1MetricResult",
     "Phase1ValidationResult",
 ]
+
+
+def _phase1_validation_score_from_payload(
+    payload: Phase1ValidationScoreLike | Mapping[str, Any],
+) -> Phase1ValidationScore | None:
+    """恢复新 score 对象，同时兼容历史 float payload。"""
+
+    if payload is None:
+        return None
+    if isinstance(payload, Phase1ValidationScore):
+        return payload
+    if isinstance(payload, Mapping):
+        return Phase1ValidationScore.from_dict(payload)
+    return Phase1ValidationScore.from_float(float(payload))

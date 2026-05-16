@@ -36,7 +36,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .phase1_checkpoint import Phase1ValidationCheckpoint
-from ..metrics import compare_phase1_tie_breaker, scores_are_tied
+from ..metrics import (
+    compare_phase1_tie_breaker,
+    scores_are_tied,
+)
 
 
 @dataclass(frozen=True)
@@ -321,7 +324,7 @@ class Phase1CheckpointSelector:
             selected=selected,
             selected_checkpoint_id=validation.checkpoint_id,
             selected_epoch=selected.epoch,
-            selected_score=validation.score,
+            selected_score=validation.score.total_score,
             candidate_count=len(validation_checkpoints),
             eligible_count=len(eligible),
             rejected=tuple(rejected),
@@ -354,7 +357,7 @@ class Phase1CheckpointSelector:
             epoch=checkpoint.epoch,
             checkpoint_id=validation.checkpoint_id,
             passed=validation.passed,
-            score=validation.score,
+            score=validation.score.total_score,
             failed_layers=validation.failed_layers,
             reason=reason,
         )
@@ -372,8 +375,10 @@ class Phase1CheckpointSelector:
             3. tie-breaker 仍相同时，选择更早 epoch。
         """
 
-        candidate_score = candidate.codebook_validation.score
-        best_score = current_best.codebook_validation.score
+        candidate_score = candidate.codebook_validation.score.total_score
+        
+        best_score = current_best.codebook_validation.score.total_score
+        
         # 理论上进入 eligible 的候选都应有 score；这里保留防御式判断，避免调用方
         # 直接复用私有函数时因 None 比较导致异常。
         if candidate_score is None or best_score is None:
@@ -404,8 +409,10 @@ class Phase1CheckpointSelector:
         best checkpoint 是因为最高 score、tie-breaker，还是更早 epoch 被选中。
         """
 
-        candidate_score = candidate.codebook_validation.score
-        best_score = previous_best.codebook_validation.score
+        candidate_score = candidate.codebook_validation.score.total_score
+        
+        best_score = previous_best.codebook_validation.score.total_score
+        
         # None 分支是防御式兜底；正常 select_best 流程中 eligible 不会出现 None score。
         if candidate_score is None or best_score is None:
             return "selected_highest_score"
@@ -433,8 +440,10 @@ class Phase1CheckpointSelector:
         而不是 hard gate 失败原因。
         """
 
-        selected_score = selected.codebook_validation.score
-        rejected_score = rejected.codebook_validation.score
+        selected_score = selected.codebook_validation.score.total_score
+        
+        rejected_score = rejected.codebook_validation.score.total_score
+        
         # 正常情况下不会进入该分支；保留兜底可让摘要原因保持可序列化。
         if selected_score is None or rejected_score is None:
             return "missing_score"

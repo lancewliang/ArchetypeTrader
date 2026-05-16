@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from ._template import render_template_file
 from ..checkpoint import Phase1CheckpointSelectionResult
+from ..metrics import get_phase1_validation_score_value
 
 
 JsonObject = dict[str, Any]
@@ -47,6 +48,8 @@ def _format_value(value: Any) -> str:
         return f"{value:.6g}"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, Mapping) and "total_score" in value:
+        return _format_value(value.get("total_score"))
     if isinstance(value, tuple | list):
         return ", ".join(str(item) for item in value) or "-"
     return str(value)
@@ -152,7 +155,9 @@ class Phase1CheckpointSelectionReport:
             "codebook_validation": {
                 "checkpoint_id": getattr(validation, "checkpoint_id", None),
                 "passed": getattr(validation, "passed", None),
-                "score": getattr(validation, "score", None),
+                "score": get_phase1_validation_score_value(
+                    getattr(validation, "score", None)
+                ),
                 "failed_layers": tuple(getattr(validation, "failed_layers", ())),
                 "tie_breaker_metrics": _as_mapping(
                     getattr(validation, "tie_breaker_metrics", None)

@@ -31,6 +31,8 @@ def _format_value(value: Any) -> str:
         return f"{value:.6g}"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, Mapping) and "total_score" in value:
+        return _format_value(value.get("total_score"))
     return str(value)
 
 
@@ -100,6 +102,9 @@ class Phase1CodebookReportContextBuilder:
             ),
             "tie_breaker_rows": self._build_mapping_rows(
                 validation.get("tie_breaker_metrics", {})
+            ),
+            "score_breakdown_rows": self._build_score_breakdown_rows(
+                validation.get("score")
             ),
             "drift_diagnostics": [
                 self._build_metric_context(metric)
@@ -208,6 +213,30 @@ class Phase1CodebookReportContextBuilder:
             {"key": str(key), "value": _format_value(value)}
             for key, value in payload.items()
         ]
+
+    def _build_score_breakdown_rows(self, payload: Any) -> list[JsonObject]:
+        """构建综合 score 子项拆解表格上下文。"""
+
+        if not isinstance(payload, Mapping):
+            return []
+        components = payload.get("components", ())
+        if not isinstance(components, list | tuple):
+            return []
+        rows: list[JsonObject] = []
+        for component in components:
+            if not isinstance(component, Mapping):
+                continue
+            rows.append(
+                {
+                    "name": str(component.get("name", "-")),
+                    "value": _format_value(component.get("value")),
+                    "weight": _format_value(component.get("weight")),
+                    "weighted_value": _format_value(
+                        component.get("weighted_value")
+                    ),
+                }
+            )
+        return rows
 
 
 __all__ = ["Phase1CodebookReportContextBuilder"]
