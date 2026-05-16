@@ -94,6 +94,13 @@ class Phase1CodebookReportContextBuilder:
         return {
             "page_title": str(report.get("title", self.title)),
             "header_title": self.title,
+            "header": self._build_header_context(
+                summary=summary,
+                report=report,
+                config=config,
+                vq_internal_payload=vq_internal_payload,
+                oracle_profitability_payload=oracle_profitability_payload,
+            ),
             "report": {
                 "generated_at": str(report.get("generated_at", "-")),
                 "schema": str(report.get("schema", "-")),
@@ -150,6 +157,125 @@ class Phase1CodebookReportContextBuilder:
             "config_rows": self._build_mapping_rows(config),
             "artifact_rows": self._build_mapping_rows(artifacts),
         }
+
+    def _build_header_context(
+        self,
+        *,
+        summary: Mapping[str, Any],
+        report: Mapping[str, Any],
+        config: Mapping[str, Any],
+        vq_internal_payload: Phase1VQInternalPayload | None,
+        oracle_profitability_payload: Phase1OracleProfitabilityPayload | None,
+    ) -> JsonObject:
+        """构建报告页眉元数据。
+
+        Pair/Batch/Horizon 属于运行上下文，历史 payload 里可能来自 metadata
+        或 config；K/N_val 属于 validation 结果，优先从 VQ payload 自动推导。
+        """
+
+        pair = self._first_present(
+            report,
+            config,
+            keys=("pair", "symbol", "instrument"),
+        )
+        batch = self._first_present(
+            report,
+            config,
+            keys=("batch", "batch_id", "batchid", "train_batch_id"),
+        )
+        horizon = self._first_present(
+            report,
+            config,
+            keys=("horizon", "horizon_length"),
+        )
+        codebook_size = self._header_codebook_size(
+            vq_internal_payload=vq_internal_payload,
+            config=config,
+            report=report,
+        )
+        validation_sample_count = self._header_validation_sample_count(
+            vq_internal_payload=vq_internal_payload,
+            oracle_profitability_payload=oracle_profitability_payload,
+            report=report,
+            config=config,
+        )
+        header = {
+            "pair": _format_value(pair),
+            "batch": _format_value(batch),
+            "checkpoint": str(summary.get("checkpoint_id", "-")),
+            "k": _format_value(codebook_size),
+            "n_val": _format_value(validation_sample_count),
+            "horizon": _format_value(horizon),
+            "generated_at": str(report.get("generated_at", "-")),
+        }
+        header["meta_items"] = [
+            {"label": "Pair", "value": header["pair"]},
+            {"label": "Batch", "value": header["batch"]},
+            {"label": "Checkpoint", "value": header["checkpoint"]},
+            {"label": "K", "value": header["k"]},
+            {"label": "N_val", "value": header["n_val"]},
+            {"label": "Horizon", "value": header["horizon"]},
+        ]
+        return header
+
+    def _first_present(
+        self,
+        *payloads: Mapping[str, Any],
+        keys: tuple[str, ...],
+    ) -> Any:
+        """按候选 key 顺序从多个 mapping 中读取第一个非空值。"""
+
+        for payload in payloads:
+            for key in keys:
+                value = payload.get(key)
+                if value not in (None, ""):
+                    return value
+        return None
+
+    def _header_codebook_size(
+        self,
+        *,
+        vq_internal_payload: Phase1VQInternalPayload | None,
+        config: Mapping[str, Any],
+        report: Mapping[str, Any],
+    ) -> Any:
+        """读取 header 中的 K，优先使用 validation 实际 codebook size。"""
+
+        if (
+            vq_internal_payload is not None
+            and vq_internal_payload.codebook_size_available
+        ):
+            return vq_internal_payload.codebook_size
+        return self._first_present(
+            report,
+            config,
+            keys=("k", "K", "codebook_size", "num_archetypes"),
+        )
+
+    def _header_validation_sample_count(
+        self,
+        *,
+        vq_internal_payload: Phase1VQInternalPayload | None,
+        oracle_profitability_payload: Phase1OracleProfitabilityPayload | None,
+        report: Mapping[str, Any],
+        config: Mapping[str, Any],
+    ) -> Any:
+        """读取 header 中的 N_val，优先使用 code distribution 统计样本数。"""
+
+        if vq_internal_payload is not None:
+            sample_count = vq_internal_payload.code_distribution_sample_count
+            if sample_count > 0:
+                return sample_count
+        if (
+            oracle_profitability_payload is not None
+            and oracle_profitability_payload.decoded_returns
+        ):
+            return len(oracle_profitability_payload.decoded_returns)
+        return self._first_present(
+            report,
+            config,
+            keys=("n_val", "N_val", "validation_sample_count", "val_sample_count"),
+        )
 
     def _build_layer_context(self, layer: Phase1LayerResult) -> JsonObject:
         """构建单个 validation layer 的模板上下文。"""
