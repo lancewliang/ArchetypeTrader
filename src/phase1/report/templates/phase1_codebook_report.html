@@ -338,6 +338,12 @@
       overflow: visible;
     }
 
+    .threshold-layer .message {
+      width: 350px;
+      min-width: 350px;
+      max-width: 350px;
+    }
+
     .threshold-layer + .threshold-layer {
       border-top: 1px solid var(--soft-line);
     }
@@ -695,7 +701,7 @@
                 <th class="num">方向 Direction</th>
                 <th class="num">距离 Distance</th>
                 <th>状态 Status</th>
-                <th>说明 Message</th>
+                <th class="message">说明 Message</th>
               </tr>
             </thead>
             <tbody>
