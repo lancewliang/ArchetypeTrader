@@ -110,6 +110,7 @@ class Phase1CodebookReport:
             "failed_layer_count": len(validation_result.failed_layers),
             "layer_count": len(validation_result.layers),
             "code_diagnostic_count": len(validation_result.code_diagnostics),
+            "risk_finding_count": len(validation_result.risk_findings),
         }
         payload = {
             "report": {

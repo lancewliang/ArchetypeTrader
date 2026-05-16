@@ -58,6 +58,7 @@ from ..metrics import (
     Phase1VQInternalPayload,
     Phase1VQInternalThresholds,
     aggregate_validation_result,
+    build_phase1_risk_findings,
     build_tie_breaker_metrics,
     compute_phase1_validation_score,
     evaluate_behavior_quality_rules,
@@ -441,6 +442,29 @@ class Phase1CodebookEvaluator:
             val_oracle_computation=oracle_computation,
             label_computation=label_computation,
         )
+        oracle_payload = (
+            oracle_computation.extra_payload
+            if isinstance(
+                oracle_computation.extra_payload,
+                Phase1OracleProfitabilityPayload,
+            )
+            else None
+        )
+        label_payload = (
+            label_computation.extra_payload
+            if isinstance(
+                label_computation.extra_payload,
+                Phase1LabelPredictabilityPayload,
+            )
+            else None
+        )
+        risk_findings = build_phase1_risk_findings(
+            layers=layers,
+            code_diagnostics=behavior_computation.code_diagnostics,
+            drift_diagnostics=drift_diagnostics,
+            oracle_profitability_payload=oracle_payload,
+            label_predictability_payload=label_payload,
+        )
 
         return aggregate_validation_result(
             checkpoint_id=checkpoint_id,
@@ -452,6 +476,7 @@ class Phase1CodebookEvaluator:
             drift_diagnostics=drift_diagnostics,
             score=score,
             tie_breaker_metrics=tie_breaker_metrics,
+            risk_findings=risk_findings,
             teacher_quality_payload=(
                 teacher_computation.extra_payload
                 if isinstance(
@@ -473,22 +498,8 @@ class Phase1CodebookEvaluator:
                 )
                 else None
             ),
-            oracle_profitability_payload=(
-                oracle_computation.extra_payload
-                if isinstance(
-                    oracle_computation.extra_payload,
-                    Phase1OracleProfitabilityPayload,
-                )
-                else None
-            ),
-            label_predictability_payload=(
-                label_computation.extra_payload
-                if isinstance(
-                    label_computation.extra_payload,
-                    Phase1LabelPredictabilityPayload,
-                )
-                else None
-            ),
+            oracle_profitability_payload=oracle_payload,
+            label_predictability_payload=label_payload,
         )
 
     def _build_drift_diagnostics(

@@ -56,6 +56,9 @@ MetricDirection = Literal["greater_is_better", "less_is_better", "between"]
 MetricThresholdValue = float | tuple[float, float] | None
 """机器可读阈值；区间阈值使用 ``(lower, upper)``。"""
 
+RiskSeverity = Literal["info", "warn", "fail"]
+"""checkpoint 级跨层风险定位严重级别。"""
+
 
 @dataclass(frozen=True)
 class Phase1MetricResult:
@@ -143,6 +146,94 @@ def _metric_threshold_value_from_payload(value: Any) -> MetricThresholdValue:
             return None
         return (float(value[0]), float(value[1]))
     return float(value)
+
+
+@dataclass(frozen=True)
+class Phase1RiskFinding:
+    """checkpoint 级跨层风险定位结果。
+
+    功能说明:
+        把 hard gate metric、drift diagnostic、code diagnostic 和 layer payload
+        中的异常信号合并成 report/审计可直接消费的行动项。
+
+    设计边界:
+        - 不参与 hard gate pass/fail；
+        - 不重新计算底层 raw metrics；
+        - 只引用已经存在的 metric、code 和 morphology-motif pair 证据。
+    """
+
+    # 风险等级。fail 表示已经阻断 hard gate，warn 表示需要排查，info 表示边界风险。
+    severity: RiskSeverity
+
+    # 简短风险标题。
+    title: str
+
+    # 风险主因说明。
+    reason: str
+
+    # 关联 metric 稳定名称。
+    related_metrics: tuple[str, ...] = ()
+
+    # 关联 code id。
+    related_codes: tuple[int, ...] = ()
+
+    # 关联 morphology-motif pair 字符串。
+    related_pairs: tuple[str, ...] = ()
+
+    # 建议动作。
+    recommended_action: str = ""
+
+    def __post_init__(self) -> None:
+        """标准化 tuple 字段，保证落盘结构稳定。"""
+
+        object.__setattr__(
+            self,
+            "related_metrics",
+            tuple(str(metric) for metric in self.related_metrics),
+        )
+        object.__setattr__(
+            self,
+            "related_codes",
+            tuple(int(code_id) for code_id in self.related_codes),
+        )
+        object.__setattr__(
+            self,
+            "related_pairs",
+            tuple(str(pair) for pair in self.related_pairs),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为 checkpoint/report 可保存的 dict。"""
+
+        return {
+            "severity": self.severity,
+            "title": self.title,
+            "reason": self.reason,
+            "related_metrics": list(self.related_metrics),
+            "related_codes": list(self.related_codes),
+            "related_pairs": list(self.related_pairs),
+            "recommended_action": self.recommended_action,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1RiskFinding":
+        """从 dict 恢复 risk finding。"""
+
+        return cls(
+            severity=payload["severity"],  # type: ignore[arg-type]
+            title=str(payload["title"]),
+            reason=str(payload["reason"]),
+            related_metrics=tuple(
+                str(metric) for metric in payload.get("related_metrics", ())
+            ),
+            related_codes=tuple(
+                int(code_id) for code_id in payload.get("related_codes", ())
+            ),
+            related_pairs=tuple(
+                str(pair) for pair in payload.get("related_pairs", ())
+            ),
+            recommended_action=str(payload.get("recommended_action", "")),
+        )
 
 
 @dataclass(frozen=True)
@@ -240,6 +331,9 @@ class Phase1ValidationResult:
     # score 接近时的决胜指标。
     tie_breaker_metrics: Phase1TieBreakerMetrics
 
+    # checkpoint 级跨层风险定位。
+    risk_findings: tuple[Phase1RiskFinding, ...] = ()
+
     # 第零层 teacher quality 中间 payload，用于审计 DP/flat return 明细。
     teacher_quality_payload: Phase1TeacherQualityPayload | None = None
 
@@ -279,6 +373,9 @@ class Phase1ValidationResult:
                 for name, result in self.drift_diagnostics.items()
             },
             "tie_breaker_metrics": self.tie_breaker_metrics.to_dict(),
+            "risk_findings": [
+                finding.to_dict() for finding in self.risk_findings
+            ],
             "teacher_quality_payload": (
                 self.teacher_quality_payload.to_dict()
                 if self.teacher_quality_payload is not None
@@ -352,6 +449,10 @@ class Phase1ValidationResult:
             tie_breaker_metrics=Phase1TieBreakerMetrics.from_dict(
                 payload["tie_breaker_metrics"]
             ),
+            risk_findings=tuple(
+                Phase1RiskFinding.from_dict(finding)
+                for finding in payload.get("risk_findings", ())
+            ),
             teacher_quality_payload=(
                 Phase1TeacherQualityPayload.from_dict(teacher_payload)
                 if (teacher_payload := payload.get("teacher_quality_payload"))
@@ -390,7 +491,9 @@ __all__ = [
     "MetricThresholdValue",
     "Phase1LayerResult",
     "Phase1MetricResult",
+    "Phase1RiskFinding",
     "Phase1ValidationResult",
+    "RiskSeverity",
 ]
 
 

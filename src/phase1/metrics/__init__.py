@@ -5,7 +5,9 @@ from .phase1_metric_results import (
     MetricThresholdValue,
     Phase1LayerResult,
     Phase1MetricResult,
+    Phase1RiskFinding,
     Phase1ValidationResult,
+    RiskSeverity,
 )
 from .phase1_validation_data_schema import (
     CodeAssignmentSnapshot,
@@ -71,6 +73,7 @@ from .phase1_validation_score import (
     get_phase1_validation_score_value,
     scores_are_tied,
 )
+from .phase1_validation_risk_findings import build_phase1_risk_findings
 
 __all__ = [
     "CodeAssignmentSnapshot",
@@ -80,6 +83,7 @@ __all__ = [
     "MetricThresholdValue",
     "Phase1LayerResult",
     "Phase1MetricResult",
+    "Phase1RiskFinding",
     "Phase1Metrics",
     "Phase1BehaviorQualityMetrics",
     "Phase1BehaviorQualityPayload",
@@ -109,8 +113,10 @@ __all__ = [
     "Phase1ValidationScoreLike",
     "Phase1ValidationScoreWeights",
     "Phase1VQInternalThresholds",
+    "RiskSeverity",
     "aggregate_validation_result",
     "build_tie_breaker_metrics",
+    "build_phase1_risk_findings",
     "compare_phase1_tie_breaker",
     "compute_behavior_structure_score",
     "compute_codebook_health_score",

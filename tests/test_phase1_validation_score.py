@@ -11,6 +11,7 @@ from src.phase1.metrics import (
     Phase1LabelPredictabilityPayload,
     Phase1OracleProfitabilityPayload,
     Phase1PerCodeProfitability,
+    Phase1RiskFinding,
     Phase1TeacherQualityPayload,
     Phase1ValidationScore,
     Phase1ValidationScoreWeights,
@@ -94,11 +95,13 @@ def test_phase1_validation_score_round_trips_and_exposes_total() -> None:
 def test_phase1_validation_result_reads_legacy_float_score() -> None:
     payload = _validation_result().to_dict()
     payload["score"] = 0.75
+    payload.pop("risk_findings")
 
     validation = Phase1ValidationResult.from_dict(payload)
 
     assert isinstance(validation.score, Phase1ValidationScore)
     assert validation.score.total_score == 0.75
+    assert validation.risk_findings == ()
 
 
 def test_phase1_validation_result_round_trips_layer_payloads() -> None:
@@ -155,6 +158,17 @@ def test_phase1_validation_result_round_trips_layer_payloads() -> None:
             probe_confusion_matrix=((2, 1), (0, 3)),
             probe_seed=13,
         ),
+        risk_findings=(
+            Phase1RiskFinding(
+                severity="warn",
+                title="Code 0 risk",
+                reason="decoded return is weak",
+                related_metrics=("decoded_mean_advantage",),
+                related_codes=(0,),
+                related_pairs=("uptrend:long_hold",),
+                recommended_action="inspect code 0 samples",
+            ),
+        ),
     )
 
     payload = validation.to_dict()
@@ -169,6 +183,7 @@ def test_phase1_validation_result_round_trips_layer_payloads() -> None:
     ]
     assert payload["oracle_profitability_payload"]["random_seed"] == 7
     assert payload["label_predictability_payload"]["probe_seed"] == 13
+    assert payload["risk_findings"][0]["related_codes"] == [0]
     assert isinstance(restored.teacher_quality_payload, Phase1TeacherQualityPayload)
     assert isinstance(restored.vq_internal_payload, Phase1VQInternalPayload)
     assert isinstance(restored.behavior_quality_payload, Phase1BehaviorQualityPayload)
@@ -180,3 +195,5 @@ def test_phase1_validation_result_round_trips_layer_payloads() -> None:
         restored.label_predictability_payload,
         Phase1LabelPredictabilityPayload,
     )
+    assert isinstance(restored.risk_findings[0], Phase1RiskFinding)
+    assert restored.risk_findings[0].related_pairs == ("uptrend:long_hold",)

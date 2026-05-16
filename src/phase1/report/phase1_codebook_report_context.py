@@ -10,6 +10,7 @@ from ..metrics import (
     Phase1CodeDiagnostic,
     Phase1LayerResult,
     Phase1MetricResult,
+    Phase1RiskFinding,
     Phase1ValidationScore,
     Phase1VQInternalPayload,
 )
@@ -73,6 +74,10 @@ class Phase1CodebookReportContextBuilder:
             str(name): Phase1MetricResult.from_dict(item)
             for name, item in validation.get("drift_diagnostics", {}).items()
         }
+        risk_findings = tuple(
+            Phase1RiskFinding.from_dict(item)
+            for item in validation.get("risk_findings", ())
+        )
         vq_internal_payload = self._vq_internal_payload(
             validation.get("vq_internal_payload")
         )
@@ -95,6 +100,7 @@ class Phase1CodebookReportContextBuilder:
                 "score": _format_value(summary.get("score")),
                 "failed_layers": failed_text,
                 "code_diagnostic_count": str(summary.get("code_diagnostic_count", 0)),
+                "risk_finding_count": str(summary.get("risk_finding_count", 0)),
                 "badge_class": _badge_class(passed),
                 "status_label": "PASS" if passed else "FAIL",
             },
@@ -119,6 +125,10 @@ class Phase1CodebookReportContextBuilder:
             "drift_diagnostics": [
                 self._build_metric_context(metric)
                 for metric in drift_diagnostics.values()
+            ],
+            "risk_findings": [
+                self._build_risk_finding_context(finding)
+                for finding in risk_findings
             ],
             "config_rows": self._build_mapping_rows(config),
         }
@@ -206,6 +216,25 @@ class Phase1CodebookReportContextBuilder:
             }
             for code_id, occupancy in enumerate(distribution)
         ]
+
+    def _build_risk_finding_context(
+        self,
+        finding: Phase1RiskFinding,
+    ) -> JsonObject:
+        """构建单个 risk finding 的模板上下文。"""
+
+        return {
+            "severity": finding.severity,
+            "badge_class": "fail" if finding.severity == "fail" else "warn",
+            "title": finding.title,
+            "reason": finding.reason,
+            "related_metrics": ", ".join(finding.related_metrics) or "-",
+            "related_codes": (
+                ", ".join(str(code_id) for code_id in finding.related_codes) or "-"
+            ),
+            "related_pairs": ", ".join(finding.related_pairs) or "-",
+            "recommended_action": finding.recommended_action,
+        }
 
     def _vq_internal_payload(self, payload: Any) -> Phase1VQInternalPayload | None:
         """从 report payload 恢复第一层 VQ internal payload。"""

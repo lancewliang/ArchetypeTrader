@@ -33,6 +33,7 @@ from collections.abc import Mapping, Sequence
 from .phase1_metric_results import (
     Phase1LayerResult,
     Phase1MetricResult,
+    Phase1RiskFinding,
     Phase1ValidationResult,
 )
 from .phase1_validation_score import Phase1ValidationScoreLike
@@ -74,6 +75,7 @@ def aggregate_validation_result(
     drift_diagnostics: Mapping[str, Phase1MetricResult],
     score: Phase1ValidationScoreLike,
     tie_breaker_metrics: Phase1TieBreakerMetrics,
+    risk_findings: Sequence[Phase1RiskFinding] = (),
     teacher_quality_payload: Phase1TeacherQualityPayload | None = None,
     vq_internal_payload: Phase1VQInternalPayload | None = None,
     behavior_quality_payload: Phase1BehaviorQualityPayload | None = None,
@@ -107,6 +109,7 @@ def aggregate_validation_result(
         code_diagnostics=tuple(code_diagnostics),
         drift_diagnostics=dict(drift_diagnostics),
         tie_breaker_metrics=tie_breaker_metrics,
+        risk_findings=tuple(risk_findings),
         teacher_quality_payload=teacher_quality_payload,
         vq_internal_payload=vq_internal_payload,
         behavior_quality_payload=behavior_quality_payload,
