@@ -29,6 +29,7 @@ from ...metrics import (
     CodeAssignmentSnapshot,
     Phase1EvaluationSnapshot,
     Phase1LayerComputation,
+    Phase1VQInternalPayload,
     Phase1VQInternalMetrics,
     Phase1ValidationRuntimeConfig,
 )
@@ -491,6 +492,17 @@ def compute_vq_internal_metrics(
         assignment_history,
         runtime_config.churn_window_epochs,
     )
+    payload = Phase1VQInternalPayload(
+        code_distribution=tuple(float(value) for value in probabilities),
+        active_codes=tuple(
+            int(code_id) for code_id in current_assignment.active_codes
+        ),
+        current_assignment=current_assignment,
+        assignment_churn_by_epoch=assignment_churn_by_epoch,
+        codebook_size=num_codes,
+        codebook_size_available=num_codes > 0,
+        code_distribution_sample_count=int(code_ids.size),
+    )
 
     action_accuracy = compute_action_accuracy(
         val_snapshot.demo_actions,
@@ -568,22 +580,12 @@ def compute_vq_internal_metrics(
         if np.isfinite(quantization_distance)
         and np.isfinite(train_quantization_distance)
         else _nan(),
-        code_distribution=tuple(float(value) for value in probabilities),
-        active_codes=tuple(
-            int(code_id) for code_id in current_assignment.active_codes
-        ),
     )
     return Phase1LayerComputation(
         layer_id=1,
         layer_name="vq_internal",
         metrics=metrics,
-        extra_payload={
-            "current_assignment": current_assignment,
-            "assignment_churn_by_epoch": assignment_churn_by_epoch,
-            "codebook_size": num_codes,
-            "codebook_size_available": num_codes > 0,
-            "code_distribution_sample_count": int(code_ids.size),
-        },
+        extra_payload=payload,
     )
 
 

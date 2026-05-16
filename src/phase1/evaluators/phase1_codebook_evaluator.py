@@ -51,6 +51,7 @@ from ..metrics import (
     Phase1ValidationResult,
     Phase1ValidationRuntimeConfig,
     Phase1ValidationScoreWeights,
+    Phase1VQInternalPayload,
     Phase1VQInternalThresholds,
     aggregate_validation_result,
     build_tie_breaker_metrics,
@@ -339,7 +340,12 @@ class Phase1CodebookEvaluator:
             assignment_history=assignment_history,
             runtime_config=self.runtime_config,
         )
-        current_assignment = vq_computation.extra_payload.get("current_assignment")
+        vq_payload = vq_computation.extra_payload
+        current_assignment = (
+            vq_payload.current_assignment
+            if isinstance(vq_payload, Phase1VQInternalPayload)
+            else vq_payload.get("current_assignment")
+        )
         self.last_assignment_snapshot = (
             current_assignment
             if isinstance(current_assignment, CodeAssignmentSnapshot)

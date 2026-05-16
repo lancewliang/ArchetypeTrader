@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass, fields
 from typing import TYPE_CHECKING, Any
 
@@ -11,7 +11,150 @@ from src.utils import _dataclass_from_mapping
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
-    from .phase1_validation_data_schema import Phase1ValidationMetrics
+    from .phase1_validation_data_schema import (
+        CodeAssignmentSnapshot,
+        Phase1ValidationMetrics,
+    )
+
+
+@dataclass(frozen=True)
+class Phase1VQInternalPayload(Mapping[str, object]):
+    """第一层 VQ 内部计算的中间 payload。
+
+    使用场景:
+        保存 code 使用分布、active codes、当前 assignment snapshot 以及
+        assignment churn 诊断等非 hard-gate raw metrics 的辅助产物。
+        该对象实现 ``Mapping``，用于兼容现有 ``extra_payload.get(...)`` 调用。
+    """
+
+    # validation split 的 code 使用分布，索引为 code id，值为 occupancy probability。
+    code_distribution: tuple[float, ...]
+
+    # validation split 中达到 active occupancy 阈值的 code id。
+    active_codes: tuple[int, ...]
+
+    # 当前 validation split 的 sample -> code assignment 快照。
+    current_assignment: "CodeAssignmentSnapshot"
+
+    # 最近窗口内按 epoch 记录的 assignment churn。
+    assignment_churn_by_epoch: Mapping[int, float]
+
+    # 当前 codebook size。
+    codebook_size: int
+
+    # 当前 codebook size 是否可用。
+    codebook_size_available: bool
+
+    # 参与 code distribution 统计的样本数。
+    code_distribution_sample_count: int
+
+    def __post_init__(self) -> None:
+        """标准化 payload 中的 tuple/dict 标量类型。"""
+
+        object.__setattr__(
+            self,
+            "code_distribution",
+            tuple(float(value) for value in self.code_distribution),
+        )
+        object.__setattr__(
+            self,
+            "active_codes",
+            tuple(int(code_id) for code_id in self.active_codes),
+        )
+        object.__setattr__(
+            self,
+            "assignment_churn_by_epoch",
+            {
+                int(epoch): float(churn)
+                for epoch, churn in self.assignment_churn_by_epoch.items()
+            },
+        )
+        object.__setattr__(self, "codebook_size", int(self.codebook_size))
+        object.__setattr__(
+            self,
+            "codebook_size_available",
+            bool(self.codebook_size_available),
+        )
+        object.__setattr__(
+            self,
+            "code_distribution_sample_count",
+            int(self.code_distribution_sample_count),
+        )
+
+    def _mapping(self) -> dict[str, object]:
+        """返回兼容旧 ``extra_payload`` 字典访问的视图。"""
+
+        return {
+            "code_distribution": self.code_distribution,
+            "active_codes": self.active_codes,
+            "current_assignment": self.current_assignment,
+            "assignment_churn_by_epoch": self.assignment_churn_by_epoch,
+            "codebook_size": self.codebook_size,
+            "codebook_size_available": self.codebook_size_available,
+            "code_distribution_sample_count": self.code_distribution_sample_count,
+        }
+
+    def __getitem__(self, key: str) -> object:
+        """按旧 payload key 读取属性值。"""
+
+        return self._mapping()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        """迭代旧 payload key。"""
+
+        return iter(self._mapping())
+
+    def __len__(self) -> int:
+        """返回 payload key 数量。"""
+
+        return len(self._mapping())
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为可落盘 dict。"""
+
+        return {
+            "code_distribution": [float(value) for value in self.code_distribution],
+            "active_codes": [int(code_id) for code_id in self.active_codes],
+            "current_assignment": self.current_assignment.to_dict(),
+            "assignment_churn_by_epoch": {
+                int(epoch): float(churn)
+                for epoch, churn in self.assignment_churn_by_epoch.items()
+            },
+            "codebook_size": self.codebook_size,
+            "codebook_size_available": self.codebook_size_available,
+            "code_distribution_sample_count": self.code_distribution_sample_count,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1VQInternalPayload":
+        """从 dict 恢复第一层 VQ 内部 payload。"""
+
+        from .phase1_validation_data_schema import CodeAssignmentSnapshot
+
+        current_assignment = payload["current_assignment"]
+        if not isinstance(current_assignment, CodeAssignmentSnapshot):
+            current_assignment = CodeAssignmentSnapshot.from_dict(current_assignment)
+        return cls(
+            code_distribution=tuple(
+                float(value) for value in payload.get("code_distribution", ())
+            ),
+            active_codes=tuple(
+                int(code_id) for code_id in payload.get("active_codes", ())
+            ),
+            current_assignment=current_assignment,
+            assignment_churn_by_epoch={
+                int(epoch): float(churn)
+                for epoch, churn in payload.get(
+                    "assignment_churn_by_epoch",
+                    {},
+                ).items()
+            },
+            codebook_size=int(payload["codebook_size"]),
+            codebook_size_available=bool(payload["codebook_size_available"]),
+            code_distribution_sample_count=int(
+                payload["code_distribution_sample_count"]
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -66,21 +209,10 @@ class Phase1VQInternalMetrics:
     # 旧 checkpoint 可能没有该字段，因此给 NaN 默认值。
     quantization_distance_gap: float = float("nan")
 
-    # validation split 的 code 使用分布，索引为 code id，值为 occupancy probability。
-    code_distribution: tuple[float, ...] = ()
-
-    # validation split 中达到 active occupancy 阈值的 code id。
-    active_codes: tuple[int, ...] = ()
-
     def to_dict(self) -> dict[str, Any]:
         """序列化为 dict，供 checkpoint/report 落盘。"""
 
-        payload = asdict(self)
-        payload["code_distribution"] = [
-            float(value) for value in self.code_distribution
-        ]
-        payload["active_codes"] = [int(code_id) for code_id in self.active_codes]
-        return payload
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1VQInternalMetrics":
@@ -88,12 +220,6 @@ class Phase1VQInternalMetrics:
 
         field_names = {field.name for field in fields(cls)}
         values = {key: value for key, value in payload.items() if key in field_names}
-        values["code_distribution"] = tuple(
-            float(value) for value in payload.get("code_distribution", ())
-        )
-        values["active_codes"] = tuple(
-            int(code_id) for code_id in payload.get("active_codes", ())
-        )
         return cls(**values)
 
 
@@ -354,6 +480,7 @@ def compute_codebook_health_score(metrics: Phase1ValidationMetrics) -> float:
 __all__ = [
     "compute_codebook_health_score",
     "Phase1VQInternalMetrics",
+    "Phase1VQInternalPayload",
     "Phase1VQInternalThresholds",
     "evaluate_vq_internal_rules",
 ]

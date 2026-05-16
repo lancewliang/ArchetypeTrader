@@ -47,6 +47,7 @@ from .phase1_validation_teacher_quality import (
     evaluate_teacher_quality_rules,
 )
 from .phase1_validation_vq_internal import (
+    Phase1VQInternalPayload,
     Phase1VQInternalMetrics,
     Phase1VQInternalThresholds,
     compute_codebook_health_score,
@@ -86,6 +87,7 @@ __all__ = [
     "Phase1TeacherQualityMetrics",
     "Phase1TeacherQualityThresholds",
     "Phase1TieBreakerMetrics",
+    "Phase1VQInternalPayload",
     "Phase1VQInternalMetrics",
     "Phase1ValidationMetrics",
     "Phase1ValidationResult",
