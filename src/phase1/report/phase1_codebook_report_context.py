@@ -10,6 +10,8 @@ from ..metrics import (
     Phase1CodeDiagnostic,
     Phase1LayerResult,
     Phase1MetricResult,
+    Phase1ValidationScore,
+    Phase1VQInternalPayload,
 )
 
 
@@ -71,6 +73,10 @@ class Phase1CodebookReportContextBuilder:
             str(name): Phase1MetricResult.from_dict(item)
             for name, item in validation.get("drift_diagnostics", {}).items()
         }
+        vq_internal_payload = self._vq_internal_payload(
+            validation.get("vq_internal_payload")
+        )
+        validation_score = self._validation_score(validation.get("score"))
 
         passed = bool(summary.get("passed", False))
         failed_layers = summary.get("failed_layers", [])
@@ -98,14 +104,18 @@ class Phase1CodebookReportContextBuilder:
                 for item in code_diagnostics
             ],
             "code_distribution": self._build_code_distribution_context(
-                validation.get("metrics", {})
-            ),
+                vq_internal_payload
+            )
+            if vq_internal_payload is not None
+            else [],
             "tie_breaker_rows": self._build_mapping_rows(
                 validation.get("tie_breaker_metrics", {})
             ),
             "score_breakdown_rows": self._build_score_breakdown_rows(
-                validation.get("score")
-            ),
+                validation_score
+            )
+            if validation_score is not None
+            else [],
             "drift_diagnostics": [
                 self._build_metric_context(metric)
                 for metric in drift_diagnostics.values()
@@ -166,24 +176,12 @@ class Phase1CodebookReportContextBuilder:
 
     def _build_code_distribution_context(
         self,
-        metrics: Mapping[str, Any],
+        payload: Phase1VQInternalPayload,
     ) -> list[JsonObject]:
         """构建 codebook 使用分布的模板上下文。"""
 
-        vq_metrics = metrics.get("vq_internal", {})
-        if not isinstance(vq_metrics, Mapping):
-            return []
-
-        raw_distribution = vq_metrics.get("code_distribution", ())
-        raw_active_codes = vq_metrics.get("active_codes", ())
-        try:
-            distribution = [float(value) for value in raw_distribution]
-        except (TypeError, ValueError):
-            return []
-        try:
-            active_codes = {int(code_id) for code_id in raw_active_codes}
-        except (TypeError, ValueError):
-            active_codes = set()
+        distribution = [float(value) for value in payload.code_distribution]
+        active_codes = {int(code_id) for code_id in payload.active_codes}
 
         return [
             {
@@ -206,6 +204,15 @@ class Phase1CodebookReportContextBuilder:
             for code_id, occupancy in enumerate(distribution)
         ]
 
+    def _vq_internal_payload(self, payload: Any) -> Phase1VQInternalPayload | None:
+        """从 report payload 恢复第一层 VQ internal payload。"""
+
+        if isinstance(payload, Phase1VQInternalPayload):
+            return payload
+        if isinstance(payload, Mapping):
+            return Phase1VQInternalPayload.from_dict(payload)
+        return None
+
     def _build_mapping_rows(self, payload: Mapping[str, Any]) -> list[JsonObject]:
         """构建普通 key-value 表格上下文。"""
 
@@ -214,29 +221,34 @@ class Phase1CodebookReportContextBuilder:
             for key, value in payload.items()
         ]
 
-    def _build_score_breakdown_rows(self, payload: Any) -> list[JsonObject]:
+    def _build_score_breakdown_rows(
+        self,
+        score: Phase1ValidationScore,
+    ) -> list[JsonObject]:
         """构建综合 score 子项拆解表格上下文。"""
 
-        if not isinstance(payload, Mapping):
-            return []
-        components = payload.get("components", ())
-        if not isinstance(components, list | tuple):
-            return []
-        rows: list[JsonObject] = []
-        for component in components:
-            if not isinstance(component, Mapping):
-                continue
-            rows.append(
-                {
-                    "name": str(component.get("name", "-")),
-                    "value": _format_value(component.get("value")),
-                    "weight": _format_value(component.get("weight")),
-                    "weighted_value": _format_value(
-                        component.get("weighted_value")
-                    ),
-                }
-            )
-        return rows
+        return [
+            {
+                "name": component.name,
+                "value": _format_value(component.value),
+                "weight": _format_value(component.weight),
+                "weighted_value": _format_value(component.weighted_value),
+            }
+            for component in score.components
+        ]
+
+    def _validation_score(self, payload: Any) -> Phase1ValidationScore | None:
+        """从 report payload 恢复 Phase I validation score。"""
+
+        if payload is None:
+            return None
+        if isinstance(payload, Phase1ValidationScore):
+            return payload
+        if isinstance(payload, Mapping):
+            return Phase1ValidationScore.from_dict(payload)
+        if isinstance(payload, int | float):
+            return Phase1ValidationScore.from_float(float(payload))
+        return None
 
 
 __all__ = ["Phase1CodebookReportContextBuilder"]

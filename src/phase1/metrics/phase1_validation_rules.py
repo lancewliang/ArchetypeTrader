@@ -46,6 +46,7 @@ from .phase1_validation_label_predictability import evaluate_label_predictabilit
 from .phase1_validation_oracle_profitability import evaluate_oracle_profitability_rules
 from .phase1_validation_teacher_quality import evaluate_teacher_quality_rules
 from .phase1_validation_vq_internal import evaluate_vq_internal_rules
+from .phase1_validation_vq_internal import Phase1VQInternalPayload
 
 
 def aggregate_validation_result(
@@ -59,6 +60,7 @@ def aggregate_validation_result(
     drift_diagnostics: Mapping[str, Phase1MetricResult],
     score: Phase1ValidationScoreLike,
     tie_breaker_metrics: Phase1TieBreakerMetrics,
+    vq_internal_payload: Phase1VQInternalPayload | None = None,
 ) -> Phase1ValidationResult:
     """聚合 checkpoint 级 validation result。
 
@@ -87,6 +89,7 @@ def aggregate_validation_result(
         code_diagnostics=tuple(code_diagnostics),
         drift_diagnostics=dict(drift_diagnostics),
         tie_breaker_metrics=tie_breaker_metrics,
+        vq_internal_payload=vq_internal_payload,
     )
 
 

@@ -448,6 +448,9 @@ class Phase1CodebookEvaluator:
             drift_diagnostics=drift_diagnostics,
             score=score,
             tie_breaker_metrics=tie_breaker_metrics,
+            vq_internal_payload=(
+                vq_payload if isinstance(vq_payload, Phase1VQInternalPayload) else None
+            ),
         )
 
     def _build_drift_diagnostics(

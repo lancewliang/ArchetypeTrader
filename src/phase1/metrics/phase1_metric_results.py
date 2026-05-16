@@ -23,6 +23,7 @@ from .phase1_validation_data_schema import (
     Phase1TieBreakerMetrics,
     Phase1ValidationMetrics,
 )
+from .phase1_validation_vq_internal import Phase1VQInternalPayload
 from .phase1_validation_score import (
     Phase1ValidationScore,
     Phase1ValidationScoreLike
@@ -189,6 +190,9 @@ class Phase1ValidationResult:
     # score 接近时的决胜指标。
     tie_breaker_metrics: Phase1TieBreakerMetrics
 
+    # 第一层 VQ 内部中间 payload，用于 report 展示 code distribution 等非 gate 字段。
+    vq_internal_payload: Phase1VQInternalPayload | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为 checkpoint/report 可保存的嵌套 dict。"""
 
@@ -213,6 +217,11 @@ class Phase1ValidationResult:
                 for name, result in self.drift_diagnostics.items()
             },
             "tie_breaker_metrics": self.tie_breaker_metrics.to_dict(),
+            "vq_internal_payload": (
+                self.vq_internal_payload.to_dict()
+                if self.vq_internal_payload is not None
+                else None
+            ),
         }
 
     def to_flat_dict(self) -> dict[str, int | float | bool | None]:
@@ -260,6 +269,11 @@ class Phase1ValidationResult:
             },
             tie_breaker_metrics=Phase1TieBreakerMetrics.from_dict(
                 payload["tie_breaker_metrics"]
+            ),
+            vq_internal_payload=(
+                Phase1VQInternalPayload.from_dict(vq_payload)
+                if (vq_payload := payload.get("vq_internal_payload")) is not None
+                else None
             ),
         )
 

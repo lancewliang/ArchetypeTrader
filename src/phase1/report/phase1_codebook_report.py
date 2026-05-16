@@ -99,12 +99,13 @@ class Phase1CodebookReport:
 
         generated_at = datetime.now(UTC).isoformat()
         validation_payload = validation_result.to_dict()
+        score = validation_result.score
         summary = {
             "checkpoint_id": validation_result.checkpoint_id,
             "stage": validation_result.stage,
             "epoch": validation_result.epoch,
             "passed": validation_result.passed,
-            "score": validation_result.score.total_score,
+            "score": score.total_score if hasattr(score, "total_score") else score,
             "failed_layers": list(validation_result.failed_layers),
             "failed_layer_count": len(validation_result.failed_layers),
             "layer_count": len(validation_result.layers),

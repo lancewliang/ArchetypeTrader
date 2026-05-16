@@ -118,11 +118,31 @@ def _payload() -> dict[str, object]:
                 "risk_adjusted_return": 1.23456789,
                 "active_code_ratio": True,
             },
-            "metrics": {
-                "vq_internal": {
-                    "code_distribution": [0.5, 0.25, 0.0],
+            "score": {
+                "total_score": 0.87654321,
+                "components": [
+                    {
+                        "name": "teacher_quality",
+                        "value": 0.5,
+                        "weight": 0.1,
+                        "weighted_value": 0.05,
+                    }
+                ],
+            },
+            "vq_internal_payload": {
+                "code_distribution": [0.5, 0.25, 0.0],
+                "active_codes": [0, 1],
+                "current_assignment": {
+                    "epoch": 7,
+                    "split": "val",
+                    "sample_ids": [0, 1, 2],
+                    "code_ids": [0, 1, 0],
                     "active_codes": [0, 1],
                 },
+                "assignment_churn_by_epoch": {},
+                "codebook_size": 3,
+                "codebook_size_available": True,
+                "code_distribution_sample_count": 3,
             },
         },
         "config": {"codebook_size": 32},
@@ -209,4 +229,17 @@ def test_build_html_context_includes_code_distribution_rows() -> None:
             "badge_class": "warn",
             "status_label": "INACTIVE",
         },
+    ]
+
+
+def test_build_html_context_includes_score_breakdown_rows() -> None:
+    context = Phase1CodebookReportContextBuilder().build(_payload())
+
+    assert context["score_breakdown_rows"] == [
+        {
+            "name": "teacher_quality",
+            "value": "0.5",
+            "weight": "0.1",
+            "weighted_value": "0.05",
+        }
     ]
