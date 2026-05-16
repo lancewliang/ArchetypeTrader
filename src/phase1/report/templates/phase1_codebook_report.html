@@ -332,6 +332,12 @@
       padding: 14px 16px 16px;
     }
 
+    .threshold-layer .table-scroll {
+      height: auto;
+      max-height: none;
+      overflow: visible;
+    }
+
     .threshold-layer + .threshold-layer {
       border-top: 1px solid var(--soft-line);
     }
@@ -548,6 +554,12 @@
     .risk-grid {
       grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
       align-items: start;
+    }
+
+    .drift-diagnostics-table {
+      height: auto;
+      max-height: none;
+      overflow: visible;
     }
 
     .risk-findings-panel {
@@ -893,7 +905,7 @@
           <h2><span class="metric-with-tip">Train/Val Drift 诊断 <span class="note">Drift Diagnostics</span><span class="tip" tabindex="0" data-tip="这些指标不一定直接淘汰 checkpoint，但用于解释训练集和验证集行为差异。drift 高时，可能是市场形态分布、code usage 或 motif 分布发生迁移。">?</span></span></h2>
           <span class="note">train/validation 分布漂移 warning</span>
         </div>
-        <div class="table-scroll">
+        <div class="table-scroll drift-diagnostics-table">
           <table>
             <thead>
               <tr>
