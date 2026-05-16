@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -222,6 +222,57 @@
       font-size: 12px;
     }
 
+    .metric-with-tip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      position: relative;
+    }
+
+    .tip {
+      width: 17px;
+      height: 17px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      color: #475467;
+      background: #eef2f7;
+      border: 1px solid #d0d5dd;
+      font-size: 11px;
+      font-weight: 800;
+      cursor: help;
+    }
+
+    .tip::after {
+      content: attr(data-tip);
+      position: absolute;
+      z-index: 20;
+      left: 0;
+      top: calc(100% + 8px);
+      width: min(360px, calc(100vw - 48px));
+      padding: 10px 12px;
+      border-radius: 6px;
+      background: #111827;
+      color: #fff;
+      box-shadow: 0 10px 24px rgba(16, 24, 40, 0.22);
+      font-size: 12px;
+      line-height: 1.5;
+      font-weight: 500;
+      white-space: normal;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-4px);
+      transition: opacity 0.12s ease, transform 0.12s ease;
+    }
+
+    .tip:hover::after,
+    .tip:focus::after {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
     .table-scroll {
       width: 100%;
       overflow-x: auto;
@@ -317,7 +368,7 @@
     <div class="wrap hero">
       <div>
         <h1>{{ header_title }}</h1>
-        <p class="subtitle">Static audit view for Phase I codebook validation gates, diagnostics, profitability, and selector-readiness signals.</p>
+        <p class="subtitle">Phase I codebook validation 静态审计报告：按五层硬阈值、诊断、盈利性和 selector 可学习性信号复盘 checkpoint。</p>
       </div>
       <div class="meta" aria-label="run metadata">
         {% for item in header.meta_items %}
@@ -330,25 +381,28 @@
   <main class="wrap">
     <section class="grid summary-grid" aria-label="summary gates">
       <article class="score-card">
-        <h2>Final Decision</h2>
+        <h2><span class="metric-with-tip">最终选择结论 <span class="note">Final Decision</span><span class="tip" tabindex="0" data-tip="这个结论先看五层 hard gate 是否全部通过，再看综合评分。PASS 只表示该 checkpoint 有资格进入 Phase II 候选，不等同于最终线上策略盈利。">?</span></span></h2>
         <div class="score-value">{{ summary.score }}<small>/1</small></div>
         <div class="decision"><span class="badge {{ summary.badge_class }}">{{ summary.status_label }}</span>Checkpoint {{ summary.checkpoint_id }}</div>
-        <p class="note" style="margin-top:12px;">Stage {{ summary.stage }}, epoch {{ summary.epoch }}. Failed layers: {{ summary.failed_layers }}.</p>
+        <p class="note" style="margin-top:12px;">阶段 {{ summary.stage }}，epoch {{ summary.epoch }}。失败层：{{ summary.failed_layers }}。</p>
       </article>
 
-      {% for layer in layers %}
+      {% for layer in layer_summary_cards %}
       <article class="gate-card">
         <div class="gate-title">
           <div>
             <div class="gate-num">Layer {{ layer.layer_id }}</div>
-            <h3>{{ layer.name }}</h3>
+            <h3><span class="metric-with-tip">{{ layer.title }}<span class="tip" tabindex="0" data-tip="{{ layer.tip }}">?</span></span></h3>
           </div>
           <span class="badge {{ layer.badge_class }}">{{ layer.status_label }}</span>
         </div>
         <div class="gate-main">
-          <div><div class="metric-num">{{ layer.metric_count }}</div><div class="metric-label">metrics</div></div>
-          <div><div class="metric-num">{{ layer.failed_count }}</div><div class="metric-label">failed</div></div>
-          <div><div class="metric-num">{{ layer.status_label }}</div><div class="metric-label">gate</div></div>
+          {% for metric in layer.metrics %}
+          <div>
+            <div class="metric-num"><span class="metric-with-tip">{{ metric.value }}<span class="tip" tabindex="0" data-tip="{{ metric.tip }}">?</span></span></div>
+            <div class="metric-label">{{ metric.label }}</div>
+          </div>
+          {% endfor %}
         </div>
       </article>
       {% endfor %}
@@ -356,20 +410,20 @@
 
     <section class="panel">
       <div class="panel-head">
-        <h2>Validation Metrics</h2>
-        <span class="note">Values, thresholds, signed distance, and rule messages</span>
+        <h2><span class="metric-with-tip">指标阈值明细 <span class="note">Validation Metrics</span><span class="tip" tabindex="0" data-tip="逐项展示 hard gate metric 的当前值、阈值、到阈值的距离和解释。悬停指标名旁的问号可查看该指标的中文含义或失败原因。">?</span></span></h2>
+        <span class="note">当前值、阈值、阈值距离和规则说明</span>
       </div>
       <div class="table-scroll">
         <table>
           <thead>
             <tr>
-              <th>Layer</th>
-              <th>Metric</th>
-              <th class="num">Value</th>
-              <th class="num">Threshold</th>
-              <th class="num">Distance</th>
-              <th>Status</th>
-              <th>Message</th>
+              <th>层 Layer</th>
+              <th>指标 Metric</th>
+              <th class="num">当前值 Value</th>
+              <th class="num">阈值 Threshold</th>
+              <th class="num">距离 Distance</th>
+              <th>状态 Status</th>
+              <th>说明 Message</th>
             </tr>
           </thead>
           <tbody>
@@ -377,7 +431,7 @@
             {% for metric in layer.metrics %}
             <tr>
               <td>{{ layer.name }}</td>
-              <td>{{ metric.name }}</td>
+              <td><span class="metric-with-tip">{{ metric.name }}<span class="tip" tabindex="0" data-tip="{{ metric.message }}">?</span></span></td>
               <td class="num">{{ metric.value }}</td>
               <td class="num">{{ metric.threshold }}</td>
               <td class="num">{{ metric.distance_to_threshold }}</td>
@@ -395,12 +449,12 @@
       {% if score_breakdown_rows %}
       <article class="panel">
         <div class="panel-head">
-          <h2>Score Breakdown</h2>
-          <span class="note">Only used after hard gates pass</span>
+          <h2><span class="metric-with-tip">综合评分拆解 <span class="note">Score Breakdown</span><span class="tip" tabindex="0" data-tip="综合评分只用于 hard gate 全部通过后的 checkpoint 排序。每个 component 先归一化，再乘以权重得到 weighted contribution。">?</span></span></h2>
+          <span class="note">仅用于通过硬阈值后的排序</span>
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Component</th><th class="num">Value</th><th class="num">Weight</th><th class="num">Weighted</th></tr></thead>
+            <thead><tr><th>分项 Component</th><th class="num">分值 Value</th><th class="num">权重 Weight</th><th class="num">加权 Weighted</th></tr></thead>
             <tbody>
               {% for row in score_breakdown_rows %}
               <tr><td>{{ row.name }}</td><td class="num">{{ row.value }}</td><td class="num">{{ row.weight }}</td><td class="num">{{ row.weighted_value }}</td></tr>
@@ -414,12 +468,12 @@
       {% if code_distribution %}
       <article class="panel">
         <div class="panel-head">
-          <h2>Codebook Usage Distribution</h2>
-          <span class="note">Validation split occupancy by code</span>
+          <h2><span class="metric-with-tip">Codebook 使用分布 <span class="note">Usage Distribution</span><span class="tip" tabindex="0" data-tip="展示 validation 样本被分配到各 code 的比例。健康状态是多数 code 都有稳定使用，但没有单个 code 占据过大比例。">?</span></span></h2>
+          <span class="note">validation split 中每个 code 的占用比例</span>
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Code</th><th class="num">Occupancy</th><th>Usage</th><th>Status</th></tr></thead>
+            <thead><tr><th>Code</th><th class="num">占用率 Occupancy</th><th>使用量 Usage</th><th>状态 Status</th></tr></thead>
             <tbody>
               {% for row in code_distribution %}
               <tr>
@@ -439,8 +493,8 @@
     {% if oracle_profitability_kpis %}
     <section class="panel">
       <div class="panel-head">
-        <h2>Oracle-label Profitability KPIs</h2>
-        <span class="note">Assigned-label decoder profitability summary</span>
+        <h2><span class="metric-with-tip">Oracle-label 盈利性 KPI <span class="note">Profitability KPIs</span><span class="tip" tabindex="0" data-tip="这里验证 encoder assigned label 加 frozen decoder 的盈利上界。如果 oracle-label 策略都不赚钱，Phase II selector 很难凭空修复。">?</span></span></h2>
+        <span class="note">assigned-label decoder 盈利摘要</span>
       </div>
       <div class="panel-body kpi-grid">
         {% for kpi in oracle_profitability_kpis %}
@@ -454,20 +508,18 @@
     {% endif %}
 
     <section class="grid two">
-      {% if oracle_cumulative_return_series %}
+      {% if oracle_return_summary_rows %}
       <article class="panel">
         <div class="panel-head">
-          <h2>Oracle-label Cumulative Returns</h2>
-          <span class="note">Cumulative points rendered from per-horizon returns</span>
+          <h2><span class="metric-with-tip">Oracle-label 累计收益 <span class="note">Cumulative Returns</span><span class="tip" tabindex="0" data-tip="曲线由每条 horizon 的 return 累加得到。DP 是 teacher 参照，Decoded 是 assigned label 经 frozen decoder 执行后的收益，Random label 是随机 label 基准，Flat 是空仓基准。">?</span></span></h2>
+          <span class="note">紧凑轨迹摘要，避免长序列撑爆页面</span>
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Series</th><th>Step</th><th class="num">Cumulative Return</th></tr></thead>
+            <thead><tr><th>序列 Series</th><th class="num">最终累计收益 Final</th><th>抽样轨迹 Sampled Trace</th><th class="num">点数 Points</th></tr></thead>
             <tbody>
-              {% for series in oracle_cumulative_return_series %}
-              {% for point in series.points %}
-              <tr><td>{{ series.label }}</td><td>{{ point.step }}</td><td class="num">{{ point.value }}</td></tr>
-              {% endfor %}
+              {% for row in oracle_return_summary_rows %}
+              <tr><td>{{ row.label }}</td><td class="num">{{ row.final_value }}</td><td class="message">{{ row.sampled_values }}</td><td class="num">{{ row.point_count }}</td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -478,12 +530,12 @@
       {% if per_code_profit_series %}
       <article class="panel">
         <div class="panel-head">
-          <h2>Per-code Profitability</h2>
-          <span class="note">Mean decoded advantage by active code</span>
+          <h2><span class="metric-with-tip">Per-code 盈利 <span class="note">Profitability</span><span class="tip" tabindex="0" data-tip="每个 active code 只在被 encoder 分配到该 code 的 validation samples 上统计收益，用于发现整体通过但局部失效的坏 code。">?</span></span></h2>
+          <span class="note">active code 的 mean decoded advantage</span>
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Code</th><th class="num">Mean Advantage</th><th>Status</th></tr></thead>
+            <thead><tr><th>Code</th><th class="num">平均优势 Mean Advantage</th><th>状态 Status</th></tr></thead>
             <tbody>
               {% for row in per_code_profit_series %}
               <tr><td>{{ row.label }}</td><td class="num">{{ row.value }}</td><td><span class="badge {{ row.badge_class }}">{{ row.badge_class }}</span></td></tr>
@@ -498,14 +550,14 @@
     {% if pair_profitability_matrix.rows %}
     <section class="panel">
       <div class="panel-head">
-        <h2>Dominant Pair Profitability Matrix</h2>
-        <span class="note">Morphology by motif, values are mean decoded advantage</span>
+        <h2><span class="metric-with-tip">Dominant Pair 盈利矩阵 <span class="note">Profitability Matrix</span><span class="tip" tabindex="0" data-tip="行是市场形态 morphology，列是交易行为 motif。单元格展示该 morphology/motif 组合下的 mean decoded advantage，用于解释哪些形态-行为组合贡献收益或风险。">?</span></span></h2>
+        <span class="note">行是 morphology，列是 motif，值为 mean decoded advantage</span>
       </div>
       <div class="table-scroll">
         <table>
           <thead>
             <tr>
-              <th>Morphology</th>
+              <th>市场形态 Morphology</th>
               {% for motif in pair_profitability_matrix.motifs %}
               <th class="num">{{ motif }}</th>
               {% endfor %}
@@ -530,15 +582,15 @@
       {% if drift_diagnostics %}
       <article class="panel">
         <div class="panel-head">
-          <h2>Drift Diagnostics</h2>
-          <span class="note">Train/validation drift warnings</span>
+          <h2><span class="metric-with-tip">Train/Val Drift 诊断 <span class="note">Drift Diagnostics</span><span class="tip" tabindex="0" data-tip="这些指标不一定直接淘汰 checkpoint，但用于解释训练集和验证集行为差异。drift 高时，可能是市场形态分布、code usage 或 motif 分布发生迁移。">?</span></span></h2>
+          <span class="note">train/validation 分布漂移 warning</span>
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Metric</th><th class="num">Value</th><th class="num">Threshold</th><th>Status</th></tr></thead>
+            <thead><tr><th>指标 Metric</th><th class="num">值 Value</th><th class="num">警戒 Threshold</th><th>状态 Status</th></tr></thead>
             <tbody>
               {% for metric in drift_diagnostics %}
-              <tr><td>{{ metric.name }}</td><td class="num">{{ metric.value }}</td><td class="num">{{ metric.threshold }}</td><td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td></tr>
+              <tr><td><span class="metric-with-tip">{{ metric.name }}<span class="tip" tabindex="0" data-tip="{{ metric.message }}">?</span></span></td><td class="num">{{ metric.value }}</td><td class="num">{{ metric.threshold }}</td><td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -548,25 +600,25 @@
 
       <article class="panel">
         <div class="panel-head">
-          <h2>Risk Summary</h2>
+          <h2><span class="metric-with-tip">失败风险定位 <span class="note">Risk Summary</span><span class="tip" tabindex="0" data-tip="把 hard gate、drift、code diagnostics 和 payload 中的异常信号聚合成可行动的排查方向。">?</span></span></h2>
           <span class="badge {{ risk_summary.badge_class }}">{{ risk_summary.severity }}</span>
         </div>
         <div class="panel-body risk-text">
-          <p><strong>Primary risk:</strong> {{ risk_summary.primary_risk }}</p>
-          <p><strong>Inspect:</strong> {{ risk_summary.inspection_target }}</p>
-          <p><strong>Recommendation:</strong> {{ risk_summary.recommendation }}</p>
+          <p><strong>主要风险 Primary risk:</strong> {{ risk_summary.primary_risk }}</p>
+          <p><strong>优先检查 Inspect:</strong> {{ risk_summary.inspection_target }}</p>
+          <p><strong>建议 Recommendation:</strong> {{ risk_summary.recommendation }}</p>
         </div>
       </article>
 
       {% if risk_findings %}
       <article class="panel">
         <div class="panel-head">
-          <h2>Risk Findings</h2>
-          <span class="note">{{ risk_summary.finding_count }} findings</span>
+          <h2><span class="metric-with-tip">风险 Findings <span class="note">Risk Findings</span><span class="tip" tabindex="0" data-tip="列出所有 WARN/FAIL/near-threshold 风险，以及关联 metric、code、pair，便于人工审计追踪证据。">?</span></span></h2>
+          <span class="note">{{ risk_summary.finding_count }} 条风险</span>
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Severity</th><th>Title</th><th>Related</th></tr></thead>
+            <thead><tr><th>等级 Severity</th><th>标题 Title</th><th>关联对象 Related</th></tr></thead>
             <tbody>
               {% for finding in risk_findings %}
               <tr>
@@ -585,28 +637,28 @@
     {% if code_diagnostics %}
     <section class="panel">
       <div class="panel-head">
-        <h2>Code Diagnostics</h2>
-        <span class="note">Per-code support, behavior attribution, and profitability</span>
+          <h2><span class="metric-with-tip">Code 级诊断表 <span class="note">Code Diagnostics</span><span class="tip" tabindex="0" data-tip="把每个 active code 的支撑样本、主导市场形态、主导行为 motif、pair 集中度和盈利性放在一起看，用于判断 code 是否可解释、可预测、可交易。">?</span></span></h2>
+        <span class="note">per-code support、行为归因和盈利质量</span>
       </div>
       <div class="table-scroll">
         <table>
           <thead>
             <tr>
-              <th>Code</th>
-              <th class="num">Support</th>
-              <th class="num">Occupancy</th>
-              <th>Dominant Morphology</th>
-              <th class="num">Morph Ratio</th>
-              <th class="num">Lift</th>
-              <th>Dominant Motif</th>
-              <th class="num">Motif Ratio</th>
-              <th>Dominant Pair</th>
-              <th class="num">Pair Ratio</th>
-              <th class="num">Decoded Return</th>
-              <th class="num">Win Rate</th>
-              <th class="num">Retention</th>
-              <th class="num">Fee Drag</th>
-              <th>Status</th>
+              <th><span class="metric-with-tip">Code<span class="tip" tabindex="0" data-tip="VQ codebook 中的离散 label ID。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">支撑样本 Support<span class="tip" tabindex="0" data-tip="validation 中被分配到该 code 的样本数。样本太少时 per-code 统计不稳定。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">占用率 Occupancy<span class="tip" tabindex="0" data-tip="该 code 覆盖 validation 样本的比例。">?</span></span></th>
+              <th><span class="metric-with-tip">主导形态 Dominant Morphology<span class="tip" tabindex="0" data-tip="该 code 内占比最高的市场形态，说明这个 code 主要出现在什么行情结构中。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">形态占比 Morph Ratio<span class="tip" tabindex="0" data-tip="dominant morphology 在该 code 内的占比。低于阈值说明该 code 混入多种市场形态。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Lift<span class="tip" tabindex="0" data-tip="dominant morphology 占比除以全体验证集同类 morphology 占比。大于 1 表示该 code 对该市场形态有富集。">?</span></span></th>
+              <th><span class="metric-with-tip">主导行为 Dominant Motif<span class="tip" tabindex="0" data-tip="该 code 内占比最高的交易行为模式，回答这个 code 主要怎么交易。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">行为占比 Motif Ratio<span class="tip" tabindex="0" data-tip="dominant motif 在该 code 内的占比。比例低说明同一 code 混合了多种交易意图。">?</span></span></th>
+              <th><span class="metric-with-tip">主导组合 Dominant Pair<span class="tip" tabindex="0" data-tip="该 code 内最常见的 morphology/motif 组合。好的 code 应该形成稳定 pair。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">组合占比 Pair Ratio<span class="tip" tabindex="0" data-tip="dominant morphology-motif pair 在该 code 内的占比，用于检查市场结构和行为意图是否绑定稳定。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Decoded Return<span class="tip" tabindex="0" data-tip="该 code 对应样本上 assigned label 经 decoder 执行后的平均收益优势。负值表示该 code 没有保留 DP 盈利能力。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">胜率 Win Rate<span class="tip" tabindex="0" data-tip="该 code 对应样本中 decoded return 超过 flat 的比例。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">保留率 Retention<span class="tip" tabindex="0" data-tip="decoded return 相对 DP teacher return 的保留比例。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">手续费拖累 Fee Drag<span class="tip" tabindex="0" data-tip="手续费占 gross profit 的比例，过高说明收益可能被成本吞掉。">?</span></span></th>
+              <th>状态 Status</th>
             </tr>
           </thead>
           <tbody>
@@ -639,12 +691,12 @@
       {% if tie_breaker_rows %}
       <article class="panel">
         <div class="panel-head">
-          <h2>Tie Breaker Metrics</h2>
-          <span class="note">Stable selector ordering fields</span>
+          <h2><span class="metric-with-tip">决胜指标 <span class="note">Tie Breaker Metrics</span><span class="tip" tabindex="0" data-tip="当多个 checkpoint 都通过 hard gate 且综合分接近时，用这些稳定字段做最终排序。">?</span></span></h2>
+          <span class="note">selector 稳定排序字段</span>
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Metric</th><th class="num">Value</th></tr></thead>
+            <thead><tr><th>指标 Metric</th><th class="num">值 Value</th></tr></thead>
             <tbody>
               {% for row in tie_breaker_rows %}
               <tr><td>{{ row.key }}</td><td class="num">{{ row.value }}</td></tr>
@@ -658,12 +710,12 @@
       {% if config_rows %}
       <article class="panel">
         <div class="panel-head">
-          <h2>Config Snapshot</h2>
-          <span class="note">Report-time config values</span>
+          <h2><span class="metric-with-tip">配置快照 <span class="note">Config Snapshot</span><span class="tip" tabindex="0" data-tip="生成报告时随 payload 保存的 Phase I 配置，用于复现实验上下文。">?</span></span></h2>
+          <span class="note">报告生成时的 config 值</span>
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Key</th><th>Value</th></tr></thead>
+            <thead><tr><th>键 Key</th><th>值 Value</th></tr></thead>
             <tbody>
               {% for row in config_rows %}
               <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
@@ -679,8 +731,8 @@
     <section class="grid two">
       <article class="panel">
         <div class="panel-head">
-          <h2>Report Metadata</h2>
-          <span class="note">Schema and generated timestamp</span>
+          <h2><span class="metric-with-tip">报告元信息 <span class="note">Report Metadata</span><span class="tip" tabindex="0" data-tip="报告 schema 和生成时间，用于后续兼容迁移与审计追踪。">?</span></span></h2>
+          <span class="note">schema 和 generated timestamp</span>
         </div>
         <div class="table-scroll">
           <table>
@@ -695,12 +747,12 @@
       {% if artifact_rows %}
       <article class="panel">
         <div class="panel-head">
-          <h2>Artifacts</h2>
-          <span class="note">Output paths captured with this report</span>
+          <h2><span class="metric-with-tip">产物路径 <span class="note">Artifacts</span><span class="tip" tabindex="0" data-tip="本次 report 关联的 checkpoint、payload、图表或其他产物路径。">?</span></span></h2>
+          <span class="note">随报告记录的输出路径</span>
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Key</th><th>Path</th></tr></thead>
+            <thead><tr><th>键 Key</th><th>路径 Path</th></tr></thead>
             <tbody>
               {% for row in artifact_rows %}
               <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
@@ -713,7 +765,7 @@
     </section>
     {% endif %}
 
-    <p class="footer-note">Generated by Phase1CodebookReport from validation metrics and diagnostics. This HTML is self-contained and does not require network assets.</p>
+    <p class="footer-note">本报告由 Phase1CodebookReport 基于 validation metrics 和 diagnostics 生成。HTML 自包含，不依赖网络资源；悬停问号可查看中文解释。</p>
   </main>
 </body>
 </html>
