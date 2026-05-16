@@ -92,7 +92,7 @@ class Phase1CodebookReportContextBuilder:
         risk_findings = tuple(validation.risk_findings)
         vq_internal_payload = validation.vq_internal_payload
         oracle_profitability_payload = validation.oracle_profitability_payload
-        validation_score = self._validation_score(validation.score)
+        validation_score = validation.score
         return Phase1CodebookReportHtmlContext(
             page_title=str(report.get("title", self.title)),
             header_title=self.title,
