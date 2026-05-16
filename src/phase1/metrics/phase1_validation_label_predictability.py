@@ -163,6 +163,10 @@ def evaluate_label_predictability_rules(
             ),
             layer=layer,
             message="给定 morphology 后的 label 条件熵需要明显低于全局 label 熵",
+            direction_message=(
+                "指标方向：越小越好；变大表示 morphology 对 label 的解释力变弱，"
+                "变小表示 label 结构更能被 morphology 解释"
+            ),
         ),
         _ge(
             name="mutual_information_lift",

@@ -27,9 +27,11 @@ def _metric_result(
     passed: bool,
     layer: str,
     message: str,
+    direction_message: str | None = None,
 ) -> Phase1MetricResult:
     """创建 metric result，并把缺失 hard gate 统一标记为 skip-as-fail。"""
 
+    full_message = _append_direction(message, direction_message)
     if _is_missing(value):
         return Phase1MetricResult(
             name=name,
@@ -38,7 +40,7 @@ def _metric_result(
             severity="skip",
             passed=False,
             layer=layer,
-            message=f"{message}；指标缺失或不可计算，按 hard gate 失败处理",
+            message=f"{full_message}；指标缺失或不可计算，按 hard gate 失败处理",
         )
     return Phase1MetricResult(
         name=name,
@@ -47,8 +49,16 @@ def _metric_result(
         severity="pass" if passed else "fail",
         passed=passed,
         layer=layer,
-        message=message,
+        message=full_message,
     )
+
+
+def _append_direction(message: str, direction_message: str | None) -> str:
+    """把指标方向说明追加到 report message。"""
+
+    if direction_message is None:
+        return message
+    return f"{message}；{direction_message}"
 
 
 def _gt(
@@ -68,6 +78,10 @@ def _gt(
         passed=value > threshold_value if not _is_missing(value) else False,
         layer=layer,
         message=message,
+        direction_message=(
+            "指标方向：越大越好；变大表示质量、收益或覆盖度提升，"
+            "变小表示更接近失败阈值"
+        ),
     )
 
 
@@ -88,6 +102,10 @@ def _ge(
         passed=value >= threshold_value if not _is_missing(value) else False,
         layer=layer,
         message=message,
+        direction_message=(
+            "指标方向：越大越好；变大表示质量、收益或覆盖度提升，"
+            "变小表示更接近失败阈值"
+        ),
     )
 
 
@@ -108,6 +126,10 @@ def _le(
         passed=value <= threshold_value if not _is_missing(value) else False,
         layer=layer,
         message=message,
+        direction_message=(
+            "指标方向：越小越好；变大表示风险、误差或异常占比上升，"
+            "变小表示更健康"
+        ),
     )
 
 
@@ -129,6 +151,10 @@ def _between(
         passed=lower <= value <= upper if not _is_missing(value) else False,
         layer=layer,
         message=message,
+        direction_message=(
+            "指标方向：落在目标区间内最好；变大表示更靠近上限，"
+            "变小表示更靠近下限，低于下限或高于上限都可能失败"
+        ),
     )
 
 

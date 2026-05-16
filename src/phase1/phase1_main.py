@@ -74,7 +74,7 @@ class Phase1MainConfig:
 
     pair: str
     train_batch_id: str
-    epochs: int = 50
+    epochs: int = 100
     pretrain_epochs: int = 10
     batch_size: int = 1024
     learning_rate: float = 1e-3
@@ -177,6 +177,7 @@ class Phase1MainFlow:
             self.build_components()
             # Step 4: 集中校验训练、评估和 checkpoint 所需组件。
             self.validate_components()
+            logger.info("Phase I components validated")
             # Step 5: 可选预训练 encoder-decoder，使模型具备基础动作重构能力。
             self.pretrain()
             # Step 6: 训练 VQ encoder-decoder，使 codebook 学到可复用 trading archetypes。
@@ -439,8 +440,11 @@ class Phase1MainFlow:
         )
         self.data_store.save_phase1_checkpoint_selection_html(html=report_html)
         if not best_checkpoint_selection.has_selection:
-            print("no passed checkpoint found!!!")
-            return
+            logger.error("no passed checkpoint found!!!")
+            return 
+        
+        logger.info("Phase I best checkpoint selected: epoch=%d", best_validation_checkpoint_selection.epoch)
+               
         best_validation_checkpoint_selection = best_checkpoint_selection.selected
         best_checkpoint = self.data_store.load_phase1_checkpoint(
             stage="vq",

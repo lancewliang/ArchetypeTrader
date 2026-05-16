@@ -127,7 +127,7 @@ class Phase1ArtifactStore(DataFileStore):
         epoch: int,
         config: Phase1CheckpointConfig,
         model_state_dict: Phase1StateDict,
-        optimizer_state_dict: Phase1StateDict      
+        optimizer_state_dict: Phase1StateDict
     ) -> None:
         """保存 Phase I checkpoint。
 
@@ -150,7 +150,8 @@ class Phase1ArtifactStore(DataFileStore):
             is_best=False,
             config=config,
             model_state_dict=model_state_dict,
-            optimizer_state_dict=optimizer_state_dict
+            optimizer_state_dict=optimizer_state_dict,
+            
         )
         checkpoint_path = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
         self._save_phase1_checkpoint_payload(checkpoint, checkpoint_path)
@@ -159,7 +160,8 @@ class Phase1ArtifactStore(DataFileStore):
         self,
         *,
         stage: Phase1CheckpointStage | None = None,
-        epoch: int | None = None     
+        epoch: int | None = None,
+        best: bool = False,
     ) -> Phase1Checkpoint:
         """读取 Phase I checkpoint。
 
@@ -173,7 +175,26 @@ class Phase1ArtifactStore(DataFileStore):
             返回 checkpoint 内容，供恢复训练、best 选择和模型导出使用。
         """
       
+        if best:
+            path = self._phase1_best_checkpoint_path()
+            return self._load_phase1_checkpoint_payload(path)
+        if stage is None or epoch is None:
+            raise ValueError("stage and epoch are required for phase1 checkpoint load")
+
         path = self._phase1_checkpoint_path(stage=stage, epoch=epoch)
+        return self._load_phase1_checkpoint_payload(path)
+
+    def load_best_checkpoint(self) -> Phase1Checkpoint | None:
+        """读取当前 Phase I best checkpoint。
+
+        输出:
+            如果 best checkpoint 已固化，返回对应 payload；如果还没有选择出 best
+            checkpoint 或文件不存在，返回 ``None``，供导出流程安全跳过。
+        """
+
+        path = self._phase1_best_checkpoint_path()
+        if not path.exists():
+            return None
         return self._load_phase1_checkpoint_payload(path)
 
     def save_best_checkpoint(
@@ -346,6 +367,20 @@ class Phase1ArtifactStore(DataFileStore):
                 raise ValueError(f"invalid phase1 epoch metrics payload: {path}")
             checkpoints.append(Phase1ValidationCheckpoint.from_dict(payload))
         return checkpoints
+
+    def load_phase1_epoch_metrics(
+        self,
+        *,
+        stage: str,
+        epoch: int,
+    ) -> dict[str, Any]:
+        """读取单个 Phase I epoch 的训练/评估指标 JSON。"""
+
+        path = self._phase1_epoch_metrics_path(stage=stage, epoch=epoch)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"invalid phase1 epoch metrics payload: {path}")
+        return dict(payload)
 
     def load_phase1_validation_result(
         self,

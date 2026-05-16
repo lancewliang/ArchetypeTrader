@@ -150,6 +150,7 @@ def _missing_warn_result(
     threshold: str,
     layer: str,
     message: str,
+    direction_message: str,
 ) -> Phase1MetricResult:
     """构造缺失但可解释的 VQ internal warning。"""
 
@@ -162,7 +163,7 @@ def _missing_warn_result(
         severity="warn",
         passed=True,
         layer=layer,
-        message=message,
+        message=f"{message}；{direction_message}",
     )
 
 
@@ -189,6 +190,10 @@ def evaluate_vq_internal_rules(
                 "近期 assignment churn 缺失，通常表示训练初期 history 不足；"
                 "正式 checkpoint selection 前应补齐 history"
             ),
+            direction_message=(
+                "指标方向：越小越好；变大表示 label 语义更不稳定，"
+                "变小表示 assignment 更稳定"
+            ),
         )
         if math.isnan(metrics.assignment_churn_recent_mean)
         else _le(
@@ -207,6 +212,10 @@ def evaluate_vq_internal_rules(
             message=(
                 "入场时点误差缺失，通常表示没有 demo/decoded 同时入场样本；"
                 "需要结合 direction accuracy 和 flat 样本占比解释"
+            ),
+            direction_message=(
+                "指标方向：越小越好；变大表示 decoded 入场时点偏离 demo 更远，"
+                "变小表示入场时点更一致"
             ),
         )
         if math.isnan(metrics.entry_timing_error_median)
