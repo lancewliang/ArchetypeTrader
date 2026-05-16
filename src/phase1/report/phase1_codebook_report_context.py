@@ -9,12 +9,15 @@ from typing import Any, Mapping
 from .phase1_codebook_report_schema import (
     Phase1CodebookReportDocument,
     Phase1CodebookReportHtmlContext,
+    Phase1ReportChartGridLine,
+    Phase1ReportChartSeries,
     Phase1ReportCodeDiagnosticView,
     Phase1ReportCodeDistributionRow,
     Phase1ReportHeader,
     Phase1ReportHeaderItem,
     Phase1ReportKpiRow,
     Phase1ReportLayerView,
+    Phase1ReportLineChart,
     Phase1ReportMappingRow,
     Phase1ReportMetricView,
     Phase1ReportPairProfitabilityCell,
@@ -93,6 +96,9 @@ class Phase1CodebookReportContextBuilder:
         vq_internal_payload = validation.vq_internal_payload
         oracle_profitability_payload = validation.oracle_profitability_payload
         validation_score = validation.score
+        oracle_return_series = self._build_oracle_cumulative_return_series(
+            oracle_profitability_payload
+        )
         return Phase1CodebookReportHtmlContext(
             page_title=str(report.get("title", self.title)),
             header_title=self.title,
@@ -116,8 +122,9 @@ class Phase1CodebookReportContextBuilder:
             oracle_profitability_kpis=self._build_oracle_profitability_kpis(
                 validation.metrics
             ),
-            oracle_cumulative_return_series=(
-                self._build_oracle_cumulative_return_series(
+            oracle_cumulative_return_series=oracle_return_series,
+            oracle_cumulative_return_chart=(
+                self._build_oracle_cumulative_return_chart(
                     oracle_profitability_payload
                 )
             ),
@@ -582,6 +589,16 @@ class Phase1CodebookReportContextBuilder:
             (cell.morphology, cell.motif): cell
             for cell in cells
         }
+        max_abs_advantage = max(
+            (
+                abs(cell.mean_decoded_advantage)
+                for cell in cells
+                if math.isfinite(cell.mean_decoded_advantage)
+            ),
+            default=1.0,
+        )
+        if max_abs_advantage <= 0.0:
+            max_abs_advantage = 1.0
         rows: list[Phase1ReportPairProfitabilityRow] = []
         flat_cells: list[Phase1ReportPairProfitabilityCell] = []
         for morphology in morphologies:
@@ -598,20 +615,43 @@ class Phase1CodebookReportContextBuilder:
                         retention_ratio="-",
                         fee_drag="-",
                         badge_class="skip",
+                        display_value="-",
+                        background_color="#eef1f5",
+                        text_color="#525866",
+                        tooltip=f"{morphology} / {motif}: no validation samples.",
                     )
                 else:
+                    mean_advantage = cell.mean_decoded_advantage
                     cell_context = Phase1ReportPairProfitabilityCell(
                         morphology=morphology,
                         motif=motif,
                         support=str(cell.support),
                         mean_decoded_advantage=_format_value(
-                            cell.mean_decoded_advantage
+                            mean_advantage
                         ),
                         decoded_win_rate=_format_value(cell.decoded_win_rate),
                         retention_ratio=_format_value(cell.retention_ratio),
                         fee_drag=_format_value(cell.fee_drag),
                         badge_class=self._profit_badge_class(
-                            cell.mean_decoded_advantage
+                            mean_advantage
+                        ),
+                        display_value=self._format_signed_value(mean_advantage),
+                        background_color=self._heatmap_background(
+                            mean_advantage,
+                            max_abs_advantage,
+                        ),
+                        text_color=self._heatmap_text_color(
+                            mean_advantage,
+                            max_abs_advantage,
+                        ),
+                        tooltip=(
+                            f"{morphology} / {motif}: "
+                            f"mean decoded advantage "
+                            f"{self._format_signed_value(mean_advantage)}, "
+                            f"support {cell.support}, win rate "
+                            f"{_format_value(cell.decoded_win_rate)}, "
+                            f"retention {_format_value(cell.retention_ratio)}, "
+                            f"fee drag {_format_value(cell.fee_drag)}."
                         ),
                     )
                 row_cells.append(cell_context)
@@ -627,6 +667,11 @@ class Phase1CodebookReportContextBuilder:
             motifs=motifs,
             rows=tuple(rows),
             cells=tuple(flat_cells),
+            grid_template_columns=(
+                f"minmax(132px, 1fr) repeat({len(motifs)}, minmax(118px, 1fr))"
+            ),
+            legend_min=f"-{_format_value(max_abs_advantage)}",
+            legend_max=f"+{_format_value(max_abs_advantage)}",
         )
 
     def _build_oracle_cumulative_return_series(
@@ -653,6 +698,130 @@ class Phase1CodebookReportContextBuilder:
             if returns
         )
 
+    def _build_oracle_cumulative_return_chart(
+        self,
+        payload: Phase1OracleProfitabilityPayload | None,
+    ) -> Phase1ReportLineChart:
+        """构建 oracle-label 累计收益静态 SVG 折线图。"""
+
+        if payload is None:
+            return Phase1ReportLineChart()
+        definitions = (
+            (
+                "dp",
+                "DP",
+                "var(--blue)",
+                payload.dp_returns,
+                "DP teacher 累计收益，是第一阶段示范轨迹的收益参照。",
+            ),
+            (
+                "decoded",
+                "Decoded",
+                "var(--pass)",
+                payload.decoded_returns,
+                "assigned label 经 frozen decoder 执行后的累计收益。",
+            ),
+            (
+                "random_label",
+                "Random label",
+                "var(--rose)",
+                payload.random_label_returns,
+                "随机 label 基准累计收益，用于检查 label assignment 的信息量。",
+            ),
+            (
+                "flat",
+                "Flat",
+                "var(--skip)",
+                payload.flat_returns,
+                "空仓基准累计收益。",
+            ),
+        )
+        raw_series = [
+            (key, label, color, self._cumulative_values(returns), tooltip)
+            for key, label, color, returns, tooltip in definitions
+            if returns
+        ]
+        finite_values = [
+            value
+            for _, _, _, values, _ in raw_series
+            for value in values
+            if math.isfinite(value)
+        ]
+        if not raw_series or not finite_values:
+            return Phase1ReportLineChart()
+
+        y_min = min(finite_values)
+        y_max = max(finite_values)
+        if y_min == y_max:
+            padding = max(1.0, abs(y_min) * 0.05)
+            y_min -= padding
+            y_max += padding
+        else:
+            padding = (y_max - y_min) * 0.06
+            y_min -= padding
+            y_max += padding
+
+        width = 820.0
+        height = 330.0
+        left = 52.0
+        right = 22.0
+        top = 24.0
+        bottom = 38.0
+        plot_width = width - left - right
+        plot_height = height - top - bottom
+
+        def x_coord(step: int, max_step: int) -> float:
+            if max_step <= 0:
+                return left
+            return left + step * plot_width / max_step
+
+        def y_coord(value: float) -> float:
+            return top + (y_max - value) * plot_height / (y_max - y_min)
+
+        grid_lines = tuple(
+            Phase1ReportChartGridLine(
+                y=self._format_svg_number(
+                    top + index * plot_height / 4.0
+                ),
+                label=_format_value(y_max - index * (y_max - y_min) / 4.0),
+            )
+            for index in range(5)
+        )
+        chart_series: list[Phase1ReportChartSeries] = []
+        for key, label, color, values, tooltip in raw_series:
+            max_step = len(values) - 1
+            sampled_indices = self._chart_sample_indices(len(values))
+            points = " ".join(
+                (
+                    f"{self._format_svg_number(x_coord(index, max_step))},"
+                    f"{self._format_svg_number(y_coord(values[index]))}"
+                )
+                for index in sampled_indices
+                if math.isfinite(values[index])
+            )
+            if not points:
+                continue
+            chart_series.append(
+                Phase1ReportChartSeries(
+                    key=key,
+                    label=label,
+                    color=color,
+                    points=points,
+                    end_value=_format_value(values[-1]),
+                    tooltip=tooltip,
+                )
+            )
+
+        return Phase1ReportLineChart(
+            width=str(int(width)),
+            height=str(int(height)),
+            grid_lines=grid_lines,
+            series=tuple(chart_series),
+            y_min=_format_value(y_min),
+            y_max=_format_value(y_max),
+            x_axis_label="validation horizon order",
+        )
+
     def _cumulative_points(
         self,
         returns: tuple[float, ...],
@@ -670,6 +839,68 @@ class Phase1CodebookReportContextBuilder:
                 )
             )
         return tuple(points)
+
+    def _cumulative_values(self, returns: tuple[float, ...]) -> tuple[float, ...]:
+        """把逐样本 return 转成累计数值序列，供 SVG 图表使用。"""
+
+        total = 0.0
+        values = [total]
+        for value in returns:
+            numeric_value = float(value)
+            if math.isfinite(numeric_value):
+                total += numeric_value
+            values.append(total)
+        return tuple(values)
+
+    def _chart_sample_indices(self, value_count: int) -> tuple[int, ...]:
+        """限制 SVG 点数，避免长验证集把 HTML 膨胀成全量点位表。"""
+
+        if value_count <= 0:
+            return ()
+        max_points = 320
+        if value_count <= max_points:
+            return tuple(range(value_count))
+        last_index = value_count - 1
+        step = last_index / (max_points - 1)
+        indices = {
+            0,
+            last_index,
+            *(round(index * step) for index in range(max_points)),
+        }
+        return tuple(sorted(indices))
+
+    def _heatmap_background(self, value: float | None, max_abs: float) -> str:
+        """按收益正负和强度生成热力图背景色。"""
+
+        if value is None or not math.isfinite(value):
+            return "#eef1f5"
+        alpha = min(0.92, max(0.16, abs(value) / max_abs * 0.82 + 0.10))
+        if value >= 0.0:
+            return f"rgba(20, 122, 77, {alpha:.3g})"
+        return f"rgba(180, 35, 24, {alpha:.3g})"
+
+    def _heatmap_text_color(self, value: float | None, max_abs: float) -> str:
+        """按背景强度选择热力图文字颜色。"""
+
+        if value is None or not math.isfinite(value):
+            return "#525866"
+        intensity = abs(value) / max_abs
+        return "#ffffff" if intensity >= 0.62 else "#0f172a"
+
+    def _format_signed_value(self, value: float | None) -> str:
+        """格式化带正号的收益值。"""
+
+        if value is None:
+            return "-"
+        if not math.isfinite(value):
+            return _format_value(value)
+        prefix = "+" if value >= 0.0 else ""
+        return f"{prefix}{_format_value(value)}"
+
+    def _format_svg_number(self, value: float) -> str:
+        """格式化 SVG 坐标，减少无意义小数。"""
+
+        return f"{value:.2f}".rstrip("0").rstrip(".")
 
     def _nested_value(self, payload: Any, key: str) -> Any:
         """兼容 Mapping 和 dataclass/object 的字段读取。"""

@@ -356,6 +356,117 @@
       background: #fbfcfe;
     }
 
+    .chart {
+      min-height: 300px;
+    }
+
+    .line-chart svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      min-height: 260px;
+    }
+
+    .axis {
+      stroke: #98a2b3;
+      stroke-width: 1;
+    }
+
+    .grid-line {
+      stroke: #e4e7ec;
+      stroke-width: 1;
+    }
+
+    .svg-label {
+      fill: #667085;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .chart-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 16px;
+      padding-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
+    .legend-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--skip);
+      flex: 0 0 auto;
+    }
+
+    .heatmap-wrap {
+      overflow-x: auto;
+      padding: 14px 16px 16px;
+    }
+
+    .heatmap {
+      display: grid;
+      gap: 4px;
+      min-width: 760px;
+    }
+
+    .heatmap-head,
+    .heatmap-row-head,
+    .heatmap-cell {
+      min-height: 42px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px;
+      font-size: 12px;
+      line-height: 1.25;
+      font-weight: 720;
+      text-align: center;
+    }
+
+    .heatmap-head,
+    .heatmap-row-head {
+      background: #fbfcfe;
+      border: 1px solid var(--soft-line);
+      color: #344054;
+    }
+
+    .heatmap-row-head {
+      justify-content: flex-start;
+      text-align: left;
+    }
+
+    .heatmap-cell {
+      border: 1px solid rgba(16, 24, 40, 0.08);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .heatmap-legend {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .heatmap-scale {
+      width: 180px;
+      height: 10px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--fail), #f2f4f7, var(--pass));
+      border: 1px solid var(--soft-line);
+    }
+
     .risk-text p + p { margin-top: 10px; }
 
     .footer-note {
@@ -564,29 +675,26 @@
       <article class="panel">
         <div class="panel-head">
           <h2><span class="metric-with-tip">Oracle-label 累计收益 <span class="note">Cumulative Returns</span><span class="tip" tabindex="0" data-tip="曲线数据由每条 horizon 的 return 累加得到。DP 是 teacher 参照，Decoded 是 assigned label 经 frozen decoder 执行后的收益，Random label 是随机 label 基准，Flat 是空仓基准。">?</span></span></h2>
-          <span class="note">静态点位表</span>
+          <span class="note">累计收益曲线</span>
         </div>
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>序列 Series</th>
-                <th class="num">Step</th>
-                <th class="num">累计收益 Cumulative</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for series in oracle_cumulative_return_series %}
-              {% for point in series.points %}
-              <tr>
-                <td>{{ series.label }}</td>
-                <td class="num">{{ point.step }}</td>
-                <td class="num">{{ point.value }}</td>
-              </tr>
-              {% endfor %}
-              {% endfor %}
-            </tbody>
-          </table>
+        <div class="panel-body chart line-chart">
+          <svg viewBox="0 0 {{ oracle_cumulative_return_chart.width }} {{ oracle_cumulative_return_chart.height }}" role="img" aria-label="Oracle-label cumulative returns">
+            {% for line in oracle_cumulative_return_chart.grid_lines %}
+            <line class="grid-line" x1="52" y1="{{ line.y }}" x2="798" y2="{{ line.y }}"></line>
+            <text class="svg-label" x="6" y="{{ line.y }}">{{ line.label }}</text>
+            {% endfor %}
+            <line class="axis" x1="52" y1="292" x2="798" y2="292"></line>
+            <line class="axis" x1="52" y1="24" x2="52" y2="292"></line>
+            {% for series in oracle_cumulative_return_chart.series %}
+            <polyline points="{{ series.points }}" fill="none" stroke="{{ series.color }}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"><title>{{ series.tooltip }}</title></polyline>
+            {% endfor %}
+            <text class="svg-label" x="52" y="320">{{ oracle_cumulative_return_chart.x_axis_label }}</text>
+          </svg>
+          <div class="chart-legend" aria-label="cumulative return legend">
+            {% for series in oracle_cumulative_return_chart.series %}
+            <span class="legend-item"><i class="legend-swatch" style="background: {{ series.color }}"></i>{{ series.label }} {{ series.end_value }}</span>
+            {% endfor %}
+          </div>
         </div>
       </article>
       {% endif %}
@@ -624,30 +732,28 @@
     {% if pair_profitability_matrix.rows %}
     <section class="panel">
       <div class="panel-head">
-        <h2><span class="metric-with-tip">Dominant Pair 盈利矩阵 <span class="note">Profitability Matrix</span><span class="tip" tabindex="0" data-tip="行是市场形态 morphology，列是交易行为 motif。单元格展示该 morphology/motif 组合下的 mean decoded advantage，用于解释哪些形态-行为组合贡献收益或风险。">?</span></span></h2>
-        <span class="note">行是 morphology，列是 motif，值为 mean decoded advantage</span>
+        <h2><span class="metric-with-tip">Dominant Pair 热力图 <span class="note">Profitability Heatmap</span><span class="tip" tabindex="0" data-tip="行是市场形态 morphology，列是交易行为 motif。颜色展示该 morphology/motif 组合下的 mean decoded advantage，用于解释哪些形态-行为组合贡献收益或风险。">?</span></span></h2>
+        <span class="note">绿色为正优势，红色为负优势</span>
       </div>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>市场形态 Morphology</th>
-              {% for motif in pair_profitability_matrix.motifs %}
-              <th class="num">{{ motif }}</th>
-              {% endfor %}
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in pair_profitability_matrix.rows %}
-            <tr>
-              <td>{{ row.morphology }}</td>
-              {% for cell in row.cells %}
-              <td class="num"><span class="badge {{ cell.badge_class }}">{{ cell.mean_decoded_advantage }}</span></td>
-              {% endfor %}
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+      <div class="heatmap-wrap">
+        <div class="heatmap" style="grid-template-columns: {{ pair_profitability_matrix.grid_template_columns }}">
+          <div class="heatmap-head">Morphology / Motif</div>
+          {% for motif in pair_profitability_matrix.motifs %}
+          <div class="heatmap-head">{{ motif }}</div>
+          {% endfor %}
+          {% for row in pair_profitability_matrix.rows %}
+          <div class="heatmap-row-head">{{ row.morphology }}</div>
+          {% for cell in row.cells %}
+          <div class="heatmap-cell" title="{{ cell.tooltip }}" style="background: {{ cell.background_color }}; color: {{ cell.text_color }};">{{ cell.display_value }}</div>
+          {% endfor %}
+          {% endfor %}
+        </div>
+        <div class="heatmap-legend">
+          <span>{{ pair_profitability_matrix.legend_min }}</span>
+          <span class="heatmap-scale"></span>
+          <span>{{ pair_profitability_matrix.legend_max }}</span>
+          <span>mean decoded advantage</span>
+        </div>
       </div>
     </section>
     {% endif %}

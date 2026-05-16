@@ -653,6 +653,66 @@ class Phase1ReportSeries:
 
 
 @dataclass(frozen=True)
+class Phase1ReportChartGridLine:
+    """SVG 图表中的横向网格线。"""
+
+    # SVG y 坐标。
+    y: str
+
+    # 网格线数值标签。
+    label: str
+
+
+@dataclass(frozen=True)
+class Phase1ReportChartSeries:
+    """SVG 折线图中的一条序列。"""
+
+    # 序列稳定 key。
+    key: str
+
+    # 序列展示 label。
+    label: str
+
+    # CSS 颜色值。
+    color: str
+
+    # SVG polyline points 字符串。
+    points: str
+
+    # 序列末值。
+    end_value: str
+
+    # hover title 文案。
+    tooltip: str
+
+
+@dataclass(frozen=True)
+class Phase1ReportLineChart:
+    """静态 SVG 折线图视图模型。"""
+
+    # SVG viewBox 宽度。
+    width: str = "820"
+
+    # SVG viewBox 高度。
+    height: str = "330"
+
+    # 横向网格线。
+    grid_lines: tuple[Phase1ReportChartGridLine, ...] = ()
+
+    # 折线序列。
+    series: tuple[Phase1ReportChartSeries, ...] = ()
+
+    # y 轴最小值。
+    y_min: str = "-"
+
+    # y 轴最大值。
+    y_max: str = "-"
+
+    # x 轴说明。
+    x_axis_label: str = "validation horizon order"
+
+
+@dataclass(frozen=True)
 class Phase1ReportPairProfitabilityCell:
     """morphology-motif 盈利矩阵单元格。
 
@@ -683,6 +743,18 @@ class Phase1ReportPairProfitabilityCell:
 
     # 盈利状态 badge CSS class。
     badge_class: str
+
+    # 热力图中展示的单元格文本。
+    display_value: str = "-"
+
+    # 热力图单元格背景色。
+    background_color: str = "#eef1f5"
+
+    # 热力图单元格文字色。
+    text_color: str = "#0f172a"
+
+    # 单元格 hover title 文案。
+    tooltip: str = ""
 
 
 @dataclass(frozen=True)
@@ -719,6 +791,15 @@ class Phase1ReportPairProfitabilityMatrix:
 
     # 扁平化单元格列表，便于模板或后续图表复用。
     cells: tuple[Phase1ReportPairProfitabilityCell, ...]
+
+    # 热力图 CSS grid-template-columns。
+    grid_template_columns: str = ""
+
+    # 热力图图例负向端点。
+    legend_min: str = "-"
+
+    # 热力图图例正向端点。
+    legend_max: str = "-"
 
 
 @dataclass(frozen=True)
@@ -789,6 +870,11 @@ class Phase1CodebookReportHtmlContext:
 
     # artifact 路径行。
     artifact_rows: tuple[Phase1ReportMappingRow, ...]
+
+    # 累计收益 SVG 折线图。
+    oracle_cumulative_return_chart: Phase1ReportLineChart = field(
+        default_factory=Phase1ReportLineChart
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """转换为模板引擎可消费的普通 dict。"""
@@ -865,6 +951,9 @@ __all__ = [
     "Phase1ReportProfitSeriesRow",
     "Phase1ReportCodeDistributionRow",
     "Phase1ReportScoreBreakdownRow",
+    "Phase1ReportChartGridLine",
+    "Phase1ReportChartSeries",
+    "Phase1ReportLineChart",
     "Phase1ReportSeries",
     "Phase1ReportSeriesPoint",
     "Phase1ReportPairProfitabilityCell",
