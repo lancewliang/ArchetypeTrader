@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from src.phase1.report.phase1_codebook_report import Phase1CodebookReport
+from src.phase1.report.phase1_codebook_report_context import (
+    Phase1CodebookReportContextBuilder,
+)
 
 
 class _ValidationResult:
@@ -115,6 +118,12 @@ def _payload() -> dict[str, object]:
                 "risk_adjusted_return": 1.23456789,
                 "active_code_ratio": True,
             },
+            "metrics": {
+                "vq_internal": {
+                    "code_distribution": [0.5, 0.25, 0.0],
+                    "active_codes": [0, 1],
+                },
+            },
         },
         "config": {"codebook_size": 32},
         "artifacts": {"checkpoint": "/tmp/ckpt.pt"},
@@ -167,3 +176,37 @@ def test_empty_optional_sections_are_omitted() -> None:
     assert "Tie Breaker Metrics</h2>" not in html
     assert "Config Snapshot</h2>" not in html
     assert "Artifacts</h2>" not in html
+
+
+def test_build_html_context_includes_code_distribution_rows() -> None:
+    context = Phase1CodebookReportContextBuilder().build(_payload())
+
+    assert context["code_distribution"] == [
+        {
+            "code_id": "0",
+            "occupancy": "0.5",
+            "occupancy_percent": "50%",
+            "bar_width": "50%",
+            "active": True,
+            "badge_class": "pass",
+            "status_label": "ACTIVE",
+        },
+        {
+            "code_id": "1",
+            "occupancy": "0.25",
+            "occupancy_percent": "25%",
+            "bar_width": "25%",
+            "active": True,
+            "badge_class": "pass",
+            "status_label": "ACTIVE",
+        },
+        {
+            "code_id": "2",
+            "occupancy": "0",
+            "occupancy_percent": "0%",
+            "bar_width": "0%",
+            "active": False,
+            "badge_class": "warn",
+            "status_label": "INACTIVE",
+        },
+    ]

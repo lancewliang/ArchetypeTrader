@@ -17,6 +17,7 @@ from src.phase1.evaluators.phase1_validation_layers.layer1_vq_internal import (
 from src.phase1.metrics import (
     CodeAssignmentSnapshot,
     Phase1EvaluationSnapshot,
+    Phase1VQInternalMetrics,
     Phase1ValidationRuntimeConfig,
 )
 
@@ -236,7 +237,8 @@ def test_vq_internal_metrics_do_not_infer_codebook_size_from_used_codes() -> Non
         runtime_config=Phase1ValidationRuntimeConfig(),
     )
 
-    assert computation.extra_payload["code_distribution"].size == 0
+    assert computation.metrics.code_distribution == ()
+    assert computation.metrics.active_codes == ()
     assert computation.extra_payload["codebook_size_available"] is False
     assert math.isnan(computation.metrics.active_code_ratio)
     assert math.isnan(computation.metrics.max_code_occupancy)
@@ -288,9 +290,10 @@ def test_vq_internal_metrics_mark_occupancy_unavailable_without_samples() -> Non
     )
 
     np.testing.assert_allclose(
-        computation.extra_payload["code_distribution"],
+        computation.metrics.code_distribution,
         [0.0, 0.0, 0.0, 0.0],
     )
+    assert computation.metrics.active_codes == ()
     assert computation.extra_payload["code_distribution_sample_count"] == 0
     assert math.isnan(computation.metrics.active_code_ratio)
     assert math.isnan(computation.metrics.max_code_occupancy)
@@ -342,7 +345,33 @@ def test_vq_internal_metrics_prefer_configured_codebook_size() -> None:
     )
 
     np.testing.assert_allclose(
-        computation.extra_payload["code_distribution"],
+        computation.metrics.code_distribution,
         [0.5, 0.5, 0.0, 0.0],
     )
+    assert computation.metrics.active_codes == (0, 1)
     assert computation.metrics.active_code_ratio == 0.5
+
+
+def test_vq_internal_metrics_round_trip_code_usage_fields() -> None:
+    metrics = Phase1VQInternalMetrics(
+        validation_action_accuracy=0.9,
+        reconstruction_loss_gap=1.1,
+        active_code_ratio=0.5,
+        max_code_occupancy=0.5,
+        normalized_code_perplexity=0.7,
+        dead_code_ratio=0.0,
+        assignment_churn_recent_mean=0.1,
+        code_lifetime_pass_ratio=1.0,
+        quantization_distance=0.2,
+        nearest_second_margin_median=0.3,
+        decoder_turnover_error=0.4,
+        entry_timing_error_median=1.0,
+        direction_accuracy=0.95,
+        code_distribution=(0.5, 0.5, 0.0),
+        active_codes=(0, 1),
+    )
+
+    restored = Phase1VQInternalMetrics.from_dict(metrics.to_dict())
+
+    assert restored.code_distribution == (0.5, 0.5, 0.0)
+    assert restored.active_codes == (0, 1)

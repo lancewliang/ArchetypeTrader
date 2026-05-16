@@ -20,17 +20,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import math
 from pathlib import Path
 from typing import Any, Mapping
 
 from ._template import render_template_file
-from ..metrics import (
-    Phase1CodeDiagnostic,
-    Phase1LayerResult,
-    Phase1MetricResult,
-    Phase1ValidationResult,
-)
+from .phase1_codebook_report_context import Phase1CodebookReportContextBuilder
+from ..metrics import Phase1ValidationResult
 
 
 JsonObject = dict[str, Any]
@@ -60,54 +55,6 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, tuple | list):
         return [_json_safe(item) for item in value]
     return value
-
-
-def _format_value(value: Any) -> str:
-    """格式化 HTML 表格中的指标值。
-
-    输入参数:
-        value: 原始指标值。
-
-    输出:
-        面向 HTML 展示的字符串。
-
-    使用场景:
-        metric、tie-breaker、config 和 artifact 表格渲染。
-    """
-
-    if value is None:
-        return "-"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, float):
-        if math.isnan(value):
-            return "NaN"
-        if math.isinf(value):
-            return "Infinity" if value > 0 else "-Infinity"
-        return f"{value:.6g}"
-    if isinstance(value, int):
-        return str(value)
-    return str(value)
-
-
-def _badge_class(severity: str | bool) -> str:
-    """将状态映射为 HTML badge class。
-
-    输入参数:
-        severity: metric severity 字符串，或 layer/checkpoint passed 布尔值。
-
-    输出:
-        ``pass``、``fail``、``warn`` 或 ``skip``。
-
-    使用场景:
-        report 中统一渲染 checkpoint、layer 和 metric 状态。
-    """
-
-    if isinstance(severity, bool):
-        return "pass" if severity else "fail"
-    if severity in {"pass", "fail", "warn", "skip"}:
-        return severity
-    return "warn"
 
 
 @dataclass(frozen=True)
@@ -209,132 +156,8 @@ class Phase1CodebookReport:
             测试中也可直接校验 HTML 片段。
         """
 
-        return render_template_file(_TEMPLATE_PATH, self._build_html_context(payload))
-
-    def _build_html_context(self, payload: Mapping[str, Any]) -> JsonObject:
-        """把 report payload 转成模板使用的展示模型。
-
-        输入参数:
-            payload: ``build_payload()`` 返回的 report payload。
-
-        输出:
-            只包含字符串、数字、bool、list 和 dict 的模板上下文。
-
-        使用场景:
-            ``render_html()`` 调用模板前完成强类型恢复、值格式化和状态映射，
-            HTML 结构本身留在独立模板文件中。
-        """
-
-        validation = payload["validation"]
-        summary = payload["summary"]
-        report = payload["report"]
-        config = payload.get("config", {})
-        layers = tuple(
-            Phase1LayerResult.from_dict(layer)
-            for layer in validation.get("layers", ())
-        )
-        code_diagnostics = tuple(
-            Phase1CodeDiagnostic.from_dict(item)
-            for item in validation.get("code_diagnostics", ())
-        )
-        drift_diagnostics = {
-            str(name): Phase1MetricResult.from_dict(item)
-            for name, item in validation.get("drift_diagnostics", {}).items()
-        }
-
-        passed = bool(summary.get("passed", False))
-        failed_layers = summary.get("failed_layers", [])
-        failed_text = ", ".join(str(layer) for layer in failed_layers) or "-"
-        return {
-            "page_title": str(report.get("title", self.title)),
-            "header_title": self.title,
-            "report": {
-                "generated_at": str(report.get("generated_at", "-")),
-                "schema": str(report.get("schema", "-")),
-            },
-            "summary": {
-                "checkpoint_id": str(summary.get("checkpoint_id", "-")),
-                "stage": str(summary.get("stage", "-")),
-                "epoch": str(summary.get("epoch", "-")),
-                "score": _format_value(summary.get("score")),
-                "failed_layers": failed_text,
-                "code_diagnostic_count": str(summary.get("code_diagnostic_count", 0)),
-                "badge_class": _badge_class(passed),
-                "status_label": "PASS" if passed else "FAIL",
-            },
-            "layers": [self._build_layer_context(layer) for layer in layers],
-            "code_diagnostics": [
-                self._build_code_diagnostic_context(item)
-                for item in code_diagnostics
-            ],
-            "tie_breaker_rows": self._build_mapping_rows(
-                validation.get("tie_breaker_metrics", {})
-            ),
-            "drift_diagnostics": [
-                self._build_metric_context(metric)
-                for metric in drift_diagnostics.values()
-            ],
-            "config_rows": self._build_mapping_rows(config)
-        }
-
-    def _build_layer_context(self, layer: Phase1LayerResult) -> JsonObject:
-        """构建单个 validation layer 的模板上下文。"""
-
-        failed = sum(1 for metric in layer.metrics if not metric.passed)
-        return {
-            "layer_id": str(layer.layer_id),
-            "name": layer.name,
-            "badge_class": _badge_class(layer.passed),
-            "status_label": "PASS" if layer.passed else "FAIL",
-            "metric_count": str(len(layer.metrics)),
-            "failed_count": str(failed),
-            "metrics": [
-                self._build_metric_context(metric)
-                for metric in layer.metrics
-            ],
-        }
-
-    def _build_metric_context(self, metric: Phase1MetricResult) -> JsonObject:
-        """构建单个 metric result 的模板上下文。"""
-
-        return {
-            "name": metric.name,
-            "value": _format_value(metric.value),
-            "threshold": metric.threshold,
-            "badge_class": _badge_class(metric.severity),
-            "severity_label": metric.severity.upper(),
-            "message": metric.message,
-        }
-
-    def _build_code_diagnostic_context(
-        self,
-        item: Phase1CodeDiagnostic,
-    ) -> JsonObject:
-        """构建单个 code diagnostic 的模板上下文。"""
-
-        return {
-            "code_id": str(item.code_id),
-            "support": str(item.support),
-            "occupancy": _format_value(item.occupancy),
-            "dominant_morphology": str(item.dominant_morphology or "-"),
-            "dominant_morphology_ratio": _format_value(
-                item.dominant_morphology_ratio
-            ),
-            "dominant_motif": str(item.dominant_motif or "-"),
-            "dominant_motif_ratio": _format_value(item.dominant_motif_ratio),
-            "dominant_pair": str(item.dominant_pair or "-"),
-            "decoded_mean_advantage": _format_value(item.decoded_mean_advantage),
-            "retention_ratio": _format_value(item.retention_ratio),
-            "status": item.status,
-        }
-
-    def _build_mapping_rows(self, payload: Mapping[str, Any]) -> list[JsonObject]:
-        """构建普通 key-value 表格上下文。"""
-
-        return [
-            {"key": str(key), "value": _format_value(value)}
-            for key, value in payload.items()
-        ]
+        context = Phase1CodebookReportContextBuilder(title=self.title).build(payload)
+        return render_template_file(_TEMPLATE_PATH, context)
 
 
 __all__ = ["Phase1CodebookReport"]
