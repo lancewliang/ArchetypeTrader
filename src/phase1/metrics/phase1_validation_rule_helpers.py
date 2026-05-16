@@ -24,6 +24,9 @@ def _metric_result(
     name: str,
     value: int | float | str | bool | None,
     threshold: str,
+    threshold_value: float | tuple[float, float] | None = None,
+    direction: str | None = None,
+    distance_to_threshold: float | None = None,
     passed: bool,
     layer: str,
     message: str,
@@ -41,6 +44,9 @@ def _metric_result(
             passed=False,
             layer=layer,
             message=f"{full_message}；指标缺失或不可计算，按 hard gate 失败处理",
+            threshold_value=threshold_value,
+            direction=direction,  # type: ignore[arg-type]
+            distance_to_threshold=None,
         )
     return Phase1MetricResult(
         name=name,
@@ -50,6 +56,9 @@ def _metric_result(
         passed=passed,
         layer=layer,
         message=full_message,
+        threshold_value=threshold_value,
+        direction=direction,  # type: ignore[arg-type]
+        distance_to_threshold=distance_to_threshold,
     )
 
 
@@ -75,6 +84,11 @@ def _gt(
         name=name,
         value=value,
         threshold=f"> {threshold_value:g}",
+        threshold_value=float(threshold_value),
+        direction="greater_is_better",
+        distance_to_threshold=(
+            float(value - threshold_value) if not _is_missing(value) else None
+        ),
         passed=value > threshold_value if not _is_missing(value) else False,
         layer=layer,
         message=message,
@@ -99,6 +113,11 @@ def _ge(
         name=name,
         value=value,
         threshold=f">= {threshold_value:g}",
+        threshold_value=float(threshold_value),
+        direction="greater_is_better",
+        distance_to_threshold=(
+            float(value - threshold_value) if not _is_missing(value) else None
+        ),
         passed=value >= threshold_value if not _is_missing(value) else False,
         layer=layer,
         message=message,
@@ -123,6 +142,11 @@ def _le(
         name=name,
         value=value,
         threshold=f"<= {threshold_value:g}",
+        threshold_value=float(threshold_value),
+        direction="less_is_better",
+        distance_to_threshold=(
+            float(threshold_value - value) if not _is_missing(value) else None
+        ),
         passed=value <= threshold_value if not _is_missing(value) else False,
         layer=layer,
         message=message,
@@ -148,6 +172,13 @@ def _between(
         name=name,
         value=value,
         threshold=f"[{lower:g}, {upper:g}]",
+        threshold_value=(float(lower), float(upper)),
+        direction="between",
+        distance_to_threshold=(
+            float(min(value - lower, upper - value))
+            if not _is_missing(value)
+            else None
+        ),
         passed=lower <= value <= upper if not _is_missing(value) else False,
         layer=layer,
         message=message,

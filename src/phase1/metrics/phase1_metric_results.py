@@ -44,6 +44,18 @@ MetricSeverity = Literal["pass", "warn", "fail", "skip"]
     - ``skip``: 缺少必要输入无法计算。hard gate 指标默认 skip-as-fail。
 """
 
+MetricDirection = Literal["greater_is_better", "less_is_better", "between"]
+"""单个 metric 的阈值方向。
+
+含义:
+    - ``greater_is_better``: 指标值越大越安全，margin = value - threshold；
+    - ``less_is_better``: 指标值越小越安全，margin = threshold - value；
+    - ``between``: 指标值应落在闭区间，margin = min(value - lower, upper - value)。
+"""
+
+MetricThresholdValue = float | tuple[float, float] | None
+"""机器可读阈值；区间阈值使用 ``(lower, upper)``。"""
+
 
 @dataclass(frozen=True)
 class Phase1MetricResult:
@@ -79,6 +91,15 @@ class Phase1MetricResult:
     # report 展示用解释文本。
     message: str = ""
 
+    # 机器可读阈值。单侧阈值为 float，区间阈值为 (lower, upper)。
+    threshold_value: MetricThresholdValue = None
+
+    # 指标方向，用于 report 计算阈值距离和排序解释。
+    direction: MetricDirection | None = None
+
+    # 到通过边界的有符号距离。>= 0 表示在阈值安全侧，< 0 表示越界。
+    distance_to_threshold: float | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint/report 落盘。"""
 
@@ -92,11 +113,36 @@ class Phase1MetricResult:
             name=str(payload["name"]),
             value=payload.get("value"),
             threshold=str(payload["threshold"]),
+            threshold_value=_metric_threshold_value_from_payload(
+                payload.get("threshold_value")
+            ),
+            direction=(
+                str(direction)
+                if (direction := payload.get("direction")) is not None
+                else None
+            ),  # type: ignore[arg-type]
+            distance_to_threshold=(
+                float(distance)
+                if (distance := payload.get("distance_to_threshold")) is not None
+                else None
+            ),
             severity=payload["severity"],  # type: ignore[arg-type]
             passed=bool(payload["passed"]),
             layer=str(payload["layer"]),
             message=str(payload.get("message", "")),
         )
+
+
+def _metric_threshold_value_from_payload(value: Any) -> MetricThresholdValue:
+    """恢复机器可读阈值，兼容旧 payload 缺失该字段的情况。"""
+
+    if value is None:
+        return None
+    if isinstance(value, tuple | list):
+        if len(value) != 2:
+            return None
+        return (float(value[0]), float(value[1]))
+    return float(value)
 
 
 @dataclass(frozen=True)
@@ -339,7 +385,9 @@ class Phase1ValidationResult:
 
 
 __all__ = [
+    "MetricDirection",
     "MetricSeverity",
+    "MetricThresholdValue",
     "Phase1LayerResult",
     "Phase1MetricResult",
     "Phase1ValidationResult",

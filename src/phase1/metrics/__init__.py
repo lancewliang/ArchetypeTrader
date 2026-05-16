@@ -1,6 +1,8 @@
 from .phase1_metrics import Phase1Metrics
 from .phase1_metric_results import (
+    MetricDirection,
     MetricSeverity,
+    MetricThresholdValue,
     Phase1LayerResult,
     Phase1MetricResult,
     Phase1ValidationResult,
@@ -73,7 +75,9 @@ from .phase1_validation_score import (
 __all__ = [
     "CodeAssignmentSnapshot",
     "DEFAULT_TIE_SCORE_TOLERANCE",
+    "MetricDirection",
     "MetricSeverity",
+    "MetricThresholdValue",
     "Phase1LayerResult",
     "Phase1MetricResult",
     "Phase1Metrics",

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from src.phase1.metrics import (
+    Phase1MetricResult,
     Phase1LabelPredictabilityMetrics,
     Phase1LabelPredictabilityThresholds,
     Phase1VQInternalMetrics,
@@ -60,6 +63,23 @@ def test_rule_messages_include_direction_and_change_meaning() -> None:
     assert "指标方向：落在目标区间内最好" in vq_messages["normalized_code_perplexity"]
     assert "低于下限或高于上限都可能失败" in vq_messages["normalized_code_perplexity"]
 
+    vq_metrics = {metric.name: metric for metric in vq_result.metrics}
+    assert vq_metrics["validation_action_accuracy"].threshold_value == 0.85
+    assert vq_metrics["validation_action_accuracy"].direction == "greater_is_better"
+    assert vq_metrics[
+        "validation_action_accuracy"
+    ].distance_to_threshold == pytest.approx(0.05)
+    assert vq_metrics["reconstruction_loss_gap"].threshold_value == 1.25
+    assert vq_metrics["reconstruction_loss_gap"].direction == "less_is_better"
+    assert vq_metrics["reconstruction_loss_gap"].distance_to_threshold == pytest.approx(
+        0.15
+    )
+    assert vq_metrics["normalized_code_perplexity"].threshold_value == (0.5, 0.9)
+    assert vq_metrics["normalized_code_perplexity"].direction == "between"
+    assert vq_metrics[
+        "normalized_code_perplexity"
+    ].distance_to_threshold == pytest.approx(0.2)
+
     label_result = evaluate_label_predictability_rules(
         _passing_label_metrics(),
         Phase1LabelPredictabilityThresholds(),
@@ -71,3 +91,28 @@ def test_rule_messages_include_direction_and_change_meaning() -> None:
         "变大表示 morphology 对 label 的解释力变弱"
         in label_messages["label_entropy_given_morphology"]
     )
+
+    label_metrics = {metric.name: metric for metric in label_result.metrics}
+    assert label_metrics["label_entropy_given_morphology"].threshold_value == 0.8
+    assert label_metrics["label_entropy_given_morphology"].direction == "less_is_better"
+    assert label_metrics[
+        "label_entropy_given_morphology"
+    ].distance_to_threshold == pytest.approx(0.1)
+
+
+def test_metric_result_from_dict_is_backward_compatible() -> None:
+    metric = Phase1MetricResult.from_dict(
+        {
+            "name": "legacy_metric",
+            "value": 1.0,
+            "threshold": ">= 0.5",
+            "severity": "pass",
+            "passed": True,
+            "layer": "legacy",
+            "message": "ok",
+        }
+    )
+
+    assert metric.threshold_value is None
+    assert metric.direction is None
+    assert metric.distance_to_threshold is None

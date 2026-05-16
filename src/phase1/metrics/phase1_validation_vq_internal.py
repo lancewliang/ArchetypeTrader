@@ -293,6 +293,8 @@ def _missing_warn_result(
     *,
     name: str,
     threshold: str,
+    threshold_value: float | int | None,
+    direction: str,
     layer: str,
     message: str,
     direction_message: str,
@@ -309,6 +311,11 @@ def _missing_warn_result(
         passed=True,
         layer=layer,
         message=f"{message}；{direction_message}",
+        threshold_value=(
+            float(threshold_value) if threshold_value is not None else None
+        ),
+        direction=direction,  # type: ignore[arg-type]
+        distance_to_threshold=None,
     )
 
 
@@ -330,6 +337,8 @@ def evaluate_vq_internal_rules(
         _missing_warn_result(
             name="assignment_churn_recent_mean",
             threshold=f"<= {thresholds.churn_recent_mean_max:g}",
+            threshold_value=thresholds.churn_recent_mean_max,
+            direction="less_is_better",
             layer=layer,
             message=(
                 "近期 assignment churn 缺失，通常表示训练初期 history 不足；"
@@ -353,6 +362,8 @@ def evaluate_vq_internal_rules(
         _missing_warn_result(
             name="entry_timing_error_median",
             threshold=f"<= {thresholds.entry_timing_error_max:g}",
+            threshold_value=thresholds.entry_timing_error_max,
+            direction="less_is_better",
             layer=layer,
             message=(
                 "入场时点误差缺失，通常表示没有 demo/decoded 同时入场样本；"

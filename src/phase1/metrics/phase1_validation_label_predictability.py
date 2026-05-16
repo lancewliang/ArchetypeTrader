@@ -264,6 +264,18 @@ def evaluate_label_predictability_rules(
                 "<= "
                 f"{thresholds.label_entropy_given_morphology_max_ratio:g} * H(label)"
             ),
+            threshold_value=(
+                float(label_entropy_threshold)
+                if not _is_missing(label_entropy_threshold)
+                else None
+            ),
+            direction="less_is_better",
+            distance_to_threshold=(
+                float(label_entropy_threshold - metrics.label_entropy_given_morphology)
+                if not _is_missing(metrics.label_entropy_given_morphology)
+                and not _is_missing(label_entropy_threshold)
+                else None
+            ),
             passed=(
                 metrics.label_entropy_given_morphology <= label_entropy_threshold
                 if not _is_missing(metrics.label_entropy_given_morphology)

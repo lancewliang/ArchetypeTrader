@@ -596,6 +596,8 @@ class Phase1CodebookEvaluator:
         name: str,
         value: float | None,
         threshold: str,
+        threshold_value: float | None,
+        direction: str,
         triggered: bool,
         message: str,
     ) -> Phase1MetricResult:
@@ -625,6 +627,9 @@ class Phase1CodebookEvaluator:
                 passed=True,
                 layer="drift",
                 message=f"{message}；诊断输入缺失，跳过 drift 判定",
+                threshold_value=threshold_value,
+                direction=direction,  # type: ignore[arg-type]
+                distance_to_threshold=None,
             )
         return Phase1MetricResult(
             name=name,
@@ -634,6 +639,13 @@ class Phase1CodebookEvaluator:
             passed=True,
             layer="drift",
             message=message,
+            threshold_value=threshold_value,
+            direction=direction,  # type: ignore[arg-type]
+            distance_to_threshold=(
+                float(threshold_value - value)
+                if threshold_value is not None
+                else None
+            ),
         )
 
     @classmethod
@@ -669,6 +681,8 @@ class Phase1CodebookEvaluator:
             name=name,
             value=value,
             threshold=f"warn if > {threshold_value:g}",
+            threshold_value=float(threshold_value),
+            direction="less_is_better",
             triggered=bool(triggered),
             message=message,
         )
@@ -780,6 +794,8 @@ class Phase1CodebookEvaluator:
                 name="per_code_return_gap",
                 value=None,
                 threshold="warn if > train per-code return std",
+                threshold_value=None,
+                direction="less_is_better",
                 triggered=False,
                 message="per-code return train/validation gap 需要 prices 才能诊断",
             )
@@ -814,6 +830,8 @@ class Phase1CodebookEvaluator:
                 name="per_code_return_gap",
                 value=None,
                 threshold="warn if > train per-code return std",
+                threshold_value=None,
+                direction="less_is_better",
                 triggered=False,
                 message="没有可对齐的 train/validation per-code return",
             )
@@ -829,6 +847,8 @@ class Phase1CodebookEvaluator:
             name="per_code_return_gap",
             value=value,
             threshold=f"warn if > {threshold_value:g}",
+            threshold_value=threshold_value,
+            direction="less_is_better",
             triggered=value > threshold_value,
             message="per-code return train/validation gap 过大时提示 code 局部失效",
         )
