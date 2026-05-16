@@ -24,6 +24,7 @@ from .phase1_validation_rules import (
 )
 from .phase1_validation_behavior_quality import (
     Phase1BehaviorQualityMetrics,
+    Phase1BehaviorQualityPayload,
     Phase1BehaviorQualityThresholds,
     compute_behavior_structure_score,
     evaluate_behavior_quality_rules,
@@ -75,6 +76,7 @@ __all__ = [
     "Phase1MetricResult",
     "Phase1Metrics",
     "Phase1BehaviorQualityMetrics",
+    "Phase1BehaviorQualityPayload",
     "Phase1BehaviorQualityThresholds",
     "Phase1CodeDiagnostic",
     "Phase1EvaluationSnapshot",

@@ -8,12 +8,46 @@ from src.phase1.evaluators.phase1_validation_layers.layer2_behavior_quality impo
     _code_diagnostic_status,
     classify_action_motif,
     classify_market_morphology,
+    compute_behavior_quality_metrics,
     compute_distribution_by_code,
     compute_duplicate_code_pair_count,
     compute_intra_code_action_similarity,
     compute_inter_intra_separation,
     compute_lift,
 )
+from src.phase1.metrics import (
+    Phase1BehaviorQualityPayload,
+    Phase1EvaluationSnapshot,
+    Phase1ValidationRuntimeConfig,
+)
+
+
+def _snapshot(
+    *,
+    prices: np.ndarray | None,
+    decoded_actions: np.ndarray,
+    code_ids: np.ndarray,
+) -> Phase1EvaluationSnapshot:
+    sample_count, horizon = decoded_actions.shape
+    return Phase1EvaluationSnapshot(
+        split="val",
+        epoch=1,
+        sample_ids=np.arange(sample_count),
+        states=np.zeros((sample_count, horizon, 2), dtype=np.float32),
+        prices=prices,
+        demo_actions=decoded_actions,
+        demo_rewards=np.zeros((sample_count, horizon), dtype=np.float64),
+        decoded_actions=decoded_actions,
+        decoded_logits=np.zeros((sample_count, horizon, 3), dtype=np.float32),
+        code_ids=code_ids,
+        z_e=np.column_stack(
+            [code_ids.astype(np.float64), np.arange(sample_count, dtype=np.float64)]
+        ),
+        z_q=np.zeros((sample_count, 2), dtype=np.float32),
+        distances=np.zeros((sample_count, 2), dtype=np.float32),
+        reconstruction_loss=0.0,
+        action_accuracy=1.0,
+    )
 
 
 def test_classify_market_morphology_uses_documented_labels() -> None:
@@ -171,3 +205,45 @@ def test_code_diagnostic_status_aggregates_support_structure_and_profitability()
         )
         == "bad"
     )
+
+
+def test_behavior_quality_returns_typed_extra_payload() -> None:
+    decoded_actions = np.asarray(
+        [
+            [2, 2, 2],
+            [2, 2, 1],
+            [0, 0, 0],
+            [0, 0, 1],
+        ],
+        dtype=np.int64,
+    )
+    code_ids = np.asarray([0, 0, 1, 1], dtype=np.int64)
+    prices = np.asarray(
+        [
+            [100.0, 101.0, 102.0],
+            [100.0, 100.5, 101.0],
+            [100.0, 99.0, 98.0],
+            [100.0, 99.5, 99.0],
+        ],
+        dtype=np.float64,
+    )
+    snapshot = _snapshot(
+        prices=prices,
+        decoded_actions=decoded_actions,
+        code_ids=code_ids,
+    )
+
+    computation = compute_behavior_quality_metrics(
+        train_snapshot=snapshot,
+        val_snapshot=snapshot,
+        runtime_config=Phase1ValidationRuntimeConfig(active_code_min_occupancy=0.01),
+    )
+
+    assert isinstance(computation.extra_payload, Phase1BehaviorQualityPayload)
+    assert len(computation.extra_payload["morphology_labels"]) == code_ids.size
+    assert len(computation.extra_payload["motif_labels"]) == code_ids.size
+    assert computation.extra_payload["active_codes"] == (0, 1)
+    restored = Phase1BehaviorQualityPayload.from_dict(
+        computation.extra_payload.to_dict()
+    )
+    assert restored == computation.extra_payload

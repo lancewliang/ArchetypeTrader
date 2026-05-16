@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +11,92 @@ from src.utils import _dataclass_from_mapping
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
     from .phase1_validation_data_schema import Phase1ValidationMetrics
+
+
+@dataclass(frozen=True)
+class Phase1BehaviorQualityPayload(Mapping[str, object]):
+    """第二层 behavior quality 计算的中间 payload。
+
+    使用场景:
+        保存每条样本的 morphology/motif 标签，以及当前 validation split 的
+        active code 列表。该对象实现 ``Mapping``，用于兼容现有
+        ``extra_payload["..."]`` 调用。
+    """
+
+    # 每条 horizon 的市场形态标签。
+    morphology_labels: tuple[str, ...]
+
+    # 每条 horizon 的交易 motif 标签。
+    motif_labels: tuple[str, ...]
+
+    # 当前 validation split 中满足 active occupancy 阈值的 code id。
+    active_codes: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        """标准化 payload 中的标签和 code id 类型。"""
+
+        object.__setattr__(
+            self,
+            "morphology_labels",
+            tuple(str(label) for label in self.morphology_labels),
+        )
+        object.__setattr__(
+            self,
+            "motif_labels",
+            tuple(str(label) for label in self.motif_labels),
+        )
+        object.__setattr__(
+            self,
+            "active_codes",
+            tuple(int(code_id) for code_id in self.active_codes),
+        )
+
+    def _mapping(self) -> dict[str, object]:
+        """返回兼容旧 ``extra_payload`` 字典访问的视图。"""
+
+        return {
+            "morphology_labels": self.morphology_labels,
+            "motif_labels": self.motif_labels,
+            "active_codes": self.active_codes,
+        }
+
+    def __getitem__(self, key: str) -> object:
+        """按旧 payload key 读取属性值。"""
+
+        return self._mapping()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        """迭代旧 payload key。"""
+
+        return iter(self._mapping())
+
+    def __len__(self) -> int:
+        """返回 payload key 数量。"""
+
+        return len(self._mapping())
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为可落盘 dict。"""
+
+        return {
+            "morphology_labels": list(self.morphology_labels),
+            "motif_labels": list(self.motif_labels),
+            "active_codes": [int(code_id) for code_id in self.active_codes],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1BehaviorQualityPayload":
+        """从 dict 恢复第二层 behavior quality payload。"""
+
+        return cls(
+            morphology_labels=tuple(
+                str(label) for label in payload.get("morphology_labels", ())
+            ),
+            motif_labels=tuple(str(label) for label in payload.get("motif_labels", ())),
+            active_codes=tuple(
+                int(code_id) for code_id in payload.get("active_codes", ())
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -242,6 +328,7 @@ def compute_behavior_structure_score(metrics: Phase1ValidationMetrics) -> float:
 __all__ = [
     "compute_behavior_structure_score",
     "Phase1BehaviorQualityMetrics",
+    "Phase1BehaviorQualityPayload",
     "Phase1BehaviorQualityThresholds",
     "evaluate_behavior_quality_rules",
 ]

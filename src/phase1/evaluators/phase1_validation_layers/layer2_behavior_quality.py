@@ -28,6 +28,7 @@ from src.utils import nan_value as _nan
 
 from ...metrics import (
     Phase1BehaviorQualityMetrics,
+    Phase1BehaviorQualityPayload,
     Phase1BehaviorQualityThresholds,
     Phase1CodeDiagnostic,
     Phase1EvaluationSnapshot,
@@ -982,11 +983,11 @@ def compute_behavior_quality_metrics(
         layer_name="behavior_quality",
         metrics=metrics,
         code_diagnostics=tuple(diagnostics),
-        extra_payload={
-            "morphology_labels": morphologies,
-            "motif_labels": motifs,
-            "active_codes": active_codes,
-        },
+        extra_payload=Phase1BehaviorQualityPayload(
+            morphology_labels=morphologies,
+            motif_labels=motifs,
+            active_codes=active_codes,
+        ),
     )
 
 
