@@ -17,6 +17,51 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class Phase1PairProfitabilityCell:
+    """单个 morphology-motif pair 的 oracle 盈利性摘要。"""
+
+    # 市场形态标签，例如 uptrend、downtrend、range-high-vol。
+    morphology: str
+
+    # 行为 motif 标签，例如 long-hold、short-hold、flat。
+    motif: str
+
+    # validation 中落入该 pair 的 horizon 数量。
+    support: int
+
+    # 该 pair 上 decoded return 相对 flat baseline 的平均优势。
+    mean_decoded_advantage: float
+
+    # 该 pair 上 decoded return 超过 flat baseline 的比例。
+    decoded_win_rate: float
+
+    # 该 pair 上 decoded advantage 相对 DP advantage 的保留比例。
+    retention_ratio: float
+
+    # 该 pair 上 total fee / gross profit。
+    fee_drag: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为 report/checkpoint 可保存的 dict。"""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1PairProfitabilityCell":
+        """从 dict 恢复 pair profitability cell。"""
+
+        return cls(
+            morphology=str(payload["morphology"]),
+            motif=str(payload["motif"]),
+            support=int(payload["support"]),
+            mean_decoded_advantage=float(payload["mean_decoded_advantage"]),
+            decoded_win_rate=float(payload["decoded_win_rate"]),
+            retention_ratio=float(payload["retention_ratio"]),
+            fee_drag=float(payload["fee_drag"]),
+        )
+
+
+@dataclass(frozen=True)
 class Phase1OracleProfitabilityPayload(Mapping[str, object]):
     """第三层 oracle profitability 计算的中间 payload。
 
@@ -44,9 +89,23 @@ class Phase1OracleProfitabilityPayload(Mapping[str, object]):
     # random label baseline 使用的随机种子。
     random_seed: int
 
+    # morphology x motif 的 oracle decoded profitability 矩阵 cell。
+    pair_profitability_matrix: tuple[Phase1PairProfitabilityCell, ...] = ()
+
     def __post_init__(self) -> None:
         """标准化 payload 中的序列和标量类型。"""
 
+        pair_cells = []
+        for item in self.pair_profitability_matrix:
+            if isinstance(item, Phase1PairProfitabilityCell):
+                pair_cells.append(item)
+            else:
+                pair_cells.append(Phase1PairProfitabilityCell.from_dict(item))
+        object.__setattr__(
+            self,
+            "pair_profitability_matrix",
+            tuple(pair_cells),
+        )
         object.__setattr__(
             self,
             "per_code_profitability",
@@ -84,6 +143,7 @@ class Phase1OracleProfitabilityPayload(Mapping[str, object]):
             "flat_returns": self.flat_returns,
             "random_label_returns": self.random_label_returns,
             "random_seed": self.random_seed,
+            "pair_profitability_matrix": self.pair_profitability_matrix,
         }
 
     def __getitem__(self, key: str) -> object:
@@ -115,6 +175,9 @@ class Phase1OracleProfitabilityPayload(Mapping[str, object]):
                 float(value) for value in self.random_label_returns
             ],
             "random_seed": self.random_seed,
+            "pair_profitability_matrix": [
+                item.to_dict() for item in self.pair_profitability_matrix
+            ],
         }
 
     @classmethod
@@ -142,6 +205,12 @@ class Phase1OracleProfitabilityPayload(Mapping[str, object]):
                 float(value) for value in payload.get("random_label_returns", ())
             ),
             random_seed=int(payload["random_seed"]),
+            pair_profitability_matrix=tuple(
+                item
+                if isinstance(item, Phase1PairProfitabilityCell)
+                else Phase1PairProfitabilityCell.from_dict(item)
+                for item in payload.get("pair_profitability_matrix", ())
+            ),
         )
 
 
@@ -407,5 +476,6 @@ __all__ = [
     "Phase1OracleProfitabilityMetrics",
     "Phase1OracleProfitabilityPayload",
     "Phase1OracleProfitabilityThresholds",
+    "Phase1PairProfitabilityCell",
     "evaluate_oracle_profitability_rules",
 ]

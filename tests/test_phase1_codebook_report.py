@@ -283,6 +283,65 @@ def test_build_html_context_includes_header_metadata() -> None:
     }
 
 
+def test_build_html_context_includes_three_part_risk_summary() -> None:
+    payload = _payload()
+    validation = payload["validation"]
+    assert isinstance(validation, dict)
+    validation["risk_findings"] = [
+        {
+            "severity": "warn",
+            "title": "Drift warning",
+            "reason": "motif drift",
+            "related_metrics": ["motif_distribution_kl"],
+            "related_codes": [],
+            "related_pairs": [],
+            "recommended_action": "compare train and validation motif distribution",
+        },
+        {
+            "severity": "fail",
+            "title": "Code 8 risk",
+            "reason": "decoded return is negative",
+            "related_metrics": ["decoded_mean_advantage"],
+            "related_codes": [8],
+            "related_pairs": ["neutral:mixed + middle + switching"],
+            "recommended_action": "inspect code 8 decoded actions",
+        },
+    ]
+
+    context = Phase1CodebookReportContextBuilder().build(payload)
+
+    assert context["risk_summary"] == {
+        "has_findings": True,
+        "severity": "fail",
+        "badge_class": "fail",
+        "finding_count": "2",
+        "primary_risk": "Code 8 risk: decoded return is negative",
+        "inspection_target": (
+            "优先检查 codes 8；pairs neutral:mixed + middle + switching；"
+            "metrics decoded_mean_advantage。"
+        ),
+        "recommendation": "inspect code 8 decoded actions",
+    }
+
+
+def test_build_html_context_defaults_three_part_risk_summary() -> None:
+    context = Phase1CodebookReportContextBuilder().build(_payload())
+
+    assert context["risk_summary"] == {
+        "has_findings": False,
+        "severity": "info",
+        "badge_class": "pass",
+        "finding_count": "0",
+        "primary_risk": "未发现阻断或警戒级风险。",
+        "inspection_target": (
+            "无需优先 drill-down；保留 hard gate、per-code 和 drift 常规审计记录。"
+        ),
+        "recommendation": (
+            "当前 checkpoint 可按 hard gate 和 selector 结果进入后续候选流程。"
+        ),
+    }
+
+
 def test_build_html_context_includes_score_breakdown_rows() -> None:
     context = Phase1CodebookReportContextBuilder().build(_payload())
 

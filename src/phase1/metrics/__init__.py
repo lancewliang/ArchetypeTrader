@@ -44,6 +44,7 @@ from .phase1_validation_oracle_profitability import (
     Phase1OracleProfitabilityMetrics,
     Phase1OracleProfitabilityPayload,
     Phase1OracleProfitabilityThresholds,
+    Phase1PairProfitabilityCell,
     compute_oracle_profitability_score,
     evaluate_oracle_profitability_rules,
 )
@@ -98,6 +99,7 @@ __all__ = [
     "Phase1OracleProfitabilityMetrics",
     "Phase1OracleProfitabilityPayload",
     "Phase1OracleProfitabilityThresholds",
+    "Phase1PairProfitabilityCell",
     "Phase1PerCodeProfitability",
     "Phase1TeacherQualityMetrics",
     "Phase1TeacherQualityPayload",

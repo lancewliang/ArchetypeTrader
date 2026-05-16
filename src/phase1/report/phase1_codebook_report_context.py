@@ -134,6 +134,11 @@ class Phase1CodebookReportContextBuilder:
                 code_diagnostics,
                 oracle_profitability_payload,
             ),
+            "pair_profitability_matrix": (
+                self._build_pair_profitability_matrix(
+                    oracle_profitability_payload
+                )
+            ),
             "code_distribution": self._build_code_distribution_context(
                 vq_internal_payload
             )
@@ -151,6 +156,7 @@ class Phase1CodebookReportContextBuilder:
                 self._build_metric_context(metric)
                 for metric in drift_diagnostics.values()
             ],
+            "risk_summary": self._build_risk_summary_context(risk_findings),
             "risk_findings": [
                 self._build_risk_finding_context(finding)
                 for finding in risk_findings
@@ -386,6 +392,73 @@ class Phase1CodebookReportContextBuilder:
             "recommended_action": finding.recommended_action,
         }
 
+    def _build_risk_summary_context(
+        self,
+        findings: tuple[Phase1RiskFinding, ...],
+    ) -> JsonObject:
+        """把 risk findings 聚合成报告首页的三段式风险定位。"""
+
+        if not findings:
+            return {
+                "has_findings": False,
+                "severity": "info",
+                "badge_class": "pass",
+                "finding_count": "0",
+                "primary_risk": "未发现阻断或警戒级风险。",
+                "inspection_target": (
+                    "无需优先 drill-down；保留 hard gate、per-code 和 drift "
+                    "常规审计记录。"
+                ),
+                "recommendation": (
+                    "当前 checkpoint 可按 hard gate 和 selector 结果进入后续候选流程。"
+                ),
+            }
+
+        severity_rank = {"fail": 0, "warn": 1, "info": 2}
+        _, primary = min(
+            enumerate(findings),
+            key=lambda item: (
+                severity_rank.get(item[1].severity, 3),
+                item[0],
+            ),
+        )
+        return {
+            "has_findings": True,
+            "severity": primary.severity,
+            "badge_class": "fail" if primary.severity == "fail" else "warn",
+            "finding_count": str(len(findings)),
+            "primary_risk": self._risk_primary_text(primary),
+            "inspection_target": self._risk_inspection_target(primary),
+            "recommendation": (
+                primary.recommended_action
+                or "保留该 finding 的风险说明，并复查关联样本与相邻 checkpoint。"
+            ),
+        }
+
+    def _risk_primary_text(self, finding: Phase1RiskFinding) -> str:
+        """构建三段式中的主要风险文本。"""
+
+        if finding.reason:
+            return f"{finding.title}: {finding.reason}"
+        return finding.title
+
+    def _risk_inspection_target(self, finding: Phase1RiskFinding) -> str:
+        """根据 finding 的关联对象构建优先检查目标。"""
+
+        targets: list[str] = []
+        if finding.related_codes:
+            targets.append(
+                "codes "
+                + ", ".join(str(code_id) for code_id in finding.related_codes)
+            )
+        if finding.related_pairs:
+            targets.append("pairs " + ", ".join(finding.related_pairs))
+        if finding.related_metrics:
+            targets.append("metrics " + ", ".join(finding.related_metrics))
+        if targets:
+            return "优先检查 " + "；".join(targets) + "。"
+        return "优先检查该 finding 对应的边界样本、动作序列和验证期 trace。"
+
     def _build_oracle_profitability_kpis(
         self,
         metrics_payload: Any,
@@ -459,6 +532,66 @@ class Phase1CodebookReportContextBuilder:
             }
             for item in oracle_profitability_payload.per_code_profitability
         ]
+
+    def _build_pair_profitability_matrix(
+        self,
+        oracle_profitability_payload: Phase1OracleProfitabilityPayload | None,
+    ) -> JsonObject:
+        """构建 morphology x motif decoded advantage 矩阵上下文。"""
+
+        if oracle_profitability_payload is None:
+            return {"morphologies": [], "motifs": [], "rows": [], "cells": []}
+        cells = tuple(oracle_profitability_payload.pair_profitability_matrix)
+        if not cells:
+            return {"morphologies": [], "motifs": [], "rows": [], "cells": []}
+
+        morphologies = sorted({cell.morphology for cell in cells})
+        motifs = sorted({cell.motif for cell in cells})
+        by_pair = {
+            (cell.morphology, cell.motif): cell
+            for cell in cells
+        }
+        rows: list[JsonObject] = []
+        flat_cells: list[JsonObject] = []
+        for morphology in morphologies:
+            row_cells: list[JsonObject] = []
+            for motif in motifs:
+                cell = by_pair.get((morphology, motif))
+                if cell is None:
+                    cell_context = {
+                        "morphology": morphology,
+                        "motif": motif,
+                        "support": "0",
+                        "mean_decoded_advantage": "-",
+                        "decoded_win_rate": "-",
+                        "retention_ratio": "-",
+                        "fee_drag": "-",
+                        "badge_class": "skip",
+                    }
+                else:
+                    cell_context = {
+                        "morphology": morphology,
+                        "motif": motif,
+                        "support": str(cell.support),
+                        "mean_decoded_advantage": _format_value(
+                            cell.mean_decoded_advantage
+                        ),
+                        "decoded_win_rate": _format_value(cell.decoded_win_rate),
+                        "retention_ratio": _format_value(cell.retention_ratio),
+                        "fee_drag": _format_value(cell.fee_drag),
+                        "badge_class": self._profit_badge_class(
+                            cell.mean_decoded_advantage
+                        ),
+                    }
+                row_cells.append(cell_context)
+                flat_cells.append(cell_context)
+            rows.append({"morphology": morphology, "cells": row_cells})
+        return {
+            "morphologies": morphologies,
+            "motifs": motifs,
+            "rows": rows,
+            "cells": flat_cells,
+        }
 
     def _build_oracle_cumulative_return_series(
         self,

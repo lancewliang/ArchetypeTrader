@@ -35,6 +35,7 @@ from ...metrics import (
     Phase1OracleProfitabilityMetrics,
     Phase1OracleProfitabilityPayload,
     Phase1OracleProfitabilityThresholds,
+    Phase1PairProfitabilityCell,
     Phase1PerCodeProfitability,
     Phase1ValidationRuntimeConfig,
 )
@@ -486,6 +487,95 @@ def compute_per_code_profitability(
     return tuple(output)
 
 
+def compute_pair_profitability_matrix(
+    *,
+    morphologies: np.ndarray,
+    motifs: np.ndarray,
+    decoded_advantage: np.ndarray,
+    decoded_returns: np.ndarray,
+    flat_returns: np.ndarray,
+    dp_advantage: np.ndarray,
+    decoded_gross_returns: np.ndarray,
+    decoded_fees: np.ndarray,
+) -> tuple[Phase1PairProfitabilityCell, ...]:
+    """计算 morphology x motif 的 decoded advantage 矩阵 cell。
+
+    输入参数:
+        morphologies: 每条 horizon 的市场形态标签。
+        motifs: 每条 horizon 的行为 motif 标签。
+        decoded_advantage: decoded return 相对 flat 的优势。
+        decoded_returns: decoded 策略净收益。
+        flat_returns: flat baseline 收益。
+        dp_advantage: DP teacher 相对 flat 的优势。
+        decoded_gross_returns: decoded gross return。
+        decoded_fees: decoded 手续费。
+
+    输出:
+        按 morphology、motif 排序的 pair profitability cell。
+    """
+
+    morphology_values = np.asarray(morphologies, dtype=object).reshape(-1)
+    motif_values = np.asarray(motifs, dtype=object).reshape(-1)
+    sample_count = morphology_values.shape[0]
+    if sample_count == 0 or motif_values.shape[0] != sample_count:
+        return ()
+
+    decoded_advantage_values = np.asarray(decoded_advantage, dtype=np.float64)
+    decoded_return_values = np.asarray(decoded_returns, dtype=np.float64)
+    flat_return_values = np.asarray(flat_returns, dtype=np.float64)
+    dp_advantage_values = np.asarray(dp_advantage, dtype=np.float64)
+    gross_values = np.asarray(decoded_gross_returns, dtype=np.float64)
+    fee_values = np.asarray(decoded_fees, dtype=np.float64)
+    if any(
+        values.shape[0] != sample_count
+        for values in (
+            decoded_advantage_values,
+            decoded_return_values,
+            flat_return_values,
+            dp_advantage_values,
+            gross_values,
+            fee_values,
+        )
+    ):
+        return ()
+
+    output: list[Phase1PairProfitabilityCell] = []
+    pairs = sorted(
+        {
+            (str(morphology), str(motif))
+            for morphology, motif in zip(
+                morphology_values,
+                motif_values,
+                strict=False,
+            )
+        }
+    )
+    for morphology, motif in pairs:
+        mask = (morphology_values == morphology) & (motif_values == motif)
+        support = int(np.sum(mask))
+        if support <= 0:
+            continue
+        output.append(
+            Phase1PairProfitabilityCell(
+                morphology=morphology,
+                motif=motif,
+                support=support,
+                mean_decoded_advantage=float(
+                    np.nanmean(decoded_advantage_values[mask])
+                ),
+                decoded_win_rate=float(
+                    np.nanmean(decoded_return_values[mask] > flat_return_values[mask])
+                ),
+                retention_ratio=_safe_retention_ratio(
+                    decoded_advantage_values[mask],
+                    dp_advantage_values[mask],
+                ),
+                fee_drag=compute_fee_drag(fee_values[mask], gross_values[mask]),
+            )
+        )
+    return tuple(output)
+
+
 def compute_dominant_pair_positive_ratio(
     snapshot: Phase1EvaluationSnapshot,
     decoded_advantage: np.ndarray,
@@ -612,6 +702,18 @@ def compute_oracle_profitability_metrics(
         thresholds=thresholds,
         active_codes=active_codes,
     )
+    morphologies = classify_market_morphology(val_snapshot.prices)
+    motifs = classify_action_motif(val_snapshot.decoded_actions, val_snapshot.prices)
+    pair_profitability_matrix = compute_pair_profitability_matrix(
+        morphologies=morphologies,
+        motifs=motifs,
+        decoded_advantage=decoded_advantage,
+        decoded_returns=decoded_execution.returns,
+        flat_returns=flat_returns,
+        dp_advantage=dp_advantage,
+        decoded_gross_returns=decoded_execution.gross_returns,
+        decoded_fees=decoded_execution.fees,
+    )
 
     random_label_risk_adjusted_return = compute_risk_adjusted_return(random_returns)
     risk_adjusted_return = compute_risk_adjusted_return(decoded_execution.returns)
@@ -678,6 +780,7 @@ def compute_oracle_profitability_metrics(
             flat_returns=flat_returns,
             random_label_returns=random_returns,
             random_seed=runtime_config.random_seed,
+            pair_profitability_matrix=pair_profitability_matrix,
         ),
     )
 
@@ -687,6 +790,7 @@ __all__ = [
     "compute_fee_drag",
     "compute_max_drawdown",
     "compute_oracle_profitability_metrics",
+    "compute_pair_profitability_matrix",
     "compute_per_code_profitability",
     "compute_random_label_returns",
     "compute_risk_adjusted_return",
