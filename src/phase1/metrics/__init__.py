@@ -31,12 +31,14 @@ from .phase1_validation_behavior_quality import (
 )
 from .phase1_validation_label_predictability import (
     Phase1LabelPredictabilityMetrics,
+    Phase1LabelPredictabilityPayload,
     Phase1LabelPredictabilityThresholds,
     compute_label_predictability_score,
     evaluate_label_predictability_rules,
 )
 from .phase1_validation_oracle_profitability import (
     Phase1OracleProfitabilityMetrics,
+    Phase1OracleProfitabilityPayload,
     Phase1OracleProfitabilityThresholds,
     compute_oracle_profitability_score,
     evaluate_oracle_profitability_rules,
@@ -81,10 +83,12 @@ __all__ = [
     "Phase1CodeDiagnostic",
     "Phase1EvaluationSnapshot",
     "Phase1LabelPredictabilityMetrics",
+    "Phase1LabelPredictabilityPayload",
     "Phase1LabelPredictabilityThresholds",
     "Phase1LayerComputation",
     "Phase1LayerMetrics",
     "Phase1OracleProfitabilityMetrics",
+    "Phase1OracleProfitabilityPayload",
     "Phase1OracleProfitabilityThresholds",
     "Phase1PerCodeProfitability",
     "Phase1TeacherQualityMetrics",

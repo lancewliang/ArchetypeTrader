@@ -30,8 +30,14 @@ from .phase1_validation_behavior_quality import (
     Phase1BehaviorQualityMetrics,
     Phase1BehaviorQualityPayload,
 )
-from .phase1_validation_label_predictability import Phase1LabelPredictabilityMetrics
-from .phase1_validation_oracle_profitability import Phase1OracleProfitabilityMetrics
+from .phase1_validation_label_predictability import (
+    Phase1LabelPredictabilityMetrics,
+    Phase1LabelPredictabilityPayload,
+)
+from .phase1_validation_oracle_profitability import (
+    Phase1OracleProfitabilityMetrics,
+    Phase1OracleProfitabilityPayload,
+)
 from .phase1_validation_teacher_quality import (
     Phase1TeacherQualityMetrics,
     Phase1TeacherQualityPayload,
@@ -639,9 +645,11 @@ __all__ = [
     "Phase1CodeDiagnostic",
     "Phase1EvaluationSnapshot",
     "Phase1LabelPredictabilityMetrics",
+    "Phase1LabelPredictabilityPayload",
     "Phase1LayerComputation",
     "Phase1LayerMetrics",
     "Phase1OracleProfitabilityMetrics",
+    "Phase1OracleProfitabilityPayload",
     "Phase1PerCodeProfitability",
     "Phase1TeacherQualityMetrics",
     "Phase1TeacherQualityPayload",

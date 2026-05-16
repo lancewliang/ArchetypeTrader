@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -10,7 +10,139 @@ from src.utils import _dataclass_from_mapping
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
-    from .phase1_validation_data_schema import Phase1ValidationMetrics
+    from .phase1_validation_data_schema import (
+        Phase1PerCodeProfitability,
+        Phase1ValidationMetrics,
+    )
+
+
+@dataclass(frozen=True)
+class Phase1OracleProfitabilityPayload(Mapping[str, object]):
+    """第三层 oracle profitability 计算的中间 payload。
+
+    使用场景:
+        保存 per-code 盈利性摘要、decoded/DP/flat/random label returns 以及
+        random seed。该对象实现 ``Mapping``，用于兼容现有
+        ``extra_payload["..."]`` 调用。
+    """
+
+    # Layer 3 输出的 per-code 盈利性摘要，供 Layer 2 复用。
+    per_code_profitability: tuple["Phase1PerCodeProfitability", ...]
+
+    # 每条 horizon 的 assigned-label decoded return。
+    decoded_returns: tuple[float, ...]
+
+    # 每条 horizon 的 DP teacher return。
+    dp_returns: tuple[float, ...]
+
+    # 每条 horizon 的 flat baseline return。
+    flat_returns: tuple[float, ...]
+
+    # 每条 horizon 的 random-label decoded return。
+    random_label_returns: tuple[float, ...]
+
+    # random label baseline 使用的随机种子。
+    random_seed: int
+
+    def __post_init__(self) -> None:
+        """标准化 payload 中的序列和标量类型。"""
+
+        object.__setattr__(
+            self,
+            "per_code_profitability",
+            tuple(self.per_code_profitability),
+        )
+        object.__setattr__(
+            self,
+            "decoded_returns",
+            tuple(float(value) for value in self.decoded_returns),
+        )
+        object.__setattr__(
+            self,
+            "dp_returns",
+            tuple(float(value) for value in self.dp_returns),
+        )
+        object.__setattr__(
+            self,
+            "flat_returns",
+            tuple(float(value) for value in self.flat_returns),
+        )
+        object.__setattr__(
+            self,
+            "random_label_returns",
+            tuple(float(value) for value in self.random_label_returns),
+        )
+        object.__setattr__(self, "random_seed", int(self.random_seed))
+
+    def _mapping(self) -> dict[str, object]:
+        """返回兼容旧 ``extra_payload`` 字典访问的视图。"""
+
+        return {
+            "per_code_profitability": self.per_code_profitability,
+            "decoded_returns": self.decoded_returns,
+            "dp_returns": self.dp_returns,
+            "flat_returns": self.flat_returns,
+            "random_label_returns": self.random_label_returns,
+            "random_seed": self.random_seed,
+        }
+
+    def __getitem__(self, key: str) -> object:
+        """按旧 payload key 读取属性值。"""
+
+        return self._mapping()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        """迭代旧 payload key。"""
+
+        return iter(self._mapping())
+
+    def __len__(self) -> int:
+        """返回 payload key 数量。"""
+
+        return len(self._mapping())
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为可落盘 dict。"""
+
+        return {
+            "per_code_profitability": [
+                item.to_dict() for item in self.per_code_profitability
+            ],
+            "decoded_returns": [float(value) for value in self.decoded_returns],
+            "dp_returns": [float(value) for value in self.dp_returns],
+            "flat_returns": [float(value) for value in self.flat_returns],
+            "random_label_returns": [
+                float(value) for value in self.random_label_returns
+            ],
+            "random_seed": self.random_seed,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1OracleProfitabilityPayload":
+        """从 dict 恢复第三层 oracle profitability payload。"""
+
+        from .phase1_validation_data_schema import Phase1PerCodeProfitability
+
+        per_code = []
+        for item in payload.get("per_code_profitability", ()):
+            if isinstance(item, Phase1PerCodeProfitability):
+                per_code.append(item)
+            else:
+                per_code.append(Phase1PerCodeProfitability.from_dict(item))
+        return cls(
+            per_code_profitability=tuple(per_code),
+            decoded_returns=tuple(
+                float(value) for value in payload.get("decoded_returns", ())
+            ),
+            dp_returns=tuple(float(value) for value in payload.get("dp_returns", ())),
+            flat_returns=tuple(
+                float(value) for value in payload.get("flat_returns", ())
+            ),
+            random_label_returns=tuple(
+                float(value) for value in payload.get("random_label_returns", ())
+            ),
+            random_seed=int(payload["random_seed"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -273,6 +405,7 @@ def compute_oracle_profitability_score(metrics: Phase1ValidationMetrics) -> floa
 __all__ = [
     "compute_oracle_profitability_score",
     "Phase1OracleProfitabilityMetrics",
+    "Phase1OracleProfitabilityPayload",
     "Phase1OracleProfitabilityThresholds",
     "evaluate_oracle_profitability_rules",
 ]

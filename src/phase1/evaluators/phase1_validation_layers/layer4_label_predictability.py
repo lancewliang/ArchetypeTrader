@@ -32,6 +32,7 @@ from src.utils import ActionExecutionCalculator, nan_value as _nan
 from ...metrics import (
     Phase1EvaluationSnapshot,
     Phase1LabelPredictabilityMetrics,
+    Phase1LabelPredictabilityPayload,
     Phase1LayerComputation,
     Phase1ValidationRuntimeConfig,
 )
@@ -567,7 +568,13 @@ def compute_label_predictability_metrics(
             layer_id=4,
             layer_name="label_predictability",
             metrics=metrics,
-            extra_payload={"probe_seed": runtime_config.random_seed},
+            extra_payload=Phase1LabelPredictabilityPayload(
+                probe_train_accuracy=_nan(),
+                probe_validation_accuracy=_nan(),
+                probe_predictability_gap=_nan(),
+                probe_confusion_matrix=tuple(),
+                probe_seed=runtime_config.random_seed,
+            ),
         )
 
     probe = train_probe_classifier(train_x, train_y, runtime_config)
@@ -614,19 +621,19 @@ def compute_label_predictability_metrics(
         layer_id=4,
         layer_name="label_predictability",
         metrics=metrics,
-        extra_payload={
-            "probe_train_accuracy": train_accuracy,
-            "probe_validation_accuracy": metrics.probe_top1_accuracy,
-            "probe_predictability_gap": float(
+        extra_payload=Phase1LabelPredictabilityPayload(
+            probe_train_accuracy=train_accuracy,
+            probe_validation_accuracy=metrics.probe_top1_accuracy,
+            probe_predictability_gap=float(
                 train_accuracy - metrics.probe_top1_accuracy
             ),
-            "probe_confusion_matrix": _confusion_matrix(
+            probe_confusion_matrix=_confusion_matrix(
                 val_y,
                 top1,
                 num_codes=num_codes,
             ),
-            "probe_seed": runtime_config.random_seed,
-        },
+            probe_seed=runtime_config.random_seed,
+        ),
     )
 
 

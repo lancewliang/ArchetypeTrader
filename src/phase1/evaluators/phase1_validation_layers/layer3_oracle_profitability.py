@@ -33,6 +33,7 @@ from ...metrics import (
     Phase1EvaluationSnapshot,
     Phase1LayerComputation,
     Phase1OracleProfitabilityMetrics,
+    Phase1OracleProfitabilityPayload,
     Phase1OracleProfitabilityThresholds,
     Phase1PerCodeProfitability,
     Phase1ValidationRuntimeConfig,
@@ -109,14 +110,14 @@ def _missing_prices_computation(
         layer_id=3,
         layer_name="oracle_profitability",
         metrics=metrics,
-        extra_payload={
-            "per_code_profitability": tuple(),
-            "decoded_returns": missing_returns,
-            "dp_returns": missing_returns.copy(),
-            "flat_returns": missing_returns.copy(),
-            "random_label_returns": missing_returns.copy(),
-            "random_seed": random_seed,
-        },
+        extra_payload=Phase1OracleProfitabilityPayload(
+            per_code_profitability=tuple(),
+            decoded_returns=missing_returns,
+            dp_returns=missing_returns.copy(),
+            flat_returns=missing_returns.copy(),
+            random_label_returns=missing_returns.copy(),
+            random_seed=random_seed,
+        ),
     )
 
 
@@ -670,14 +671,14 @@ def compute_oracle_profitability_metrics(
         layer_id=3,
         layer_name="oracle_profitability",
         metrics=metrics,
-        extra_payload={
-            "per_code_profitability": per_code,
-            "decoded_returns": decoded_execution.returns,
-            "dp_returns": dp_execution.returns,
-            "flat_returns": flat_returns,
-            "random_label_returns": random_returns,
-            "random_seed": runtime_config.random_seed,
-        },
+        extra_payload=Phase1OracleProfitabilityPayload(
+            per_code_profitability=per_code,
+            decoded_returns=decoded_execution.returns,
+            dp_returns=dp_execution.returns,
+            flat_returns=flat_returns,
+            random_label_returns=random_returns,
+            random_seed=runtime_config.random_seed,
+        ),
     )
 
 __all__ = [
