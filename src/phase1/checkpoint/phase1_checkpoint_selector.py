@@ -34,6 +34,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from ..metrics import (
+    get_phase1_validation_score_value,
+)
 
 from .phase1_checkpoint import Phase1ValidationCheckpoint
 from ..metrics import (
@@ -357,7 +360,7 @@ class Phase1CheckpointSelector:
             epoch=checkpoint.epoch,
             checkpoint_id=validation.checkpoint_id,
             passed=validation.passed,
-            score=validation.score.total_score,
+            score=get_phase1_validation_score_value(validation.score),
             failed_layers=validation.failed_layers,
             reason=reason,
         )
