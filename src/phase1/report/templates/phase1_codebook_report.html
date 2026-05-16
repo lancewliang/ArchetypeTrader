@@ -296,7 +296,7 @@
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 760px;
+      min-width: 660px;
       font-size: 13px;
     }
 
@@ -326,6 +326,22 @@
     .message {
       color: var(--muted);
       max-width: 540px;
+    }
+
+    .threshold-layer {
+      padding: 14px 16px 16px;
+    }
+
+    .threshold-layer + .threshold-layer {
+      border-top: 1px solid var(--soft-line);
+    }
+
+    .threshold-layer-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
     }
 
     .bar-track {
@@ -651,38 +667,42 @@
         <h2><span class="metric-with-tip">指标阈值明细 <span class="note">Validation Metrics</span><span class="tip" tabindex="0" data-tip="逐项展示 hard gate metric 的当前值、阈值、阈值方向、到阈值的距离和解释。">?</span></span></h2>
         <span class="note">{{ summary.layer_count }} layers, {{ summary.code_diagnostic_count }} code diagnostics, {{ summary.risk_finding_count }} risk findings</span>
       </div>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>层 Layer</th>
-              <th>指标 Metric</th>
-              <th class="num">当前值 Value</th>
-              <th class="num">阈值 Threshold</th>
-              <th class="num">方向 Direction</th>
-              <th class="num">距离 Distance</th>
-              <th>状态 Status</th>
-              <th>说明 Message</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for layer in layers %}
-            {% for metric in layer.metrics %}
-            <tr>
-              <td>{{ layer.name }}</td>
-              <td><span class="metric-with-tip">{{ metric.name }}<span class="tip" tabindex="0" data-tip="{{ metric.description }}">?</span></span></td>
-              <td class="num">{{ metric.value }}</td>
-              <td class="num">{{ metric.threshold }}</td>
-              <td class="num">{{ metric.direction }}</td>
-              <td class="num">{{ metric.distance_to_threshold }}</td>
-              <td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td>
-              <td class="message">{{ metric.message }}</td>
-            </tr>
-            {% endfor %}
-            {% endfor %}
-          </tbody>
-        </table>
+      {% for layer in layers %}
+      <div class="threshold-layer">
+        <div class="threshold-layer-head">
+          <h3>{{ layer.name }}</h3>
+          <span class="badge {{ layer.badge_class }}">{{ layer.status_label }}</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>指标 Metric</th>
+                <th class="num">当前值 Value</th>
+                <th class="num">阈值 Threshold</th>
+                <th class="num">方向 Direction</th>
+                <th class="num">距离 Distance</th>
+                <th>状态 Status</th>
+                <th>说明 Message</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for metric in layer.metrics %}
+              <tr>
+                <td><span class="metric-with-tip">{{ metric.name }}<span class="tip" tabindex="0" data-tip="{{ metric.description }}">?</span></span></td>
+                <td class="num">{{ metric.value }}</td>
+                <td class="num">{{ metric.threshold }}</td>
+                <td class="num">{{ metric.direction }}</td>
+                <td class="num">{{ metric.distance_to_threshold }}</td>
+                <td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td>
+                <td class="message">{{ metric.message }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
       </div>
+      {% endfor %}
     </section>
 
     <section class="grid two">
