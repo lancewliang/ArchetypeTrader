@@ -787,6 +787,9 @@ class Phase1CodebookReportHtmlContext:
     # config snapshot 行。
     config_rows: tuple[Phase1ReportMappingRow, ...]
 
+    # artifact 路径行。
+    artifact_rows: tuple[Phase1ReportMappingRow, ...]
+
     def to_dict(self) -> dict[str, Any]:
         """转换为模板引擎可消费的普通 dict。"""
 

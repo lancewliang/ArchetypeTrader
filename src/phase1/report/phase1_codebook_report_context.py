@@ -153,6 +153,7 @@ class Phase1CodebookReportContextBuilder:
                 for finding in risk_findings
             ),
             config_rows=self._build_mapping_rows(config),
+            artifact_rows=self._build_mapping_rows(payload.artifacts),
         )
 
     def _build_header_context(

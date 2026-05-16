@@ -1,0 +1,719 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fa;
+      --panel: #ffffff;
+      --ink: #1d2433;
+      --muted: #667085;
+      --line: #d8dee8;
+      --soft-line: #edf1f6;
+      --pass: #147a4d;
+      --pass-bg: #e8f6ef;
+      --warn: #a15c00;
+      --warn-bg: #fff4df;
+      --fail: #b42318;
+      --fail-bg: #ffe8e5;
+      --skip: #525866;
+      --skip-bg: #eef1f5;
+      --blue: #2563eb;
+      --shadow: 0 8px 24px rgba(16, 24, 40, 0.08);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system,
+        BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    header {
+      background: #101828;
+      color: #fff;
+      border-bottom: 1px solid #0b1220;
+    }
+
+    .wrap {
+      width: min(1440px, calc(100vw - 40px));
+      margin: 0 auto;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      padding: 28px 0;
+      align-items: end;
+    }
+
+    h1, h2, h3, p { margin: 0; }
+
+    h1 {
+      font-size: 28px;
+      line-height: 1.2;
+      letter-spacing: 0;
+      font-weight: 750;
+    }
+
+    h2 {
+      font-size: 18px;
+      line-height: 1.25;
+      font-weight: 720;
+    }
+
+    h3 {
+      font-size: 14px;
+      line-height: 1.25;
+      font-weight: 720;
+    }
+
+    .subtitle {
+      margin-top: 8px;
+      color: #cbd5e1;
+      max-width: 840px;
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(3, auto);
+      gap: 10px;
+      justify-content: end;
+      color: #d1d5db;
+      font-size: 12px;
+    }
+
+    .meta span {
+      display: inline-flex;
+      gap: 6px;
+      padding: 6px 8px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.05);
+      white-space: nowrap;
+    }
+
+    main { padding: 24px 0 48px; }
+    section { margin-top: 18px; }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .summary-grid {
+      grid-template-columns: 280px repeat(5, minmax(150px, 1fr));
+      align-items: stretch;
+    }
+
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .panel, .score-card, .gate-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .panel { overflow: hidden; }
+
+    .panel-head {
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid var(--soft-line);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .panel-body { padding: 14px 16px 16px; }
+    .score-card { padding: 16px; }
+
+    .score-value {
+      font-size: 42px;
+      line-height: 1;
+      font-weight: 760;
+      margin-top: 8px;
+    }
+
+    .decision {
+      margin-top: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 720;
+    }
+
+    .gate-card {
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      min-height: 142px;
+    }
+
+    .gate-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+      min-height: 40px;
+    }
+
+    .gate-num {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .gate-main {
+      margin-top: auto;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      padding-top: 14px;
+    }
+
+    .gate-main div {
+      border-top: 1px solid var(--soft-line);
+      padding-top: 8px;
+    }
+
+    .metric-num {
+      font-size: 18px;
+      font-weight: 760;
+      line-height: 1.2;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+
+    .badge {
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      text-transform: uppercase;
+    }
+
+    .badge.pass { color: var(--pass); background: var(--pass-bg); }
+    .badge.warn { color: var(--warn); background: var(--warn-bg); }
+    .badge.fail { color: var(--fail); background: var(--fail-bg); }
+    .badge.skip { color: var(--skip); background: var(--skip-bg); }
+
+    .note {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .table-scroll {
+      width: 100%;
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 760px;
+    }
+
+    th, td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--soft-line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: #344054;
+      font-size: 12px;
+      font-weight: 760;
+      background: #fbfcfe;
+      white-space: nowrap;
+    }
+
+    td.num, th.num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .message {
+      color: var(--muted);
+      max-width: 520px;
+    }
+
+    .bar-track {
+      height: 10px;
+      background: #eef2f7;
+      border-radius: 999px;
+      overflow: hidden;
+      min-width: 120px;
+    }
+
+    .bar-fill {
+      height: 100%;
+      background: var(--blue);
+      border-radius: inherit;
+    }
+
+    .bar-fill.pass { background: var(--pass); }
+    .bar-fill.warn { background: var(--warn); }
+    .bar-fill.fail { background: var(--fail); }
+
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .kpi {
+      border: 1px solid var(--soft-line);
+      border-radius: 6px;
+      padding: 10px;
+      background: #fbfcfe;
+    }
+
+    .risk-text p + p { margin-top: 10px; }
+
+    .footer-note {
+      margin-top: 22px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    @media (max-width: 1100px) {
+      .summary-grid, .two, .three { grid-template-columns: 1fr; }
+      .hero { grid-template-columns: 1fr; align-items: start; }
+      .meta { justify-content: start; grid-template-columns: repeat(2, auto); }
+    }
+
+    @media (max-width: 640px) {
+      .wrap { width: min(100vw - 24px, 1440px); }
+      .meta { grid-template-columns: 1fr; }
+      .kpi-grid { grid-template-columns: 1fr; }
+      .score-value { font-size: 36px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap hero">
+      <div>
+        <h1>{{ header_title }}</h1>
+        <p class="subtitle">Static audit view for Phase I codebook validation gates, diagnostics, profitability, and selector-readiness signals.</p>
+      </div>
+      <div class="meta" aria-label="run metadata">
+        {% for item in header.meta_items %}
+        <span><strong>{{ item.label }}</strong> {{ item.value }}</span>
+        {% endfor %}
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="grid summary-grid" aria-label="summary gates">
+      <article class="score-card">
+        <h2>Final Decision</h2>
+        <div class="score-value">{{ summary.score }}<small>/1</small></div>
+        <div class="decision"><span class="badge {{ summary.badge_class }}">{{ summary.status_label }}</span>Checkpoint {{ summary.checkpoint_id }}</div>
+        <p class="note" style="margin-top:12px;">Stage {{ summary.stage }}, epoch {{ summary.epoch }}. Failed layers: {{ summary.failed_layers }}.</p>
+      </article>
+
+      {% for layer in layers %}
+      <article class="gate-card">
+        <div class="gate-title">
+          <div>
+            <div class="gate-num">Layer {{ layer.layer_id }}</div>
+            <h3>{{ layer.name }}</h3>
+          </div>
+          <span class="badge {{ layer.badge_class }}">{{ layer.status_label }}</span>
+        </div>
+        <div class="gate-main">
+          <div><div class="metric-num">{{ layer.metric_count }}</div><div class="metric-label">metrics</div></div>
+          <div><div class="metric-num">{{ layer.failed_count }}</div><div class="metric-label">failed</div></div>
+          <div><div class="metric-num">{{ layer.status_label }}</div><div class="metric-label">gate</div></div>
+        </div>
+      </article>
+      {% endfor %}
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Validation Metrics</h2>
+        <span class="note">Values, thresholds, signed distance, and rule messages</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Layer</th>
+              <th>Metric</th>
+              <th class="num">Value</th>
+              <th class="num">Threshold</th>
+              <th class="num">Distance</th>
+              <th>Status</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for layer in layers %}
+            {% for metric in layer.metrics %}
+            <tr>
+              <td>{{ layer.name }}</td>
+              <td>{{ metric.name }}</td>
+              <td class="num">{{ metric.value }}</td>
+              <td class="num">{{ metric.threshold }}</td>
+              <td class="num">{{ metric.distance_to_threshold }}</td>
+              <td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td>
+              <td class="message">{{ metric.message }}</td>
+            </tr>
+            {% endfor %}
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid two">
+      {% if score_breakdown_rows %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Score Breakdown</h2>
+          <span class="note">Only used after hard gates pass</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Component</th><th class="num">Value</th><th class="num">Weight</th><th class="num">Weighted</th></tr></thead>
+            <tbody>
+              {% for row in score_breakdown_rows %}
+              <tr><td>{{ row.name }}</td><td class="num">{{ row.value }}</td><td class="num">{{ row.weight }}</td><td class="num">{{ row.weighted_value }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      {% endif %}
+
+      {% if code_distribution %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Codebook Usage Distribution</h2>
+          <span class="note">Validation split occupancy by code</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Code</th><th class="num">Occupancy</th><th>Usage</th><th>Status</th></tr></thead>
+            <tbody>
+              {% for row in code_distribution %}
+              <tr>
+                <td>code {{ row.code_id }}</td>
+                <td class="num">{{ row.occupancy_percent }}</td>
+                <td><div class="bar-track"><div class="bar-fill {{ row.badge_class }}" style="width: {{ row.bar_width }}"></div></div></td>
+                <td><span class="badge {{ row.badge_class }}">{{ row.status_label }}</span></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      {% endif %}
+    </section>
+
+    {% if oracle_profitability_kpis %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Oracle-label Profitability KPIs</h2>
+        <span class="note">Assigned-label decoder profitability summary</span>
+      </div>
+      <div class="panel-body kpi-grid">
+        {% for kpi in oracle_profitability_kpis %}
+        <div class="kpi">
+          <div class="metric-num">{{ kpi.value }}</div>
+          <div class="metric-label">{{ kpi.label }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    <section class="grid two">
+      {% if oracle_cumulative_return_series %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Oracle-label Cumulative Returns</h2>
+          <span class="note">Cumulative points rendered from per-horizon returns</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Series</th><th>Step</th><th class="num">Cumulative Return</th></tr></thead>
+            <tbody>
+              {% for series in oracle_cumulative_return_series %}
+              {% for point in series.points %}
+              <tr><td>{{ series.label }}</td><td>{{ point.step }}</td><td class="num">{{ point.value }}</td></tr>
+              {% endfor %}
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      {% endif %}
+
+      {% if per_code_profit_series %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Per-code Profitability</h2>
+          <span class="note">Mean decoded advantage by active code</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Code</th><th class="num">Mean Advantage</th><th>Status</th></tr></thead>
+            <tbody>
+              {% for row in per_code_profit_series %}
+              <tr><td>{{ row.label }}</td><td class="num">{{ row.value }}</td><td><span class="badge {{ row.badge_class }}">{{ row.badge_class }}</span></td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      {% endif %}
+    </section>
+
+    {% if pair_profitability_matrix.rows %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Dominant Pair Profitability Matrix</h2>
+        <span class="note">Morphology by motif, values are mean decoded advantage</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Morphology</th>
+              {% for motif in pair_profitability_matrix.motifs %}
+              <th class="num">{{ motif }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in pair_profitability_matrix.rows %}
+            <tr>
+              <td>{{ row.morphology }}</td>
+              {% for cell in row.cells %}
+              <td class="num"><span class="badge {{ cell.badge_class }}">{{ cell.mean_decoded_advantage }}</span></td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+
+    <section class="grid three">
+      {% if drift_diagnostics %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Drift Diagnostics</h2>
+          <span class="note">Train/validation drift warnings</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Metric</th><th class="num">Value</th><th class="num">Threshold</th><th>Status</th></tr></thead>
+            <tbody>
+              {% for metric in drift_diagnostics %}
+              <tr><td>{{ metric.name }}</td><td class="num">{{ metric.value }}</td><td class="num">{{ metric.threshold }}</td><td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      {% endif %}
+
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Risk Summary</h2>
+          <span class="badge {{ risk_summary.badge_class }}">{{ risk_summary.severity }}</span>
+        </div>
+        <div class="panel-body risk-text">
+          <p><strong>Primary risk:</strong> {{ risk_summary.primary_risk }}</p>
+          <p><strong>Inspect:</strong> {{ risk_summary.inspection_target }}</p>
+          <p><strong>Recommendation:</strong> {{ risk_summary.recommendation }}</p>
+        </div>
+      </article>
+
+      {% if risk_findings %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Risk Findings</h2>
+          <span class="note">{{ risk_summary.finding_count }} findings</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Severity</th><th>Title</th><th>Related</th></tr></thead>
+            <tbody>
+              {% for finding in risk_findings %}
+              <tr>
+                <td><span class="badge {{ finding.badge_class }}">{{ finding.severity }}</span></td>
+                <td><strong>{{ finding.title }}</strong><br><span class="note">{{ finding.reason }}</span></td>
+                <td class="message">metrics: {{ finding.related_metrics }}<br>codes: {{ finding.related_codes }}<br>pairs: {{ finding.related_pairs }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      {% endif %}
+    </section>
+
+    {% if code_diagnostics %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Code Diagnostics</h2>
+        <span class="note">Per-code support, behavior attribution, and profitability</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th class="num">Support</th>
+              <th class="num">Occupancy</th>
+              <th>Dominant Morphology</th>
+              <th class="num">Morph Ratio</th>
+              <th class="num">Lift</th>
+              <th>Dominant Motif</th>
+              <th class="num">Motif Ratio</th>
+              <th>Dominant Pair</th>
+              <th class="num">Pair Ratio</th>
+              <th class="num">Decoded Return</th>
+              <th class="num">Win Rate</th>
+              <th class="num">Retention</th>
+              <th class="num">Fee Drag</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for code in code_diagnostics %}
+            <tr>
+              <td>{{ code.code_id }}</td>
+              <td class="num">{{ code.support }}</td>
+              <td class="num">{{ code.occupancy }}</td>
+              <td>{{ code.dominant_morphology }}</td>
+              <td class="num">{{ code.dominant_morphology_ratio }}</td>
+              <td class="num">{{ code.morphology_lift }}</td>
+              <td>{{ code.dominant_motif }}</td>
+              <td class="num">{{ code.dominant_motif_ratio }}</td>
+              <td>{{ code.dominant_pair }}</td>
+              <td class="num">{{ code.dominant_pair_ratio }}</td>
+              <td class="num">{{ code.decoded_mean_advantage }}</td>
+              <td class="num">{{ code.decoded_win_rate }}</td>
+              <td class="num">{{ code.retention_ratio }}</td>
+              <td class="num">{{ code.fee_drag }}</td>
+              <td><span class="badge {{ code.badge_class }}">{{ code.status }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+
+    <section class="grid two">
+      {% if tie_breaker_rows %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Tie Breaker Metrics</h2>
+          <span class="note">Stable selector ordering fields</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Metric</th><th class="num">Value</th></tr></thead>
+            <tbody>
+              {% for row in tie_breaker_rows %}
+              <tr><td>{{ row.key }}</td><td class="num">{{ row.value }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      {% endif %}
+
+      {% if config_rows %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Config Snapshot</h2>
+          <span class="note">Report-time config values</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Key</th><th>Value</th></tr></thead>
+            <tbody>
+              {% for row in config_rows %}
+              <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      {% endif %}
+    </section>
+
+    {% if report %}
+    <section class="grid two">
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Report Metadata</h2>
+          <span class="note">Schema and generated timestamp</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <tbody>
+              <tr><th>generated_at</th><td>{{ report.generated_at }}</td></tr>
+              <tr><th>schema</th><td>{{ report.schema }}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+
+      {% if artifact_rows %}
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Artifacts</h2>
+          <span class="note">Output paths captured with this report</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Key</th><th>Path</th></tr></thead>
+            <tbody>
+              {% for row in artifact_rows %}
+              <tr><td>{{ row.key }}</td><td>{{ row.value }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <p class="footer-note">Generated by Phase1CodebookReport from validation metrics and diagnostics. This HTML is self-contained and does not require network assets.</p>
+  </main>
+</body>
+</html>
