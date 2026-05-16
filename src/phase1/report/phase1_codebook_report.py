@@ -19,42 +19,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Mapping
 
 from ._template import render_template_file
 from .phase1_codebook_report_context import Phase1CodebookReportContextBuilder
+from .phase1_codebook_report_schema import (
+    JsonObject,
+    Phase1CodebookReportDocument,
+)
 from ..metrics import Phase1ValidationResult
 
 
-JsonObject = dict[str, Any]
 _TEMPLATE_PATH = Path(__file__).with_name("templates") / "phase1_codebook_report.html"
-
-
-def _json_safe(value: Any) -> Any:
-    """把常见非 JSON 原生对象转换为可序列化值。
-
-    输入参数:
-        value: 任意 report payload 值，可包含 Path、tuple、list、mapping 或具备
-            ``to_dict()`` 方法的对象。
-
-    输出:
-        JSON 可序列化的 Python 值。
-
-    使用场景:
-        写 JSON 前统一处理 artifacts、config 和 validation result 中的路径或对象。
-    """
-
-    if hasattr(value, "to_dict") and callable(value.to_dict):
-        return _json_safe(value.to_dict())
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, tuple | list):
-        return [_json_safe(item) for item in value]
-    return value
 
 
 @dataclass(frozen=True)
@@ -73,15 +50,15 @@ class Phase1CodebookReport:
 
     title: str = "Phase I Codebook Validation Report"
 
-    def build_payload(
+    def build_document(
         self,
         *,
         validation_result: Phase1ValidationResult,
         config: Mapping[str, object] | None = None,
         artifacts: Mapping[str, str | Path] | None = None,
         metadata: Mapping[str, object] | None = None,
-    ) -> JsonObject:
-        """构建 JSON/HTML 共用 report payload。
+    ) -> Phase1CodebookReportDocument:
+        """构建强类型 report payload document。
 
         输入参数:
             validation_result: 五层 validation 完整结果。
@@ -90,42 +67,17 @@ class Phase1CodebookReport:
             metadata: 额外 report 元数据，例如 run id、git sha 或数据批次。
 
         输出:
-            普通 dict，包含 report 元信息、summary、validation、config 和 artifacts。
-
-        使用场景:
-            ``render_html()`` 的前置步骤；外部系统也可直接调用本方法拿到
-            机器可读 payload。
+            ``Phase1CodebookReportDocument`` 强类型对象。
         """
 
-        generated_at = datetime.now(UTC).isoformat()
-        validation_payload = validation_result.to_dict()
-        score = validation_result.score
-        summary = {
-            "checkpoint_id": validation_result.checkpoint_id,
-            "stage": validation_result.stage,
-            "epoch": validation_result.epoch,
-            "passed": validation_result.passed,
-            "score": score.total_score if hasattr(score, "total_score") else score,
-            "failed_layers": list(validation_result.failed_layers),
-            "failed_layer_count": len(validation_result.failed_layers),
-            "layer_count": len(validation_result.layers),
-            "code_diagnostic_count": len(validation_result.code_diagnostics),
-            "risk_finding_count": len(validation_result.risk_findings),
-        }
-        payload = {
-            "report": {
-                "title": self.title,
-                "generated_at": generated_at,
-                "schema": "phase1_codebook_validation_report.v1",
-                **dict(metadata or {}),
-            },
-            "summary": summary,
-            "validation": validation_payload,
-            "config": dict(config or {}),
-            "artifacts": dict(artifacts or {}),
-        }
-        return _json_safe(payload)
-
+        return Phase1CodebookReportDocument.from_validation_result(
+            validation_result=validation_result,
+            title=self.title,
+            config=config,
+            artifacts=artifacts,
+            metadata=metadata,
+        )
+ 
     def build_html(
         self,
         *,
@@ -136,19 +88,22 @@ class Phase1CodebookReport:
     ) -> str:
         """从 validation result 直接构建静态 HTML 报告内容。"""
 
-        payload = self.build_payload(
+        document = self.build_document(
             validation_result=validation_result,
             config=config,
             artifacts=artifacts,
             metadata=metadata,
         )
-        return self.render_html(payload)
+        return self.render_html(document)
 
-    def render_html(self, payload: Mapping[str, Any]) -> str:
+    def render_html(
+        self,
+        payload: Phase1CodebookReportDocument,
+    ) -> str:
         """将 report payload 渲染为静态 HTML 字符串。
 
         输入参数:
-            payload: ``build_payload()`` 返回的 report payload。
+            payload: ``build_document()`` 返回的强类型 document。
 
         输出:
             完整 HTML 文本。
@@ -159,7 +114,7 @@ class Phase1CodebookReport:
         """
 
         context = Phase1CodebookReportContextBuilder(title=self.title).build(payload)
-        return render_template_file(_TEMPLATE_PATH, context)
+        return render_template_file(_TEMPLATE_PATH, context.to_dict())
 
 
 __all__ = ["Phase1CodebookReport"]

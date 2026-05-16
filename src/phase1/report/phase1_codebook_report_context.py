@@ -6,18 +6,39 @@ from dataclasses import dataclass
 import math
 from typing import Any, Mapping
 
+from .phase1_codebook_report_schema import (
+    Phase1CodebookReportDocument,
+    Phase1CodebookReportHtmlContext,
+    Phase1ReportCodeDiagnosticView,
+    Phase1ReportCodeDistributionRow,
+    Phase1ReportHeader,
+    Phase1ReportHeaderItem,
+    Phase1ReportKpiRow,
+    Phase1ReportLayerView,
+    Phase1ReportMappingRow,
+    Phase1ReportMetricView,
+    Phase1ReportPairProfitabilityCell,
+    Phase1ReportPairProfitabilityMatrix,
+    Phase1ReportPairProfitabilityRow,
+    Phase1ReportProfitSeriesRow,
+    Phase1ReportRiskFindingView,
+    Phase1ReportRiskSummaryView,
+    Phase1ReportScoreBreakdownRow,
+    Phase1ReportSeries,
+    Phase1ReportSeriesPoint,
+    Phase1ReportSummaryView,
+)
 from ..metrics import (
     Phase1CodeDiagnostic,
     Phase1LayerResult,
     Phase1MetricResult,
     Phase1OracleProfitabilityPayload,
     Phase1RiskFinding,
+    Phase1ValidationResult,
     Phase1ValidationScore,
     Phase1VQInternalPayload,
+    get_phase1_validation_score_value,
 )
-
-
-JsonObject = dict[str, Any]
 
 
 def _format_value(value: Any) -> str:
@@ -56,124 +77,93 @@ class Phase1CodebookReportContextBuilder:
 
     title: str = "Phase I Codebook Validation Report"
 
-    def build(self, payload: Mapping[str, Any]) -> JsonObject:
+    def build(
+        self,
+        payload: Phase1CodebookReportDocument,
+    ) -> Phase1CodebookReportHtmlContext:
         """把 report payload 转成模板使用的展示模型。"""
 
-        validation = payload["validation"]
-        summary = payload["summary"]
-        report = payload["report"]
-        config = payload.get("config", {})
-        artifacts = payload.get("artifacts", {})
-        layers = tuple(
-            Phase1LayerResult.from_dict(layer)
-            for layer in validation.get("layers", ())
-        )
-        code_diagnostics = tuple(
-            Phase1CodeDiagnostic.from_dict(item)
-            for item in validation.get("code_diagnostics", ())
-        )
-        drift_diagnostics = {
-            str(name): Phase1MetricResult.from_dict(item)
-            for name, item in validation.get("drift_diagnostics", {}).items()
-        }
-        risk_findings = tuple(
-            Phase1RiskFinding.from_dict(item)
-            for item in validation.get("risk_findings", ())
-        )
-        vq_internal_payload = self._vq_internal_payload(
-            validation.get("vq_internal_payload")
-        )
-        oracle_profitability_payload = self._oracle_profitability_payload(
-            validation.get("oracle_profitability_payload")
-        )
-        validation_score = self._validation_score(validation.get("score"))
-
-        passed = bool(summary.get("passed", False))
-        failed_layers = summary.get("failed_layers", [])
-        failed_text = ", ".join(str(layer) for layer in failed_layers) or "-"
-        return {
-            "page_title": str(report.get("title", self.title)),
-            "header_title": self.title,
-            "header": self._build_header_context(
-                summary=summary,
+        validation = payload.validation
+        report = payload.report.to_dict()
+        config = payload.config
+        layers = tuple(validation.layers)
+        code_diagnostics = tuple(validation.code_diagnostics)
+        drift_diagnostics = dict(validation.drift_diagnostics)
+        risk_findings = tuple(validation.risk_findings)
+        vq_internal_payload = validation.vq_internal_payload
+        oracle_profitability_payload = validation.oracle_profitability_payload
+        validation_score = self._validation_score(validation.score)
+        return Phase1CodebookReportHtmlContext(
+            page_title=str(report.get("title", self.title)),
+            header_title=self.title,
+            header=self._build_header_context(
+                validation=validation,
                 report=report,
                 config=config,
                 vq_internal_payload=vq_internal_payload,
                 oracle_profitability_payload=oracle_profitability_payload,
             ),
-            "report": {
+            report={
                 "generated_at": str(report.get("generated_at", "-")),
                 "schema": str(report.get("schema", "-")),
             },
-            "summary": {
-                "checkpoint_id": str(summary.get("checkpoint_id", "-")),
-                "stage": str(summary.get("stage", "-")),
-                "epoch": str(summary.get("epoch", "-")),
-                "score": _format_value(summary.get("score")),
-                "failed_layers": failed_text,
-                "layer_count": str(summary.get("layer_count", len(layers))),
-                "code_diagnostic_count": str(summary.get("code_diagnostic_count", 0)),
-                "risk_finding_count": str(summary.get("risk_finding_count", 0)),
-                "badge_class": _badge_class(passed),
-                "status_label": "PASS" if passed else "FAIL",
-            },
-            "layers": [self._build_layer_context(layer) for layer in layers],
-            "code_diagnostics": [
+            summary=self._build_summary_context(validation),
+            layers=tuple(self._build_layer_context(layer) for layer in layers),
+            code_diagnostics=tuple(
                 self._build_code_diagnostic_context(item)
                 for item in code_diagnostics
-            ],
-            "oracle_profitability_kpis": self._build_oracle_profitability_kpis(
-                validation.get("metrics", {})
             ),
-            "oracle_cumulative_return_series": (
+            oracle_profitability_kpis=self._build_oracle_profitability_kpis(
+                validation.metrics
+            ),
+            oracle_cumulative_return_series=(
                 self._build_oracle_cumulative_return_series(
                     oracle_profitability_payload
                 )
             ),
-            "per_code_profit_series": self._build_per_code_profit_series(
+            per_code_profit_series=self._build_per_code_profit_series(
                 code_diagnostics,
                 oracle_profitability_payload,
             ),
-            "pair_profitability_matrix": (
+            pair_profitability_matrix=(
                 self._build_pair_profitability_matrix(
                     oracle_profitability_payload
                 )
             ),
-            "code_distribution": self._build_code_distribution_context(
+            code_distribution=self._build_code_distribution_context(
                 vq_internal_payload
             )
             if vq_internal_payload is not None
-            else [],
-            "tie_breaker_rows": self._build_mapping_rows(
-                validation.get("tie_breaker_metrics", {})
+            else (),
+            tie_breaker_rows=self._build_mapping_rows(
+                validation.tie_breaker_metrics.to_dict()
             ),
-            "score_breakdown_rows": self._build_score_breakdown_rows(
+            score_breakdown_rows=self._build_score_breakdown_rows(
                 validation_score
             )
             if validation_score is not None
-            else [],
-            "drift_diagnostics": [
+            else (),
+            drift_diagnostics=tuple(
                 self._build_metric_context(metric)
                 for metric in drift_diagnostics.values()
-            ],
-            "risk_summary": self._build_risk_summary_context(risk_findings),
-            "risk_findings": [
+            ),
+            risk_summary=self._build_risk_summary_context(risk_findings),
+            risk_findings=tuple(
                 self._build_risk_finding_context(finding)
                 for finding in risk_findings
-            ],
-            "config_rows": self._build_mapping_rows(config),
-            "artifact_rows": self._build_mapping_rows(artifacts),
-        }
+            ),
+            config_rows=self._build_mapping_rows(config),
+        )
 
     def _build_header_context(
         self,
         *,
-        summary: Mapping[str, Any],
+        validation: Phase1ValidationResult,
         report: Mapping[str, Any],
         config: Mapping[str, Any],
         vq_internal_payload: Phase1VQInternalPayload | None,
         oracle_profitability_payload: Phase1OracleProfitabilityPayload | None,
-    ) -> JsonObject:
+    ) -> Phase1ReportHeader:
         """构建报告页眉元数据。
 
         Pair/Batch/Horizon 属于运行上下文，历史 payload 里可能来自 metadata
@@ -206,24 +196,51 @@ class Phase1CodebookReportContextBuilder:
             report=report,
             config=config,
         )
-        header = {
-            "pair": _format_value(pair),
-            "batch": _format_value(batch),
-            "checkpoint": str(summary.get("checkpoint_id", "-")),
-            "k": _format_value(codebook_size),
-            "n_val": _format_value(validation_sample_count),
-            "horizon": _format_value(horizon),
-            "generated_at": str(report.get("generated_at", "-")),
-        }
-        header["meta_items"] = [
-            {"label": "Pair", "value": header["pair"]},
-            {"label": "Batch", "value": header["batch"]},
-            {"label": "Checkpoint", "value": header["checkpoint"]},
-            {"label": "K", "value": header["k"]},
-            {"label": "N_val", "value": header["n_val"]},
-            {"label": "Horizon", "value": header["horizon"]},
-        ]
-        return header
+        pair_text = _format_value(pair)
+        batch_text = _format_value(batch)
+        checkpoint_text = validation.checkpoint_id
+        k_text = _format_value(codebook_size)
+        n_val_text = _format_value(validation_sample_count)
+        horizon_text = _format_value(horizon)
+        generated_at_text = str(report.get("generated_at", "-"))
+        return Phase1ReportHeader(
+            pair=pair_text,
+            batch=batch_text,
+            checkpoint=checkpoint_text,
+            k=k_text,
+            n_val=n_val_text,
+            horizon=horizon_text,
+            generated_at=generated_at_text,
+            meta_items=(
+                Phase1ReportHeaderItem(label="Pair", value=pair_text),
+                Phase1ReportHeaderItem(label="Batch", value=batch_text),
+                Phase1ReportHeaderItem(label="Checkpoint", value=checkpoint_text),
+                Phase1ReportHeaderItem(label="K", value=k_text),
+                Phase1ReportHeaderItem(label="N_val", value=n_val_text),
+                Phase1ReportHeaderItem(label="Horizon", value=horizon_text),
+            ),
+        )
+
+    def _build_summary_context(
+        self,
+        validation: Phase1ValidationResult,
+    ) -> Phase1ReportSummaryView:
+        """从 validation result 直接构建报告摘要展示模型。"""
+
+        failed_text = ", ".join(str(layer) for layer in validation.failed_layers) or "-"
+        passed = validation.passed
+        return Phase1ReportSummaryView(
+            checkpoint_id=validation.checkpoint_id,
+            stage=validation.stage,
+            epoch=str(validation.epoch),
+            score=_format_value(get_phase1_validation_score_value(validation.score)),
+            failed_layers=failed_text,
+            layer_count=str(len(validation.layers)),
+            code_diagnostic_count=str(len(validation.code_diagnostics)),
+            risk_finding_count=str(len(validation.risk_findings)),
+            badge_class=_badge_class(passed),
+            status_label="PASS" if passed else "FAIL",
+        )
 
     def _first_present(
         self,
@@ -284,135 +301,138 @@ class Phase1CodebookReportContextBuilder:
             keys=("n_val", "N_val", "validation_sample_count", "val_sample_count"),
         )
 
-    def _build_layer_context(self, layer: Phase1LayerResult) -> JsonObject:
+    def _build_layer_context(self, layer: Phase1LayerResult) -> Phase1ReportLayerView:
         """构建单个 validation layer 的模板上下文。"""
 
         failed = sum(1 for metric in layer.metrics if not metric.passed)
-        return {
-            "layer_id": str(layer.layer_id),
-            "name": layer.name,
-            "badge_class": _badge_class(layer.passed),
-            "status_label": "PASS" if layer.passed else "FAIL",
-            "metric_count": str(len(layer.metrics)),
-            "failed_count": str(failed),
-            "metrics": [
+        return Phase1ReportLayerView(
+            layer_id=str(layer.layer_id),
+            name=layer.name,
+            badge_class=_badge_class(layer.passed),
+            status_label="PASS" if layer.passed else "FAIL",
+            metric_count=str(len(layer.metrics)),
+            failed_count=str(failed),
+            metrics=tuple(
                 self._build_metric_context(metric)
                 for metric in layer.metrics
-            ],
-        }
+            ),
+        )
 
-    def _build_metric_context(self, metric: Phase1MetricResult) -> JsonObject:
+    def _build_metric_context(
+        self,
+        metric: Phase1MetricResult,
+    ) -> Phase1ReportMetricView:
         """构建单个 metric result 的模板上下文。"""
 
-        return {
-            "name": metric.name,
-            "value": _format_value(metric.value),
-            "threshold": metric.threshold,
-            "threshold_value": _format_value(metric.threshold_value),
-            "direction": str(metric.direction or "-"),
-            "distance_to_threshold": _format_value(metric.distance_to_threshold),
-            "badge_class": _badge_class(metric.severity),
-            "severity_label": metric.severity.upper(),
-            "message": metric.message,
-        }
+        return Phase1ReportMetricView(
+            name=metric.name,
+            value=_format_value(metric.value),
+            threshold=metric.threshold,
+            threshold_value=_format_value(metric.threshold_value),
+            direction=str(metric.direction or "-"),
+            distance_to_threshold=_format_value(metric.distance_to_threshold),
+            badge_class=_badge_class(metric.severity),
+            severity_label=metric.severity.upper(),
+            message=metric.message,
+        )
 
     def _build_code_diagnostic_context(
         self,
         item: Phase1CodeDiagnostic,
-    ) -> JsonObject:
+    ) -> Phase1ReportCodeDiagnosticView:
         """构建单个 code diagnostic 的模板上下文。"""
 
-        return {
-            "code_id": str(item.code_id),
-            "support": str(item.support),
-            "occupancy": _format_value(item.occupancy),
-            "dominant_morphology": str(item.dominant_morphology or "-"),
-            "dominant_morphology_ratio": _format_value(
+        return Phase1ReportCodeDiagnosticView(
+            code_id=str(item.code_id),
+            support=str(item.support),
+            occupancy=_format_value(item.occupancy),
+            dominant_morphology=str(item.dominant_morphology or "-"),
+            dominant_morphology_ratio=_format_value(
                 item.dominant_morphology_ratio
             ),
-            "morphology_lift": _format_value(item.morphology_lift),
-            "dominant_motif": str(item.dominant_motif or "-"),
-            "dominant_motif_ratio": _format_value(item.dominant_motif_ratio),
-            "dominant_pair": str(item.dominant_pair or "-"),
-            "dominant_pair_ratio": _format_value(item.dominant_pair_ratio),
-            "decoded_mean_advantage": _format_value(item.decoded_mean_advantage),
-            "decoded_win_rate": _format_value(item.decoded_win_rate),
-            "retention_ratio": _format_value(item.retention_ratio),
-            "fee_drag": _format_value(item.fee_drag),
-            "status": item.status,
-            "badge_class": _badge_class(item.status),
-        }
+            morphology_lift=_format_value(item.morphology_lift),
+            dominant_motif=str(item.dominant_motif or "-"),
+            dominant_motif_ratio=_format_value(item.dominant_motif_ratio),
+            dominant_pair=str(item.dominant_pair or "-"),
+            dominant_pair_ratio=_format_value(item.dominant_pair_ratio),
+            decoded_mean_advantage=_format_value(item.decoded_mean_advantage),
+            decoded_win_rate=_format_value(item.decoded_win_rate),
+            retention_ratio=_format_value(item.retention_ratio),
+            fee_drag=_format_value(item.fee_drag),
+            status=item.status,
+            badge_class=_badge_class(item.status),
+        )
 
     def _build_code_distribution_context(
         self,
         payload: Phase1VQInternalPayload,
-    ) -> list[JsonObject]:
+    ) -> tuple[Phase1ReportCodeDistributionRow, ...]:
         """构建 codebook 使用分布的模板上下文。"""
 
         distribution = [float(value) for value in payload.code_distribution]
         active_codes = {int(code_id) for code_id in payload.active_codes}
 
-        return [
-            {
-                "code_id": str(code_id),
-                "occupancy": _format_value(occupancy),
-                "occupancy_percent": (
+        return tuple(
+            Phase1ReportCodeDistributionRow(
+                code_id=str(code_id),
+                occupancy=_format_value(occupancy),
+                occupancy_percent=(
                     f"{occupancy * 100:.3g}%"
                     if math.isfinite(occupancy)
                     else _format_value(occupancy)
                 ),
-                "bar_width": (
+                bar_width=(
                     f"{max(0.0, min(100.0, occupancy * 100.0)):.3g}%"
                     if math.isfinite(occupancy)
                     else "0%"
                 ),
-                "active": code_id in active_codes,
-                "badge_class": "pass" if code_id in active_codes else "warn",
-                "status_label": "ACTIVE" if code_id in active_codes else "INACTIVE",
-            }
+                active=code_id in active_codes,
+                badge_class="pass" if code_id in active_codes else "warn",
+                status_label="ACTIVE" if code_id in active_codes else "INACTIVE",
+            )
             for code_id, occupancy in enumerate(distribution)
-        ]
+        )
 
     def _build_risk_finding_context(
         self,
         finding: Phase1RiskFinding,
-    ) -> JsonObject:
+    ) -> Phase1ReportRiskFindingView:
         """构建单个 risk finding 的模板上下文。"""
 
-        return {
-            "severity": finding.severity,
-            "badge_class": "fail" if finding.severity == "fail" else "warn",
-            "title": finding.title,
-            "reason": finding.reason,
-            "related_metrics": ", ".join(finding.related_metrics) or "-",
-            "related_codes": (
+        return Phase1ReportRiskFindingView(
+            severity=finding.severity,
+            badge_class="fail" if finding.severity == "fail" else "warn",
+            title=finding.title,
+            reason=finding.reason,
+            related_metrics=", ".join(finding.related_metrics) or "-",
+            related_codes=(
                 ", ".join(str(code_id) for code_id in finding.related_codes) or "-"
             ),
-            "related_pairs": ", ".join(finding.related_pairs) or "-",
-            "recommended_action": finding.recommended_action,
-        }
+            related_pairs=", ".join(finding.related_pairs) or "-",
+            recommended_action=finding.recommended_action,
+        )
 
     def _build_risk_summary_context(
         self,
         findings: tuple[Phase1RiskFinding, ...],
-    ) -> JsonObject:
+    ) -> Phase1ReportRiskSummaryView:
         """把 risk findings 聚合成报告首页的三段式风险定位。"""
 
         if not findings:
-            return {
-                "has_findings": False,
-                "severity": "info",
-                "badge_class": "pass",
-                "finding_count": "0",
-                "primary_risk": "未发现阻断或警戒级风险。",
-                "inspection_target": (
+            return Phase1ReportRiskSummaryView(
+                has_findings=False,
+                severity="info",
+                badge_class="pass",
+                finding_count="0",
+                primary_risk="未发现阻断或警戒级风险。",
+                inspection_target=(
                     "无需优先 drill-down；保留 hard gate、per-code 和 drift "
                     "常规审计记录。"
                 ),
-                "recommendation": (
+                recommendation=(
                     "当前 checkpoint 可按 hard gate 和 selector 结果进入后续候选流程。"
                 ),
-            }
+            )
 
         severity_rank = {"fail": 0, "warn": 1, "info": 2}
         _, primary = min(
@@ -422,18 +442,18 @@ class Phase1CodebookReportContextBuilder:
                 item[0],
             ),
         )
-        return {
-            "has_findings": True,
-            "severity": primary.severity,
-            "badge_class": "fail" if primary.severity == "fail" else "warn",
-            "finding_count": str(len(findings)),
-            "primary_risk": self._risk_primary_text(primary),
-            "inspection_target": self._risk_inspection_target(primary),
-            "recommendation": (
+        return Phase1ReportRiskSummaryView(
+            has_findings=True,
+            severity=primary.severity,
+            badge_class="fail" if primary.severity == "fail" else "warn",
+            finding_count=str(len(findings)),
+            primary_risk=self._risk_primary_text(primary),
+            inspection_target=self._risk_inspection_target(primary),
+            recommendation=(
                 primary.recommended_action
                 or "保留该 finding 的风险说明，并复查关联样本与相邻 checkpoint。"
             ),
-        }
+        )
 
     def _risk_primary_text(self, finding: Phase1RiskFinding) -> str:
         """构建三段式中的主要风险文本。"""
@@ -462,12 +482,12 @@ class Phase1CodebookReportContextBuilder:
     def _build_oracle_profitability_kpis(
         self,
         metrics_payload: Any,
-    ) -> list[JsonObject]:
+    ) -> tuple[Phase1ReportKpiRow, ...]:
         """构建 oracle-label 收益卡 KPI 展示字段。"""
 
         oracle_metrics = self._nested_value(metrics_payload, "oracle_profitability")
         if oracle_metrics in (None, ""):
-            return []
+            return ()
 
         definitions = (
             (
@@ -487,166 +507,168 @@ class Phase1CodebookReportContextBuilder:
                 "trimmed advantage",
             ),
         )
-        rows: list[JsonObject] = []
+        rows: list[Phase1ReportKpiRow] = []
         for key, label in definitions:
             value = self._nested_value(oracle_metrics, key)
             if value in (None, ""):
                 continue
             rows.append(
-                {
-                    "key": key,
-                    "label": label,
-                    "value": _format_value(value),
-                }
+                Phase1ReportKpiRow(
+                    key=key,
+                    label=label,
+                    value=_format_value(value),
+                )
             )
-        return rows
+        return tuple(rows)
 
     def _build_per_code_profit_series(
         self,
         code_diagnostics: tuple[Phase1CodeDiagnostic, ...],
         oracle_profitability_payload: Phase1OracleProfitabilityPayload | None,
-    ) -> list[JsonObject]:
+    ) -> tuple[Phase1ReportProfitSeriesRow, ...]:
         """构建 per-code 盈利图表序列。"""
 
         if code_diagnostics:
-            return [
-                {
-                    "code_id": str(item.code_id),
-                    "label": f"code {item.code_id}",
-                    "value": _format_value(item.decoded_mean_advantage),
-                    "badge_class": self._profit_badge_class(
+            return tuple(
+                Phase1ReportProfitSeriesRow(
+                    code_id=str(item.code_id),
+                    label=f"code {item.code_id}",
+                    value=_format_value(item.decoded_mean_advantage),
+                    badge_class=self._profit_badge_class(
                         item.decoded_mean_advantage
                     ),
-                }
+                )
                 for item in code_diagnostics
                 if item.decoded_mean_advantage is not None
-            ]
+            )
         if oracle_profitability_payload is None:
-            return []
-        return [
-            {
-                "code_id": str(item.code_id),
-                "label": f"code {item.code_id}",
-                "value": _format_value(item.mean_advantage),
-                "badge_class": self._profit_badge_class(item.mean_advantage),
-            }
+            return ()
+        return tuple(
+            Phase1ReportProfitSeriesRow(
+                code_id=str(item.code_id),
+                label=f"code {item.code_id}",
+                value=_format_value(item.mean_advantage),
+                badge_class=self._profit_badge_class(item.mean_advantage),
+            )
             for item in oracle_profitability_payload.per_code_profitability
-        ]
+        )
 
     def _build_pair_profitability_matrix(
         self,
         oracle_profitability_payload: Phase1OracleProfitabilityPayload | None,
-    ) -> JsonObject:
+    ) -> Phase1ReportPairProfitabilityMatrix:
         """构建 morphology x motif decoded advantage 矩阵上下文。"""
 
         if oracle_profitability_payload is None:
-            return {"morphologies": [], "motifs": [], "rows": [], "cells": []}
+            return Phase1ReportPairProfitabilityMatrix(
+                morphologies=(),
+                motifs=(),
+                rows=(),
+                cells=(),
+            )
         cells = tuple(oracle_profitability_payload.pair_profitability_matrix)
         if not cells:
-            return {"morphologies": [], "motifs": [], "rows": [], "cells": []}
+            return Phase1ReportPairProfitabilityMatrix(
+                morphologies=(),
+                motifs=(),
+                rows=(),
+                cells=(),
+            )
 
-        morphologies = sorted({cell.morphology for cell in cells})
-        motifs = sorted({cell.motif for cell in cells})
+        morphologies = tuple(sorted({cell.morphology for cell in cells}))
+        motifs = tuple(sorted({cell.motif for cell in cells}))
         by_pair = {
             (cell.morphology, cell.motif): cell
             for cell in cells
         }
-        rows: list[JsonObject] = []
-        flat_cells: list[JsonObject] = []
+        rows: list[Phase1ReportPairProfitabilityRow] = []
+        flat_cells: list[Phase1ReportPairProfitabilityCell] = []
         for morphology in morphologies:
-            row_cells: list[JsonObject] = []
+            row_cells: list[Phase1ReportPairProfitabilityCell] = []
             for motif in motifs:
                 cell = by_pair.get((morphology, motif))
                 if cell is None:
-                    cell_context = {
-                        "morphology": morphology,
-                        "motif": motif,
-                        "support": "0",
-                        "mean_decoded_advantage": "-",
-                        "decoded_win_rate": "-",
-                        "retention_ratio": "-",
-                        "fee_drag": "-",
-                        "badge_class": "skip",
-                    }
+                    cell_context = Phase1ReportPairProfitabilityCell(
+                        morphology=morphology,
+                        motif=motif,
+                        support="0",
+                        mean_decoded_advantage="-",
+                        decoded_win_rate="-",
+                        retention_ratio="-",
+                        fee_drag="-",
+                        badge_class="skip",
+                    )
                 else:
-                    cell_context = {
-                        "morphology": morphology,
-                        "motif": motif,
-                        "support": str(cell.support),
-                        "mean_decoded_advantage": _format_value(
+                    cell_context = Phase1ReportPairProfitabilityCell(
+                        morphology=morphology,
+                        motif=motif,
+                        support=str(cell.support),
+                        mean_decoded_advantage=_format_value(
                             cell.mean_decoded_advantage
                         ),
-                        "decoded_win_rate": _format_value(cell.decoded_win_rate),
-                        "retention_ratio": _format_value(cell.retention_ratio),
-                        "fee_drag": _format_value(cell.fee_drag),
-                        "badge_class": self._profit_badge_class(
+                        decoded_win_rate=_format_value(cell.decoded_win_rate),
+                        retention_ratio=_format_value(cell.retention_ratio),
+                        fee_drag=_format_value(cell.fee_drag),
+                        badge_class=self._profit_badge_class(
                             cell.mean_decoded_advantage
                         ),
-                    }
+                    )
                 row_cells.append(cell_context)
                 flat_cells.append(cell_context)
-            rows.append({"morphology": morphology, "cells": row_cells})
-        return {
-            "morphologies": morphologies,
-            "motifs": motifs,
-            "rows": rows,
-            "cells": flat_cells,
-        }
+            rows.append(
+                Phase1ReportPairProfitabilityRow(
+                    morphology=morphology,
+                    cells=tuple(row_cells),
+                )
+            )
+        return Phase1ReportPairProfitabilityMatrix(
+            morphologies=morphologies,
+            motifs=motifs,
+            rows=tuple(rows),
+            cells=tuple(flat_cells),
+        )
 
     def _build_oracle_cumulative_return_series(
         self,
         payload: Phase1OracleProfitabilityPayload | None,
-    ) -> list[JsonObject]:
+    ) -> tuple[Phase1ReportSeries, ...]:
         """构建 oracle-label 累计收益曲线序列。"""
 
         if payload is None:
-            return []
+            return ()
         definitions = (
             ("dp", "DP", payload.dp_returns),
             ("decoded", "Decoded", payload.decoded_returns),
             ("random_label", "Random label", payload.random_label_returns),
             ("flat", "Flat", payload.flat_returns),
         )
-        return [
-            {
-                "key": key,
-                "label": label,
-                "points": self._cumulative_points(returns),
-            }
+        return tuple(
+            Phase1ReportSeries(
+                key=key,
+                label=label,
+                points=self._cumulative_points(returns),
+            )
             for key, label, returns in definitions
             if returns
-        ]
+        )
 
-    def _cumulative_points(self, returns: tuple[float, ...]) -> list[JsonObject]:
+    def _cumulative_points(
+        self,
+        returns: tuple[float, ...],
+    ) -> tuple[Phase1ReportSeriesPoint, ...]:
         """把逐样本 return 转为从 0 开始的累计曲线点。"""
 
         total = 0.0
-        points = [{"step": "0", "value": _format_value(total)}]
+        points = [Phase1ReportSeriesPoint(step="0", value=_format_value(total))]
         for index, value in enumerate(returns, start=1):
             total += float(value)
-            points.append({"step": str(index), "value": _format_value(total)})
-        return points
-
-    def _vq_internal_payload(self, payload: Any) -> Phase1VQInternalPayload | None:
-        """从 report payload 恢复第一层 VQ internal payload。"""
-
-        if isinstance(payload, Phase1VQInternalPayload):
-            return payload
-        if isinstance(payload, Mapping):
-            return Phase1VQInternalPayload.from_dict(payload)
-        return None
-
-    def _oracle_profitability_payload(
-        self,
-        payload: Any,
-    ) -> Phase1OracleProfitabilityPayload | None:
-        """从 report payload 恢复第三层 oracle profitability payload。"""
-
-        if isinstance(payload, Phase1OracleProfitabilityPayload):
-            return payload
-        if isinstance(payload, Mapping):
-            return Phase1OracleProfitabilityPayload.from_dict(payload)
-        return None
+            points.append(
+                Phase1ReportSeriesPoint(
+                    step=str(index),
+                    value=_format_value(total),
+                )
+            )
+        return tuple(points)
 
     def _nested_value(self, payload: Any, key: str) -> Any:
         """兼容 Mapping 和 dataclass/object 的字段读取。"""
@@ -662,42 +684,32 @@ class Phase1CodebookReportContextBuilder:
             return "warn"
         return "pass" if value >= 0.0 else "fail"
 
-    def _build_mapping_rows(self, payload: Mapping[str, Any]) -> list[JsonObject]:
+    def _build_mapping_rows(
+        self,
+        payload: Mapping[str, Any],
+    ) -> tuple[Phase1ReportMappingRow, ...]:
         """构建普通 key-value 表格上下文。"""
 
-        return [
-            {"key": str(key), "value": _format_value(value)}
+        return tuple(
+            Phase1ReportMappingRow(key=str(key), value=_format_value(value))
             for key, value in payload.items()
-        ]
+        )
 
     def _build_score_breakdown_rows(
         self,
         score: Phase1ValidationScore,
-    ) -> list[JsonObject]:
+    ) -> tuple[Phase1ReportScoreBreakdownRow, ...]:
         """构建综合 score 子项拆解表格上下文。"""
 
-        return [
-            {
-                "name": component.name,
-                "value": _format_value(component.value),
-                "weight": _format_value(component.weight),
-                "weighted_value": _format_value(component.weighted_value),
-            }
+        return tuple(
+            Phase1ReportScoreBreakdownRow(
+                name=component.name,
+                value=_format_value(component.value),
+                weight=_format_value(component.weight),
+                weighted_value=_format_value(component.weighted_value),
+            )
             for component in score.components
-        ]
-
-    def _validation_score(self, payload: Any) -> Phase1ValidationScore | None:
-        """从 report payload 恢复 Phase I validation score。"""
-
-        if payload is None:
-            return None
-        if isinstance(payload, Phase1ValidationScore):
-            return payload
-        if isinstance(payload, Mapping):
-            return Phase1ValidationScore.from_dict(payload)
-        if isinstance(payload, int | float):
-            return Phase1ValidationScore.from_float(float(payload))
-        return None
+        )
 
 
 __all__ = ["Phase1CodebookReportContextBuilder"]

@@ -18,8 +18,6 @@ from typing import Any, Mapping, TypeAlias, cast
 
 from ..metrics import (
     Phase1ValidationResult,
-    Phase1ValidationScore,
-    get_phase1_validation_score_value,
 )
 
 
@@ -159,133 +157,6 @@ class Phase1CodebookReportMeta:
 
 
 @dataclass(frozen=True)
-class Phase1CodebookReportSummary:
-    """报告摘要信息。
-
-    含义：
-        对单个 checkpoint validation 结果做顶层汇总。
-
-    作用：
-        生成 payload 中的 ``summary`` 节点，并为 HTML header/summary 区提供稳定
-        字段来源。
-    """
-
-    # checkpoint 稳定 ID 或文件名。
-    checkpoint_id: str
-
-    # checkpoint 所属阶段，例如 train/validation/vq。
-    stage: str
-
-    # checkpoint 对应 epoch。
-    epoch: int
-
-    # 五层 hard gate 是否全部通过。
-    passed: bool
-
-    # 综合分数；兼容历史 int/float 和新 Phase1ValidationScore.total_score。
-    score: float | int | None
-
-    # 失败 layer 名称列表。
-    failed_layers: tuple[str, ...]
-
-    # 失败 layer 数量。
-    failed_layer_count: int
-
-    # validation layer 总数量。
-    layer_count: int
-
-    # code-level diagnostic 行数。
-    code_diagnostic_count: int
-
-    # checkpoint 级风险 finding 数量。
-    risk_finding_count: int
-
-    def __post_init__(self) -> None:
-        """标准化摘要字段类型。"""
-
-        failed_layers = tuple(str(layer) for layer in self.failed_layers)
-        object.__setattr__(self, "checkpoint_id", str(self.checkpoint_id))
-        object.__setattr__(self, "stage", str(self.stage))
-        object.__setattr__(self, "epoch", int(self.epoch))
-        object.__setattr__(self, "passed", bool(self.passed))
-        object.__setattr__(self, "score", _summary_score(self.score))
-        object.__setattr__(self, "failed_layers", failed_layers)
-        object.__setattr__(self, "failed_layer_count", int(self.failed_layer_count))
-        object.__setattr__(self, "layer_count", int(self.layer_count))
-        object.__setattr__(
-            self,
-            "code_diagnostic_count",
-            int(self.code_diagnostic_count),
-        )
-        object.__setattr__(
-            self,
-            "risk_finding_count",
-            int(self.risk_finding_count),
-        )
-
-    @classmethod
-    def from_validation_result(
-        cls,
-        validation_result: Phase1ValidationResult,
-    ) -> "Phase1CodebookReportSummary":
-        """从完整 validation result 生成报告摘要。"""
-
-        return cls(
-            checkpoint_id=validation_result.checkpoint_id,
-            stage=validation_result.stage,
-            epoch=validation_result.epoch,
-            passed=validation_result.passed,
-            score=get_phase1_validation_score_value(validation_result.score),
-            failed_layers=tuple(validation_result.failed_layers),
-            failed_layer_count=len(validation_result.failed_layers),
-            layer_count=len(validation_result.layers),
-            code_diagnostic_count=len(validation_result.code_diagnostics),
-            risk_finding_count=len(validation_result.risk_findings),
-        )
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase1CodebookReportSummary":
-        """从 payload 的 ``summary`` 节点恢复报告摘要。"""
-
-        failed_layers = tuple(
-            str(layer) for layer in payload.get("failed_layers", ())
-        )
-        return cls(
-            checkpoint_id=str(payload.get("checkpoint_id", "-")),
-            stage=str(payload.get("stage", "-")),
-            epoch=int(payload.get("epoch", 0)),
-            passed=bool(payload.get("passed", False)),
-            score=_summary_score(payload.get("score")),
-            failed_layers=failed_layers,
-            failed_layer_count=int(
-                payload.get("failed_layer_count", len(failed_layers))
-            ),
-            layer_count=int(payload.get("layer_count", 0)),
-            code_diagnostic_count=int(payload.get("code_diagnostic_count", 0)),
-            risk_finding_count=int(payload.get("risk_finding_count", 0)),
-        )
-
-    def to_dict(self) -> JsonObject:
-        """转换为现有 payload 兼容的 ``summary`` dict。"""
-
-        return {
-            "checkpoint_id": self.checkpoint_id,
-            "stage": self.stage,
-            "epoch": self.epoch,
-            "passed": self.passed,
-            "score": self.score,
-            "failed_layers": list(self.failed_layers),
-            "failed_layer_count": self.failed_layer_count,
-            "layer_count": self.layer_count,
-            "code_diagnostic_count": self.code_diagnostic_count,
-            "risk_finding_count": self.risk_finding_count,
-        }
-
-
-@dataclass(frozen=True)
 class Phase1CodebookReportDocument:
     """完整机器可读 report payload。
 
@@ -299,9 +170,6 @@ class Phase1CodebookReportDocument:
 
     # 报告元信息，对应 payload["report"]。
     report: Phase1CodebookReportMeta
-
-    # checkpoint 摘要，对应 payload["summary"]。
-    summary: Phase1CodebookReportSummary
 
     # 完整 validation result，对应 payload["validation"]。
     validation: Phase1ValidationResult
@@ -337,9 +205,6 @@ class Phase1CodebookReportDocument:
                 generated_at=generated_at,
                 metadata=metadata,
             ),
-            summary=Phase1CodebookReportSummary.from_validation_result(
-                validation_result
-            ),
             validation=validation_result,
             config=_json_object(config or {}),
             artifacts=_json_object(artifacts or {}),
@@ -353,16 +218,13 @@ class Phase1CodebookReportDocument:
         """从 public payload dict 恢复 report document。"""
 
         report_payload = _require_mapping(payload.get("report"), "report")
-        summary_payload = _require_mapping(payload.get("summary"), "summary")
-        summary = Phase1CodebookReportSummary.from_dict(summary_payload)
-        validation = _validation_result_from_payload(
+        validation_payload = _require_mapping(
             payload.get("validation"),
-            summary=summary,
+            "validation",
         )
         return cls(
             report=Phase1CodebookReportMeta.from_dict(report_payload),
-            summary=summary,
-            validation=validation,
+            validation=Phase1ValidationResult.from_dict(validation_payload),
             config=_json_object(_optional_mapping(payload.get("config"))),
             artifacts=_json_object(_optional_mapping(payload.get("artifacts"))),
         )
@@ -372,7 +234,6 @@ class Phase1CodebookReportDocument:
 
         return {
             "report": self.report.to_dict(),
-            "summary": self.summary.to_dict(),
             "validation": _json_object(self.validation.to_dict()),
             "config": dict(self.config),
             "artifacts": dict(self.artifacts),
@@ -926,9 +787,6 @@ class Phase1CodebookReportHtmlContext:
     # config snapshot 行。
     config_rows: tuple[Phase1ReportMappingRow, ...]
 
-    # artifacts 行。
-    artifact_rows: tuple[Phase1ReportMappingRow, ...]
-
     def to_dict(self) -> dict[str, Any]:
         """转换为模板引擎可消费的普通 dict。"""
 
@@ -948,44 +806,6 @@ def ensure_phase1_codebook_report_document(
     if isinstance(payload, Phase1CodebookReportDocument):
         return payload
     return Phase1CodebookReportDocument.from_dict(payload)
-
-
-def _summary_score(value: Any) -> float | int | None:
-    """标准化 summary score，兼容新旧 score 表示。"""
-
-    if value is None:
-        return None
-    if isinstance(value, Phase1ValidationScore):
-        return value.total_score
-    if isinstance(value, Mapping) and "total_score" in value:
-        return float(value["total_score"])
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int | float):
-        return value
-    return float(value)
-
-
-def _validation_result_from_payload(
-    value: Any,
-    *,
-    summary: Phase1CodebookReportSummary,
-) -> Phase1ValidationResult:
-    """从强类型对象或 dict 恢复 ``Phase1ValidationResult``。"""
-
-    if isinstance(value, Phase1ValidationResult):
-        return value
-    if not isinstance(value, Mapping):
-        raise TypeError("validation must be a Phase1ValidationResult or mapping")
-
-    validation_payload = dict(value)
-    validation_payload.setdefault("checkpoint_id", summary.checkpoint_id)
-    validation_payload.setdefault("stage", summary.stage)
-    validation_payload.setdefault("epoch", summary.epoch)
-    validation_payload.setdefault("passed", summary.passed)
-    validation_payload.setdefault("score", summary.score)
-    validation_payload.setdefault("failed_layers", list(summary.failed_layers))
-    return Phase1ValidationResult.from_dict(validation_payload)
 
 
 def _json_object(value: Mapping[str, Any]) -> JsonObject:
@@ -1023,7 +843,6 @@ __all__ = [
     "PHASE1_CODEBOOK_REPORT_SCHEMA",
     "Phase1CodebookReportDocument",
     "Phase1CodebookReportMeta",
-    "Phase1CodebookReportSummary",
     "Phase1CodebookReportHtmlContext",
     "Phase1ReportHeader",
     "Phase1ReportHeaderItem",

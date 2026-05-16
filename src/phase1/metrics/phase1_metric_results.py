@@ -311,7 +311,7 @@ class Phase1ValidationResult:
     passed: bool
 
     # 综合评分对象。只有 passed=True 时通常才有值；失败 checkpoint 推荐为 None。
-    score: Phase1ValidationScoreLike
+    score: Phase1ValidationScore
 
     # 失败 layer 名称列表。
     failed_layers: tuple[str, ...]
