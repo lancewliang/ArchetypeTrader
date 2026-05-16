@@ -29,7 +29,10 @@ from src.utils import _dataclass_from_mapping
 from .phase1_validation_behavior_quality import Phase1BehaviorQualityMetrics
 from .phase1_validation_label_predictability import Phase1LabelPredictabilityMetrics
 from .phase1_validation_oracle_profitability import Phase1OracleProfitabilityMetrics
-from .phase1_validation_teacher_quality import Phase1TeacherQualityMetrics
+from .phase1_validation_teacher_quality import (
+    Phase1TeacherQualityMetrics,
+    Phase1TeacherQualityPayload,
+)
 from .phase1_validation_vq_internal import Phase1VQInternalMetrics
 
 
@@ -637,6 +640,7 @@ __all__ = [
     "Phase1OracleProfitabilityMetrics",
     "Phase1PerCodeProfitability",
     "Phase1TeacherQualityMetrics",
+    "Phase1TeacherQualityPayload",
     "Phase1TieBreakerMetrics",
     "Phase1VQInternalMetrics",
     "Phase1ValidationMetrics",

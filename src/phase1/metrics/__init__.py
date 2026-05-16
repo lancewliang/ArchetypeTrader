@@ -42,6 +42,7 @@ from .phase1_validation_oracle_profitability import (
 )
 from .phase1_validation_teacher_quality import (
     Phase1TeacherQualityMetrics,
+    Phase1TeacherQualityPayload,
     Phase1TeacherQualityThresholds,
     compute_teacher_quality_score,
     evaluate_teacher_quality_rules,
@@ -85,6 +86,7 @@ __all__ = [
     "Phase1OracleProfitabilityThresholds",
     "Phase1PerCodeProfitability",
     "Phase1TeacherQualityMetrics",
+    "Phase1TeacherQualityPayload",
     "Phase1TeacherQualityThresholds",
     "Phase1TieBreakerMetrics",
     "Phase1VQInternalPayload",

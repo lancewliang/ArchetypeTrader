@@ -11,7 +11,11 @@ from src.phase1.evaluators.phase1_validation_layers.layer0_teacher_quality impor
     compute_teacher_quality_metrics,
     compute_top_removed_total_advantage,
 )
-from src.phase1.metrics import Phase1EvaluationSnapshot, Phase1ValidationRuntimeConfig
+from src.phase1.metrics import (
+    Phase1EvaluationSnapshot,
+    Phase1TeacherQualityPayload,
+    Phase1ValidationRuntimeConfig,
+)
 
 
 def _snapshot(
@@ -64,10 +68,15 @@ def test_layer0_returns_documented_extra_payload_and_missing_reason() -> None:
         ),
     )
 
+    assert isinstance(computation.extra_payload, Phase1TeacherQualityPayload)
     np.testing.assert_allclose(computation.extra_payload["dp_returns"], [0.60, -0.05])
     np.testing.assert_allclose(computation.extra_payload["flat_returns"], [0.0, 0.0])
     np.testing.assert_allclose(computation.extra_payload["advantages"], [0.60, -0.05])
     assert computation.extra_payload["missing_reason"] == "missing_prices"
+    restored = Phase1TeacherQualityPayload.from_dict(
+        computation.extra_payload.to_dict()
+    )
+    assert restored == computation.extra_payload
     assert math.isnan(computation.metrics.fee_sensitivity)
     assert math.isnan(computation.metrics.morphology_coverage)
 
