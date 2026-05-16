@@ -986,7 +986,7 @@ class Phase1CodebookReportContextBuilder:
             rows=tuple(rows),
             cells=tuple(flat_cells),
             grid_template_columns=(
-                f"minmax(132px, 1fr) repeat({len(motifs)}, minmax(118px, 1fr))"
+                f"minmax(86px, 1.15fr) repeat({len(motifs)}, minmax(0, 1fr))"
             ),
             legend_min=f"-{_format_value(max_abs_advantage)}",
             legend_max=f"+{_format_value(max_abs_advantage)}",

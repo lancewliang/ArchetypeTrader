@@ -496,14 +496,15 @@
     .profit-fill.fail { background: var(--fail); }
 
     .heatmap-wrap {
-      overflow-x: auto;
+      overflow: visible;
       padding: 14px 16px 16px;
     }
 
     .heatmap {
       display: grid;
       gap: 4px;
-      min-width: 760px;
+      width: 100%;
+      min-width: 0;
     }
 
     .heatmap-head,
@@ -519,6 +520,7 @@
       line-height: 1.25;
       font-weight: 720;
       text-align: center;
+      overflow-wrap: anywhere;
     }
 
     .heatmap-head,
@@ -563,6 +565,12 @@
     }
 
     .drift-diagnostics-table {
+      height: auto;
+      max-height: none;
+      overflow: visible;
+    }
+
+    .tie-breaker-table {
       height: auto;
       max-height: none;
       overflow: visible;
@@ -1040,7 +1048,7 @@
           <h2><span class="metric-with-tip">决胜指标 <span class="note">Tie Breaker Metrics</span><span class="tip" tabindex="0" data-tip="当多个 checkpoint 都通过 hard gate 且综合分接近时，用这些稳定字段做最终排序。">?</span></span></h2>
           <span class="note">selector 稳定排序字段</span>
         </div>
-        <div class="table-scroll">
+        <div class="table-scroll tie-breaker-table">
           <table>
             <thead>
               <tr>
