@@ -249,6 +249,40 @@ def test_build_html_context_includes_code_distribution_rows() -> None:
     ]
 
 
+def test_build_html_context_includes_header_metadata() -> None:
+    payload = _payload()
+    report = payload["report"]
+    assert isinstance(report, dict)
+    report.update({"pair": "BTCUSDT", "batchid": "phase1_2026w18"})
+    payload["config"] = {
+        "pair": "ETHUSDT",
+        "batch": "config_batch",
+        "train_batch_id": "config_batch",
+        "horizon": 72,
+        "num_archetypes": 99,
+    }
+
+    context = Phase1CodebookReportContextBuilder().build(payload)
+
+    assert context["header"] == {
+        "pair": "BTCUSDT",
+        "batch": "phase1_2026w18",
+        "checkpoint": "ckpt<1>",
+        "k": "3",
+        "n_val": "3",
+        "horizon": "72",
+        "generated_at": "2026-05-10T00:00:00+00:00",
+        "meta_items": [
+            {"label": "Pair", "value": "BTCUSDT"},
+            {"label": "Batch", "value": "phase1_2026w18"},
+            {"label": "Checkpoint", "value": "ckpt<1>"},
+            {"label": "K", "value": "3"},
+            {"label": "N_val", "value": "3"},
+            {"label": "Horizon", "value": "72"},
+        ],
+    }
+
+
 def test_build_html_context_includes_score_breakdown_rows() -> None:
     context = Phase1CodebookReportContextBuilder().build(_payload())
 
