@@ -795,6 +795,11 @@ class Phase1CodebookReportHtmlContext:
 
         return cast(dict[str, Any], template_safe(self))
 
+    def __getitem__(self, key: str) -> Any:
+        """兼容历史测试和调用方对 HTML context 的 dict-style 读取。"""
+
+        return self.to_dict()[key]
+
 
 def ensure_phase1_codebook_report_document(
     payload: Phase1CodebookReportDocument | Mapping[str, Any],
