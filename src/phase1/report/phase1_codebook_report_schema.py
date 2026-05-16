@@ -363,6 +363,9 @@ class Phase1ReportMetricView:
     # 指标说明或失败原因。
     message: str
 
+    # 指标含义和判读说明，用于 hover tooltip。
+    description: str = ""
+
 
 @dataclass(frozen=True)
 class Phase1ReportLayerView:
@@ -567,6 +570,9 @@ class Phase1ReportProfitSeriesRow:
     # 盈利状态 badge CSS class。
     badge_class: str
 
+    # 条形图宽度。
+    bar_width: str = "0%"
+
 
 @dataclass(frozen=True)
 class Phase1ReportCodeDistributionRow:
@@ -690,6 +696,9 @@ class Phase1ReportChartSeries:
 class Phase1ReportLineChart:
     """静态 SVG 折线图视图模型。"""
 
+    # 图表小标题。
+    title: str = ""
+
     # SVG viewBox 宽度。
     width: str = "820"
 
@@ -710,6 +719,9 @@ class Phase1ReportLineChart:
 
     # x 轴说明。
     x_axis_label: str = "validation horizon order"
+
+    # 同一区块内的补充子图。
+    detail_charts: tuple["Phase1ReportLineChart", ...] = ()
 
 
 @dataclass(frozen=True)

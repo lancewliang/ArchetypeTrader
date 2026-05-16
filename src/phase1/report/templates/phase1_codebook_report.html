@@ -111,6 +111,10 @@
       gap: 16px;
     }
 
+    .natural-height {
+      align-self: start;
+    }
+
     .summary-grid {
       grid-template-columns: 280px repeat(5, minmax(150px, 1fr));
       align-items: stretch;
@@ -360,6 +364,12 @@
       min-height: 300px;
     }
 
+    .line-chart + .line-chart {
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid var(--soft-line);
+    }
+
     .line-chart svg {
       display: block;
       width: 100%;
@@ -406,6 +416,56 @@
       background: var(--skip);
       flex: 0 0 auto;
     }
+
+    .chart-subtitle {
+      color: #344054;
+      font-size: 12px;
+      font-weight: 760;
+      margin-bottom: 8px;
+    }
+
+    .profit-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .profit-row {
+      display: grid;
+      grid-template-columns: minmax(72px, 96px) minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .profit-label {
+      font-weight: 720;
+      color: #344054;
+      white-space: nowrap;
+    }
+
+    .profit-value {
+      font-variant-numeric: tabular-nums;
+      font-weight: 760;
+      min-width: 78px;
+      text-align: right;
+    }
+
+    .profit-bar {
+      height: 12px;
+      background: #eef2f7;
+      border-radius: 999px;
+      overflow: hidden;
+      min-width: 0;
+    }
+
+    .profit-fill {
+      height: 100%;
+      border-radius: inherit;
+    }
+
+    .profit-fill.pass { background: var(--pass); }
+    .profit-fill.warn { background: var(--warn); }
+    .profit-fill.fail { background: var(--fail); }
 
     .heatmap-wrap {
       overflow-x: auto;
@@ -469,6 +529,31 @@
 
     .risk-text p + p { margin-top: 10px; }
 
+    .risk-grid {
+      grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+      align-items: start;
+    }
+
+    .risk-findings-panel {
+      grid-column: 1 / -1;
+    }
+
+    table.metadata-table {
+      width: auto;
+      min-width: 560px;
+      max-width: 100%;
+    }
+
+    table.metadata-table th {
+      width: 150px;
+    }
+
+    table.metadata-table td {
+      width: auto;
+      max-width: 460px;
+      overflow-wrap: anywhere;
+    }
+
     .footer-note {
       margin-top: 22px;
       color: var(--muted);
@@ -476,8 +561,12 @@
     }
 
     @media (max-width: 1180px) {
-      .summary-grid, .two, .three {
+      .summary-grid, .two, .three, .risk-grid {
         grid-template-columns: 1fr;
+      }
+
+      .risk-findings-panel {
+        grid-column: auto;
       }
 
       .hero {
@@ -496,6 +585,13 @@
       .meta, .kpi-grid { grid-template-columns: 1fr; }
       h1 { font-size: 22px; }
       .score-value { font-size: 34px; }
+      .profit-row {
+        grid-template-columns: minmax(62px, 80px) minmax(0, 1fr);
+      }
+      .profit-value {
+        grid-column: 2;
+        text-align: left;
+      }
     }
   </style>
 </head>
@@ -550,7 +646,7 @@
       {% endfor %}
     </section>
 
-    <section class="panel">
+    <section class="panel natural-height">
       <div class="panel-head">
         <h2><span class="metric-with-tip">指标阈值明细 <span class="note">Validation Metrics</span><span class="tip" tabindex="0" data-tip="逐项展示 hard gate metric 的当前值、阈值、阈值方向、到阈值的距离和解释。">?</span></span></h2>
         <span class="note">{{ summary.layer_count }} layers, {{ summary.code_diagnostic_count }} code diagnostics, {{ summary.risk_finding_count }} risk findings</span>
@@ -574,7 +670,7 @@
             {% for metric in layer.metrics %}
             <tr>
               <td>{{ layer.name }}</td>
-              <td><span class="metric-with-tip">{{ metric.name }}<span class="tip" tabindex="0" data-tip="{{ metric.message }}">?</span></span></td>
+              <td><span class="metric-with-tip">{{ metric.name }}<span class="tip" tabindex="0" data-tip="{{ metric.description }}">?</span></span></td>
               <td class="num">{{ metric.value }}</td>
               <td class="num">{{ metric.threshold }}</td>
               <td class="num">{{ metric.direction }}</td>
@@ -678,6 +774,7 @@
           <span class="note">累计收益曲线</span>
         </div>
         <div class="panel-body chart line-chart">
+          <div class="chart-subtitle">{{ oracle_cumulative_return_chart.title }}</div>
           <svg viewBox="0 0 {{ oracle_cumulative_return_chart.width }} {{ oracle_cumulative_return_chart.height }}" role="img" aria-label="Oracle-label cumulative returns">
             {% for line in oracle_cumulative_return_chart.grid_lines %}
             <line class="grid-line" x1="52" y1="{{ line.y }}" x2="798" y2="{{ line.y }}"></line>
@@ -696,6 +793,28 @@
             {% endfor %}
           </div>
         </div>
+        {% for detail_chart in oracle_cumulative_return_chart.detail_charts %}
+        <div class="panel-body chart line-chart">
+          <div class="chart-subtitle">{{ detail_chart.title }}</div>
+          <svg viewBox="0 0 {{ detail_chart.width }} {{ detail_chart.height }}" role="img" aria-label="Oracle-label cumulative returns detail">
+            {% for line in detail_chart.grid_lines %}
+            <line class="grid-line" x1="52" y1="{{ line.y }}" x2="798" y2="{{ line.y }}"></line>
+            <text class="svg-label" x="6" y="{{ line.y }}">{{ line.label }}</text>
+            {% endfor %}
+            <line class="axis" x1="52" y1="292" x2="798" y2="292"></line>
+            <line class="axis" x1="52" y1="24" x2="52" y2="292"></line>
+            {% for series in detail_chart.series %}
+            <polyline points="{{ series.points }}" fill="none" stroke="{{ series.color }}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"><title>{{ series.tooltip }}</title></polyline>
+            {% endfor %}
+            <text class="svg-label" x="52" y="320">{{ detail_chart.x_axis_label }}</text>
+          </svg>
+          <div class="chart-legend" aria-label="cumulative return detail legend">
+            {% for series in detail_chart.series %}
+            <span class="legend-item"><i class="legend-swatch" style="background: {{ series.color }}"></i>{{ series.label }} {{ series.end_value }}</span>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
       </article>
       {% endif %}
 
@@ -705,25 +824,14 @@
           <h2><span class="metric-with-tip">Per-code 盈利 <span class="note">Profitability</span><span class="tip" tabindex="0" data-tip="每个 active code 只在被 encoder 分配到该 code 的 validation samples 上统计收益，用于发现整体通过但局部失效的坏 code。">?</span></span></h2>
           <span class="note">active code 的 mean decoded advantage</span>
         </div>
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Code</th>
-                <th class="num">平均优势 Mean Advantage</th>
-                <th>状态 Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for row in per_code_profit_series %}
-              <tr>
-                <td>{{ row.label }}</td>
-                <td class="num">{{ row.value }}</td>
-                <td><span class="badge {{ row.badge_class }}">{{ row.badge_class }}</span></td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+        <div class="panel-body profit-list">
+          {% for row in per_code_profit_series %}
+          <div class="profit-row">
+            <div class="profit-label">{{ row.label }}</div>
+            <div class="profit-bar"><div class="profit-fill {{ row.badge_class }}" style="width: {{ row.bar_width }}"></div></div>
+            <div class="profit-value">{{ row.value }}</div>
+          </div>
+          {% endfor %}
         </div>
       </article>
       {% endif %}
@@ -758,9 +866,9 @@
     </section>
     {% endif %}
 
-    <section class="grid three">
+    <section class="grid risk-grid">
       {% if drift_diagnostics %}
-      <article class="panel">
+      <article class="panel natural-height">
         <div class="panel-head">
           <h2><span class="metric-with-tip">Train/Val Drift 诊断 <span class="note">Drift Diagnostics</span><span class="tip" tabindex="0" data-tip="这些指标不一定直接淘汰 checkpoint，但用于解释训练集和验证集行为差异。drift 高时，可能是市场形态分布、code usage 或 motif 分布发生迁移。">?</span></span></h2>
           <span class="note">train/validation 分布漂移 warning</span>
@@ -778,7 +886,7 @@
             <tbody>
               {% for metric in drift_diagnostics %}
               <tr>
-                <td><span class="metric-with-tip">{{ metric.name }}<span class="tip" tabindex="0" data-tip="{{ metric.message }}">?</span></span></td>
+                <td><span class="metric-with-tip">{{ metric.name }}<span class="tip" tabindex="0" data-tip="{{ metric.description }}">?</span></span></td>
                 <td class="num">{{ metric.value }}</td>
                 <td class="num">{{ metric.threshold }}</td>
                 <td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td>
@@ -803,7 +911,7 @@
       </article>
 
       {% if risk_findings %}
-      <article class="panel">
+      <article class="panel risk-findings-panel">
         <div class="panel-head">
           <h2><span class="metric-with-tip">风险 Findings <span class="note">Risk Findings</span><span class="tip" tabindex="0" data-tip="列出所有 WARN/FAIL/near-threshold 风险，以及关联 metric、code、pair，便于人工审计追踪证据。">?</span></span></h2>
           <span class="note">{{ risk_summary.finding_count }} 条风险</span>
@@ -844,21 +952,21 @@
         <table>
           <thead>
             <tr>
-              <th>Code</th>
-              <th class="num">Support</th>
-              <th class="num">Occupancy</th>
-              <th>Dominant Morphology</th>
-              <th class="num">Morph Ratio</th>
-              <th class="num">Lift</th>
-              <th>Dominant Motif</th>
-              <th class="num">Motif Ratio</th>
-              <th>Dominant Pair</th>
-              <th class="num">Pair Ratio</th>
-              <th class="num">Decoded Return</th>
-              <th class="num">Win Rate</th>
-              <th class="num">Retention</th>
-              <th class="num">Fee Drag</th>
-              <th>Status</th>
+              <th><span class="metric-with-tip">Code<span class="tip" tabindex="0" data-tip="VQ codebook 中的离散 label ID。每个 code 应尽量对应一个可解释的交易原型，而不是任意编号。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Support<span class="tip" tabindex="0" data-tip="validation 中被分配到该 code 的样本数。样本太少时，dominant morphology、motif、return 等统计不稳定，不能可靠解释该 code。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Occupancy<span class="tip" tabindex="0" data-tip="该 code 在 validation 样本中的占用比例。它用于检查 code 是否有足够覆盖，以及是否存在过度集中或接近 dead code 的问题。">?</span></span></th>
+              <th><span class="metric-with-tip">Dominant Morphology<span class="tip" tabindex="0" data-tip="该 code 内占比最高的市场形态，例如 uptrend、downtrend、reversal-up。它说明这个 code 主要出现在什么行情结构中。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Morph Ratio<span class="tip" tabindex="0" data-tip="dominant morphology 在该 code 内的占比。低于阈值说明该 code 混入了很多不同市场形态，selector 从起点状态学习会更困难。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Lift<span class="tip" tabindex="0" data-tip="该 code 的 dominant morphology 占比除以全体验证集同类 morphology 占比。lift 大于 1 表示该 code 对该市场形态有富集；低 lift 表示它和全局分布差不多。">?</span></span></th>
+              <th><span class="metric-with-tip">Dominant Motif<span class="tip" tabindex="0" data-tip="该 code 内占比最高的交易行为模式，由方向、入场时段、持仓风格和可选反转类型组成。它回答这个 code 主要怎么交易。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Motif Ratio<span class="tip" tabindex="0" data-tip="dominant motif 在该 code 内的占比。比例低说明同一 code 聚合了多种交易意图，可能导致 decoder 行为不稳定。">?</span></span></th>
+              <th><span class="metric-with-tip">Dominant Pair<span class="tip" tabindex="0" data-tip="该 code 内最常见的市场形态和交易 motif 组合。好的 code 应该能形成稳定 pair，例如 downtrend / short-hold。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Pair Ratio<span class="tip" tabindex="0" data-tip="dominant morphology-motif pair 在该 code 内的占比。它同时检查市场结构和行为意图是否绑定稳定，过低说明 code 语义模糊。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Decoded Return<span class="tip" tabindex="0" data-tip="该 code 对应样本上，assigned label 经 decoder 执行后的平均或累计收益优势。负值表示该 code 在自己的样本上没有保留 DP 盈利能力。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Win Rate<span class="tip" tabindex="0" data-tip="该 code 对应样本中 decoded return 超过 flat 的比例。用于判断 per-code 盈利是否稳定，而不是靠少数大收益样本。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Retention<span class="tip" tabindex="0" data-tip="该 code 上 decoded advantage 相对 DP teacher advantage 的保留比例。过低表示压缩或重构过程中丢失了该原型的关键盈利动作。">?</span></span></th>
+              <th class="num"><span class="metric-with-tip">Fee Drag<span class="tip" tabindex="0" data-tip="该 code 上手续费占 gross profit 的比例。高 fee drag 通常说明 decoder 产生碎交易、频繁切换或收益空间过薄。">?</span></span></th>
+              <th><span class="metric-with-tip">Status<span class="tip" tabindex="0" data-tip="该 code 的综合诊断状态。WARN 通常表示没有直接淘汰 checkpoint，但需要检查该 code 的样本、动作序列或成本来源。">?</span></span></th>
             </tr>
           </thead>
           <tbody>
@@ -950,7 +1058,7 @@
           <span class="note">schema 和 generated timestamp</span>
         </div>
         <div class="table-scroll">
-          <table>
+          <table class="metadata-table">
             <tbody>
               <tr><th>generated_at</th><td>{{ report.generated_at }}</td></tr>
               <tr><th>schema</th><td>{{ report.schema }}</td></tr>

@@ -74,6 +74,223 @@ def _badge_class(severity: str | bool) -> str:
     return "warn"
 
 
+_METRIC_DESCRIPTIONS: dict[str, str] = {
+    "dp_advantage_vs_flat": (
+        "DP teacher 每条 horizon 相对 flat baseline 的平均收益优势；"
+        "用于确认示范轨迹整体是否有正交易价值。"
+    ),
+    "dp_win_rate_vs_flat": (
+        "DP teacher 收益超过 flat baseline 的 horizon 比例；"
+        "用于检查收益是否广泛存在，而不是只依赖少数样本。"
+    ),
+    "near_zero_opportunity_ratio": (
+        "收益优势接近手续费噪声的样本比例；比例越高，说明训练集中"
+        "可学习的清晰交易机会越少。"
+    ),
+    "fee_sensitivity": (
+        "手续费上升后 DP teacher 总优势的保留比例；用于识别"
+        "过度依赖微小价差、成本稍变即失效的示范。"
+    ),
+    "morphology_coverage": (
+        "非 neutral 市场形态在 validation 中的覆盖率；用于确认样本包含"
+        "足够趋势、反转或波动结构，而不是多数为无结构行情。"
+    ),
+    "dp_return_concentration_after_top5_removed": (
+        "去掉收益最高 5% horizon 后的 DP 总优势；用于检查 teacher 收益"
+        "是否被极少数尾部行情支撑。"
+    ),
+    "validation_action_accuracy": (
+        "decoder 在 assigned code 条件下重构 DP 示范动作的准确率；"
+        "衡量 code 是否保留基本动作信息。"
+    ),
+    "reconstruction_loss_gap": (
+        "validation reconstruction loss 相对 train reconstruction loss 的泛化差距；"
+        "差距过大表示 decoder 泛化不稳。"
+    ),
+    "active_code_ratio": (
+        "validation 中被有效使用的 code 占 codebook 的比例；用于判断"
+        "codebook 是否充分利用。"
+    ),
+    "max_code_occupancy": (
+        "单个 code 的最大样本占用率；过高表示 label collapse 或多个行为模式"
+        "被混到同一个 code。"
+    ),
+    "normalized_code_perplexity": (
+        "code 使用分布的归一化 perplexity；越高表示使用越均衡，过低说明"
+        "codebook 有塌缩风险。"
+    ),
+    "dead_code_ratio": (
+        "validation 中几乎没有样本支持的 code 比例；比例高说明 codebook 容量"
+        "未被有效使用。"
+    ),
+    "assignment_churn_recent_mean": (
+        "相邻或近期 checkpoint 之间 label assignment 的平均变动率；用于检查"
+        "code 语义是否稳定。"
+    ),
+    "code_lifetime_pass_ratio": (
+        "active code 中生命周期达到稳定要求的比例；用于过滤短暂出现、"
+        "不可复用的 code。"
+    ),
+    "nearest_second_margin_median": (
+        "最近 code 与第二近 code 距离差的中位数；margin 低表示样本分配"
+        "边界模糊、label 容易抖动。"
+    ),
+    "direction_accuracy": (
+        "decoded 动作方向与 DP 示范方向一致的比例；用于检查 long/short/flat"
+        "方向是否被正确保留。"
+    ),
+    "entry_timing_error_median": (
+        "decoded 入场时点相对 DP 示范入场时点的中位误差；误差大表示"
+        "交易时机被重构偏移。"
+    ),
+    "decoder_turnover_error": (
+        "decoded 换手强度相对 DP 示范的误差；用于检查 decoder 是否过度交易"
+        "或过度平滑动作。"
+    ),
+    "weak_support_code_ratio": (
+        "support 不足的 active code 比例；比例高说明大量 code 级统计不稳定。"
+    ),
+    "weak_morphology_code_ratio": (
+        "dominant morphology 不清晰的 active code 比例；比例高表示 code 与"
+        "市场结构关系弱。"
+    ),
+    "weak_motif_code_ratio": (
+        "dominant trading motif 不清晰的 active code 比例；比例高表示 code 内部"
+        "交易意图混杂。"
+    ),
+    "weak_pair_code_ratio": (
+        "dominant morphology-motif pair 不清晰的 active code 比例；用于检查"
+        "市场形态与交易行为是否稳定绑定。"
+    ),
+    "weak_lift_nonprofitable_code_ratio": (
+        "同时缺少 morphology lift 或盈利性的弱 code 比例；用于识别"
+        "既不可解释又不可交易的原型。"
+    ),
+    "intra_code_action_similarity": (
+        "同一 code 内 decoded action 序列的一致性；越高表示该 code 行为语义"
+        "越集中。"
+    ),
+    "inter_intra_separation": (
+        "code 间行为中心距离与 code 内差异的比值；越高表示不同 archetype"
+        "分得越开。"
+    ),
+    "latent_silhouette_score": (
+        "latent 空间中 assigned code 的 silhouette 聚类分数；用于判断 label"
+        "边界是否清晰。"
+    ),
+    "duplicate_code_pair_count": (
+        "行为相似度超过重复阈值的 code pair 数量；数量高说明 codebook 中"
+        "存在冗余原型。"
+    ),
+    "profitable_code_coverage": (
+        "具备正 decoded advantage 的 active code 覆盖率；用于确认盈利能力"
+        "不是只集中在少数 code。"
+    ),
+    "mean_decoded_advantage_vs_flat": (
+        "assigned-label decoded 策略相对 flat baseline 的平均收益优势；"
+        "这是 codebook oracle 盈利性的最低要求。"
+    ),
+    "decoded_win_rate_vs_flat": (
+        "decoded 收益超过 flat baseline 的 horizon 比例；用于判断盈利是否"
+        "稳定分布。"
+    ),
+    "mean_advantage_vs_random_label": (
+        "assigned label decoded return 相对 random label decoded return 的平均优势；"
+        "用于验证 encoder 分配的 label 不是随机 ID。"
+    ),
+    "random_label_relative_lift": (
+        "assigned label 相对 random label 的收益提升比例；越高说明 label assignment"
+        "携带越多交易信息。"
+    ),
+    "retention_ratio": (
+        "decoded 总优势相对 DP teacher 总优势的保留比例；用于衡量压缩后"
+        "保留了多少 teacher 盈利能力。"
+    ),
+    "downside_control": (
+        "decoded 策略对亏损或下行风险的控制指标；用于避免平均收益为正但"
+        "回撤结构过差。"
+    ),
+    "risk_adjusted_return": (
+        "decoded return 的风险调整收益；用于把收益和波动/下行风险一起评估。"
+    ),
+    "risk_adjusted_return_vs_random": (
+        "decoded 策略风险调整收益相对 random label baseline 的优势；用于确认"
+        "收益质量也优于随机标签。"
+    ),
+    "top_5_contribution": (
+        "收益最高 5% horizon 对总 decoded profit 的贡献比例；比例高说明"
+        "盈利过度依赖尾部样本。"
+    ),
+    "trimmed_decoded_advantage": (
+        "去掉收益最高和最低尾部样本后的 decoded 平均优势；用于检查主体样本"
+        "是否仍有正期望。"
+    ),
+    "fee_drag": (
+        "手续费占 gross profit 的比例；过高通常表示 decoder 交易过碎或收益空间"
+        "被成本吞噬。"
+    ),
+    "turnover_return_correlation": (
+        "换手强度与收益的相关性；显著为负表示越交易越亏，可能存在"
+        "过度交易问题。"
+    ),
+    "bad_code_ratio": (
+        "decoded profitability 或行为质量不达标的坏 code 比例；用于定位"
+        "整体通过但局部失效的 codebook。"
+    ),
+    "dominant_pair_positive_ratio": (
+        "dominant morphology-motif pair 中 mean decoded advantage 为正的比例；"
+        "用于检查主要形态-行为组合是否大多可盈利。"
+    ),
+    "probe_top1_accuracy": (
+        "用 horizon 起点可见状态预测 assigned label 的 top-1 accuracy；"
+        "衡量 Phase II selector 是否可能学到这些 label。"
+    ),
+    "probe_top3_accuracy": (
+        "label probe 的 top-3 accuracy；用于判断 selector 是否能把候选 code"
+        "缩小到少数几个。"
+    ),
+    "probe_balanced_accuracy": (
+        "按 code 平衡后的 probe accuracy；用于避免模型只预测高频 code。"
+    ),
+    "label_entropy_given_morphology": (
+        "给定市场形态后的 label 条件熵；值越低表示市场结构对 label"
+        "有更强约束。"
+    ),
+    "mutual_information_lift": (
+        "label 与可见状态之间的互信息提升；用于衡量 label 是否可由当前状态"
+        "预测，而不是主要依赖未来路径。"
+    ),
+    "probe_return_retention": (
+        "probe 预测 label 的 decoded return 相对 oracle assigned label decoded return"
+        "的保留比例；用于估计 selector 学成后的收益上限。"
+    ),
+    "morphology_distribution_kl": (
+        "validation 市场形态分布相对 train 的 KL divergence；值高说明"
+        "验证期行情结构发生迁移。"
+    ),
+    "code_usage_kl": (
+        "validation code usage 分布相对 train 的 KL divergence；值高说明"
+        "encoder assignment 或市场结构在验证期发生漂移。"
+    ),
+    "motif_distribution_kl": (
+        "validation 行为 motif 分布相对 train 的 KL divergence；值高说明"
+        "decoder 行为结构或样本结构发生迁移。"
+    ),
+    "reconstruction_generalization_gap": (
+        "validation 与 train reconstruction quality 的泛化差距；用于解释"
+        "验证集重构或收益变差是否来自泛化问题。"
+    ),
+    "label_predictability_gap": (
+        "train/validation label predictability 的差距；值高说明 selector 可学习性"
+        "在验证期下降。"
+    ),
+    "per_code_return_gap": (
+        "train/validation per-code return 的差距；用于定位某些 code 在验证期"
+        "盈利结构是否失效。"
+    ),
+}
+
+
 @dataclass(frozen=True)
 class Phase1CodebookReportContextBuilder:
     """Phase I codebook validation report 模板上下文构建器。"""
@@ -332,6 +549,7 @@ class Phase1CodebookReportContextBuilder:
     ) -> Phase1ReportMetricView:
         """构建单个 metric result 的模板上下文。"""
 
+        description = self._metric_description(metric)
         return Phase1ReportMetricView(
             name=metric.name,
             value=_format_value(metric.value),
@@ -342,7 +560,20 @@ class Phase1CodebookReportContextBuilder:
             badge_class=_badge_class(metric.severity),
             severity_label=metric.severity.upper(),
             message=metric.message,
+            description=description,
         )
+
+    def _metric_description(self, metric: Phase1MetricResult) -> str:
+        """构建 metric hover 中的指标含义和判定说明。"""
+
+        description = _METRIC_DESCRIPTIONS.get(
+            metric.name,
+            "该指标用于 Phase I codebook hard gate 或 drift 诊断；"
+            "需要结合当前值、阈值方向和风险 findings 一起判断。",
+        )
+        if metric.message:
+            return f"指标含义: {description} 当前判定: {metric.message}"
+        return f"指标含义: {description}"
 
     def _build_code_diagnostic_context(
         self,
@@ -537,13 +768,24 @@ class Phase1CodebookReportContextBuilder:
         """构建 per-code 盈利图表序列。"""
 
         if code_diagnostics:
+            max_abs_advantage = self._max_abs_profit_value(
+                item.decoded_mean_advantage
+                for item in code_diagnostics
+                if item.decoded_mean_advantage is not None
+            )
             return tuple(
                 Phase1ReportProfitSeriesRow(
                     code_id=str(item.code_id),
                     label=f"code {item.code_id}",
-                    value=_format_value(item.decoded_mean_advantage),
+                    value=self._format_signed_value(
+                        item.decoded_mean_advantage
+                    ),
                     badge_class=self._profit_badge_class(
                         item.decoded_mean_advantage
+                    ),
+                    bar_width=self._profit_bar_width(
+                        item.decoded_mean_advantage,
+                        max_abs_advantage,
                     ),
                 )
                 for item in code_diagnostics
@@ -551,12 +793,20 @@ class Phase1CodebookReportContextBuilder:
             )
         if oracle_profitability_payload is None:
             return ()
+        max_abs_advantage = self._max_abs_profit_value(
+            item.mean_advantage
+            for item in oracle_profitability_payload.per_code_profitability
+        )
         return tuple(
             Phase1ReportProfitSeriesRow(
                 code_id=str(item.code_id),
                 label=f"code {item.code_id}",
-                value=_format_value(item.mean_advantage),
+                value=self._format_signed_value(item.mean_advantage),
                 badge_class=self._profit_badge_class(item.mean_advantage),
+                bar_width=self._profit_bar_width(
+                    item.mean_advantage,
+                    max_abs_advantage,
+                ),
             )
             for item in oracle_profitability_payload.per_code_profitability
         )
@@ -741,6 +991,44 @@ class Phase1CodebookReportContextBuilder:
             for key, label, color, returns, tooltip in definitions
             if returns
         ]
+        chart = self._build_line_chart_from_series(
+            raw_series,
+            title="全部累计收益",
+        )
+        if not chart.series:
+            return chart
+
+        detail_series = tuple(
+            item for item in raw_series if item[0] != "dp"
+        )
+        if self._needs_decoder_detail_chart(raw_series, detail_series):
+            detail_chart = self._build_line_chart_from_series(
+                detail_series,
+                title="Decoded / Random / Flat 明细",
+            )
+            if detail_chart.series:
+                return Phase1ReportLineChart(
+                    title=chart.title,
+                    width=chart.width,
+                    height=chart.height,
+                    grid_lines=chart.grid_lines,
+                    series=chart.series,
+                    y_min=chart.y_min,
+                    y_max=chart.y_max,
+                    x_axis_label=chart.x_axis_label,
+                    detail_charts=(detail_chart,),
+                )
+        return chart
+
+    def _build_line_chart_from_series(
+        self,
+        raw_series: list[tuple[str, str, str, tuple[float, ...], str]]
+        | tuple[tuple[str, str, str, tuple[float, ...], str], ...],
+        *,
+        title: str,
+    ) -> Phase1ReportLineChart:
+        """把累计数值序列转换成静态 SVG 折线图坐标。"""
+
         finite_values = [
             value
             for _, _, _, values, _ in raw_series
@@ -813,6 +1101,7 @@ class Phase1CodebookReportContextBuilder:
             )
 
         return Phase1ReportLineChart(
+            title=title,
             width=str(int(width)),
             height=str(int(height)),
             grid_lines=grid_lines,
@@ -821,6 +1110,37 @@ class Phase1CodebookReportContextBuilder:
             y_max=_format_value(y_max),
             x_axis_label="validation horizon order",
         )
+
+    def _needs_decoder_detail_chart(
+        self,
+        raw_series: list[tuple[str, str, str, tuple[float, ...], str]],
+        detail_series: tuple[tuple[str, str, str, tuple[float, ...], str], ...],
+    ) -> bool:
+        """判断 decoded/random 是否会被 DP 量级压扁。"""
+
+        if not detail_series:
+            return False
+        full_range = self._series_value_range(tuple(raw_series))
+        detail_range = self._series_value_range(detail_series)
+        if detail_range <= 0.0:
+            return False
+        return full_range / detail_range >= 20.0
+
+    def _series_value_range(
+        self,
+        raw_series: tuple[tuple[str, str, str, tuple[float, ...], str], ...],
+    ) -> float:
+        """计算一组序列的有限值范围。"""
+
+        finite_values = [
+            value
+            for _, _, _, values, _ in raw_series
+            for value in values
+            if math.isfinite(value)
+        ]
+        if not finite_values:
+            return 0.0
+        return max(finite_values) - min(finite_values)
 
     def _cumulative_points(
         self,
@@ -868,6 +1188,28 @@ class Phase1CodebookReportContextBuilder:
             *(round(index * step) for index in range(max_points)),
         }
         return tuple(sorted(indices))
+
+    def _max_abs_profit_value(self, values: Any) -> float:
+        """计算 per-code 盈利条形图的归一化尺度。"""
+
+        finite_values = [
+            abs(float(value))
+            for value in values
+            if value is not None and math.isfinite(float(value))
+        ]
+        return max(finite_values, default=1.0) or 1.0
+
+    def _profit_bar_width(
+        self,
+        value: float | None,
+        max_abs_value: float,
+    ) -> str:
+        """按绝对收益生成 per-code 条形宽度。"""
+
+        if value is None or not math.isfinite(value):
+            return "0%"
+        width = abs(value) / max_abs_value * 100.0
+        return f"{max(2.0, min(100.0, width)):.3g}%"
 
     def _heatmap_background(self, value: float | None, max_abs: float) -> str:
         """按收益正负和强度生成热力图背景色。"""
