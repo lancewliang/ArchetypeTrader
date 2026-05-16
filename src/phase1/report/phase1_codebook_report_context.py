@@ -10,6 +10,7 @@ from ..metrics import (
     Phase1CodeDiagnostic,
     Phase1LayerResult,
     Phase1MetricResult,
+    Phase1OracleProfitabilityPayload,
     Phase1RiskFinding,
     Phase1ValidationScore,
     Phase1VQInternalPayload,
@@ -62,6 +63,7 @@ class Phase1CodebookReportContextBuilder:
         summary = payload["summary"]
         report = payload["report"]
         config = payload.get("config", {})
+        artifacts = payload.get("artifacts", {})
         layers = tuple(
             Phase1LayerResult.from_dict(layer)
             for layer in validation.get("layers", ())
@@ -80,6 +82,9 @@ class Phase1CodebookReportContextBuilder:
         )
         vq_internal_payload = self._vq_internal_payload(
             validation.get("vq_internal_payload")
+        )
+        oracle_profitability_payload = self._oracle_profitability_payload(
+            validation.get("oracle_profitability_payload")
         )
         validation_score = self._validation_score(validation.get("score"))
 
@@ -109,6 +114,13 @@ class Phase1CodebookReportContextBuilder:
                 self._build_code_diagnostic_context(item)
                 for item in code_diagnostics
             ],
+            "oracle_profitability_kpis": self._build_oracle_profitability_kpis(
+                validation.get("metrics", {})
+            ),
+            "per_code_profit_series": self._build_per_code_profit_series(
+                code_diagnostics,
+                oracle_profitability_payload,
+            ),
             "code_distribution": self._build_code_distribution_context(
                 vq_internal_payload
             )
@@ -131,6 +143,7 @@ class Phase1CodebookReportContextBuilder:
                 for finding in risk_findings
             ],
             "config_rows": self._build_mapping_rows(config),
+            "artifact_rows": self._build_mapping_rows(artifacts),
         }
 
     def _build_layer_context(self, layer: Phase1LayerResult) -> JsonObject:
@@ -179,12 +192,17 @@ class Phase1CodebookReportContextBuilder:
             "dominant_morphology_ratio": _format_value(
                 item.dominant_morphology_ratio
             ),
+            "morphology_lift": _format_value(item.morphology_lift),
             "dominant_motif": str(item.dominant_motif or "-"),
             "dominant_motif_ratio": _format_value(item.dominant_motif_ratio),
             "dominant_pair": str(item.dominant_pair or "-"),
+            "dominant_pair_ratio": _format_value(item.dominant_pair_ratio),
             "decoded_mean_advantage": _format_value(item.decoded_mean_advantage),
+            "decoded_win_rate": _format_value(item.decoded_win_rate),
             "retention_ratio": _format_value(item.retention_ratio),
+            "fee_drag": _format_value(item.fee_drag),
             "status": item.status,
+            "badge_class": _badge_class(item.status),
         }
 
     def _build_code_distribution_context(
@@ -236,6 +254,80 @@ class Phase1CodebookReportContextBuilder:
             "recommended_action": finding.recommended_action,
         }
 
+    def _build_oracle_profitability_kpis(
+        self,
+        metrics_payload: Any,
+    ) -> list[JsonObject]:
+        """构建 oracle-label 收益卡 KPI 展示字段。"""
+
+        oracle_metrics = self._nested_value(metrics_payload, "oracle_profitability")
+        if oracle_metrics in (None, ""):
+            return []
+
+        definitions = (
+            (
+                "mean_decoded_advantage_vs_flat",
+                "mean decoded advantage",
+            ),
+            (
+                "random_label_relative_lift",
+                "vs random uplift",
+            ),
+            (
+                "top_5_contribution",
+                "top 5% contribution",
+            ),
+            (
+                "trimmed_decoded_advantage",
+                "trimmed advantage",
+            ),
+        )
+        rows: list[JsonObject] = []
+        for key, label in definitions:
+            value = self._nested_value(oracle_metrics, key)
+            if value in (None, ""):
+                continue
+            rows.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "value": _format_value(value),
+                }
+            )
+        return rows
+
+    def _build_per_code_profit_series(
+        self,
+        code_diagnostics: tuple[Phase1CodeDiagnostic, ...],
+        oracle_profitability_payload: Phase1OracleProfitabilityPayload | None,
+    ) -> list[JsonObject]:
+        """构建 per-code 盈利图表序列。"""
+
+        if code_diagnostics:
+            return [
+                {
+                    "code_id": str(item.code_id),
+                    "label": f"code {item.code_id}",
+                    "value": _format_value(item.decoded_mean_advantage),
+                    "badge_class": self._profit_badge_class(
+                        item.decoded_mean_advantage
+                    ),
+                }
+                for item in code_diagnostics
+                if item.decoded_mean_advantage is not None
+            ]
+        if oracle_profitability_payload is None:
+            return []
+        return [
+            {
+                "code_id": str(item.code_id),
+                "label": f"code {item.code_id}",
+                "value": _format_value(item.mean_advantage),
+                "badge_class": self._profit_badge_class(item.mean_advantage),
+            }
+            for item in oracle_profitability_payload.per_code_profitability
+        ]
+
     def _vq_internal_payload(self, payload: Any) -> Phase1VQInternalPayload | None:
         """从 report payload 恢复第一层 VQ internal payload。"""
 
@@ -244,6 +336,32 @@ class Phase1CodebookReportContextBuilder:
         if isinstance(payload, Mapping):
             return Phase1VQInternalPayload.from_dict(payload)
         return None
+
+    def _oracle_profitability_payload(
+        self,
+        payload: Any,
+    ) -> Phase1OracleProfitabilityPayload | None:
+        """从 report payload 恢复第三层 oracle profitability payload。"""
+
+        if isinstance(payload, Phase1OracleProfitabilityPayload):
+            return payload
+        if isinstance(payload, Mapping):
+            return Phase1OracleProfitabilityPayload.from_dict(payload)
+        return None
+
+    def _nested_value(self, payload: Any, key: str) -> Any:
+        """兼容 Mapping 和 dataclass/object 的字段读取。"""
+
+        if isinstance(payload, Mapping):
+            return payload.get(key)
+        return getattr(payload, key, None)
+
+    def _profit_badge_class(self, value: float | None) -> str:
+        """将 per-code 盈利值映射为展示状态。"""
+
+        if value is None or not math.isfinite(value):
+            return "warn"
+        return "pass" if value >= 0.0 else "fail"
 
     def _build_mapping_rows(self, payload: Mapping[str, Any]) -> list[JsonObject]:
         """构建普通 key-value 表格上下文。"""
