@@ -15,6 +15,7 @@ class _ValidationResult:
     failed_layers = ()
     layers = ()
     code_diagnostics = ()
+    risk_findings = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -129,6 +130,14 @@ def _payload() -> dict[str, object]:
                     }
                 ],
             },
+            "metrics": {
+                "oracle_profitability": {
+                    "mean_decoded_advantage_vs_flat": 0.174,
+                    "random_label_relative_lift": 0.28,
+                    "top_5_contribution": 0.42,
+                    "trimmed_decoded_advantage": 0.091,
+                },
+            },
             "vq_internal_payload": {
                 "code_distribution": [0.5, 0.25, 0.0],
                 "active_codes": [0, 1],
@@ -143,6 +152,14 @@ def _payload() -> dict[str, object]:
                 "codebook_size": 3,
                 "codebook_size_available": True,
                 "code_distribution_sample_count": 3,
+            },
+            "oracle_profitability_payload": {
+                "per_code_profitability": [],
+                "decoded_returns": [0.2, -0.05, 0.1],
+                "dp_returns": [0.3, -0.1, 0.2],
+                "flat_returns": [0.0, 0.0, 0.0],
+                "random_label_returns": [0.05, -0.02, 0.01],
+                "random_seed": 7,
             },
         },
         "config": {"codebook_size": 32},
@@ -242,4 +259,114 @@ def test_build_html_context_includes_score_breakdown_rows() -> None:
             "weight": "0.1",
             "weighted_value": "0.05",
         }
+    ]
+
+
+def test_build_html_context_includes_full_code_diagnostic_fields() -> None:
+    context = Phase1CodebookReportContextBuilder().build(_payload())
+
+    assert context["code_diagnostics"][0] == {
+        "code_id": "3",
+        "support": "24",
+        "occupancy": "0.125",
+        "dominant_morphology": "trend<up>",
+        "dominant_morphology_ratio": "0.67",
+        "morphology_lift": "-",
+        "dominant_motif": "hold",
+        "dominant_motif_ratio": "0.5",
+        "dominant_pair": "trend-hold",
+        "dominant_pair_ratio": "0.45",
+        "decoded_mean_advantage": "1.25",
+        "decoded_win_rate": "0.55",
+        "retention_ratio": "-",
+        "fee_drag": "0.02",
+        "status": "weak<script>",
+        "badge_class": "warn",
+    }
+
+
+def test_build_html_context_includes_oracle_profitability_kpis() -> None:
+    context = Phase1CodebookReportContextBuilder().build(_payload())
+
+    assert context["oracle_profitability_kpis"] == [
+        {
+            "key": "mean_decoded_advantage_vs_flat",
+            "label": "mean decoded advantage",
+            "value": "0.174",
+        },
+        {
+            "key": "random_label_relative_lift",
+            "label": "vs random uplift",
+            "value": "0.28",
+        },
+        {
+            "key": "top_5_contribution",
+            "label": "top 5% contribution",
+            "value": "0.42",
+        },
+        {
+            "key": "trimmed_decoded_advantage",
+            "label": "trimmed advantage",
+            "value": "0.091",
+        },
+    ]
+
+
+def test_build_html_context_includes_per_code_profit_series() -> None:
+    context = Phase1CodebookReportContextBuilder().build(_payload())
+
+    assert context["per_code_profit_series"] == [
+        {
+            "code_id": "3",
+            "label": "code 3",
+            "value": "1.25",
+            "badge_class": "pass",
+        }
+    ]
+
+
+def test_build_html_context_includes_oracle_cumulative_return_series() -> None:
+    context = Phase1CodebookReportContextBuilder().build(_payload())
+
+    assert context["oracle_cumulative_return_series"] == [
+        {
+            "key": "dp",
+            "label": "DP",
+            "points": [
+                {"step": "0", "value": "0"},
+                {"step": "1", "value": "0.3"},
+                {"step": "2", "value": "0.2"},
+                {"step": "3", "value": "0.4"},
+            ],
+        },
+        {
+            "key": "decoded",
+            "label": "Decoded",
+            "points": [
+                {"step": "0", "value": "0"},
+                {"step": "1", "value": "0.2"},
+                {"step": "2", "value": "0.15"},
+                {"step": "3", "value": "0.25"},
+            ],
+        },
+        {
+            "key": "random_label",
+            "label": "Random label",
+            "points": [
+                {"step": "0", "value": "0"},
+                {"step": "1", "value": "0.05"},
+                {"step": "2", "value": "0.03"},
+                {"step": "3", "value": "0.04"},
+            ],
+        },
+        {
+            "key": "flat",
+            "label": "Flat",
+            "points": [
+                {"step": "0", "value": "0"},
+                {"step": "1", "value": "0"},
+                {"step": "2", "value": "0"},
+                {"step": "3", "value": "0"},
+            ],
+        },
     ]

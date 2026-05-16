@@ -117,6 +117,11 @@ class Phase1CodebookReportContextBuilder:
             "oracle_profitability_kpis": self._build_oracle_profitability_kpis(
                 validation.get("metrics", {})
             ),
+            "oracle_cumulative_return_series": (
+                self._build_oracle_cumulative_return_series(
+                    oracle_profitability_payload
+                )
+            ),
             "per_code_profit_series": self._build_per_code_profit_series(
                 code_diagnostics,
                 oracle_profitability_payload,
@@ -327,6 +332,40 @@ class Phase1CodebookReportContextBuilder:
             }
             for item in oracle_profitability_payload.per_code_profitability
         ]
+
+    def _build_oracle_cumulative_return_series(
+        self,
+        payload: Phase1OracleProfitabilityPayload | None,
+    ) -> list[JsonObject]:
+        """构建 oracle-label 累计收益曲线序列。"""
+
+        if payload is None:
+            return []
+        definitions = (
+            ("dp", "DP", payload.dp_returns),
+            ("decoded", "Decoded", payload.decoded_returns),
+            ("random_label", "Random label", payload.random_label_returns),
+            ("flat", "Flat", payload.flat_returns),
+        )
+        return [
+            {
+                "key": key,
+                "label": label,
+                "points": self._cumulative_points(returns),
+            }
+            for key, label, returns in definitions
+            if returns
+        ]
+
+    def _cumulative_points(self, returns: tuple[float, ...]) -> list[JsonObject]:
+        """把逐样本 return 转为从 0 开始的累计曲线点。"""
+
+        total = 0.0
+        points = [{"step": "0", "value": _format_value(total)}]
+        for index, value in enumerate(returns, start=1):
+            total += float(value)
+            points.append({"step": str(index), "value": _format_value(total)})
+        return points
 
     def _vq_internal_payload(self, payload: Any) -> Phase1VQInternalPayload | None:
         """从 report payload 恢复第一层 VQ internal payload。"""
