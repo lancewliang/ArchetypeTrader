@@ -229,7 +229,6 @@ class Phase1CodebookReport:
         summary = payload["summary"]
         report = payload["report"]
         config = payload.get("config", {})
-        artifacts = payload.get("artifacts", {})
         layers = tuple(
             Phase1LayerResult.from_dict(layer)
             for layer in validation.get("layers", ())
@@ -275,8 +274,7 @@ class Phase1CodebookReport:
                 self._build_metric_context(metric)
                 for metric in drift_diagnostics.values()
             ],
-            "config_rows": self._build_mapping_rows(config),
-            "artifact_rows": self._build_mapping_rows(artifacts),
+            "config_rows": self._build_mapping_rows(config)
         }
 
     def _build_layer_context(self, layer: Phase1LayerResult) -> JsonObject:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import TYPE_CHECKING, Any
 
 from src.utils import _dataclass_from_mapping
@@ -66,16 +66,35 @@ class Phase1VQInternalMetrics:
     # 旧 checkpoint 可能没有该字段，因此给 NaN 默认值。
     quantization_distance_gap: float = float("nan")
 
+    # validation split 的 code 使用分布，索引为 code id，值为 occupancy probability。
+    code_distribution: tuple[float, ...] = ()
+
+    # validation split 中达到 active occupancy 阈值的 code id。
+    active_codes: tuple[int, ...] = ()
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为 dict，供 checkpoint/report 落盘。"""
 
-        return asdict(self)
+        payload = asdict(self)
+        payload["code_distribution"] = [
+            float(value) for value in self.code_distribution
+        ]
+        payload["active_codes"] = [int(code_id) for code_id in self.active_codes]
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1VQInternalMetrics":
         """从 dict 恢复第一层 metrics。"""
 
-        return _dataclass_from_mapping(cls, payload)
+        field_names = {field.name for field in fields(cls)}
+        values = {key: value for key, value in payload.items() if key in field_names}
+        values["code_distribution"] = tuple(
+            float(value) for value in payload.get("code_distribution", ())
+        )
+        values["active_codes"] = tuple(
+            int(code_id) for code_id in payload.get("active_codes", ())
+        )
+        return cls(**values)
 
 
 @dataclass(frozen=True)
