@@ -6,7 +6,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-
+LOB_ASK_PRICE_COLS = ["ask1_price", "ask2_price", "ask3_price", "ask4_price", "ask5_price"]
+LOB_ASK_SIZE_COLS = ["ask1_size", "ask2_size", "ask3_size", "ask4_size", "ask5_size"]
+LOB_BID_PRICE_COLS = ["bid1_price", "bid2_price", "bid3_price", "bid4_price", "bid5_price"]
+LOB_BID_SIZE_COLS = ["bid1_size", "bid2_size", "bid3_size", "bid4_size", "bid5_size"]
 @dataclass(frozen=True)
 class ActionExecutionResult:
     """动作执行后的逐 horizon 收益结果。
@@ -132,6 +135,65 @@ class ActionExecutionCalculator:
     def _nan_result(sample_count: int) -> ActionExecutionResult:
         empty = np.full(sample_count, float("nan"), dtype=np.float64)
         return ActionExecutionResult(empty, empty.copy(), empty.copy(), empty.copy())
+    
+    @staticmethod
+    def compute_lob_slippage(
+        delta_position: int, state: dict, mark_price: float,
+    ) -> float:
+        """Walk the 5-level LOB to compute slippage cost.
 
+        # Section 3.1: C(|ΔP|) - |ΔP| × p_mark
+        # For buys (ΔP > 0): walk ask side, slippage = fill_cash - |ΔP| × mark
+        # For sells (ΔP < 0): walk bid side, slippage = |ΔP| × mark - fill_cash
+        #
+        # If the 5-level book cannot fill the entire order, remaining
+        # quantity is filled at the worst available level.
+
+        Args:
+            delta_position: signed position change (>0 buy, <0 sell)
+            state: polars row dict containing LOB features
+            mark_price: mark price p_mark
+
+        Returns:
+            slippage cost (non-negative)
+        """
+        if delta_position == 0:
+            return 0.0
+
+        abs_delta = float(abs(delta_position))
+
+        if delta_position > 0:
+            price_cols = LOB_ASK_PRICE_COLS
+            size_cols = LOB_ASK_SIZE_COLS
+        else:
+            price_cols = LOB_BID_PRICE_COLS
+            size_cols = LOB_BID_SIZE_COLS
+
+        qty_remaining = abs_delta
+        fill_cash = 0.0
+        last_price = mark_price
+
+        for p_col, s_col in zip(price_cols, size_cols):
+            level_price = float(state[p_col])
+            level_size = float(state[s_col])
+            if level_price <= 0 or level_size <= 0:
+                continue
+            last_price = level_price
+            fill_qty = min(qty_remaining, level_size)
+            fill_cash += fill_qty * level_price
+            qty_remaining -= fill_qty
+            if qty_remaining <= 0:
+                break
+
+        if qty_remaining > 0:
+            fill_cash += qty_remaining * last_price
+        # 价格举例：当前持仓量为 0，目标持仓量为 1，当前价格为 10，如果 通过委托价格9 购买 fillcash 9 slippage 为 -1
+        # 价格举例：当前持仓量为 0，目标持仓量为 1，当前价格为 10，如果 通过委托价格11购买 fillcash 11 slippage 为 1
+        if delta_position > 0:
+            slippage = fill_cash - abs_delta * mark_price
+        else:
+            slippage = abs_delta * mark_price - fill_cash
+
+        return max(slippage, 0.0)
 
 __all__ = ["ActionExecutionCalculator", "ActionExecutionResult"]
