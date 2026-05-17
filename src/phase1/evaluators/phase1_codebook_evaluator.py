@@ -955,23 +955,23 @@ class Phase1CodebookEvaluator:
             )
         return price_values, depth_values
 
-    @staticmethod
-    def _prices_from_horizon_dataset(
-        *,
-        horizon_dataset: HorizonDataset | None,
-        expected_samples: int,
-        sample_ids: np.ndarray,
-        collected_states: np.ndarray,
-    ) -> np.ndarray | None:
-        """兼容旧调用方：只返回 horizon dataset 中对齐后的 prices。"""
+    # @staticmethod
+    # def _prices_from_horizon_dataset(
+    #     *,
+    #     horizon_dataset: HorizonDataset | None,
+    #     expected_samples: int,
+    #     sample_ids: np.ndarray,
+    #     collected_states: np.ndarray,
+    # ) -> np.ndarray | None:
+    #     """兼容旧调用方：只返回 horizon dataset 中对齐后的 prices。"""
 
-        prices, _depthprices = Phase1CodebookEvaluator._market_data_from_horizon_dataset(
-            horizon_dataset=horizon_dataset,
-            expected_samples=expected_samples,
-            sample_ids=sample_ids,
-            collected_states=collected_states,
-        )
-        return prices
+    #     prices, _depthprices = Phase1CodebookEvaluator._market_data_from_horizon_dataset(
+    #         horizon_dataset=horizon_dataset,
+    #         expected_samples=expected_samples,
+    #         sample_ids=sample_ids,
+    #         collected_states=collected_states,
+    #     )
+    #     return prices
 
 
 __all__ = ["Phase1CodebookEvaluator"]
