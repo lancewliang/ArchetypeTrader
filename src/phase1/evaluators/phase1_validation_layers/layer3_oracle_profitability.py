@@ -331,6 +331,23 @@ def compute_max_drawdown(cumulative_returns: np.ndarray) -> float:
     return float(np.max(peak - values))
 
 
+def compute_downside_control(decoded_drawdown: float, dp_drawdown: float) -> float:
+    """计算 decoded 相对 DP teacher 的回撤放大比例。
+
+    当 DP teacher 无回撤时，原始比例没有正分母。此时需要保留 hard gate 语义：
+    decoded 也无回撤则风险没有放大，返回 0；decoded 有回撤则返回 inf，让规则层
+    按超过阈值处理，而不是把可判定情况标成缺失。
+    """
+
+    if not np.isfinite(decoded_drawdown) or not np.isfinite(dp_drawdown):
+        return _nan()
+    if dp_drawdown > _EPS:
+        return float(decoded_drawdown / dp_drawdown)
+    if decoded_drawdown <= _EPS:
+        return 0.0
+    return float("inf")
+
+
 def compute_top_contribution_ratio(returns: np.ndarray, top_ratio: float) -> float:
     """计算正收益中头部样本贡献比例。
 
@@ -736,10 +753,7 @@ def compute_oracle_profitability_metrics(
             / (abs(np.nanmean(random_advantage)) + _EPS)
         ),
         retention_ratio=retention_ratio,
-        downside_control=_safe_positive_denominator_ratio(
-            decoded_drawdown,
-            dp_drawdown,
-        ),
+        downside_control=compute_downside_control(decoded_drawdown, dp_drawdown),
         risk_adjusted_return=risk_adjusted_return,
         top_5_contribution=compute_top_contribution_ratio(
             decoded_advantage,
@@ -791,6 +805,7 @@ __all__ = [
     "compute_active_codes",
     "compute_dominant_pair_positive_ratio",
     "compute_fee_drag",
+    "compute_downside_control",
     "compute_max_drawdown",
     "compute_oracle_profitability_metrics",
     "compute_pair_profitability_matrix",
