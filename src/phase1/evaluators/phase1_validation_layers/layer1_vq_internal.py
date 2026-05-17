@@ -563,7 +563,7 @@ def compute_vq_internal_metrics(
         code_lifetime_pass_ratio=compute_code_lifetime_pass_ratio(
             current_assignment.active_codes,
             _previous_assignments(current_assignment, assignment_history),
-            10,
+            5,
             current_epoch=current_assignment.epoch,
             split=current_assignment.split,
         ),
