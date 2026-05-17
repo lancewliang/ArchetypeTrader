@@ -83,7 +83,7 @@ class Phase1ValidationRuntimeConfig:
     """
 
     # 单边手续费率。用于计算扣费收益、near-zero opportunity 和 fee drag。
-    fee_rate: float = 0.0002
+    fee_rate: float = 0.0004
 
     # 随机 label baseline 重复次数。用于降低 random-label profitability 估计方差。
     random_label_trials: int = 3

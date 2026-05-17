@@ -37,7 +37,7 @@ class SingleTrade_DP_Planner:
         action_set: tuple[int, ...] = (0, 1, 2),
         initial_action: int = 1,
         gamma: float = 1.0,
-        fee_rate: float = 0.0002,
+        fee_rate: float = 0.0004,
     ) -> None:
         """初始化 Single-trade DP planner。
 

@@ -52,7 +52,7 @@ class ActionExecutionCalculator:
 
     DEFAULT_EPS = 1e-12
 
-    def __init__(self, *, fee_rate: float = 0.0, eps: float = DEFAULT_EPS) -> None:
+    def __init__(self, *, fee_rate: float = 0.0004, eps: float = DEFAULT_EPS) -> None:
         if fee_rate < 0.0:
             raise ValueError("fee_rate must be non-negative")
         if eps <= 0.0:
