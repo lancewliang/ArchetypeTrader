@@ -84,13 +84,13 @@ class Phase1MainConfig:
     horizon: int = 72
     hidden_dim: int = 128
     latent_dim: int = 16
-    num_archetypes: int = 10
+    num_archetypes: int = 8
     action_dim: int = 3
     commitment_cost: float = 0.25
     num_layers: int = 1
     dropout: float = 0.0
     gamma: float = 0.9
-    validation_interval: int = 50
+    validation_interval: int = 10
     codebook_init_method: str = "directional_kmeans"
     codebook_init_max_samples: int = 50_000
     codebook_init_n_init: int = 10
