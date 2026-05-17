@@ -116,6 +116,18 @@ class Phase1ValidationRuntimeConfig:
     # 未设置时由 snapshot.distances.shape[-1] 推断。
     codebook_size: int | None = None
 
+    # code id 对齐使用的 prototype 类型。auto/action 优先 decoded action prototype，
+    # code 优先 latent/code embedding prototype；缺失时回退到 raw id。
+    code_alignment_prototype: str = "auto"
+
+    def __post_init__(self) -> None:
+        """校验 runtime config 枚举字段。"""
+
+        if self.code_alignment_prototype not in {"auto", "action", "code"}:
+            raise ValueError(
+                "code_alignment_prototype must be one of auto, action, code"
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
 

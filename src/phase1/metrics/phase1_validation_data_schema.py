@@ -341,6 +341,12 @@ class CodeAssignmentSnapshot:
     # 当前 epoch 满足 active 标准的 code id 集合。
     active_codes: tuple[int, ...]
 
+    # 每个 code 的 latent/code embedding 原型，shape=[K, D]；无样本 code 行为 NaN。
+    code_prototypes: np.ndarray | None = None
+
+    # 每个 code 的 decoded action/position 原型，shape=[K, H]；无样本 code 行为 NaN。
+    action_prototypes: np.ndarray | None = None
+
     def __post_init__(self) -> None:
         """校验 assignment snapshot 的样本和 label 对齐契约。"""
 
@@ -351,12 +357,22 @@ class CodeAssignmentSnapshot:
         _require_shape("code_ids", code_ids, sample_ids.shape)
         if np.unique(sample_ids).size != sample_ids.size:
             raise ValueError("sample_ids must be unique within an assignment snapshot")
+        if self.code_prototypes is not None:
+            code_prototypes = _require_ndarray("code_prototypes", self.code_prototypes)
+            _require_ndim("code_prototypes", code_prototypes, 2)
+        if self.action_prototypes is not None:
+            action_prototypes = _require_ndarray(
+                "action_prototypes",
+                self.action_prototypes,
+            )
+            _require_ndim("action_prototypes", action_prototypes, 2)
 
     def to_dict(self) -> dict[str, Any]:
         """序列化 assignment 快照，供 churn/lifetime 诊断持久化。
 
         数组形状:
-            ``sample_ids`` 和 ``code_ids`` 均按 shape=[N] 转为一维 list。
+            ``sample_ids`` 和 ``code_ids`` 均按 shape=[N] 转为一维 list；
+            prototype 字段保留原二维 shape，旧 payload 可不包含这些字段。
         """
 
         return {
@@ -365,6 +381,8 @@ class CodeAssignmentSnapshot:
             "sample_ids": _array_to_payload(self.sample_ids),
             "code_ids": _array_to_payload(self.code_ids),
             "active_codes": list(self.active_codes),
+            "code_prototypes": _array_to_payload(self.code_prototypes),
+            "action_prototypes": _array_to_payload(self.action_prototypes),
         }
 
     @classmethod
@@ -381,6 +399,8 @@ class CodeAssignmentSnapshot:
             sample_ids=np.asarray(payload["sample_ids"]),
             code_ids=np.asarray(payload["code_ids"]),
             active_codes=tuple(int(code_id) for code_id in payload["active_codes"]),
+            code_prototypes=_array_from_payload(payload.get("code_prototypes")),
+            action_prototypes=_array_from_payload(payload.get("action_prototypes")),
         )
 
 

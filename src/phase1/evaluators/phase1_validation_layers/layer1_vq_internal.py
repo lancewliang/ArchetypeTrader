@@ -33,6 +33,10 @@ from ...metrics import (
     Phase1VQInternalMetrics,
     Phase1ValidationRuntimeConfig,
 )
+from .hungarian_matching_helper import (
+    active_codes_aligned_to_current,
+    align_previous_codes_to_current,
+)
 
 
 _EPS = 1e-12
@@ -142,6 +146,45 @@ def compute_normalized_perplexity(p: np.ndarray) -> float:
     return float(np.exp(entropy) / probabilities.size)
 
 
+def _compute_code_prototypes(
+    embeddings: np.ndarray,
+    code_ids: np.ndarray,
+    k: int,
+) -> np.ndarray | None:
+    """按 code 聚合 latent/code embedding prototype。"""
+
+    values = np.asarray(embeddings, dtype=np.float64)
+    assignments = np.asarray(code_ids, dtype=np.int64).reshape(-1)
+    if k <= 0 or values.ndim != 2 or values.shape[0] != assignments.shape[0]:
+        return None
+    prototypes = np.full((k, values.shape[1]), np.nan, dtype=np.float64)
+    for code_id in range(k):
+        mask = assignments == code_id
+        if np.any(mask):
+            prototypes[code_id] = np.mean(values[mask], axis=0)
+    return prototypes
+
+
+def _compute_action_prototypes(
+    decoded_actions: np.ndarray,
+    code_ids: np.ndarray,
+    k: int,
+) -> np.ndarray | None:
+    """按 code 聚合 decoded position path prototype。"""
+
+    actions = np.asarray(decoded_actions, dtype=np.float64)
+    assignments = np.asarray(code_ids, dtype=np.int64).reshape(-1)
+    if k <= 0 or actions.ndim != 2 or actions.shape[0] != assignments.shape[0]:
+        return None
+    positions = actions - 1.0
+    prototypes = np.full((k, positions.shape[1]), np.nan, dtype=np.float64)
+    for code_id in range(k):
+        mask = assignments == code_id
+        if np.any(mask):
+            prototypes[code_id] = np.mean(positions[mask], axis=0)
+    return prototypes
+
+
 def _current_assignment_snapshot(
     snapshot: Phase1EvaluationSnapshot,
     probabilities: np.ndarray,
@@ -172,6 +215,16 @@ def _current_assignment_snapshot(
         sample_ids=np.asarray(snapshot.sample_ids),
         code_ids=np.asarray(snapshot.code_ids),
         active_codes=active_codes,
+        code_prototypes=_compute_code_prototypes(
+            snapshot.z_q,
+            snapshot.code_ids,
+            probabilities.size,
+        ),
+        action_prototypes=_compute_action_prototypes(
+            snapshot.decoded_actions,
+            snapshot.code_ids,
+            probabilities.size,
+        ),
     )
 
 
@@ -187,10 +240,17 @@ def _sample_code_map(snapshot: CodeAssignmentSnapshot) -> dict[object, int]:
 def _churn_between(
     left: CodeAssignmentSnapshot,
     right: CodeAssignmentSnapshot,
+    *,
+    prototype_kind: str = "auto",
 ) -> float:
     """计算两个 snapshot 之间同一样本的 assignment 改变比例。"""
 
     right_map = _sample_code_map(right)
+    alignment = align_previous_codes_to_current(
+        left,
+        right,
+        prototype_kind=prototype_kind,
+    )
     changed = 0
     total = 0
     for sample_id, left_code in zip(left.sample_ids, left.code_ids, strict=False):
@@ -198,7 +258,8 @@ def _churn_between(
         if key not in right_map:
             continue
         total += 1
-        changed += int(int(left_code) != right_map[key])
+        aligned_left_code = alignment.get(int(left_code), int(left_code))
+        changed += int(aligned_left_code != right_map[key])
     return changed / total if total > 0 else _nan()
 
 
@@ -206,6 +267,8 @@ def _assignment_churn_by_epoch(
     current: CodeAssignmentSnapshot,
     history: Sequence[CodeAssignmentSnapshot],
     window: int,
+    *,
+    prototype_kind: str = "auto",
 ) -> dict[int, float]:
     """计算最近窗口内每个相邻 epoch pair 的 churn rate。"""
 
@@ -224,7 +287,7 @@ def _assignment_churn_by_epoch(
     snapshots = [*recent, current]
     churn_by_epoch = {}
     for left, right in zip(snapshots[:-1], snapshots[1:], strict=False):
-        value = _churn_between(left, right)
+        value = _churn_between(left, right, prototype_kind=prototype_kind)
         if not np.isfinite(value):
             return {}
         churn_by_epoch[int(right.epoch)] = value
@@ -235,6 +298,8 @@ def compute_assignment_churn(
     current: CodeAssignmentSnapshot,
     history: Sequence[CodeAssignmentSnapshot],
     window: int,
+    *,
+    prototype_kind: str = "auto",
 ) -> float:
     """计算近期 assignment churn 均值。
 
@@ -250,7 +315,14 @@ def compute_assignment_churn(
         检查 code 语义是否仍在频繁重排。
     """
 
-    churn_values = list(_assignment_churn_by_epoch(current, history, window).values())
+    churn_values = list(
+        _assignment_churn_by_epoch(
+            current,
+            history,
+            window,
+            prototype_kind=prototype_kind,
+        ).values()
+    )
     return float(np.mean(churn_values)) if churn_values else _nan()
 
 
@@ -261,6 +333,8 @@ def compute_code_lifetime_pass_ratio(
     *,
     current_epoch: int | None = None,
     split: str | None = None,
+    current_assignment: CodeAssignmentSnapshot | None = None,
+    prototype_kind: str = "auto",
 ) -> float:
     """计算当前 active code 的 lifetime 达标比例。
 
@@ -299,7 +373,16 @@ def compute_code_lifetime_pass_ratio(
     for code_id in current_active_codes:
         lifetime = 1
         for previous in reversed(ordered_history):
-            if code_id not in previous.active_codes:
+            previous_active_codes = (
+                active_codes_aligned_to_current(
+                    previous,
+                    current_assignment,
+                    prototype_kind=prototype_kind,
+                )
+                if current_assignment is not None
+                else set(previous.active_codes)
+            )
+            if code_id not in previous_active_codes:
                 break
             lifetime += 1
         pass_count += int(lifetime >= min_lifetime_epochs)
@@ -491,6 +574,7 @@ def compute_vq_internal_metrics(
         current_assignment,
         assignment_history,
         runtime_config.churn_window_epochs,
+        prototype_kind=runtime_config.code_alignment_prototype,
     )
     payload = Phase1VQInternalPayload(
         code_distribution=tuple(float(value) for value in probabilities),
@@ -559,6 +643,7 @@ def compute_vq_internal_metrics(
             current_assignment,
             assignment_history,
             runtime_config.churn_window_epochs,
+            prototype_kind=runtime_config.code_alignment_prototype,
         ),
         code_lifetime_pass_ratio=compute_code_lifetime_pass_ratio(
             current_assignment.active_codes,
@@ -566,6 +651,8 @@ def compute_vq_internal_metrics(
             5,
             current_epoch=current_assignment.epoch,
             split=current_assignment.split,
+            current_assignment=current_assignment,
+            prototype_kind=runtime_config.code_alignment_prototype,
         ),
         quantization_distance=quantization_distance,
         nearest_second_margin_median=_nearest_second_margin_median(
