@@ -76,7 +76,7 @@ class Phase1MainConfig:
 
     pair: str
     train_batch_id: str
-    epochs: int = 100
+    epochs: int = 300
     pretrain_epochs: int = 10
     batch_size: int = 1024
     learning_rate: float = 1e-3
@@ -90,7 +90,7 @@ class Phase1MainConfig:
     num_layers: int = 1
     dropout: float = 0.0
     gamma: float = 0.9
-    validation_interval: int = 5
+    validation_interval: int = 50
     codebook_init_method: str = "directional_kmeans"
     codebook_init_max_samples: int = 50_000
     codebook_init_n_init: int = 10
@@ -309,7 +309,7 @@ class Phase1MainFlow:
             self.dataloaders[split_name] = DataLoader(
                 tensor_dataset,
                 batch_size=self.config.batch_size,
-                shuffle=(split_name == "train"),
+                shuffle=False,
             )
             self.evaluation_dataloaders[split_name] = DataLoader(
                 tensor_dataset,
