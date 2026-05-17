@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import logging
+import math
 from typing import List
 import torch
 from torch.utils.data import DataLoader
@@ -75,7 +76,7 @@ class Phase1MainConfig:
 
     pair: str
     train_batch_id: str
-    epochs: int = 30
+    epochs: int = 100
     pretrain_epochs: int = 10
     batch_size: int = 1024
     learning_rate: float = 1e-3
@@ -95,6 +96,14 @@ class Phase1MainConfig:
     codebook_init_n_init: int = 10
     codebook_init_max_iter: int = 100
     codebook_init_seed: int = 42
+    dead_code_reset_enabled: bool = True
+    dead_code_reset_interval: int = 1
+    dead_code_reset_start_epoch: int = 1
+    dead_code_reset_max_samples: int = 50_000
+    dead_code_reset_min_occupancy: float = 0.001
+    dead_code_reset_max_fraction: float = 0.20
+    dead_code_reset_jitter_scale: float = 1e-4
+    dead_code_reset_seed: int = 1042
 
     def __post_init__(self) -> None:
         if self.validation_interval < 1:
@@ -106,6 +115,18 @@ class Phase1MainConfig:
             )
         if self.codebook_init_max_samples < 1:
             raise ValueError("codebook_init_max_samples must be >= 1")
+        if self.dead_code_reset_interval < 1:
+            raise ValueError("dead_code_reset_interval must be >= 1")
+        if self.dead_code_reset_start_epoch < 1:
+            raise ValueError("dead_code_reset_start_epoch must be >= 1")
+        if self.dead_code_reset_max_samples < 1:
+            raise ValueError("dead_code_reset_max_samples must be >= 1")
+        if self.dead_code_reset_min_occupancy < 0.0:
+            raise ValueError("dead_code_reset_min_occupancy must be non-negative")
+        if not 0.0 <= self.dead_code_reset_max_fraction <= 1.0:
+            raise ValueError("dead_code_reset_max_fraction must be in [0, 1]")
+        if self.dead_code_reset_jitter_scale < 0.0:
+            raise ValueError("dead_code_reset_jitter_scale must be non-negative")
 
 
 class Phase1MainFlow:
@@ -479,6 +500,8 @@ class Phase1MainFlow:
                 split="train",
                 epoch=epoch,
             )
+            if self._should_reset_dead_codes(epoch):
+                self._apply_dead_code_reset(epoch)
             if not self._should_validate_checkpoint(epoch):
                 continue
 
@@ -521,10 +544,12 @@ class Phase1MainFlow:
         if not best_checkpoint_selection.has_selection:
             logger.error("no passed checkpoint found!!!")
             return 
-        
-        logger.info("Phase I best checkpoint selected: epoch=%d", best_validation_checkpoint_selection.epoch)
                
         best_validation_checkpoint_selection = best_checkpoint_selection.selected
+        logger.info(
+            "Phase I best checkpoint selected: epoch=%d",
+            best_validation_checkpoint_selection.epoch,
+        )
         best_checkpoint = self.data_store.load_phase1_checkpoint(
             stage="vq",
             epoch=best_validation_checkpoint_selection.epoch,
@@ -621,3 +646,95 @@ class Phase1MainFlow:
         
     def _should_validate_checkpoint(self, epoch: int) -> bool:
         return epoch % self.config.validation_interval == 0
+
+    def _should_reset_dead_codes(self, epoch: int) -> bool:
+        if not self.config.dead_code_reset_enabled:
+            return False
+        if epoch < self.config.dead_code_reset_start_epoch:
+            return False
+        return epoch % self.config.dead_code_reset_interval == 0
+
+    def _apply_dead_code_reset(self, epoch: int) -> None:
+        """按训练集当前 latent 使用率重置 dead codebook entries。"""
+
+        if self.model is None:
+            raise Phase1FatalError("model must be initialized before dead-code reset")
+        if self.optimizer is None:
+            raise Phase1FatalError("optimizer must be initialized before dead-code reset")
+        if "train" not in self.evaluation_dataloaders:
+            raise Phase1FatalError("train evaluation dataloader is required")
+
+        self.model.eval()
+        latent_batches: list[torch.Tensor] = []
+        code_batches: list[torch.Tensor] = []
+        collected = 0
+        max_samples = self.config.dead_code_reset_max_samples
+        with torch.no_grad():
+            for batch in self.evaluation_dataloaders["train"]:
+                if collected >= max_samples:
+                    break
+                batch = move_trajectory_batch_to_device(batch, self.device)
+                z_e = self.model.encoder(batch)
+                quantize_output = self.model.quantizer.quantize(z_e)
+
+                remaining = max_samples - collected
+                z_e_cpu = z_e.detach().cpu()
+                code_cpu = quantize_output.code_indices.detach().cpu()
+                if z_e_cpu.shape[0] > remaining:
+                    z_e_cpu = z_e_cpu[:remaining]
+                    code_cpu = code_cpu[:remaining]
+                latent_batches.append(z_e_cpu)
+                code_batches.append(code_cpu)
+                collected += int(z_e_cpu.shape[0])
+
+        if not latent_batches:
+            raise Phase1FatalError("no train latents available for dead-code reset")
+
+        max_resets = int(
+            math.ceil(
+                self.config.num_archetypes * self.config.dead_code_reset_max_fraction
+            )
+        )
+        result = self.model.quantizer.reset_dead_codes(
+            torch.cat(latent_batches, dim=0),
+            torch.cat(code_batches, dim=0),
+            min_occupancy=self.config.dead_code_reset_min_occupancy,
+            max_resets=max_resets,
+            random_state=self.config.dead_code_reset_seed + epoch,
+            jitter_scale=self.config.dead_code_reset_jitter_scale,
+        )
+        if result.reset_count <= 0:            
+            return
+        
+        self._zero_codebook_optimizer_state(result.reset_code_indices)
+        logger.info(
+            "dead-code reset applied: epoch=%d reset_codes=%s dead_codes=%s "
+            "source_samples=%s min_occupancy=%.6f",
+            epoch,
+            result.reset_code_indices,
+            result.dead_code_indices,
+            result.source_sample_indices,
+            result.min_occupancy,
+        )
+
+    def _zero_codebook_optimizer_state(self, code_indices: tuple[int, ...]) -> None:
+        """清空被重置 code 的 Adam 动量，避免旧 optimizer state 把新向量拉回去。"""
+
+        if not code_indices or self.model is None or self.optimizer is None:
+            return
+        parameter = self.model.quantizer.embedding.weight
+        state = self.optimizer.state.get(parameter)
+        if not state:
+            return
+
+        for value in state.values():
+            if not torch.is_tensor(value):
+                continue
+            if value.shape != parameter.shape:
+                continue
+            index = torch.as_tensor(
+                code_indices,
+                dtype=torch.long,
+                device=value.device,
+            )
+            value.index_fill_(0, index, 0.0)

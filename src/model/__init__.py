@@ -18,11 +18,13 @@ from .tensor_data_types import (
     move_trajectory_batch_to_device,
 )
 from .codebook import (
+    CodebookDeadCodeResetResult,
     CodebookInitResult,
     QuantizeOutput,
     VectorQuantizer,
     classify_trajectory_directions,
     initialize_codebook_from_directional_kmeans,
+    reset_dead_codes_from_latents,
 )
 from .vq_archetype import (
     ArchetypeActionDecoder,
@@ -46,6 +48,7 @@ __all__ = [
     "ArchetypeVQModel",
     "ArtifactPaths",
     "classify_trajectory_directions",
+    "CodebookDeadCodeResetResult",
     "CodebookInitResult",
     "DemonstrationTrajectory",
     "DemonstrationTrajectoryTensor",
@@ -62,4 +65,5 @@ __all__ = [
     "build_trajectory_tensor_dataset",
     "initialize_codebook_from_directional_kmeans",
     "move_trajectory_batch_to_device",
+    "reset_dead_codes_from_latents",
 ]
