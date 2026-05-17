@@ -16,6 +16,7 @@ from ..model.tensor_data_types import (
     build_trajectory_tensor_dataset,
     move_trajectory_batch_to_device,
 )
+from ..model.codebook import classify_trajectory_directions
 from ..model.vq_archetype import ArchetypeVQModel
 from .phase1_artifact_store import Phase1ArtifactStore
 from ..tool.SingleTrade_DP_Planner import SingleTrade_DP_Planner
@@ -89,10 +90,22 @@ class Phase1MainConfig:
     dropout: float = 0.0
     gamma: float = 0.9
     validation_interval: int = 5
+    codebook_init_method: str = "directional_kmeans"
+    codebook_init_max_samples: int = 50_000
+    codebook_init_n_init: int = 10
+    codebook_init_max_iter: int = 100
+    codebook_init_seed: int = 42
 
     def __post_init__(self) -> None:
         if self.validation_interval < 1:
             raise ValueError("validation_interval must be >= 1")
+        if self.codebook_init_method not in {"directional_kmeans", "random", "none"}:
+            raise ValueError(
+                "codebook_init_method must be one of "
+                "'directional_kmeans', 'random', 'none'"
+            )
+        if self.codebook_init_max_samples < 1:
+            raise ValueError("codebook_init_max_samples must be >= 1")
 
 
 class Phase1MainFlow:
@@ -180,10 +193,12 @@ class Phase1MainFlow:
             logger.info("Phase I components validated")
             # Step 5: 可选预训练 encoder-decoder，使模型具备基础动作重构能力。
             self.pretrain()
-            # Step 6: 训练 VQ encoder-decoder，使 codebook 学到可复用 trading archetypes。
+            # Step 6: 用预训练 encoder latent 做方向感知 codebook 初始化。
+            self.initialize_codebook()
+            # Step 7: 训练 VQ encoder-decoder，使 codebook 学到可复用 trading archetypes。
             self.train()
             logger.info("Phase I training completed")
-            # Step 7: 根据验证指标选择最能代表稳定 archetype 发现结果的 checkpoint。
+            # Step 8: 根据验证指标选择最能代表稳定 archetype 发现结果的 checkpoint。
             self.select_and_save_best_checkpoint()
             # Step 9: 用训练好的 encoder/codebook 为 sampled horizons 生成 archetype labels。
             self.export_horizon_labels()
@@ -371,6 +386,70 @@ class Phase1MainFlow:
                 model_state_dict=self.model.state_dict(),
                 optimizer_state_dict=self.optimizer.state_dict()               
             )
+
+    def initialize_codebook(self) -> None:
+        """用预训练 encoder latent 初始化 VQ codebook。
+
+        方向感知 k-means 在正式 VQ 训练前执行一次。它按 DP teacher action 的
+        主方向为 short/flat/long/mixed 分桶，在每个方向内部聚类，再把聚类中心
+        写入 codebook。该步骤让 codebook 起点覆盖主要交易方向，是防止早期
+        label collapse 的第一道机制。
+        """
+
+        if self.config.codebook_init_method in {"random", "none"}:
+            logger.info(
+                "skip codebook initialization: method=%s",
+                self.config.codebook_init_method,
+            )
+            return
+        if self.model is None:
+            raise Phase1FatalError("model must be initialized before codebook init")
+        if "train" not in self.evaluation_dataloaders:
+            raise Phase1FatalError("train evaluation dataloader is required")
+
+        self.model.eval()
+        latent_batches: list[torch.Tensor] = []
+        direction_batches: list[torch.Tensor] = []
+        collected = 0
+        max_samples = self.config.codebook_init_max_samples
+        with torch.no_grad():
+            for batch in self.evaluation_dataloaders["train"]:
+                if collected >= max_samples:
+                    break
+                batch = move_trajectory_batch_to_device(batch, self.device)
+                _, actions, _ = batch
+                z_e = self.model.encoder(batch).detach().cpu()
+                directions = classify_trajectory_directions(actions).detach().cpu()
+
+                remaining = max_samples - collected
+                if z_e.shape[0] > remaining:
+                    z_e = z_e[:remaining]
+                    directions = directions[:remaining]
+                latent_batches.append(z_e)
+                direction_batches.append(directions)
+                collected += int(z_e.shape[0])
+
+        if not latent_batches:
+            raise Phase1FatalError("no train latents available for codebook init")
+
+        latents = torch.cat(latent_batches, dim=0)
+        directions = torch.cat(direction_batches, dim=0)
+        init_result = self.model.quantizer.initialize_from_directional_kmeans(
+            latents,
+            directions,
+            random_state=self.config.codebook_init_seed,
+            n_init=self.config.codebook_init_n_init,
+            max_iter=self.config.codebook_init_max_iter,
+        )
+        logger.info(
+            "codebook initialized: method=%s samples=%d centers=%d "
+            "direction_counts=%s direction_quotas=%s",
+            init_result.method,
+            init_result.num_samples,
+            init_result.num_centers,
+            dict(init_result.direction_counts),
+            dict(init_result.direction_quotas),
+        )
 
     def train(self) -> None:
         """训练 Phase I VQ encoder-decoder 并保存 checkpoint。

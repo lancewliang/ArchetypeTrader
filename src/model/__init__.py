@@ -17,15 +17,20 @@ from .tensor_data_types import (
     build_trajectory_tensor_dataset,
     move_trajectory_batch_to_device,
 )
+from .codebook import (
+    CodebookInitResult,
+    QuantizeOutput,
+    VectorQuantizer,
+    classify_trajectory_directions,
+    initialize_codebook_from_directional_kmeans,
+)
 from .vq_archetype import (
     ArchetypeActionDecoder,
     ArchetypeDecoder,
     ArchetypeEncoder,
     ArchetypeTrajectoryEncoder,
     ArchetypeVQModel,
-    QuantizeOutput,
     VQArchetypeModel,
-    VectorQuantizer,
     VqModelOutputs,
 )
 
@@ -40,6 +45,8 @@ __all__ = [
     "ArchetypeTrajectoryEncoder",
     "ArchetypeVQModel",
     "ArtifactPaths",
+    "classify_trajectory_directions",
+    "CodebookInitResult",
     "DemonstrationTrajectory",
     "DemonstrationTrajectoryTensor",
     "HorizonDataset",
@@ -53,5 +60,6 @@ __all__ = [
     "VQArchetypeModel",
     "VectorQuantizer",
     "build_trajectory_tensor_dataset",
+    "initialize_codebook_from_directional_kmeans",
     "move_trajectory_batch_to_device",
 ]

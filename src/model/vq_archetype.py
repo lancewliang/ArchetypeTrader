@@ -32,30 +32,18 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from .codebook import (
+    CodebookInitResult,
+    QuantizeOutput,
+    VectorQuantizer,
+    classify_trajectory_directions,
+)
 from .tensor_data_types import (
     ActionLogitTensor,
     ArchetypeLabelTensor,
     LatentTensor,
     TrajectoryTensorBatch,
 )
-
-
-@dataclass(frozen=True)
-class QuantizeOutput:
-    """VectorQuantizer 的输出。
-
-    ``quantized`` 使用 straight-through estimator，前向值等于 codebook 向量，
-    反向梯度等价于传给 encoder 输出 ``z_e``。这样 decoder 可以看到离散
-    archetype，同时 encoder 仍能从重构损失中获得梯度。
-    """
-
-    quantized: LatentTensor
-    code_indices: ArchetypeLabelTensor
-    vq_loss: torch.Tensor
-    codebook_loss: torch.Tensor
-    commitment_loss: torch.Tensor
-    distances: torch.Tensor
-    z_q_no_grad: LatentTensor
 
 
 @dataclass(frozen=True)
@@ -186,95 +174,6 @@ class ArchetypeTrajectoryEncoder(nn.Module):
         # hidden: [num_layers, batch, hidden_dim]；取最后一层作为整条轨迹摘要。
         last_hidden = hidden[-1]
         return self.projection(last_hidden)
-
-
-class VectorQuantizer(nn.Module):
-    """VQ-VAE 风格的最近邻 codebook。
-
-    设计原因:
-        连续 latent 很难直接作为 Phase II 的离散选择目标。codebook 把连续
-        表示压缩成有限个 code，使每个 horizon 都能得到一个稳定的
-        archetype label，后续 selector 只需要在有限 archetype 中选择。
-
-    网络层说明:
-        1. ``embedding``:
-           这是可学习 codebook，形状为 ``[num_archetypes, latent_dim]``。
-           每一行代表一个离散 trading archetype 的向量中心。
-        2. 最近邻检索:
-           ``torch.cdist`` 计算每个 ``z_e`` 到全部 codebook 向量的平方
-           L2 距离，``argmin`` 选择最近 code，得到离散 ``code_indices``。
-        3. ``codebook_loss``:
-           只更新 codebook，使被选中的 code 向 encoder 输出 ``z_e`` 靠近。
-        4. ``commitment_loss``:
-           只约束 encoder，使 ``z_e`` 不要频繁漂移到远离所选 code 的位置。
-        5. straight-through estimator:
-           前向传给 decoder 的值等于离散 code ``z_q``，反向梯度按 ``z_e``
-           传播，让离散选择可以和重构损失一起端到端训练。
-    """
-
-    def __init__(
-        self,
-        num_archetypes: int = 10,
-        latent_dim: int = 16,
-        commitment_cost: float = 0.25,
-    ) -> None:
-        super().__init__()
-        if num_archetypes <= 0:
-            raise ValueError("num_archetypes must be positive")
-        if latent_dim <= 0:
-            raise ValueError("latent_dim must be positive")
-
-        self.num_archetypes = num_archetypes
-        self.latent_dim = latent_dim
-        self.commitment_cost = commitment_cost
-        # 可学习 archetype 表；每个 embedding row 是一个离散原型向量。
-        self.embedding = nn.Embedding(num_archetypes, latent_dim)
-        nn.init.normal_(self.embedding.weight, mean=0.0, std=1.0 / latent_dim)
-
-    def forward(self, z_e: LatentTensor) -> QuantizeOutput:
-        return self.quantize(z_e)
-
-    def quantize(self, z_e: LatentTensor) -> QuantizeOutput:
-        """最近邻量化，并返回 STE 后的 ``quantized``。
-
-        输入:
-            ``z_e``: ``[batch, latent_dim]``
-        """
-
-        if z_e.ndim != 2:
-            raise ValueError("z_e must have shape [batch, latent_dim]")
-        if z_e.shape[-1] != self.latent_dim:
-            raise ValueError(
-                f"z_e last dim must be {self.latent_dim}, got {z_e.shape[-1]}"
-            )
-
-        codebook = self.embedding.weight
-        # [batch, num_archetypes]：每条轨迹 latent 到每个 code 的平方距离。
-        distances = torch.cdist(z_e, codebook, p=2).pow(2)
-        code_indices = distances.argmin(dim=-1)
-        z_q = self.embedding(code_indices)
-
-        # codebook_loss 更新 embedding；commitment_loss 约束 encoder 输出。
-        codebook_loss = F.mse_loss(z_q, z_e.detach())
-        commitment_loss = F.mse_loss(z_e, z_q.detach())
-        vq_loss = codebook_loss + self.commitment_cost * commitment_loss
-
-        # 直通估计器：前向使用离散 code，反向让 decoder 的梯度流向 encoder。
-        quantized = z_e + (z_q - z_e).detach()
-        return QuantizeOutput(
-            quantized=quantized,
-            code_indices=code_indices,
-            vq_loss=vq_loss,
-            codebook_loss=codebook_loss,
-            commitment_loss=commitment_loss,
-            distances=distances,
-            z_q_no_grad=z_q.detach(),
-        )
-
-    def embedding_from_code(self, code_id: ArchetypeLabelTensor) -> LatentTensor:
-        """根据 archetype id 取出 codebook 向量。"""
-
-        return self.embedding(code_id.long())
 
 
 class ArchetypeActionDecoder(nn.Module):
@@ -732,6 +631,8 @@ __all__ = [
     "ArchetypeEncoder",
     "ArchetypeTrajectoryEncoder",
     "ArchetypeVQModel",
+    "classify_trajectory_directions",
+    "CodebookInitResult",
     "VqModelOutputs",
     "QuantizeOutput",
     "VQArchetypeModel",
