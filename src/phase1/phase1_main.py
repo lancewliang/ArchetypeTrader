@@ -90,7 +90,7 @@ class Phase1MainConfig:
     num_layers: int = 1
     dropout: float = 0.0
     gamma: float = 0.9
-    validation_interval: int = 10
+    validation_interval: int = 20
     codebook_init_method: str = "directional_kmeans"
     codebook_init_max_samples: int = 50_000
     codebook_init_n_init: int = 10
