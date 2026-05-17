@@ -84,6 +84,18 @@ class Phase1Metrics:
     # commitment loss。累加器状态下是加权总和；averaged() 后是样本平均值。
     commitment_loss: float = 0.0
 
+    # morphology 辅助分类 loss。未启用时为 0。
+    morphology_loss: float = 0.0
+
+    # morphology-motif pair 辅助分类 loss。未启用时为 0。
+    pair_loss: float = 0.0
+
+    # codebook embedding diversity regularization loss。未启用时为 0。
+    codebook_diversity_loss: float = 0.0
+
+    # decoder action prototype diversity regularization loss。未启用时为 0。
+    prototype_diversity_loss: float = 0.0
+
     # 动作重构准确率。训练中会随 batch 更新为当前累计准确率；averaged() 后为最终准确率。
     action_accuracy: float = 0.0
 
@@ -98,6 +110,11 @@ class Phase1Metrics:
         batch_size: int,
         outputs: VqModelOutputs,
         actions: torch.Tensor | None = None,
+        total_loss: torch.Tensor | float | int | None = None,
+        morphology_loss: torch.Tensor | float | int | None = None,
+        pair_loss: torch.Tensor | float | int | None = None,
+        codebook_diversity_loss: torch.Tensor | float | int | None = None,
+        prototype_diversity_loss: torch.Tensor | float | int | None = None,
     ) -> None:
         """累加一个 batch 的基础指标。
 
@@ -118,11 +135,25 @@ class Phase1Metrics:
             raise ValueError("batch_size must be positive")
 
         self.num_samples += int(batch_size)
-        self.total_loss += _tensor_to_float(outputs.total_loss) * batch_size
+        self.total_loss += _tensor_to_float(
+            outputs.total_loss if total_loss is None else total_loss
+        ) * batch_size
         self.reconstruction_loss += _tensor_to_float(outputs.reconstruction_loss) * batch_size
         self.vq_loss += _tensor_to_float(outputs.vq_loss) * batch_size
         self.codebook_loss += _tensor_to_float(outputs.codebook_loss) * batch_size
         self.commitment_loss += _tensor_to_float(outputs.commitment_loss) * batch_size
+        if morphology_loss is not None:
+            self.morphology_loss += _tensor_to_float(morphology_loss) * batch_size
+        if pair_loss is not None:
+            self.pair_loss += _tensor_to_float(pair_loss) * batch_size
+        if codebook_diversity_loss is not None:
+            self.codebook_diversity_loss += (
+                _tensor_to_float(codebook_diversity_loss) * batch_size
+            )
+        if prototype_diversity_loss is not None:
+            self.prototype_diversity_loss += (
+                _tensor_to_float(prototype_diversity_loss) * batch_size
+            )
 
         if actions is not None:
             self._add_action_accuracy(outputs=outputs, actions=actions)
@@ -179,6 +210,12 @@ class Phase1Metrics:
             vq_loss=self.vq_loss / self.num_samples,
             codebook_loss=self.codebook_loss / self.num_samples,
             commitment_loss=self.commitment_loss / self.num_samples,
+            morphology_loss=self.morphology_loss / self.num_samples,
+            pair_loss=self.pair_loss / self.num_samples,
+            codebook_diversity_loss=self.codebook_diversity_loss / self.num_samples,
+            prototype_diversity_loss=(
+                self.prototype_diversity_loss / self.num_samples
+            ),
             action_accuracy=(
                 self.correct_actions / self.total_actions if self.total_actions > 0 else 0.0
             ),
@@ -201,6 +238,10 @@ class Phase1Metrics:
             "vq_loss": self.vq_loss,
             "codebook_loss": self.codebook_loss,
             "commitment_loss": self.commitment_loss,
+            "morphology_loss": self.morphology_loss,
+            "pair_loss": self.pair_loss,
+            "codebook_diversity_loss": self.codebook_diversity_loss,
+            "prototype_diversity_loss": self.prototype_diversity_loss,
             "action_accuracy": self.action_accuracy,
         }
         if include_context:
@@ -232,6 +273,14 @@ class Phase1Metrics:
             vq_loss=float(payload.get("vq_loss", 0.0)),
             codebook_loss=float(payload.get("codebook_loss", 0.0)),
             commitment_loss=float(payload.get("commitment_loss", 0.0)),
+            morphology_loss=float(payload.get("morphology_loss", 0.0)),
+            pair_loss=float(payload.get("pair_loss", 0.0)),
+            codebook_diversity_loss=float(
+                payload.get("codebook_diversity_loss", 0.0)
+            ),
+            prototype_diversity_loss=float(
+                payload.get("prototype_diversity_loss", 0.0)
+            ),
             action_accuracy=float(payload.get("action_accuracy", 0.0)),
             correct_actions=int(payload.get("correct_actions", 0)),
             total_actions=int(payload.get("total_actions", 0)),

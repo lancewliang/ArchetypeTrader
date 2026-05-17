@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import logging
 import math
 from typing import List
@@ -31,6 +31,12 @@ from .evaluators import Phase1CodebookEvaluator, Phase1Evaluator
 from .horizon_train_label_builder import (
     HorizonTrainLabelBuilder,
     HorizonTrainLabelBuilderConfig,
+)
+from .losses import (
+    Phase1AuxiliaryLabelStore,
+    Phase1LossConfig,
+    build_phase1_auxiliary_label_store,
+    compute_phase1_vq_training_loss,
 )
 from .metrics import CodeAssignmentSnapshot, Phase1Metrics, Phase1ValidationResult
 from .report import Phase1CheckpointSelectionReport, Phase1CodebookReport
@@ -104,8 +110,20 @@ class Phase1MainConfig:
     dead_code_reset_max_fraction: float = 0.20
     dead_code_reset_jitter_scale: float = 1e-4
     dead_code_reset_seed: int = 1042
+    morphology_label_vocab: tuple[str, ...] = ()
+    pair_label_vocab: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "morphology_label_vocab",
+            tuple(str(label) for label in self.morphology_label_vocab),
+        )
+        object.__setattr__(
+            self,
+            "pair_label_vocab",
+            tuple(str(label) for label in self.pair_label_vocab),
+        )
         if self.validation_interval < 1:
             raise ValueError("validation_interval must be >= 1")
         if self.codebook_init_method not in {"directional_kmeans", "random", "none"}:
@@ -180,6 +198,7 @@ class Phase1MainFlow:
         self.validation_results: dict[int, Phase1ValidationResult] = {}
         self.assignment_history: list[CodeAssignmentSnapshot] = []
         self.horizon_train_label_builder: HorizonTrainLabelBuilder | None = None
+        self.auxiliary_label_store: Phase1AuxiliaryLabelStore | None = None
 
     def _resolve_device(self, device: str) -> torch.device:
         requested_device = torch.device(device)
@@ -317,6 +336,14 @@ class Phase1MainFlow:
                 shuffle=False,
             )
 
+        self.auxiliary_label_store = self._build_auxiliary_label_store()
+        if self.auxiliary_label_store is not None:
+            self.config = replace(
+                self.config,
+                morphology_label_vocab=self.auxiliary_label_store.morphology_vocab,
+                pair_label_vocab=self.auxiliary_label_store.pair_vocab,
+            )
+
         first_states, _, _ = train_dataset[0]
         state_dim = int(first_states.shape[-1])
         model = ArchetypeVQModel(
@@ -328,6 +355,8 @@ class Phase1MainFlow:
             commitment_cost=self.config.commitment_cost,
             num_layers=self.config.num_layers,
             dropout=self.config.dropout,
+            num_morphology_classes=len(self.config.morphology_label_vocab),
+            num_pair_classes=len(self.config.pair_label_vocab),
         ).to(self.device)
         self.model = model
         self.evaluator = Phase1Evaluator(model=model, device=self.device)
@@ -393,9 +422,8 @@ class Phase1MainFlow:
 
         train_loader = self.dataloaders["train"]
         for epoch in range(1, self.config.pretrain_epochs + 1):
-            train_metrics = self._run_epoch(
+            train_metrics = self._run_pretrain_epoch(
                 train_loader,
-                use_vq=False,
                 stage="pretrain",
                 split="train",
                 epoch=epoch,
@@ -493,9 +521,8 @@ class Phase1MainFlow:
         train_loader = self.dataloaders["train"]
                 
         for epoch in range(1, self.config.epochs + 1):
-            train_metrics = self._run_epoch(
+            train_metrics = self._run_vq_epoch(
                 train_loader,
-                use_vq=True,
                 stage="vq",
                 split="train",
                 epoch=epoch,
@@ -581,29 +608,91 @@ class Phase1MainFlow:
                 labels,
                 split_name=split_name,
             )
-        
-    def _run_epoch(
+
+    def _build_auxiliary_label_store(self) -> Phase1AuxiliaryLabelStore | None:
+        """预计算 train split 的 morphology 和 morphology-motif pair 标签。"""
+
+        train_trajectory_dataset = self.trajectory_datasets.get("train")
+        train_horizon_dataset = self.horizon_datasets.get("train")
+        if not train_trajectory_dataset or train_horizon_dataset is None:
+            return None
+        return build_phase1_auxiliary_label_store(
+            trajectory_dataset=train_trajectory_dataset,
+            horizon_dataset=train_horizon_dataset,
+            morphology_vocab=self.config.morphology_label_vocab,
+            pair_vocab=self.config.pair_label_vocab,
+        )
+
+    def _run_pretrain_epoch(
         self,
         dataloader: DataLoader[TrajectoryTensorBatch],
         *,
-        use_vq: bool,
         stage: str | None = None,
         split: str | None = None,
         epoch: int | None = None,
     ) -> Phase1Metrics:
+        """运行 reconstruction pretrain epoch，不启用 VQ/辅助目标。"""
+
         self.model.train()
         totals = Phase1Metrics(stage=stage, split=split, epoch=epoch)
-        for batch in dataloader:
-            batch = move_trajectory_batch_to_device(batch, self.device)
+        for raw_batch in dataloader:
+            batch = move_trajectory_batch_to_device(raw_batch, self.device)
             self.optimizer.zero_grad(set_to_none=True)
-            outputs = (
-                self.model(batch)
-                if use_vq
-                else self.model.forward_pretrain(batch)
-            )
+            outputs = self.model.forward_pretrain(batch)
             outputs.total_loss.backward()
             self.optimizer.step()
-            totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs, actions=batch[1])
+            totals.add_batch(
+                batch_size=batch[0].shape[0],
+                outputs=outputs,
+                actions=batch[1],
+            )
+        return totals.averaged()
+
+    def _run_vq_epoch(
+        self,
+        dataloader: DataLoader[TrajectoryTensorBatch],
+        *,
+        stage: str | None = None,
+        split: str | None = None,
+        epoch: int | None = None,
+    ) -> Phase1Metrics:
+        """运行正式 VQ training epoch，启用 pair 辅助目标和 diversity loss。"""
+
+        self.model.train()
+        totals = Phase1Metrics(stage=stage, split=split, epoch=epoch)
+        loss_config = Phase1LossConfig()
+        for raw_batch in dataloader:
+            batch = move_trajectory_batch_to_device(raw_batch, self.device)
+            self.optimizer.zero_grad(set_to_none=True)
+            outputs = self.model(batch)
+            aux_labels = None
+            if (
+                self.auxiliary_label_store is not None
+                and len(raw_batch) >= 4
+            ):
+                aux_labels = self.auxiliary_label_store.get(
+                    raw_batch[3],
+                    device=self.device,
+                )
+            losses = compute_phase1_vq_training_loss(
+                model=self.model,
+                outputs=outputs,
+                batch=batch,
+                aux_labels=aux_labels,
+                config=loss_config,
+            )
+            losses.total_loss.backward()
+            self.optimizer.step()
+            totals.add_batch(
+                batch_size=batch[0].shape[0],
+                outputs=outputs,
+                actions=batch[1],
+                total_loss=losses.total_loss,
+                morphology_loss=losses.morphology_loss,
+                pair_loss=losses.pair_loss,
+                codebook_diversity_loss=losses.codebook_diversity_loss,
+                prototype_diversity_loss=losses.prototype_diversity_loss,
+            )
         return totals.averaged()
 
     def _evaluate_checkpoint(

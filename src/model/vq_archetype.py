@@ -67,6 +67,8 @@ class VqModelOutputs:
     vq_loss: torch.Tensor
     codebook_loss: torch.Tensor
     commitment_loss: torch.Tensor
+    morphology_logits: torch.Tensor | None
+    pair_logits: torch.Tensor | None
     total_loss: torch.Tensor
 
 
@@ -311,6 +313,8 @@ class ArchetypeVQModel(nn.Module):
         commitment_cost: float = 0.25,
         num_layers: int = 1,
         dropout: float = 0.0,
+        num_morphology_classes: int = 0,
+        num_pair_classes: int = 0,
     ) -> None:
         """初始化 Phase I VQ archetype 模型。
 
@@ -337,6 +341,8 @@ class ArchetypeVQModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.num_archetypes = num_archetypes
+        self.num_morphology_classes = num_morphology_classes
+        self.num_pair_classes = num_pair_classes
 
         # Trajectory -> 连续 latent：学习 DP teacher 的整段行为摘要。
         self.encoder = ArchetypeTrajectoryEncoder(
@@ -361,6 +367,14 @@ class ArchetypeVQModel(nn.Module):
             action_dim=action_dim,
             num_layers=num_layers,
             dropout=dropout,
+        )
+        self.morphology_head = (
+            nn.Linear(latent_dim, num_morphology_classes)
+            if num_morphology_classes > 0
+            else None
+        )
+        self.pair_head = (
+            nn.Linear(latent_dim, num_pair_classes) if num_pair_classes > 0 else None
         )
 
     def forward(self, batch: TrajectoryTensorBatch) -> VqModelOutputs:
@@ -394,6 +408,7 @@ class ArchetypeVQModel(nn.Module):
         z_e = self.encoder(batch)
         quantize_output = self.quantizer(z_e)
         action_logits = self.decoder(states, quantize_output.quantized)
+        morphology_logits, pair_logits = self._auxiliary_logits(z_e)
         return self._build_outputs(
             action_logits=action_logits,
             actions=actions,
@@ -404,6 +419,8 @@ class ArchetypeVQModel(nn.Module):
             vq_loss=quantize_output.vq_loss,
             codebook_loss=quantize_output.codebook_loss,
             commitment_loss=quantize_output.commitment_loss,
+            morphology_logits=morphology_logits,
+            pair_logits=pair_logits,
         )
 
     def forward_pretrain(self, batch: TrajectoryTensorBatch) -> VqModelOutputs:
@@ -431,6 +448,7 @@ class ArchetypeVQModel(nn.Module):
         states, actions, _ = batch
         z_e = self.encoder(batch)
         action_logits = self.decoder(states, z_e)
+        morphology_logits, pair_logits = self._auxiliary_logits(z_e)
         zero = z_e.new_zeros(())
         code_indices = z_e.new_zeros((z_e.shape[0],), dtype=torch.long)
         return self._build_outputs(
@@ -443,6 +461,8 @@ class ArchetypeVQModel(nn.Module):
             vq_loss=zero,
             codebook_loss=zero,
             commitment_loss=zero,
+            morphology_logits=morphology_logits,
+            pair_logits=pair_logits,
         )
 
     @torch.no_grad()
@@ -546,6 +566,18 @@ class ArchetypeVQModel(nn.Module):
         base_actions = decode_logits.argmax(dim=-1)
         return base_actions, decode_logits
 
+    def _auxiliary_logits(
+        self,
+        z_e: LatentTensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """用 encoder latent 预测训练期辅助标签。"""
+
+        morphology_logits = (
+            self.morphology_head(z_e) if self.morphology_head is not None else None
+        )
+        pair_logits = self.pair_head(z_e) if self.pair_head is not None else None
+        return morphology_logits, pair_logits
+
     def _build_outputs(
         self,
         *,
@@ -558,6 +590,8 @@ class ArchetypeVQModel(nn.Module):
         vq_loss: torch.Tensor,
         codebook_loss: torch.Tensor,
         commitment_loss: torch.Tensor,
+        morphology_logits: torch.Tensor | None,
+        pair_logits: torch.Tensor | None,
     ) -> VqModelOutputs:
         """统一计算 loss 并打包模型输出。
 
@@ -596,6 +630,8 @@ class ArchetypeVQModel(nn.Module):
             vq_loss=vq_loss,
             codebook_loss=codebook_loss,
             commitment_loss=commitment_loss,
+            morphology_logits=morphology_logits,
+            pair_logits=pair_logits,
             total_loss=total_loss,
         )
 
