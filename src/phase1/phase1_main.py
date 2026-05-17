@@ -79,7 +79,7 @@ class Phase1MainConfig:
     epochs: int = 300
     pretrain_epochs: int = 30
     batch_size: int = 1024
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-3
     device: str = "cuda"
     horizon: int = 72
     hidden_dim: int = 128
