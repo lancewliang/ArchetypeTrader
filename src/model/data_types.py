@@ -19,11 +19,11 @@ from pathlib import Path
 import numpy as np
 
 
-HorizonDataset = tuple[np.ndarray, np.ndarray]
+HorizonDataset = tuple[np.ndarray, np.ndarray, np.ndarray]
 """固定 horizon 的中间数据集。
 
 结构:
-    ``HorizonDataset = (states, prices)``
+    ``HorizonDataset = (states, prices, depthprices)``
 
 形状:
     ``states``: ``[x, h, feature_dim]``
@@ -35,9 +35,17 @@ HorizonDataset = tuple[np.ndarray, np.ndarray]
         价格来自 feature ``DataFrame`` 的 ``close`` 列。
         最后一维为 1，是为了保留和状态张量一致的三维结构。
 
+    ``depthprices``: ``[x, h, 20]``
+        深度行情来自 ``states`` 中的五档 ask/bid price 和 size 特征。
+        列顺序为 ``ask1_price`` ... ``ask5_price``、
+        ``ask1_size`` ... ``ask5_size``、
+        ``bid1_price`` ... ``bid5_price``、
+        ``bid1_size`` ... ``bid5_size``。
+
 含义:
     ``states`` 是模型观察到的市场状态序列，不包含 ``close`` 价格列。
     ``prices`` 是 DP teacher 和 reward 计算所需的结算价格序列。
+    ``depthprices`` 是从 ``states`` 中额外切出的盘口深度行情序列。
 
 为什么:
     状态输入和价格序列用途不同。状态给模型学习，

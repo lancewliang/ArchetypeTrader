@@ -28,11 +28,11 @@ from torch.utils.data import TensorDataset
 from .data_types import TrajectoryDataset
 
 
-HorizonTensorDataset: TypeAlias = tuple[torch.Tensor, torch.Tensor]
+HorizonTensorDataset: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 """固定 horizon 的 Tensor 数据集。
 
 结构:
-    ``HorizonTensorDataset = (states, prices)``
+    ``HorizonTensorDataset = (states, prices, depthprices)``
 
 形状:
     ``states``: ``[x, h, feature_dim]``
@@ -43,9 +43,13 @@ HorizonTensorDataset: TypeAlias = tuple[torch.Tensor, torch.Tensor]
     ``prices``: ``[x, h, 1]``
         价格来自原始 feature ``DataFrame`` 的 ``close`` 列。
 
+    ``depthprices``: ``[x, h, 20]``
+        深度行情来自 ``states`` 中的五档 ask/bid price 和 size 特征。
+
 dtype:
     ``states`` 通常为 ``torch.float32``。
     ``prices`` 通常为 ``torch.float32``。
+    ``depthprices`` 通常为 ``torch.float32``。
 
 含义:
     这是 ``HorizonDataset`` 进入 PyTorch 后的表示，主要用于 batch 化、

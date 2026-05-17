@@ -171,8 +171,8 @@ class Phase1CodebookEvaluator:
                 ``shuffle=False``，否则 sample_ids 和 horizon_dataset prices 无法稳定对齐。
             split: split 名称，例如 ``train`` 或 ``val``。
             epoch: 当前 checkpoint epoch。
-            horizon_dataset: 可选 ``(states, prices)``。传入且长度匹配时读取 prices；
-                不传时 snapshot.prices 为 ``None``。
+            horizon_dataset: 可选 ``(states, prices, depthprices)``。传入且长度匹配时
+                读取 prices；不传时 snapshot.prices 为 ``None``。
 
         输出:
             ``Phase1EvaluationSnapshot``，供五个 layer calculator 读取。
@@ -886,7 +886,7 @@ class Phase1CodebookEvaluator:
             - 对齐失败直接抛出 ``ValueError``，避免静默生成不可审计的 metrics。
 
         输入参数:
-            horizon_dataset: ``(states, prices)`` 或 ``None``。
+            horizon_dataset: ``(states, prices, depthprices)`` 或 ``None``。
             expected_samples: 当前 dataloader 实际收集到的样本数。
             sample_ids: 当前 dataloader batch 携带的稳定样本 ID。
             collected_states: dataloader 实际遍历得到的 states，用于校验 sample_id
@@ -903,7 +903,7 @@ class Phase1CodebookEvaluator:
 
         if horizon_dataset is None:
             return None
-        horizon_states, prices = horizon_dataset
+        horizon_states, prices, _depthprices = horizon_dataset
         horizon_state_values = np.asarray(horizon_states)
         price_values = np.asarray(prices)
         if sample_ids.shape != (expected_samples,):

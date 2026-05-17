@@ -116,7 +116,8 @@ class SingleTrade_DP_Planner:
         """批量生成 demonstration trajectory 数据集 ``D``。
 
         参数:
-            horizon_dataset: ``HorizonBuilder`` 的输出，即 ``(states, prices)``。
+            horizon_dataset: ``HorizonBuilder`` 的输出，
+                即 ``(states, prices, depthprices)``。
                 ``states`` 的 shape 为 ``[n, h, feature_dim]``。
                 ``prices`` 的 shape 为 ``[n, h, 1]``，来自 feature 文件的 ``close`` 列。
 
@@ -133,7 +134,7 @@ class SingleTrade_DP_Planner:
             论文中的训练数据集定义为 ``D = {tau_i}_{i=0}^{n-1}``。
             该方法把单条 trajectory 生成逻辑扩展到完整训练集。
         """
-        states_batch, prices_batch = horizon_dataset
+        states_batch, prices_batch, _depthprices_batch = horizon_dataset
         states_batch = np.asarray(states_batch, dtype=np.float32)
         prices_batch = np.asarray(prices_batch, dtype=np.float32)
         if states_batch.ndim != 3:

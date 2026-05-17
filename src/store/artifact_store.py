@@ -90,9 +90,10 @@ class DataFileStore:
 
         参数:
             horizon_dataset: ``HorizonBuilder`` 的输出。
-                通常为 ``(states, prices)``。
+                通常为 ``(states, prices, depthprices)``。
                 ``states`` shape 为 ``[x, h, len(states)]``。
                 ``prices`` shape 为 ``[x, h, 1]``。
+                ``depthprices`` shape 为 ``[x, h, 20]``。
             output_path: horizon 中间数据保存路径。
 
         输出:
@@ -105,13 +106,19 @@ class DataFileStore:
             horizon 数据是从 feature 文件到 trajectory 数据之间的重要中间结果。
             单独保存可以支持复查 ``close`` 价格切分、状态 shape 和后续 DP 输入。
         """
-        states, prices = horizon_dataset
+        states, prices, depthprices = horizon_dataset
+        depthprices = np.asarray(depthprices, dtype=np.float32)
+        if depthprices.ndim != 3 or depthprices.shape[-1] != 20:
+            raise ValueError(
+                "depthprices must have shape [x, h, 20] with LOB prices and sizes"
+            )
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             output,
             states=np.asarray(states, dtype=np.float32),
             prices=np.asarray(prices, dtype=np.float32),
+            depthprices=depthprices,
         )
 
     def load_horizon_dataset(
@@ -124,9 +131,10 @@ class DataFileStore:
             split_name: split 名称，例如 ``train``、``val``、``test``。
 
         输出:
-            返回 ``HorizonDataset``，通常为 ``(states, prices)``。
+            返回 ``HorizonDataset``，通常为 ``(states, prices, depthprices)``。
             ``states`` shape 为 ``[x, h, len(states)]``。
             ``prices`` shape 为 ``[x, h, 1]``。
+            ``depthprices`` shape 为 ``[x, h, 20]``。
 
         方法作用:
             从已保存的产出物中恢复 ``HorizonBuilder`` 生成的 horizon 数据。
@@ -138,9 +146,21 @@ class DataFileStore:
         """
         path = self._resolve_dataset_path("horizon", split_name)
         with np.load(path) as payload:
+            if "depthprices" not in payload:
+                raise ValueError(
+                    "horizon dataset is missing depthprices; regenerate it with "
+                    "HorizonBuilder before loading"
+                )
+            depthprices = payload["depthprices"].astype(np.float32, copy=False)
+            if depthprices.ndim != 3 or depthprices.shape[-1] != 20:
+                raise ValueError(
+                    "horizon dataset depthprices must have shape [x, h, 20]; "
+                    "regenerate it with LOB prices and sizes"
+                )
             return (
                 payload["states"].astype(np.float32, copy=False),
                 payload["prices"].astype(np.float32, copy=False),
+                depthprices,
             )
 
     def save_trajectory_dataset(

@@ -6,6 +6,20 @@ import numpy as np
 import polars as pl
 
 from ..model.data_types import HorizonDataset
+from ..utils.trade_execution import (
+    LOB_ASK_PRICE_COLS,
+    LOB_ASK_SIZE_COLS,
+    LOB_BID_PRICE_COLS,
+    LOB_BID_SIZE_COLS,
+)
+
+
+LOB_DEPTH_COLS = (
+    LOB_ASK_PRICE_COLS
+    + LOB_ASK_SIZE_COLS
+    + LOB_BID_PRICE_COLS
+    + LOB_BID_SIZE_COLS
+)
 
 
 class HorizonBuilder:
@@ -13,10 +27,12 @@ class HorizonBuilder:
 
     输出 ``states`` 张量的 ``shape`` 为 ``[x, h, len(states)]``。
     输出 ``prices`` 张量的 ``shape`` 为 ``[x, h, 1]``。
+    输出 ``depthprices`` 张量的 ``shape`` 为 ``[x, h, 20]``。
     ``h`` 默认值为 72，``x`` 预期为 ``len(dataframe) / h``。
     其中 ``dataframe`` 的 ``close`` 列就是价格列。
     ``states`` 是输入 ``dataframe`` 中排除 ``close`` 后的所有列，
     ``prices`` 是单独取出的 ``close`` 列。
+    ``depthprices`` 从 ``states`` 中切出五档 ask/bid price 和 size 特征。
     """
 
     def __init__(self, horizon: int = 72) -> None:
@@ -44,18 +60,20 @@ class HorizonBuilder:
         self,
         dataframe: pl.DataFrame,
     ) -> HorizonDataset:
-        """从 ``dataframe`` 构建 horizon 状态张量和价格张量。
+        """从 ``dataframe`` 构建 horizon 状态张量、价格张量和深度行情张量。
 
         参数:
             dataframe: 输入的时间序列数据表，每一行代表一个时间步。
                 其中 ``close`` 列就是价格列，会被单独返回为 ``prices``。
 
         输出:
-            返回 ``HorizonDataset``，即 ``(states, prices)``。
+            返回 ``HorizonDataset``，即 ``(states, prices, depthprices)``。
             ``states`` 的 ``shape`` 为 ``[x, h, len(states)]``。
             ``prices`` 的 ``shape`` 为 ``[x, h, 1]``。
+            ``depthprices`` 的 ``shape`` 为 ``[x, h, 20]``。
             其中 ``h = horizon``，``x = len(dataframe) / h``。
             ``states`` 不包含 ``close`` 列，``prices`` 只包含 ``close`` 列。
+            ``depthprices`` 从 ``states`` 中的 LOB price/size 特征切出。
 
         方法作用:
             将连续时间序列按固定 horizon 切成多个样本。
@@ -78,6 +96,14 @@ class HorizonBuilder:
         ]
         if not state_columns:
             raise ValueError("dataframe must contain at least one state feature column")
+        missing_depth_columns = [
+            column for column in LOB_DEPTH_COLS if column not in state_columns
+        ]
+        if missing_depth_columns:
+            missing = ", ".join(missing_depth_columns)
+            raise ValueError(
+                f"dataframe must contain numeric LOB depth columns: {missing}"
+            )
 
         usable_rows = len(dataframe) // self.horizon * self.horizon
         if usable_rows == 0:
@@ -86,12 +112,13 @@ class HorizonBuilder:
             )
         dataframe = dataframe.head(usable_rows)
 
-        states = (
-            dataframe.select(state_columns)
-            .to_numpy()
-            .astype(np.float32, copy=False)
-            .reshape(-1, self.horizon, len(state_columns))
+        state_values = dataframe.select(state_columns).to_numpy().astype(
+            np.float32,
+            copy=False,
         )
+        states = state_values.reshape(-1, self.horizon, len(state_columns))
+        depth_indices = [state_columns.index(column) for column in LOB_DEPTH_COLS]
+        depthprices = states[..., depth_indices].copy()
         prices = (
             dataframe.select("close")
             .to_numpy()
@@ -102,4 +129,6 @@ class HorizonBuilder:
             raise ValueError("state features contain non-finite values")
         if not np.isfinite(prices).all():
             raise ValueError("close prices contain non-finite values")
-        return states, prices
+        if not np.isfinite(depthprices).all():
+            raise ValueError("LOB depth features contain non-finite values")
+        return states, prices, depthprices
