@@ -148,6 +148,7 @@ def _demo_returns(
         snapshot.prices,
         snapshot.demo_actions,
         runtime_config.fee_rate,
+        snapshot.depthprices,
     )
     if rewards.ndim == 2 and np.all(np.isfinite(rewards)):
         return ActionExecutionResult(
@@ -285,6 +286,7 @@ def compute_random_label_returns(
                 snapshot.prices,
                 random_actions,
                 runtime_config.fee_rate,
+                snapshot.depthprices,
             ).returns
         )
     return np.mean(np.stack(trial_returns, axis=0), axis=0)
@@ -675,6 +677,7 @@ def compute_oracle_profitability_metrics(
         val_snapshot.prices,
         val_snapshot.decoded_actions,
         runtime_config.fee_rate,
+        val_snapshot.depthprices,
     )
     flat_returns = np.zeros_like(decoded_execution.returns)
     random_returns = compute_random_label_returns(

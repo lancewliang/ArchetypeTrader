@@ -242,7 +242,7 @@ class Phase1CodebookEvaluator:
                 "validation dataloader must provide stable sample_ids as the fourth "
                 "batch field; rebuild it with build_trajectory_tensor_dataset()"
             )
-        prices = self._prices_from_horizon_dataset(
+        prices, depthprices = self._market_data_from_horizon_dataset(
             horizon_dataset=horizon_dataset,
             expected_samples=total_samples,
             sample_ids=sample_ids,
@@ -262,6 +262,8 @@ class Phase1CodebookEvaluator:
             states=states_array,
             # None or [N, H]. HorizonDataset [N, H, 1] prices are normalized below.
             prices=prices,
+            # None or [N, H, 20]. LOB depth market data used for execution slippage.
+            depthprices=depthprices,
             # [N, H]
             demo_actions=np.concatenate(action_parts, axis=0),
             # [N, H]
@@ -865,14 +867,14 @@ class Phase1CodebookEvaluator:
         )
 
     @staticmethod
-    def _prices_from_horizon_dataset(
+    def _market_data_from_horizon_dataset(
         *,
         horizon_dataset: HorizonDataset | None,
         expected_samples: int,
         sample_ids: np.ndarray,
         collected_states: np.ndarray,
-    ) -> np.ndarray | None:
-        """从可选 horizon dataset 中提取 prices。
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """从可选 horizon dataset 中提取 prices 和 depthprices。
 
         功能说明:
             根据 dataloader 收集到的 ``sample_ids`` 从 ``horizon_dataset`` 中取回
@@ -880,9 +882,10 @@ class Phase1CodebookEvaluator:
             dataset 顺序不一致导致 price/action/reward 错配。
 
         设计边界:
-            - 只负责 prices 提取和对齐校验，不修正错位数据；
-            - 未提供 ``horizon_dataset`` 时返回 ``None``，由下游 layer 按缺失价格处理；
+            - 只负责 market data 提取和对齐校验，不修正错位数据；
+            - 未提供 ``horizon_dataset`` 时返回 ``(None, None)``；
             - 价格只接受 ``[N, H]`` 或 ``[N, H, 1]``，输出统一为 ``[N, H]``；
+            - 深度行情接受 ``[N, H, 20]``，输出保持 ``[N, H, 20]``；
             - 对齐失败直接抛出 ``ValueError``，避免静默生成不可审计的 metrics。
 
         输入参数:
@@ -893,19 +896,24 @@ class Phase1CodebookEvaluator:
                 与 horizon dataset 的顺序是否一致。
 
         输出:
-            prices 数组，shape=[N, H]；未提供 horizon dataset 或样本数不匹配时返回 ``None``。
+            ``(prices, depthprices)``；未提供 horizon dataset 时返回 ``(None, None)``。
 
         使用场景:
-            ``collect_snapshot()`` 将 dataloader 中的 trajectory 与外部 horizon prices
-            对齐。调用方应保证 dataloader 未 shuffle，且 horizon dataset 与 trajectory
-            dataset 顺序一致。
+            ``collect_snapshot()`` 将 dataloader 中的 trajectory 与外部 horizon market
+            data 对齐。调用方应保证 dataloader 未 shuffle，且 horizon dataset 与
+            trajectory dataset 顺序一致。
         """
 
         if horizon_dataset is None:
-            return None
-        horizon_states, prices, _depthprices = horizon_dataset
+            return None, None
+        if len(horizon_dataset) == 2:
+            horizon_states, prices = horizon_dataset
+            depthprices = None
+        else:
+            horizon_states, prices, depthprices = horizon_dataset
         horizon_state_values = np.asarray(horizon_states)
         price_values = np.asarray(prices)
+        depth_values = None if depthprices is None else np.asarray(depthprices)
         if sample_ids.shape != (expected_samples,):
             raise ValueError(
                 "sample_ids must match collected sample count, "
@@ -929,14 +937,41 @@ class Phase1CodebookEvaluator:
             )
 
         price_values = price_values[sample_ids]
+        if depth_values is not None:
+            depth_values = depth_values[sample_ids]
         if price_values.ndim == 3 and price_values.shape[-1] == 1:
-            return price_values[..., 0]
-        if price_values.ndim != 2:
+            price_values = price_values[..., 0]
+        elif price_values.ndim != 2:
             raise ValueError(
                 "horizon_dataset prices must have shape [N, H] or [N, H, 1], "
                 f"got {price_values.shape}"
             )
-        return price_values
+        if depth_values is None:
+            return price_values, None
+        if depth_values.ndim != 3 or depth_values.shape[-1] != 20:
+            raise ValueError(
+                "horizon_dataset depthprices must have shape [N, H, 20], "
+                f"got {depth_values.shape}"
+            )
+        return price_values, depth_values
+
+    @staticmethod
+    def _prices_from_horizon_dataset(
+        *,
+        horizon_dataset: HorizonDataset | None,
+        expected_samples: int,
+        sample_ids: np.ndarray,
+        collected_states: np.ndarray,
+    ) -> np.ndarray | None:
+        """兼容旧调用方：只返回 horizon dataset 中对齐后的 prices。"""
+
+        prices, _depthprices = Phase1CodebookEvaluator._market_data_from_horizon_dataset(
+            horizon_dataset=horizon_dataset,
+            expected_samples=expected_samples,
+            sample_ids=sample_ids,
+            collected_states=collected_states,
+        )
+        return prices
 
 
 __all__ = ["Phase1CodebookEvaluator"]

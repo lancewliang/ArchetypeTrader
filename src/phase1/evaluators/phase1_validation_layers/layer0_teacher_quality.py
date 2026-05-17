@@ -122,6 +122,7 @@ def compute_demo_returns(
         price_values,
         snapshot.demo_actions,
         fee_rate,
+        snapshot.depthprices,
     ).returns
 
 
@@ -130,6 +131,7 @@ def compute_fee_sensitivity(
     actions: np.ndarray,
     fee_rate: float,
     *,
+    depthprices: np.ndarray | None = None,
     original_advantages: np.ndarray | None = None,
 ) -> float:
     """计算 teacher 策略对手续费的敏感性。
@@ -158,6 +160,7 @@ def compute_fee_sensitivity(
             price_values,
             actions,
             fee_rate,
+            depthprices,
         ).returns
         denominator_values = original_returns
     else:
@@ -167,6 +170,7 @@ def compute_fee_sensitivity(
         price_values,
         actions,
         fee_rate * 2.0,
+        depthprices,
     ).returns
     numerator = np.nansum(doubled_fee_returns)
     denominator = np.nansum(denominator_values)
@@ -276,6 +280,7 @@ def compute_teacher_quality_metrics(
             price_values,
             val_snapshot.demo_actions,
             runtime_config.fee_rate,
+            depthprices=val_snapshot.depthprices,
             original_advantages=advantages,
         )
         labels = classify_market_morphology(

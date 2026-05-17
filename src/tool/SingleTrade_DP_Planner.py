@@ -6,18 +6,8 @@ import numpy as np
 
 from ..model.data_types import DemonstrationTrajectory, HorizonDataset, TrajectoryDataset
 from ..utils.trade_execution import (
-    LOB_ASK_PRICE_COLS,
-    LOB_ASK_SIZE_COLS,
-    LOB_BID_PRICE_COLS,
-    LOB_BID_SIZE_COLS,
-)
-
-
-LOB_DEPTH_WIDTH = (
-    len(LOB_ASK_PRICE_COLS)
-    + len(LOB_ASK_SIZE_COLS)
-    + len(LOB_BID_PRICE_COLS)
-    + len(LOB_BID_SIZE_COLS)
+    ActionExecutionCalculator,
+    LOB_DEPTH_WIDTH,
 )
 
 
@@ -302,7 +292,7 @@ class SingleTrade_DP_Planner:
         delta_position = next_position - current_position
         gross_reward = next_position * (price_next - price_now)
         fee_cost = abs(delta_position) * float(price_now) * self.fee_rate
-        slippage_cost = self._lob_slippage_cost(
+        slippage_cost = ActionExecutionCalculator.compute_lob_slippage_from_depthprice(
             delta_position=delta_position,
             depthprice=depthprice,
             mark_price=float(price_now),
@@ -314,55 +304,3 @@ class SingleTrade_DP_Planner:
         if position is None:
             raise ValueError(f"unsupported action: {action}")
         return position
-
-    @staticmethod
-    def _lob_slippage_cost(
-        *,
-        delta_position: float,
-        depthprice: np.ndarray,
-        mark_price: float,
-    ) -> float:
-        if delta_position == 0.0:
-            return 0.0
-
-        values = np.asarray(depthprice, dtype=np.float32).reshape(-1)
-        if values.shape[0] != LOB_DEPTH_WIDTH:
-            raise ValueError(f"depthprice must have {LOB_DEPTH_WIDTH} values")
-
-        level_count = len(LOB_ASK_PRICE_COLS)
-        ask_prices = values[:level_count]
-        ask_sizes = values[level_count : level_count * 2]
-        bid_prices = values[level_count * 2 : level_count * 3]
-        bid_sizes = values[level_count * 3 : level_count * 4]
-
-        if delta_position > 0.0:
-            level_prices = ask_prices
-            level_sizes = ask_sizes
-        else:
-            level_prices = bid_prices
-            level_sizes = bid_sizes
-
-        qty_remaining = abs(float(delta_position))
-        fill_cash = 0.0
-        last_price = float(mark_price)
-        for level_price, level_size in zip(level_prices, level_sizes):
-            price = float(level_price)
-            size = float(level_size)
-            if price <= 0.0 or size <= 0.0:
-                continue
-            last_price = price
-            fill_qty = min(qty_remaining, size)
-            fill_cash += fill_qty * price
-            qty_remaining -= fill_qty
-            if qty_remaining <= 0.0:
-                break
-
-        if qty_remaining > 0.0:
-            fill_cash += qty_remaining * last_price
-
-        mark_cash = abs(float(delta_position)) * float(mark_price)
-        if delta_position > 0.0:
-            slippage = fill_cash - mark_cash
-        else:
-            slippage = mark_cash - fill_cash
-        return max(float(slippage), 0.0)

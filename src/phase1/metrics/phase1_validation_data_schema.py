@@ -195,6 +195,9 @@ class Phase1EvaluationSnapshot:
     # 当前 split 的动作重构准确率。用于第一层 VQ internal hard gate。
     action_accuracy: float
 
+    # horizon LOB 深度行情，shape=[N, H, 20]。用于执行收益中的盘口滑点计算；缺失时可为 None。
+    depthprices: np.ndarray | None = None
+
     def __post_init__(self) -> None:
         """校验 snapshot 初始化时的数组维度一致性。"""
 
@@ -223,6 +226,9 @@ class Phase1EvaluationSnapshot:
         if self.prices is not None:
             prices = _require_ndarray("prices", self.prices)
             _require_shape("prices", prices, nh_shape)
+        if self.depthprices is not None:
+            depthprices = _require_ndarray("depthprices", self.depthprices)
+            _require_shape("depthprices", depthprices, (n_samples, horizon, 20))
 
         _require_ndim("decoded_logits", decoded_logits, 3)
         if decoded_logits.shape[:2] != nh_shape:

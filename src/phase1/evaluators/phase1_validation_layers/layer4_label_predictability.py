@@ -502,11 +502,13 @@ def _probe_return_retention(
         val_snapshot.prices,
         probe_actions,
         runtime_config.fee_rate,
+        val_snapshot.depthprices,
     ).returns
     oracle_returns = ActionExecutionCalculator.execute_actions(
         val_snapshot.prices,
         val_snapshot.decoded_actions,
         runtime_config.fee_rate,
+        val_snapshot.depthprices,
     ).returns
     flat_returns = np.zeros_like(oracle_returns)
     return float(
