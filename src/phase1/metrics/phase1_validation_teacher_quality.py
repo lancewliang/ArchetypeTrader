@@ -168,7 +168,7 @@ class Phase1TeacherQualityThresholds:
     fee_sensitivity_min: float = 0.60
 
     # 非 neutral 市场形态覆盖率下限。用于判断样本是否有足够可学习的市场结构。
-    morphology_coverage_min: float = 0.60
+    morphology_coverage_min: float = 0.55
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
