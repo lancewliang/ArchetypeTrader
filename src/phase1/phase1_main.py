@@ -78,13 +78,13 @@ class Phase1MainConfig:
     train_batch_id: str
     epochs: int = 200
     pretrain_epochs: int = 10
-    batch_size: int = 1024
+    batch_size: int = 2048
     learning_rate: float = 1e-3
     device: str = "cuda"
     horizon: int = 72
     hidden_dim: int = 128
     latent_dim: int = 16
-    num_archetypes: int = 6
+    num_archetypes: int = 10
     action_dim: int = 3
     commitment_cost: float = 0.25
     num_layers: int = 1
@@ -103,7 +103,7 @@ class Phase1MainConfig:
     dead_code_reset_min_occupancy: float = 0.001
     dead_code_reset_max_fraction: float = 0.20
     dead_code_reset_jitter_scale: float = 1e-4
-    dead_code_reset_seed: int = 1042
+    dead_code_reset_seed: int = 42
 
     def __post_init__(self) -> None:
         if self.validation_interval < 1:
