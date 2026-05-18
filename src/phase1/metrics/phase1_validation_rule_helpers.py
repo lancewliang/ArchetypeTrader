@@ -19,6 +19,12 @@ def _is_missing(value: Any) -> bool:
     return False
 
 
+def _finite_distance(value: float) -> float | None:
+    """只保留有限阈值距离，避免报告展示 inf/-inf。"""
+
+    return float(value) if math.isfinite(value) else None
+
+
 def _metric_result(
     *,
     name: str,
@@ -87,7 +93,9 @@ def _gt(
         threshold_value=float(threshold_value),
         direction="greater_is_better",
         distance_to_threshold=(
-            float(value - threshold_value) if not _is_missing(value) else None
+            _finite_distance(value - threshold_value)
+            if not _is_missing(value)
+            else None
         ),
         passed=value > threshold_value if not _is_missing(value) else False,
         layer=layer,
@@ -116,7 +124,9 @@ def _ge(
         threshold_value=float(threshold_value),
         direction="greater_is_better",
         distance_to_threshold=(
-            float(value - threshold_value) if not _is_missing(value) else None
+            _finite_distance(value - threshold_value)
+            if not _is_missing(value)
+            else None
         ),
         passed=value >= threshold_value if not _is_missing(value) else False,
         layer=layer,
@@ -145,7 +155,9 @@ def _le(
         threshold_value=float(threshold_value),
         direction="less_is_better",
         distance_to_threshold=(
-            float(threshold_value - value) if not _is_missing(value) else None
+            _finite_distance(threshold_value - value)
+            if not _is_missing(value)
+            else None
         ),
         passed=value <= threshold_value if not _is_missing(value) else False,
         layer=layer,
@@ -175,7 +187,7 @@ def _between(
         threshold_value=(float(lower), float(upper)),
         direction="between",
         distance_to_threshold=(
-            float(min(value - lower, upper - value))
+            _finite_distance(min(value - lower, upper - value))
             if not _is_missing(value)
             else None
         ),

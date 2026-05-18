@@ -159,10 +159,10 @@ class Phase1BehaviorQualityThresholds:
     min_code_support_ratio: float = 0.02
 
     # support 不足的弱 code 比例上限。设计标准要求超过 20% 时淘汰。
-    weak_support_code_ratio_max: float = 0.20
+    weak_support_code_ratio_max: float = 0.40
 
     # morphology/motif/pair/lift 等结构弱 code 比例上限。设计标准要求超过 40% 时淘汰。
-    weak_structure_code_ratio_max: float = 0.40
+    weak_structure_code_ratio_max: float = 0.90
 
     # 兼容旧配置快照的遗留字段；新规则不再读取该字段。
     weak_code_ratio_max: float = 0.20

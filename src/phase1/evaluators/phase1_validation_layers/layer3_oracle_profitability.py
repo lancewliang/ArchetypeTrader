@@ -334,18 +334,14 @@ def compute_max_drawdown(cumulative_returns: np.ndarray) -> float:
 def compute_downside_control(decoded_drawdown: float, dp_drawdown: float) -> float:
     """计算 decoded 相对 DP teacher 的回撤放大比例。
 
-    当 DP teacher 无回撤时，原始比例没有正分母。此时需要保留 hard gate 语义：
-    decoded 也无回撤则风险没有放大，返回 0；decoded 有回撤则返回 inf，让规则层
-    按超过阈值处理，而不是把可判定情况标成缺失。
+    当 DP teacher 无回撤或回撤接近 0 时，使用 eps 作为最小分母，避免报告中
+    出现 Infinity，同时保留 decoded 回撤显著放大时的 hard gate fail 语义。
     """
 
     if not np.isfinite(decoded_drawdown) or not np.isfinite(dp_drawdown):
         return _nan()
-    if dp_drawdown > _EPS:
-        return float(decoded_drawdown / dp_drawdown)
-    if decoded_drawdown <= _EPS:
-        return 0.0
-    return float("inf")
+    denominator = max(float(dp_drawdown), _EPS)
+    return float(decoded_drawdown / denominator)
 
 
 def compute_top_contribution_ratio(returns: np.ndarray, top_ratio: float) -> float:

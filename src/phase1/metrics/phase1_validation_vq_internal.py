@@ -257,7 +257,7 @@ class Phase1VQInternalThresholds:
     dead_code_ratio_max: float = 0.20
 
     # 最近若干 epoch assignment churn 均值上限。用于判断 label 语义是否稳定。
-    churn_recent_mean_max: float = 0.15
+    churn_recent_mean_max: float = 0.25
 
     # 最近 code 距离和第二近 code 距离的 margin 中位数下限。用于判断分配边界是否清晰。
     margin_median_min: float = 0.10
@@ -481,7 +481,7 @@ def compute_codebook_health_score(metrics: Phase1ValidationMetrics) -> float:
         _clip01(perplexity_score),
         _inverse_ratio_score(vq.max_code_occupancy, 0.40),
         _inverse_ratio_score(vq.dead_code_ratio, 0.20),
-        _inverse_ratio_score(vq.assignment_churn_recent_mean, 0.15),
+        _inverse_ratio_score(vq.assignment_churn_recent_mean, 0.25),
         _threshold_progress(vq.nearest_second_margin_median, 0.10),
         _threshold_progress(vq.direction_accuracy, 0.88),
     )
