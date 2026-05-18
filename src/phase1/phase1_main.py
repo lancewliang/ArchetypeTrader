@@ -76,7 +76,7 @@ class Phase1MainConfig:
 
     pair: str
     train_batch_id: str
-    epochs: int = 300
+    epochs: int = 400
     pretrain_epochs: int = 10
     batch_size: int = 2048
     learning_rate: float = 1e-3

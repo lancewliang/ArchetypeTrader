@@ -334,9 +334,9 @@ def compute_max_drawdown(cumulative_returns: np.ndarray) -> float:
 def compute_downside_control(decoded_drawdown: float) -> float:
     """计算 decoded 策略自身的最大回撤。
 
-    DP teacher 的累计收益路径按构造可能长期无回撤，因此用 DP drawdown 作为
-    分母会让比例不可解释。本指标直接使用 decoded 累计收益最大回撤作为
-    downside hard gate。
+    DP teacher 的累计收益路径按构造可能长期无回撤，因此用 DP drawdown
+    作为分母会让比例不可解释。本指标直接使用 decoded 累计收益最大回撤
+    作为 downside hard gate。
     """
 
     if not np.isfinite(decoded_drawdown):
