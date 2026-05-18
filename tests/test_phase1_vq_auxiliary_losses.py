@@ -62,6 +62,9 @@ def test_auxiliary_label_store_builds_pair_vocab_and_labels():
     assert label_store.pair_labels.shape == (4,)
     assert len(label_store.morphology_vocab) >= 1
     assert len(label_store.pair_vocab) >= 1
+    assert all("with-recent-move" not in label for label in label_store.pair_vocab)
+    assert all("against-recent-move" not in label for label in label_store.pair_vocab)
+    assert all(" + " not in label for label in label_store.pair_vocab)
 
 
 def test_phase1_vq_training_loss_supports_auxiliary_heads_and_backward():

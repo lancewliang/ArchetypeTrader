@@ -17,9 +17,11 @@
     1. morphology auxiliary classification:
        要求 encoder latent ``z_e`` 可预测市场形态，防止 code 只记动作而忽略
        market structure。
-    2. morphology-motif pair auxiliary classification:
+    2. coarse morphology-motif pair auxiliary classification:
        直接优化 weak_pair_code_ratio 对应的监督信号，让 latent 表示同时包含
-       “什么市场结构”和“采取什么行为模式”。
+       “什么市场结构”和“采取什么行为模式”。训练目标使用 coarse pair，而不是
+       validation report 中的完整 motif 字符串，避免 K=10 的 codebook 被几十个
+       细粒度 pair 类别拉扯。
     3. codebook diversity regularization:
        约束 codebook embedding 不要过度相似，减少多个 code 吸收同一类 latent。
     4. prototype diversity regularization:
@@ -68,8 +70,9 @@ class Phase1LossConfig:
         morphology_aux_weight:
             ``z_e -> morphology`` 分类 loss 权重。它提供较粗粒度的市场结构监督。
         pair_aux_weight:
-            ``z_e -> morphology-motif pair`` 分类 loss 权重。该项直接针对
-            weak_pair_code_ratio，默认高于 morphology 权重。
+            ``z_e -> coarse morphology-motif pair`` 分类 loss 权重。该项直接针对
+            weak_pair_code_ratio，默认高于 morphology 权重。这里的 pair 是训练用
+            粗粒度 pair，不是 report 中的完整 morphology-motif 诊断字符串。
         codebook_diversity_weight:
             codebook embedding 相似度惩罚权重。该项较轻，主要防止 embedding
             层面的重复和塌缩。
@@ -97,8 +100,9 @@ class Phase1LossConfig:
 class Phase1AuxiliaryLabels:
     """一个 batch 的辅助监督标签。
 
-    ``morphology`` 和 ``pair`` 都是 ``LongTensor[batch]``。若某个标签不在当前
-    vocab 中，会被编码为 ``IGNORE_INDEX``，对应样本在 CE loss 中被跳过。
+    ``morphology`` 和 ``pair`` 都是 ``LongTensor[batch]``。``pair`` 使用 coarse
+    morphology + coarse motif 标签。若某个标签不在当前 vocab 中，会被编码为
+    ``IGNORE_INDEX``，对应样本在 CE loss 中被跳过。
     """
 
     morphology: torch.Tensor
@@ -164,19 +168,20 @@ def build_phase1_auxiliary_label_store(
     morphology_vocab: Sequence[str] | None = None,
     pair_vocab: Sequence[str] | None = None,
 ) -> Phase1AuxiliaryLabelStore:
-    """从 train split 构建 morphology 和 morphology-motif pair 标签。
+    """从 train split 构建 morphology 和 coarse morphology-motif pair 标签。
 
     输入:
         trajectory_dataset:
             DP teacher 生成的 ``(states, actions, rewards)`` 序列。这里读取 teacher
-            actions 来生成 motif 标签，而不是读取模型 decoded actions，保证监督目标
-            是固定的。
+            actions 来生成 motif 标签，再粗化成训练用 coarse motif；不读取模型
+            decoded actions，保证监督目标是固定的。
         horizon_dataset:
             对应的 ``(states, prices, depthprices)``。这里读取 prices 来生成
             market morphology，并用 horizon states 与 trajectory states 做严格对齐。
         morphology_vocab / pair_vocab:
-            可选固定词表。训练恢复或复现实验时可以传入 checkpoint config 中保存的
-            vocab，保证 auxiliary head 输出维度和 label id 稳定。
+            可选固定词表。``pair_vocab`` 是 coarse pair vocab。训练恢复或复现实验
+            时可以传入 checkpoint config 中保存的 vocab，保证 auxiliary head 输出
+            维度和 label id 稳定。
 
     输出:
         ``Phase1AuxiliaryLabelStore``，包含完整 train split 的 label tensor 与 vocab。
@@ -208,7 +213,7 @@ def build_phase1_auxiliary_label_store(
     motifs = classify_action_motif(actions, prices)
     pairs = np.asarray(
         [
-            f"{morphology}:{motif}"
+            f"{_coarse_morphology(str(morphology))}:{_coarse_motif(str(motif))}"
             for morphology, motif in zip(morphologies, motifs, strict=False)
         ],
         dtype=object,
@@ -244,7 +249,8 @@ def compute_phase1_vq_training_loss(
         ``L_morph``:
             ``outputs.morphology_logits`` 对 train morphology label 的 CE loss。
         ``L_pair``:
-            ``outputs.pair_logits`` 对 train morphology-motif pair label 的 CE loss。
+            ``outputs.pair_logits`` 对 train coarse morphology-motif pair label 的
+            CE loss。
         ``L_cb_div``:
             codebook embedding 的 off-diagonal cosine similarity margin penalty。
         ``L_proto_div``:
@@ -328,6 +334,51 @@ def _encode_labels(labels: np.ndarray, vocab: Sequence[str]) -> torch.Tensor:
     label_to_id = {str(label): index for index, label in enumerate(vocab)}
     encoded = [label_to_id.get(str(label), IGNORE_INDEX) for label in labels]
     return torch.as_tensor(encoded, dtype=torch.long)
+
+
+def _coarse_morphology(label: str) -> str:
+    """把 validation morphology 标签映射成训练用粗粒度市场结构。
+
+    粗化目标:
+        降低 pair auxiliary head 的类别数，让 K=10 的 codebook 先学习稳定的大类
+        绑定。完整 morphology 仍会在 validation report 中保留，不影响最终诊断。
+    """
+
+    if label in {"uptrend", "downtrend"}:
+        return "trend"
+    if label in {"reversal-up", "reversal-down"}:
+        return "reversal"
+    if label in {"range-high-vol", "range-low-vol"}:
+        return "range"
+    if label == "volatile-mixed":
+        return "volatile"
+    return "neutral"
+
+
+def _coarse_motif(label: str) -> str:
+    """把完整 action motif 字符串映射成训练用粗粒度行为模式。
+
+    完整 motif 形如 ``long + middle + delayed-hold + against-recent-move``。
+    训练辅助目标只保留方向和主要持仓风格，丢弃 entry bucket 和 recent-move
+    细节，避免 pair vocab 过碎。
+    """
+
+    parts = [part.strip() for part in label.split("+")]
+    direction = parts[0] if parts else "mixed"
+    entry = parts[1] if len(parts) > 1 else "none"
+    holding = parts[2] if len(parts) > 2 else "unknown"
+
+    if direction == "flat":
+        return "flat"
+    if holding == "switching":
+        return f"{direction}-switch"
+    if holding == "brief-trade":
+        return f"{direction}-brief"
+    if holding == "delayed-hold":
+        return f"{direction}-delayed"
+    if holding == "hold":
+        return f"{direction}-hold"
+    return f"{direction}-{entry}"
 
 
 def _masked_cross_entropy(

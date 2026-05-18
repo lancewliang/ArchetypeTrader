@@ -331,21 +331,28 @@ def compute_max_drawdown(cumulative_returns: np.ndarray) -> float:
     return float(np.max(peak - values))
 
 
-def compute_downside_control(decoded_drawdown: float, dp_drawdown: float) -> float:
+def compute_downside_control(
+    decoded_drawdown: float,
+    dp_drawdown: float,
+    *,
+    denominator_floor: float = 1.0,
+) -> float:
     """计算 decoded 相对 DP teacher 的回撤放大比例。
 
-    当 DP teacher 无回撤时，原始比例没有正分母。此时需要保留 hard gate 语义：
-    decoded 也无回撤则风险没有放大，返回 0；decoded 有回撤则返回 inf，让规则层
-    按超过阈值处理，而不是把可判定情况标成缺失。
+    当 DP teacher 无回撤或回撤极小时，原始比例没有稳定正分母。直接返回
+    ``inf`` 会让其他盈利指标全部健康的 checkpoint 被单点极端值阻断。因此这里
+    使用 ``max(dp_drawdown, denominator_floor)`` 作为分母下限，仍然惩罚 decoded
+    回撤，但避免 DP teacher 近零回撤导致比例爆炸。
     """
 
     if not np.isfinite(decoded_drawdown) or not np.isfinite(dp_drawdown):
         return _nan()
-    if dp_drawdown > _EPS:
-        return float(decoded_drawdown / dp_drawdown)
-    if decoded_drawdown <= _EPS:
+    if not np.isfinite(denominator_floor) or denominator_floor <= 0.0:
+        raise ValueError("denominator_floor must be positive and finite")
+    if decoded_drawdown <= _EPS and dp_drawdown <= _EPS:
         return 0.0
-    return float("inf")
+    denominator = max(float(dp_drawdown), float(denominator_floor))
+    return float(decoded_drawdown / denominator)
 
 
 def compute_top_contribution_ratio(returns: np.ndarray, top_ratio: float) -> float:
