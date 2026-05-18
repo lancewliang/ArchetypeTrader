@@ -355,6 +355,33 @@ def compute_downside_control(
     return float(decoded_drawdown / denominator)
 
 
+def compute_downside_denominator_floor(
+    dp_advantage: np.ndarray,
+    runtime_config: Phase1ValidationRuntimeConfig,
+) -> float:
+    """计算 downside_control 的动态分母 floor。
+
+    ``downside_control`` 比较的是累计收益路径的最大回撤。当 DP teacher 几乎
+    单调盈利时，``dp_drawdown`` 会接近 0，裸比例会把 decoded 的正常回撤放大成
+    很大的数。这里用 DP teacher 的总正优势作为机会尺度，取其中一小部分作为
+    分母下限：
+
+        max(min_floor, floor_fraction * sum(max(dp_advantage, 0)))
+
+    这样仍然保留 downside gate：decoded 回撤越大，指标越高；但在 teacher 无回撤
+    的特殊情况下，比较基准来自本验证集可交易机会的规模，而不是接近 0 的分母。
+    """
+
+    values = np.asarray(dp_advantage, dtype=np.float64)
+    positive = values[np.isfinite(values) & (values > 0.0)]
+    opportunity_floor = 0.0
+    if positive.size:
+        opportunity_floor = float(np.sum(positive)) * float(
+            runtime_config.downside_control_floor_fraction
+        )
+    return float(max(runtime_config.downside_control_min_floor, opportunity_floor))
+
+
 def compute_top_contribution_ratio(returns: np.ndarray, top_ratio: float) -> float:
     """计算正收益中头部样本贡献比例。
 
@@ -746,6 +773,10 @@ def compute_oracle_profitability_metrics(
     risk_adjusted_return = compute_risk_adjusted_return(decoded_execution.returns)
     decoded_drawdown = compute_max_drawdown(np.cumsum(decoded_execution.returns))
     dp_drawdown = compute_max_drawdown(np.cumsum(dp_execution.returns))
+    downside_denominator_floor = compute_downside_denominator_floor(
+        dp_advantage,
+        runtime_config,
+    )
 
     metrics = Phase1OracleProfitabilityMetrics(
         mean_decoded_advantage_vs_flat=float(np.nanmean(decoded_advantage)),
@@ -760,7 +791,11 @@ def compute_oracle_profitability_metrics(
             / (abs(np.nanmean(random_advantage)) + _EPS)
         ),
         retention_ratio=retention_ratio,
-        downside_control=compute_downside_control(decoded_drawdown, dp_drawdown),
+        downside_control=compute_downside_control(
+            decoded_drawdown,
+            dp_drawdown,
+            denominator_floor=downside_denominator_floor,
+        ),
         risk_adjusted_return=risk_adjusted_return,
         top_5_contribution=compute_top_contribution_ratio(
             decoded_advantage,

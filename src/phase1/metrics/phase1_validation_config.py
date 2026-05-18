@@ -100,6 +100,12 @@ class Phase1ValidationRuntimeConfig:
     # 收益集中度统计中的 top contribution 比例。默认检查收益最高 5% horizon。
     top_contribution_ratio: float = 0.05
 
+    # downside_control 分母的最小绝对 floor。用于 DP teacher 回撤接近 0 时避免比例爆炸。
+    downside_control_min_floor: float = 1.0
+
+    # downside_control 分母的 DP 正优势比例 floor。取 total positive DP advantage 的该比例。
+    downside_control_floor_fraction: float = 0.005
+
     # label predictability probe 的训练 epoch 数。用于第四层轻量 selector 可学习性验证。
     probe_epochs: int = 20
 
@@ -127,6 +133,10 @@ class Phase1ValidationRuntimeConfig:
             raise ValueError(
                 "code_alignment_prototype must be one of auto, action, code"
             )
+        if self.downside_control_min_floor <= 0.0:
+            raise ValueError("downside_control_min_floor must be positive")
+        if self.downside_control_floor_fraction < 0.0:
+            raise ValueError("downside_control_floor_fraction must be non-negative")
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
