@@ -84,7 +84,7 @@ class Phase1MainConfig:
     train_batch_id: str
     epochs: int = 300
     pretrain_epochs: int = 10
-    batch_size: int = 1024
+    batch_size: int = 2048
     learning_rate: float = 1e-3
     device: str = "cuda"
     horizon: int = 72
@@ -110,6 +110,8 @@ class Phase1MainConfig:
     dead_code_reset_max_fraction: float = 0.20
     dead_code_reset_jitter_scale: float = 1e-4
     dead_code_reset_seed: int = 1042
+    pair_class_weight_min: float = 0.50
+    pair_class_weight_max: float = 3.00
     morphology_label_vocab: tuple[str, ...] = ()
     pair_label_vocab: tuple[str, ...] = ()
 
@@ -145,6 +147,10 @@ class Phase1MainConfig:
             raise ValueError("dead_code_reset_max_fraction must be in [0, 1]")
         if self.dead_code_reset_jitter_scale < 0.0:
             raise ValueError("dead_code_reset_jitter_scale must be non-negative")
+        if self.pair_class_weight_min <= 0.0:
+            raise ValueError("pair_class_weight_min must be positive")
+        if self.pair_class_weight_max < self.pair_class_weight_min:
+            raise ValueError("pair_class_weight_max must be >= pair_class_weight_min")
 
 
 class Phase1MainFlow:
@@ -660,7 +666,10 @@ class Phase1MainFlow:
 
         self.model.train()
         totals = Phase1Metrics(stage=stage, split=split, epoch=epoch)
-        loss_config = Phase1LossConfig()
+        loss_config = Phase1LossConfig(
+            pair_class_weight_min=self.config.pair_class_weight_min,
+            pair_class_weight_max=self.config.pair_class_weight_max,
+        )
         for raw_batch in dataloader:
             batch = move_trajectory_batch_to_device(raw_batch, self.device)
             self.optimizer.zero_grad(set_to_none=True)

@@ -73,6 +73,10 @@ class Phase1LossConfig:
             ``z_e -> coarse morphology-motif pair`` 分类 loss 权重。该项直接针对
             weak_pair_code_ratio，默认高于 morphology 权重。这里的 pair 是训练用
             粗粒度 pair，不是 report 中的完整 morphology-motif 诊断字符串。
+        pair_class_weight_min / pair_class_weight_max:
+            pair CE 的类别权重裁剪范围。权重由 train split 中 coarse pair 的频次
+            生成，低频类权重较高，高频类权重较低；裁剪用于避免极低频 pair 主导
+            整个辅助目标。
         codebook_diversity_weight:
             codebook embedding 相似度惩罚权重。该项较轻，主要防止 embedding
             层面的重复和塌缩。
@@ -89,6 +93,8 @@ class Phase1LossConfig:
 
     morphology_aux_weight: float = 0.10
     pair_aux_weight: float = 0.20
+    pair_class_weight_min: float = 0.50
+    pair_class_weight_max: float = 3.00
     codebook_diversity_weight: float = 0.001
     prototype_diversity_weight: float = 0.01
     codebook_diversity_margin: float = 0.80
@@ -107,11 +113,17 @@ class Phase1AuxiliaryLabels:
 
     morphology: torch.Tensor
     pair: torch.Tensor
+    pair_class_weights: torch.Tensor | None = None
 
     def to(self, device: torch.device | str) -> "Phase1AuxiliaryLabels":
         return Phase1AuxiliaryLabels(
             morphology=self.morphology.to(device),
             pair=self.pair.to(device),
+            pair_class_weights=(
+                self.pair_class_weights.to(device)
+                if self.pair_class_weights is not None
+                else None
+            ),
         )
 
 
@@ -127,6 +139,7 @@ class Phase1AuxiliaryLabelStore:
 
     morphology_labels: torch.Tensor
     pair_labels: torch.Tensor
+    pair_class_weights: torch.Tensor
     morphology_vocab: tuple[str, ...]
     pair_vocab: tuple[str, ...]
 
@@ -140,6 +153,7 @@ class Phase1AuxiliaryLabelStore:
         return Phase1AuxiliaryLabels(
             morphology=self.morphology_labels.index_select(0, indices).to(device),
             pair=self.pair_labels.index_select(0, indices).to(device),
+            pair_class_weights=self.pair_class_weights.to(device),
         )
 
 
@@ -224,6 +238,10 @@ def build_phase1_auxiliary_label_store(
     return Phase1AuxiliaryLabelStore(
         morphology_labels=_encode_labels(morphologies, morphology_vocab_tuple),
         pair_labels=_encode_labels(pairs, pair_vocab_tuple),
+        pair_class_weights=_class_balanced_weights(
+            _encode_labels(pairs, pair_vocab_tuple),
+            num_classes=len(pair_vocab_tuple),
+        ),
         morphology_vocab=morphology_vocab_tuple,
         pair_vocab=pair_vocab_tuple,
     )
@@ -276,6 +294,11 @@ def compute_phase1_vq_training_loss(
             outputs.pair_logits,
             aux_labels.pair,
             fallback=zero,
+            class_weights=_clamped_class_weights(
+                aux_labels.pair_class_weights,
+                min_weight=config.pair_class_weight_min,
+                max_weight=config.pair_class_weight_max,
+            ),
         )
 
     codebook_diversity = (
@@ -336,6 +359,49 @@ def _encode_labels(labels: np.ndarray, vocab: Sequence[str]) -> torch.Tensor:
     return torch.as_tensor(encoded, dtype=torch.long)
 
 
+def _class_balanced_weights(
+    targets: torch.Tensor,
+    *,
+    num_classes: int,
+) -> torch.Tensor:
+    """根据 train split 类别频次生成温和的 class-balanced CE 权重。
+
+    公式使用 ``sqrt(mean_count / count)``，比 ``1 / count`` 更平滑。这样可以
+    减少高频 pair 对辅助目标的主导，同时不会让 support 极低的 pair 产生过大的
+    梯度。
+    """
+
+    if num_classes <= 0:
+        raise ValueError("num_classes must be positive")
+    valid = targets[(targets >= 0) & (targets < num_classes)].long()
+    if valid.numel() == 0:
+        return torch.ones(num_classes, dtype=torch.float32)
+    counts = torch.bincount(valid, minlength=num_classes).float()
+    positive = counts[counts > 0]
+    mean_count = torch.mean(positive) if positive.numel() else counts.new_tensor(1.0)
+    weights = torch.ones(num_classes, dtype=torch.float32)
+    seen = counts > 0
+    weights[seen] = torch.sqrt(mean_count / counts[seen].clamp_min(1.0))
+    return weights
+
+
+def _clamped_class_weights(
+    weights: torch.Tensor | None,
+    *,
+    min_weight: float,
+    max_weight: float,
+) -> torch.Tensor | None:
+    """裁剪 class weights，防止低频类别过度主导 pair auxiliary loss。"""
+
+    if weights is None:
+        return None
+    if min_weight <= 0.0:
+        raise ValueError("min_weight must be positive")
+    if max_weight < min_weight:
+        raise ValueError("max_weight must be >= min_weight")
+    return torch.clamp(weights.float(), min=min_weight, max=max_weight)
+
+
 def _coarse_morphology(label: str) -> str:
     """把 validation morphology 标签映射成训练用粗粒度市场结构。
 
@@ -386,6 +452,7 @@ def _masked_cross_entropy(
     targets: torch.Tensor,
     *,
     fallback: torch.Tensor,
+    class_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """带 ``IGNORE_INDEX`` 支持的分类 loss。"""
 
@@ -394,7 +461,8 @@ def _masked_cross_entropy(
     mask = targets != IGNORE_INDEX
     if not bool(torch.any(mask)):
         return fallback
-    return F.cross_entropy(logits[mask], targets[mask].long())
+    weight = class_weights.to(logits.device) if class_weights is not None else None
+    return F.cross_entropy(logits[mask], targets[mask].long(), weight=weight)
 
 
 def _codebook_diversity_loss(
