@@ -208,8 +208,8 @@ _METRIC_DESCRIPTIONS: dict[str, str] = {
         "保留了多少 teacher 盈利能力。"
     ),
     "downside_control": (
-        "decoded 策略对亏损或下行风险的控制指标；用于避免平均收益为正但"
-        "回撤结构过差。"
+        "decoded 策略累计收益曲线的最大回撤；用于避免平均收益为正但"
+        "自身回撤结构过差。"
     ),
     "risk_adjusted_return": (
         "decoded return 的风险调整收益；用于把收益和波动/下行风险一起评估。"

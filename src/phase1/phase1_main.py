@@ -76,7 +76,7 @@ class Phase1MainConfig:
 
     pair: str
     train_batch_id: str
-    epochs: int = 200
+    epochs: int = 300
     pretrain_epochs: int = 10
     batch_size: int = 2048
     learning_rate: float = 1e-3
@@ -84,7 +84,7 @@ class Phase1MainConfig:
     horizon: int = 72
     hidden_dim: int = 128
     latent_dim: int = 16
-    num_archetypes: int = 8
+    num_archetypes: int = 10
     action_dim: int = 3
     commitment_cost: float = 0.25
     num_layers: int = 1

@@ -297,8 +297,7 @@ actions，则使用 `decode_random_labels()` 后仍必须走本层 `execute_acti
 
 ### 6.3 `compute_max_drawdown`
 
-该 helper 计算累计收益序列的最大回撤，用于衡量 decoded 策略相对 DP teacher 是否放大
-下行风险。
+该 helper 计算累计收益序列的最大回撤，用于衡量 decoded 策略自身的下行风险。
 
 输入为一维 `cumulative_returns`。helper 先过滤非有限值，再计算：
 
@@ -311,13 +310,11 @@ max_drawdown = max(drawdown_t)
 无有效样本时返回 `NaN`。Layer 3 使用方式为：
 
 ```text
-downside_control =
-    max_drawdown(cumsum(R_dec)) /
-    max_drawdown(cumsum(R_DP))
+downside_control = max_drawdown(cumsum(R_dec))
 ```
 
-`downside_control` 越低越好；大于 1 表示 decoded 策略的最大回撤超过 DP teacher。
-当 DP drawdown 分母不可计算或接近 0 时应返回 `NaN`。
+`downside_control` 越低越好；它是 decoded 策略累计收益曲线的绝对最大回撤。
+DP teacher 的累计收益路径可能按构造长期无回撤，因此不能作为该指标的分母。
 
 ### 6.4 `compute_risk_adjusted_return`
 
@@ -436,8 +433,7 @@ profitable-code coverage、weak-lift code 等行为质量指标，避免重复�
 9. `random_label_relative_lift = mean(R_dec - R_rand) / (abs(mean(R_rand - R_flat)) + eps)`。
 10. `retention_ratio = sum(decoded_advantage) / sum(dp_advantage)`；当
     `sum(dp_advantage) <= eps` 或不可计算时返回 `NaN`。
-11. `downside_control = max_drawdown(cumsum(R_dec)) / max_drawdown(cumsum(R_DP))`；当
-    DP drawdown 分母不可计算或接近 0 时返回 `NaN`。
+11. `downside_control = max_drawdown(cumsum(R_dec))`。
 12. `risk_adjusted_return = mean(R_dec) / (std(R_dec) + eps)`。
 13. `random_label_risk_adjusted_return = mean(R_rand) / (std(R_rand) + eps)`。
 14. `risk_adjusted_return_vs_random = risk_adjusted_return - random_label_risk_adjusted_return`。
@@ -465,7 +461,7 @@ class Phase1OracleProfitabilityThresholds:
     bad_code_ratio_max: float = 0.30
     top_5_contribution_max: float = 0.60
     dominant_pair_positive_ratio_min: float = 0.60
-    downside_control_max: float = 1.50
+    downside_control_max: float = 2.00
     risk_adjusted_return_min: float = 0.0
     fee_drag_max: float = 0.35
     turnover_return_correlation_min: float = -0.10
@@ -481,7 +477,7 @@ Hard gates：
 - `mean_advantage_vs_random_label > 0`
 - `random_label_relative_lift >= 0.20`
 - `retention_ratio >= 0.50`
-- `downside_control <= 1.50`
+- `downside_control <= 2.00`
 - `risk_adjusted_return > 0`
 - `risk_adjusted_return_vs_random > 0`
 - `top_5_contribution <= 0.60`

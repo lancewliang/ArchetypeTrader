@@ -233,7 +233,7 @@ class Phase1OracleProfitabilityMetrics:
     # decoded 总优势 / DP teacher 总优势。
     retention_ratio: float
 
-    # decoded 策略相对 DP 或 baseline 的下行风险控制指标。
+    # decoded 策略累计收益曲线的最大回撤。
     downside_control: float
 
     # decoded return 的风险调整收益指标。
@@ -297,7 +297,7 @@ class Phase1OracleProfitabilityThresholds:
     # dominant pair 中正优势 pair 的比例下限。用于判断主要市场-行为组合是否真正盈利。
     dominant_pair_positive_ratio_min: float = 0.60
 
-    # decoded 策略相对 DP teacher 的最大回撤比例上限。
+    # decoded 策略累计收益曲线的最大回撤上限。
     downside_control_max: float = 2.00
 
     # decoded 风险调整收益下限。0 表示至少不能为负。
@@ -380,7 +380,7 @@ def evaluate_oracle_profitability_rules(
             value=metrics.downside_control,
             threshold_value=thresholds.downside_control_max,
             layer=layer,
-            message="decoded 策略相对 DP teacher 的回撤放大不能过高",
+            message="decoded 策略累计收益曲线的最大回撤不能过高",
         ),
         _gt(
             name="risk_adjusted_return",

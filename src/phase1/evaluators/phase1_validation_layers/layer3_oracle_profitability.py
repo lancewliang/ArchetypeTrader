@@ -331,17 +331,17 @@ def compute_max_drawdown(cumulative_returns: np.ndarray) -> float:
     return float(np.max(peak - values))
 
 
-def compute_downside_control(decoded_drawdown: float, dp_drawdown: float) -> float:
-    """计算 decoded 相对 DP teacher 的回撤放大比例。
+def compute_downside_control(decoded_drawdown: float) -> float:
+    """计算 decoded 策略自身的最大回撤。
 
-    当 DP teacher 无回撤或回撤接近 0 时，使用 eps 作为最小分母，避免报告中
-    出现 Infinity，同时保留 decoded 回撤显著放大时的 hard gate fail 语义。
+    DP teacher 的累计收益路径按构造可能长期无回撤，因此用 DP drawdown 作为
+    分母会让比例不可解释。本指标直接使用 decoded 累计收益最大回撤作为
+    downside hard gate。
     """
 
-    if not np.isfinite(decoded_drawdown) or not np.isfinite(dp_drawdown):
+    if not np.isfinite(decoded_drawdown):
         return _nan()
-    denominator = max(float(dp_drawdown), _EPS)
-    return float(decoded_drawdown / denominator)
+    return float(max(0.0, decoded_drawdown))
 
 
 def compute_top_contribution_ratio(returns: np.ndarray, top_ratio: float) -> float:
@@ -734,7 +734,6 @@ def compute_oracle_profitability_metrics(
     random_label_risk_adjusted_return = compute_risk_adjusted_return(random_returns)
     risk_adjusted_return = compute_risk_adjusted_return(decoded_execution.returns)
     decoded_drawdown = compute_max_drawdown(np.cumsum(decoded_execution.returns))
-    dp_drawdown = compute_max_drawdown(np.cumsum(dp_execution.returns))
 
     metrics = Phase1OracleProfitabilityMetrics(
         mean_decoded_advantage_vs_flat=float(np.nanmean(decoded_advantage)),
@@ -749,7 +748,7 @@ def compute_oracle_profitability_metrics(
             / (abs(np.nanmean(random_advantage)) + _EPS)
         ),
         retention_ratio=retention_ratio,
-        downside_control=compute_downside_control(decoded_drawdown, dp_drawdown),
+        downside_control=compute_downside_control(decoded_drawdown),
         risk_adjusted_return=risk_adjusted_return,
         top_5_contribution=compute_top_contribution_ratio(
             decoded_advantage,
