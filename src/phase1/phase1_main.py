@@ -90,7 +90,7 @@ class Phase1MainConfig:
     horizon: int = 72
     hidden_dim: int = 128
     latent_dim: int = 16
-    num_archetypes: int = 10
+    num_archetypes: int = 8
     action_dim: int = 3
     commitment_cost: float = 0.25
     num_layers: int = 1
@@ -105,11 +105,12 @@ class Phase1MainConfig:
     dead_code_reset_enabled: bool = True
     dead_code_reset_interval: int = 1
     dead_code_reset_start_epoch: int = 1
+    dead_code_reset_end_epoch: int = 60
     dead_code_reset_max_samples: int = 50_000
     dead_code_reset_min_occupancy: float = 0.001
     dead_code_reset_max_fraction: float = 0.20
     dead_code_reset_jitter_scale: float = 1e-4
-    dead_code_reset_seed: int = 1042
+    dead_code_reset_seed: int = 42
     morphology_label_vocab: tuple[str, ...] = ()
     pair_label_vocab: tuple[str, ...] = ()
 
@@ -137,6 +138,10 @@ class Phase1MainConfig:
             raise ValueError("dead_code_reset_interval must be >= 1")
         if self.dead_code_reset_start_epoch < 1:
             raise ValueError("dead_code_reset_start_epoch must be >= 1")
+        if self.dead_code_reset_end_epoch < self.dead_code_reset_start_epoch:
+            raise ValueError(
+                "dead_code_reset_end_epoch must be >= dead_code_reset_start_epoch"
+            )
         if self.dead_code_reset_max_samples < 1:
             raise ValueError("dead_code_reset_max_samples must be >= 1")
         if self.dead_code_reset_min_occupancy < 0.0:
@@ -145,11 +150,7 @@ class Phase1MainConfig:
             raise ValueError("dead_code_reset_max_fraction must be in [0, 1]")
         if self.dead_code_reset_jitter_scale < 0.0:
             raise ValueError("dead_code_reset_jitter_scale must be non-negative")
-        if self.pair_class_weight_min <= 0.0:
-            raise ValueError("pair_class_weight_min must be positive")
-        if self.pair_class_weight_max < self.pair_class_weight_min:
-            raise ValueError("pair_class_weight_max must be >= pair_class_weight_min")
-
+        
 
 class Phase1MainFlow:
     """Phase I Archetype Discovery 的主流程编排骨架。
@@ -745,6 +746,8 @@ class Phase1MainFlow:
         if not self.config.dead_code_reset_enabled:
             return False
         if epoch < self.config.dead_code_reset_start_epoch:
+            return False
+        if epoch > self.config.dead_code_reset_end_epoch:
             return False
         return epoch % self.config.dead_code_reset_interval == 0
 
