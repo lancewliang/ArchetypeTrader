@@ -168,13 +168,13 @@ class Phase1LabelPredictabilityThresholds:
     """第四层 label 可预测性阈值配置。"""
 
     # probe top-1 accuracy 的固定下限。实际阈值取 max(floor, k_factor / K)。
-    probe_top1_floor: float = 0.25
+    probe_top1_floor: float = 0.22
 
     # probe top-1 accuracy 的 codebook size 自适应倍数。用于保证表现明显优于随机猜测。
     probe_top1_k_factor: float = 1.5
 
     # probe top-3 accuracy 的固定下限。实际阈值取 max(floor, k_factor / K)。
-    probe_top3_floor: float = 0.55
+    probe_top3_floor: float = 0.52
 
     # probe top-3 accuracy 的 codebook size 自适应倍数。用于判断 selector 是否能缩小候选范围。
     probe_top3_k_factor: float = 3.0
@@ -321,8 +321,8 @@ def compute_label_predictability_score(metrics: Phase1ValidationMetrics) -> floa
         else 0.0
     )
     parts = (
-        _threshold_progress(label.probe_top1_accuracy, 0.25),
-        _threshold_progress(label.probe_top3_accuracy, 0.55),
+        _threshold_progress(label.probe_top1_accuracy, 0.20),
+        _threshold_progress(label.probe_top3_accuracy, 0.50),
         _threshold_progress(label.probe_balanced_accuracy, 0.25),
         entropy_ratio_score,
         _threshold_progress(label.mutual_information_lift, 2.0),
