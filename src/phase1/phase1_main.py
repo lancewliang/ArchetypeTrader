@@ -90,7 +90,7 @@ class Phase1MainConfig:
     horizon: int = 72
     hidden_dim: int = 128
     latent_dim: int = 16
-    num_archetypes: int = 8
+    num_archetypes: int = 10
     action_dim: int = 3
     commitment_cost: float = 0.25
     num_layers: int = 1
