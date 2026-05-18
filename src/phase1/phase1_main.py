@@ -76,7 +76,7 @@ class Phase1MainConfig:
 
     pair: str
     train_batch_id: str
-    epochs: int = 300
+    epochs: int = 200
     pretrain_epochs: int = 10
     batch_size: int = 1024
     learning_rate: float = 1e-3
@@ -84,13 +84,13 @@ class Phase1MainConfig:
     horizon: int = 72
     hidden_dim: int = 128
     latent_dim: int = 16
-    num_archetypes: int = 10
+    num_archetypes: int = 6
     action_dim: int = 3
     commitment_cost: float = 0.25
     num_layers: int = 1
     dropout: float = 0.0
     gamma: float = 0.9
-    validation_interval: int = 30
+    validation_interval: int = 20
     codebook_init_method: str = "directional_kmeans"
     codebook_init_max_samples: int = 50_000
     codebook_init_n_init: int = 10
