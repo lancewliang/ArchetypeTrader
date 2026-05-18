@@ -6,8 +6,8 @@
     morphology、mutual information lift 和 probe decoded return retention。
 
 设计边界:
-    - probe 只使用 horizon 起点可见状态，不读取未来价格路径、demo action 或 reward
-      作为分类输入；
+    - probe 只使用 horizon 起点状态和上一段可见状态摘要，不读取未来价格路径、
+      demo action 或 reward 作为分类输入；
     - 本文件只计算 raw metrics，不判断 pass/fail；
     - probe 当前采用 deterministic linear classifier，不训练主模型；
     - probe return retention 直接复用统一交易执行工具；
@@ -97,19 +97,37 @@ def build_probe_features(states: np.ndarray) -> np.ndarray:
         states: 状态数组，通常形状为 ``[N, H, state_dim]``。
 
     输出:
-        ``[N, feature_dim]`` 形状的 probe feature。三维输入只取 horizon 起点
-        ``states[:, 0, :]``，避免泄露未来信息。
+        ``[N, feature_dim]`` 形状的 probe feature。三维输入构造低维可见上下文
+        摘要，按顺序拼接当前 horizon 起点 ``states[:, 0, :]``，以及上一段
+        horizon 的 ``last/mean/std/trend``。第一个样本没有上一段，使用零摘要。
 
     使用场景:
         Layer 4 probe 训练和 validation evaluation 的统一 feature 构造入口。
     """
 
     values = np.asarray(states, dtype=np.float64)
-    if values.ndim == 3:
-        return values[:, 0, :].reshape(values.shape[0], -1)
-    if values.ndim == 2:
-        return values
-    return values.reshape(values.shape[0], -1)
+
+    if values.shape[1] == 0:
+        raise ValueError("states must contain at least one timestep")
+    current_start = values[:, 0, :].reshape(values.shape[0], -1)
+    previous_segments = np.zeros_like(values)
+    if values.shape[0] > 1:
+        previous_segments[1:] = values[:-1]
+    previous_last = previous_segments[:, -1, :]
+    previous_mean = np.mean(previous_segments, axis=1)
+    previous_std = np.std(previous_segments, axis=1)
+    previous_trend = previous_segments[:, -1, :] - previous_segments[:, 0, :]
+    return np.concatenate(
+        [
+            current_start,
+            previous_last,
+            previous_mean,
+            previous_std,
+            previous_trend,
+        ],
+        axis=1,
+    )
+
 
 
 def train_probe_classifier(
