@@ -51,6 +51,8 @@ class VqModelOutputs:
     """VQ archetype 模型的一次前向输出。
 
     ``action_logits`` 用于重构 DP teacher action；
+    ``morphology_logits`` / ``pair_logits`` 是基于连续 latent ``z_e`` 的辅助头；
+    ``morphology_logits_q`` / ``pair_logits_q`` 是基于量化 latent ``z_q`` 的辅助头；
     ``code_id`` 是每条 trajectory 被分配到的 archetype label；
     ``total_loss`` 是基础训练损失，包含 action reconstruction 和 VQ loss。
     更复杂的 usage regularization、contrastive loss、alignment loss 应该在
@@ -69,6 +71,8 @@ class VqModelOutputs:
     commitment_loss: torch.Tensor
     morphology_logits: torch.Tensor | None
     pair_logits: torch.Tensor | None
+    morphology_logits_q: torch.Tensor | None
+    pair_logits_q: torch.Tensor | None
     total_loss: torch.Tensor
 
 
@@ -373,7 +377,15 @@ class ArchetypeVQModel(nn.Module):
             if num_morphology_classes > 0
             else None
         )
+        self.morphology_head_q = (
+            nn.Linear(latent_dim, num_morphology_classes)
+            if num_morphology_classes > 0
+            else None
+        )
         self.pair_head = (
+            nn.Linear(latent_dim, num_pair_classes) if num_pair_classes > 0 else None
+        )
+        self.pair_head_q = (
             nn.Linear(latent_dim, num_pair_classes) if num_pair_classes > 0 else None
         )
 
@@ -408,7 +420,9 @@ class ArchetypeVQModel(nn.Module):
         z_e = self.encoder(batch)
         quantize_output = self.quantizer(z_e)
         action_logits = self.decoder(states, quantize_output.quantized)
-        morphology_logits, pair_logits = self._auxiliary_logits(z_e)
+        morphology_logits, pair_logits, morphology_logits_q, pair_logits_q = (
+            self._auxiliary_logits(z_e=z_e, z_q=quantize_output.quantized)
+        )
         return self._build_outputs(
             action_logits=action_logits,
             actions=actions,
@@ -421,6 +435,8 @@ class ArchetypeVQModel(nn.Module):
             commitment_loss=quantize_output.commitment_loss,
             morphology_logits=morphology_logits,
             pair_logits=pair_logits,
+            morphology_logits_q=morphology_logits_q,
+            pair_logits_q=pair_logits_q,
         )
 
     def forward_pretrain(self, batch: TrajectoryTensorBatch) -> VqModelOutputs:
@@ -448,7 +464,9 @@ class ArchetypeVQModel(nn.Module):
         states, actions, _ = batch
         z_e = self.encoder(batch)
         action_logits = self.decoder(states, z_e)
-        morphology_logits, pair_logits = self._auxiliary_logits(z_e)
+        morphology_logits, pair_logits, morphology_logits_q, pair_logits_q = (
+            self._auxiliary_logits(z_e=z_e, z_q=z_e)
+        )
         zero = z_e.new_zeros(())
         code_indices = z_e.new_zeros((z_e.shape[0],), dtype=torch.long)
         return self._build_outputs(
@@ -463,6 +481,8 @@ class ArchetypeVQModel(nn.Module):
             commitment_loss=zero,
             morphology_logits=morphology_logits,
             pair_logits=pair_logits,
+            morphology_logits_q=morphology_logits_q,
+            pair_logits_q=pair_logits_q,
         )
 
     @torch.no_grad()
@@ -568,15 +588,26 @@ class ArchetypeVQModel(nn.Module):
 
     def _auxiliary_logits(
         self,
+        *,
         z_e: LatentTensor,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """用 encoder latent 预测训练期辅助标签。"""
+        z_q: LatentTensor,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """用连续 latent 和 quantized latent 预测训练期辅助标签。"""
 
         morphology_logits = (
             self.morphology_head(z_e) if self.morphology_head is not None else None
         )
         pair_logits = self.pair_head(z_e) if self.pair_head is not None else None
-        return morphology_logits, pair_logits
+        morphology_logits_q = (
+            self.morphology_head_q(z_q) if self.morphology_head_q is not None else None
+        )
+        pair_logits_q = self.pair_head_q(z_q) if self.pair_head_q is not None else None
+        return morphology_logits, pair_logits, morphology_logits_q, pair_logits_q
 
     def _build_outputs(
         self,
@@ -592,6 +623,8 @@ class ArchetypeVQModel(nn.Module):
         commitment_loss: torch.Tensor,
         morphology_logits: torch.Tensor | None,
         pair_logits: torch.Tensor | None,
+        morphology_logits_q: torch.Tensor | None,
+        pair_logits_q: torch.Tensor | None,
     ) -> VqModelOutputs:
         """统一计算 loss 并打包模型输出。
 
@@ -632,6 +665,8 @@ class ArchetypeVQModel(nn.Module):
             commitment_loss=commitment_loss,
             morphology_logits=morphology_logits,
             pair_logits=pair_logits,
+            morphology_logits_q=morphology_logits_q,
+            pair_logits_q=pair_logits_q,
             total_loss=total_loss,
         )
 

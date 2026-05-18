@@ -566,7 +566,6 @@ class Phase1ArtifactStore(DataFileStore):
             "config",
             "model_state_dict",
             "optimizer_state_dict",
-            "metrics",
         }
         missing_keys = required_keys.difference(payload)
         if missing_keys:
@@ -581,7 +580,6 @@ class Phase1ArtifactStore(DataFileStore):
         config = payload["config"]
         model_state_dict = payload["model_state_dict"]
         optimizer_state_dict = payload["optimizer_state_dict"]
-        metrics = payload["metrics"]
         if not isinstance(config, Mapping):
             raise ValueError(
                 f"invalid phase1 checkpoint {path}: config must be a mapping"
@@ -593,10 +591,6 @@ class Phase1ArtifactStore(DataFileStore):
         if not isinstance(optimizer_state_dict, Mapping):
             raise ValueError(
                 f"invalid phase1 checkpoint {path}: optimizer_state_dict must be a mapping"
-            )
-        if not isinstance(metrics, Mapping):
-            raise ValueError(
-                f"invalid phase1 checkpoint {path}: metrics must be a mapping"
             )
 
         try:
@@ -610,15 +604,6 @@ class Phase1ArtifactStore(DataFileStore):
         if not isinstance(is_best, bool):
             raise ValueError(f"invalid phase1 checkpoint {path}: is_best must be a bool")
 
-        restored_metrics: dict[str, dict[str, object]] = {}
-        for split, split_metrics in metrics.items():
-            if not isinstance(split_metrics, Mapping):
-                raise ValueError(
-                    f"invalid phase1 checkpoint {path}: "
-                    f"metrics[{split!r}] must be a mapping"
-                )
-            restored_metrics[str(split)] = dict(split_metrics)
-
         return Phase1Checkpoint(
             stage=stage,
             epoch=epoch,
@@ -626,7 +611,6 @@ class Phase1ArtifactStore(DataFileStore):
             config=dict(config),
             model_state_dict=dict(model_state_dict),
             optimizer_state_dict=dict(optimizer_state_dict),
-            metrics=restored_metrics,
         )
 
     def _write_sha256_sidecar(self, path: Path, digest: str) -> None:

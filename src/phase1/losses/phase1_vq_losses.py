@@ -17,14 +17,18 @@
     1. morphology auxiliary classification:
        要求 encoder latent ``z_e`` 可预测市场形态，防止 code 只记动作而忽略
        market structure。
-    2. coarse morphology-motif pair auxiliary classification:
+    2. quantized latent auxiliary classification:
+       要求离散后的 ``z_q`` 也能预测 morphology / coarse pair，直接把监督信号
+       压到 codebook 对应的离散表示上，避免只有连续 encoder latent 学到语义、
+       code 却仍然只是动作 proxy。
+    3. coarse morphology-motif pair auxiliary classification:
        直接优化 weak_pair_code_ratio 对应的监督信号，让 latent 表示同时包含
        “什么市场结构”和“采取什么行为模式”。训练目标使用 coarse pair，而不是
        validation report 中的完整 motif 字符串，避免 K=10 的 codebook 被几十个
        细粒度 pair 类别拉扯。
-    3. codebook diversity regularization:
+    4. codebook diversity regularization:
        约束 codebook embedding 不要过度相似，减少多个 code 吸收同一类 latent。
-    4. prototype diversity regularization:
+    5. prototype diversity regularization:
        约束不同 code 通过 decoder 表达出的 action prototype 不要过度相似，直接
        对应 duplicate_code_pair_count 的行为重复风险。
 
@@ -69,10 +73,16 @@ class Phase1LossConfig:
     字段说明:
         morphology_aux_weight:
             ``z_e -> morphology`` 分类 loss 权重。它提供较粗粒度的市场结构监督。
+        morphology_aux_weight_q:
+            ``z_q -> morphology`` 分类 loss 权重。它把同一监督信号再压到离散
+            code 表示上，帮助 codebook 学到可解释的市场结构。
         pair_aux_weight:
             ``z_e -> coarse morphology-motif pair`` 分类 loss 权重。该项直接针对
             weak_pair_code_ratio，默认高于 morphology 权重。这里的 pair 是训练用
             粗粒度 pair，不是 report 中的完整 morphology-motif 诊断字符串。
+        pair_aux_weight_q:
+            ``z_q -> coarse morphology-motif pair`` 分类 loss 权重。它让 pair 监督
+            同时约束量化前后的 latent，减轻多个 code 学成近似 action prototype。
         pair_class_weight_min / pair_class_weight_max:
             pair CE 的类别权重裁剪范围。权重由 train split 中 coarse pair 的频次
             生成，低频类权重较高，高频类权重较低；裁剪用于避免极低频 pair 主导
@@ -92,7 +102,9 @@ class Phase1LossConfig:
     """
 
     morphology_aux_weight: float = 0.10
+    morphology_aux_weight_q: float = 0.05
     pair_aux_weight: float = 0.20
+    pair_aux_weight_q: float = 0.10
     pair_class_weight_min: float = 0.50
     pair_class_weight_max: float = 3.00
     codebook_diversity_weight: float = 0.001
@@ -258,17 +270,19 @@ def compute_phase1_vq_training_loss(
     """组合基础 VQ loss、辅助监督 loss 和 diversity regularization。
 
     组合公式:
-        ``total = base + w_morph * L_morph + w_pair * L_pair
+        ``total = base + w_morph_e * L_morph_e + w_morph_q * L_morph_q
+        + w_pair_e * L_pair_e + w_pair_q * L_pair_q
         + w_cb_div * L_cb_div + w_proto_div * L_proto_div``
 
     其中:
         ``base``:
             模型原始 loss，包含 action reconstruction 和 VQ codebook/commitment。
-        ``L_morph``:
-            ``outputs.morphology_logits`` 对 train morphology label 的 CE loss。
-        ``L_pair``:
-            ``outputs.pair_logits`` 对 train coarse morphology-motif pair label 的
-            CE loss。
+        ``L_morph_e`` / ``L_morph_q``:
+            分别是 ``outputs.morphology_logits`` 和 ``outputs.morphology_logits_q``
+            对 train morphology label 的 CE loss。
+        ``L_pair_e`` / ``L_pair_q``:
+            分别是 ``outputs.pair_logits`` 和 ``outputs.pair_logits_q`` 对 train
+            coarse morphology-motif pair label 的 CE loss。
         ``L_cb_div``:
             codebook embedding 的 off-diagonal cosine similarity margin penalty。
         ``L_proto_div``:
@@ -283,10 +297,22 @@ def compute_phase1_vq_training_loss(
     base_loss = outputs.total_loss
     zero = base_loss.new_zeros(())
     morphology_loss = zero
+    morphology_loss_q = zero
     pair_loss = zero
+    pair_loss_q = zero
     if aux_labels is not None:
+        pair_class_weights = _clamped_class_weights(
+            aux_labels.pair_class_weights,
+            min_weight=config.pair_class_weight_min,
+            max_weight=config.pair_class_weight_max,
+        )
         morphology_loss = _masked_cross_entropy(
             outputs.morphology_logits,
+            aux_labels.morphology,
+            fallback=zero,
+        )
+        morphology_loss_q = _masked_cross_entropy(
+            outputs.morphology_logits_q,
             aux_labels.morphology,
             fallback=zero,
         )
@@ -294,11 +320,13 @@ def compute_phase1_vq_training_loss(
             outputs.pair_logits,
             aux_labels.pair,
             fallback=zero,
-            class_weights=_clamped_class_weights(
-                aux_labels.pair_class_weights,
-                min_weight=config.pair_class_weight_min,
-                max_weight=config.pair_class_weight_max,
-            ),
+            class_weights=pair_class_weights,
+        )
+        pair_loss_q = _masked_cross_entropy(
+            outputs.pair_logits_q,
+            aux_labels.pair,
+            fallback=zero,
+            class_weights=pair_class_weights,
         )
 
     codebook_diversity = (
@@ -322,14 +350,16 @@ def compute_phase1_vq_training_loss(
     total_loss = (
         base_loss
         + config.morphology_aux_weight * morphology_loss
+        + config.morphology_aux_weight_q * morphology_loss_q
         + config.pair_aux_weight * pair_loss
+        + config.pair_aux_weight_q * pair_loss_q
         + config.codebook_diversity_weight * codebook_diversity
         + config.prototype_diversity_weight * prototype_diversity
     )
     return Phase1VQLossBreakdown(
         base_loss=base_loss,
-        morphology_loss=morphology_loss,
-        pair_loss=pair_loss,
+        morphology_loss=morphology_loss + morphology_loss_q,
+        pair_loss=pair_loss + pair_loss_q,
         codebook_diversity_loss=codebook_diversity,
         prototype_diversity_loss=prototype_diversity,
         total_loss=total_loss,

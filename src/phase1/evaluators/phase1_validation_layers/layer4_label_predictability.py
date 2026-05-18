@@ -112,10 +112,31 @@ def build_probe_features(states: np.ndarray) -> np.ndarray:
     return values.reshape(values.shape[0], -1)
 
 
+def _balanced_class_weights(
+    target_indices: np.ndarray,
+    num_classes: int,
+) -> np.ndarray:
+    """根据训练集标签频次生成轻量 class-balanced probe 权重。"""
+
+    if num_classes <= 0:
+        raise ValueError("num_classes must be positive")
+    labels = np.asarray(target_indices, dtype=np.int64)
+    if labels.size == 0:
+        return np.ones(num_classes, dtype=np.float64)
+    counts = np.bincount(labels, minlength=num_classes).astype(np.float64)
+    positive = counts[counts > 0]
+    mean_count = float(np.mean(positive)) if positive.size else 1.0
+    weights = np.ones(num_classes, dtype=np.float64)
+    seen = counts > 0
+    weights[seen] = np.sqrt(mean_count / np.maximum(counts[seen], 1.0))
+    return weights
+
+
 def train_probe_classifier(
     train_x: np.ndarray,
     train_y: np.ndarray,
     runtime_config: Phase1ValidationRuntimeConfig,
+    class_weights: np.ndarray | None = None,
 ) -> ProbeModel:
     """训练 deterministic linear probe。
 
@@ -123,6 +144,7 @@ def train_probe_classifier(
         train_x: probe train features，形状为 ``[N, D]``。
         train_y: assigned code labels，形状为 ``[N]``。
         runtime_config: 提供 probe 训练 epoch、learning rate、batch size 和 seed。
+        class_weights: 可选 class-balanced 权重，按 ``unique_labels`` 顺序排列。
 
     输出:
         ``LinearProbe``，包含标准化参数和训练后的线性分类器参数。
@@ -130,7 +152,8 @@ def train_probe_classifier(
     使用场景:
         使用 runtime config 中的 probe_epochs、probe_learning_rate 和
         probe_batch_size，以低成本、可复现方式估计 label 是否和可见状态存在
-        可学习关系。
+        可学习关系。训练过程默认使用 class-balanced cross entropy，避免 probe
+        只学会预测高频 code。
     """
 
     features = np.asarray(train_x, dtype=np.float64)
@@ -155,10 +178,18 @@ def train_probe_classifier(
         [label_to_index[int(label)] for label in labels],
         dtype=np.int64,
     )
+    if class_weights is None:
+        class_weights = _balanced_class_weights(target_indices, unique_labels.size)
+    class_weights_array = np.asarray(class_weights, dtype=np.float32)
+    if class_weights_array.ndim != 1 or class_weights_array.shape[0] != unique_labels.size:
+        raise ValueError(
+            "class_weights must be a 1D array aligned with unique_labels"
+        )
 
     torch.manual_seed(int(runtime_config.random_seed))
     x_tensor = torch.as_tensor(normalized, dtype=torch.float32)
     y_tensor = torch.as_tensor(target_indices, dtype=torch.long)
+    weight_tensor = torch.as_tensor(class_weights_array, dtype=torch.float32)
     model = torch.nn.Linear(x_tensor.shape[1], unique_labels.size)
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -178,6 +209,7 @@ def train_probe_classifier(
             loss = torch.nn.functional.cross_entropy(
                 model(x_tensor[batch_index]),
                 y_tensor[batch_index],
+                weight=weight_tensor,
             )
             loss.backward()
             optimizer.step()
