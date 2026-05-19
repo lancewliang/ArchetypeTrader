@@ -8,7 +8,7 @@
 使用场景:
     1. 单个 hard gate 指标被包装成 ``Phase1MetricResult``；
     2. 同一 validation layer 的指标结果聚合为 ``Phase1LayerResult``；
-    3. 一个 checkpoint 的五层判定、综合分、诊断表和 tie-breaker 指标聚合为
+    3. 一个 checkpoint 的 hard-gate/reference 判定、综合分、诊断表和 tie-breaker 指标聚合为
        ``Phase1ValidationResult``；
     4. checkpoint/report 通过 ``to_dict()`` / ``from_dict()`` 做可审计落盘。
 """
@@ -290,7 +290,7 @@ class Phase1ValidationResult:
     """单个 checkpoint 的完整 Phase I validation 结果。
 
     功能说明:
-        汇总五层 hard gate 判定、综合评分、失败层列表、强类型 raw metrics、
+        汇总 hard gate/reference 判定、综合评分、失败层列表、强类型 raw metrics、
         code-level diagnostics、drift diagnostics 和 tie-breaker 指标。
 
     使用场景:
@@ -307,7 +307,7 @@ class Phase1ValidationResult:
     # checkpoint 对应 epoch。
     epoch: int
 
-    # 五层 hard gate 是否全部通过。
+    # 四层 hard gate 是否全部通过。
     passed: bool
 
     # 综合评分对象。只有 passed=True 时通常才有值；失败 checkpoint 推荐为 None。
@@ -316,7 +316,7 @@ class Phase1ValidationResult:
     # 失败 layer 名称列表。
     failed_layers: tuple[str, ...]
 
-    # 五层判定结果。
+    # hard-gate/reference layer 判定结果。
     layers: tuple[Phase1LayerResult, ...]
 
     # 五层强类型 raw metrics。

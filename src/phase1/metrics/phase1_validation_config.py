@@ -3,7 +3,7 @@
 本文件只放配置对象，不放指标计算、规则判定或文件读写逻辑。
 配置按职责拆成三类:
 
-1. 五个 layer thresholds dataclass: 五层 hard gate 各自使用的阈值；
+1. 五个 layer thresholds dataclass: 四层 hard gate 和一层 reference 各自使用的阈值；
 2. ``Phase1ValidationScoreWeights``: checkpoint 通过 hard gate 后的综合评分权重；
 3. ``Phase1ValidationRuntimeConfig``: evaluator 和各层 metric calculator 的运行参数。
 
@@ -51,10 +51,11 @@ class Phase1ValidationScoreWeights:
     behavior_structure: float = 0.20
 
     # oracle 盈利性子分数权重。用于优先选择 assigned-label decoder 收益质量更好的 checkpoint。
-    oracle_profitability: float = 0.25
+    oracle_profitability: float = 0.35
 
-    # label 可预测性子分数权重。用于让 Phase II selector 可学习性进入最终排序。
-    label_predictability: float = 0.10
+    # 保留兼容旧配置；label predictability 不再读取指标进入主 score。
+    # 若旧配置传入非零值，score 层会把该权重并入 oracle_profitability。
+    label_predictability: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""

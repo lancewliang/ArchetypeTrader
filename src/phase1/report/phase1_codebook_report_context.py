@@ -588,11 +588,16 @@ class Phase1CodebookReportContextBuilder:
         """构建单个 validation layer 的模板上下文。"""
 
         failed = sum(1 for metric in layer.metrics if not metric.passed)
+        is_reference_layer = layer.name == "label_predictability"
         return Phase1ReportLayerView(
             layer_id=str(layer.layer_id),
             name=layer.name,
-            badge_class=_badge_class(layer.passed),
-            status_label="PASS" if layer.passed else "FAIL",
+            badge_class="warn" if is_reference_layer else _badge_class(layer.passed),
+            status_label=(
+                "REF"
+                if is_reference_layer
+                else "PASS" if layer.passed else "FAIL"
+            ),
             metric_count=str(len(layer.metrics)),
             failed_count=str(failed),
             metrics=tuple(

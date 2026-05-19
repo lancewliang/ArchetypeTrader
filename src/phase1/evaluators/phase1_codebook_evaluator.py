@@ -84,8 +84,8 @@ class Phase1CodebookEvaluator:
     """完整 Phase I codebook validation 编排器。
 
     功能说明:
-        收集模型在 train/validation split 上的中间数组，调用五层 raw metric
-        calculator，执行 hard gate rules，计算综合 score 和 tie-breaker，并返回
+        收集模型在 train/validation split 上的中间数组，调用 raw metric
+        calculator，执行 hard gate/reference rules，计算综合 score 和 tie-breaker，并返回
         checkpoint 级 ``Phase1ValidationResult``。
 
     设计边界:
@@ -95,7 +95,7 @@ class Phase1CodebookEvaluator:
         - 不替代 ``Phase1CheckpointSelector`` 的候选排序职责。
 
     使用场景:
-        Phase I 训练循环保存 checkpoint 前后调用本类，对当前模型状态做五层
+        Phase I 训练循环保存 checkpoint 前后调用本类，对当前模型状态做
         validation，并把结果写入 checkpoint metrics payload。
     """
 
@@ -120,8 +120,8 @@ class Phase1CodebookEvaluator:
             vq_internal_thresholds: Layer 1 hard gate 阈值配置；不传则使用默认值。
             behavior_thresholds: Layer 2 hard gate 阈值配置；不传则使用默认值。
             oracle_profitability_thresholds: Layer 3 hard gate 阈值配置；不传则使用默认值。
-            label_predictability_thresholds: Layer 4 hard gate 阈值配置；不传则使用默认值。
-            score_weights: 五层综合评分权重；不传则使用默认值。
+            label_predictability_thresholds: Layer 4 参考阈值配置；不传则使用默认值。
+            score_weights: hard-gate 综合评分权重；不传则使用默认值。
             runtime_config: 五层 raw metric 计算运行参数；不传则使用默认值。
             device: 模型推理设备。
 
@@ -296,11 +296,11 @@ class Phase1CodebookEvaluator:
         val_horizon_dataset: HorizonDataset | None = None,
         assignment_history: Sequence[CodeAssignmentSnapshot] = (),
     ) -> Phase1ValidationResult:
-        """执行完整五层 checkpoint validation。
+        """执行完整 checkpoint validation。
 
         功能说明:
             先收集 train/val snapshot，再按 Layer 0、1、3、2、4 的计算顺序执行
-            raw metric calculator，随后按 0 到 4 的展示顺序执行 rules 判定，
+            raw metric calculator，随后按 0 到 4 的展示顺序执行 rules/reference 判定，
             最后计算 score、tie-breaker 并组装 ``Phase1ValidationResult``。
 
         输入参数:
@@ -315,7 +315,7 @@ class Phase1CodebookEvaluator:
             assignment_history: 历史 assignment snapshots，用于 Layer 1 churn/lifetime。
 
         输出:
-            ``Phase1ValidationResult``，包含 passed、score、failed layers、五层 raw
+            ``Phase1ValidationResult``，包含 passed、score、failed layers、raw
             metrics、layer rule results、code diagnostics 和 tie-breaker metrics。
 
         使用场景:
@@ -521,9 +521,9 @@ class Phase1CodebookEvaluator:
             返回值统一使用 ``Phase1MetricResult``，便于 report 和审计页面展示。
 
         设计边界:
-            - 只产生解释性 warning，不参与五层 hard gate；
+            - 只产生解释性 warning，不参与 hard gate；
             - 触发阈值时 ``severity="warn"``，但 ``passed`` 始终保持 True；
-            - 不重新定义五层 raw metric 或 selector 规则；
+            - 不重新定义 raw metric 或 selector 规则；
             - 依赖已有 snapshot 和 layer extra payload，不访问文件系统。
 
         使用场景:

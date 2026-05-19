@@ -1,8 +1,9 @@
 """Phase I codebook validation 综合评分和 tie-breaker 工具。
 
 本文件只负责把已经计算好的强类型 validation metrics 转换为归一化 score。
-hard gate 是否通过由 ``phase1_validation_rules.py`` 决定；调用方应只在五层
+hard gate 是否通过由 ``phase1_validation_rules.py`` 决定；调用方应只在四层
 hard gate 全部通过后使用 ``compute_phase1_validation_score()`` 的结果参与排序。
+label predictability 保留为参考值和 tie-breaker，不进入主 score。
 
 设计边界:
     - rules 层回答 checkpoint 是否合格，score 层只回答合格 checkpoint 谁更优；
@@ -20,7 +21,7 @@ hard gate 全部通过后使用 ``compute_phase1_validation_score()`` 的结果�
        更好的 checkpoint。
 
 使用场景:
-    1. checkpoint 通过五层 hard gate 后计算 ``validation.score``；
+    1. checkpoint 通过四层 hard gate 后计算 ``validation.score``；
     2. checkpoint score 接近时，使用 tie-breaker 指标做稳定排序；
     3. report 展示综合评分拆解时复用同一套子分数函数。
 """
@@ -188,7 +189,7 @@ def compute_phase1_validation_score(
     """计算 Phase I checkpoint 综合评分。
 
     使用场景:
-        仅在五层 hard gate 全部通过后调用。返回对象中的 ``total_score`` 被截断到
+        仅在四层 hard gate 全部通过后调用。返回对象中的 ``total_score`` 被截断到
         [0, 1]，用于合格 checkpoint 之间排序；``components`` 保留每个子项目的
         加权前分数、权重和加权贡献，供后续报表展示。
 
@@ -199,7 +200,7 @@ def compute_phase1_validation_score(
 
     注意:
         本函数不检查 hard gate 是否通过。调用方应先运行
-        ``phase1_validation_rules.py`` 中的五层规则；失败 checkpoint 的 score 应在
+        ``phase1_validation_rules.py`` 中的 hard-gate 规则；失败 checkpoint 的 score 应在
         ``aggregate_validation_result()`` 中置为 ``None``。
     """
 
@@ -227,12 +228,7 @@ def compute_phase1_validation_score(
         _score_component(
             name="oracle_profitability",
             value=compute_oracle_profitability_score(metrics),
-            weight=weights.oracle_profitability,
-        ),
-        _score_component(
-            name="label_predictability",
-            value=compute_label_predictability_score(metrics),
-            weight=weights.label_predictability,
+            weight=weights.oracle_profitability + weights.label_predictability,
         ),
     )
     return Phase1ValidationScore(
@@ -261,7 +257,7 @@ def build_tie_breaker_metrics(
 
     选择理由:
         - ``risk_adjusted_return`` 优先保证真实交易质量；
-        - ``probe_top3_accuracy`` 保证 Phase II selector 可学习性；
+        - ``probe_top3_accuracy`` 只作为 Phase II selector 可学习性的参考决胜项；
         - ``retention_ratio`` 保证压缩后仍保留 teacher 盈利能力；
         - ``active_code_ratio`` 和 ``max_code_occupancy`` 控制 codebook 使用健康度；
         - ``reconstruction_loss`` 作为最后的保真度兜底比较项。

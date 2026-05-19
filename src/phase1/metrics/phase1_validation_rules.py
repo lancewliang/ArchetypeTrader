@@ -15,14 +15,15 @@
        避免因为评估管线漏算而把 checkpoint 错误放入候选集；
     2. 每个 layer 只回答一个审计问题。例如 teacher 是否值得学、codebook 是否
        稳定、archetype 是否有行为语义、oracle label 是否保留盈利能力、label
-       是否可由 Phase II selector 学到；
+       是否具备 Phase II 参考可学习性。Label predictability 不作为 hard gate；
     3. 本文件中的 message 面向 report 和失败摘要，说明“为什么需要这个 gate”，
        不展开 raw metric 的计算公式。公式应保留在 calculator 或 schema 文档中。
 
 使用场景:
-    1. ``Phase1CodebookEvaluator.evaluate_checkpoint()`` 分别调用五个 layer rule；
+    1. ``Phase1CodebookEvaluator.evaluate_checkpoint()`` 分别调用四个 hard-gate
+       layer rule 和一个 label predictability reference rule；
     2. 每个 rule 返回 ``Phase1LayerResult``，供 report 和 selector 审计；
-    3. ``aggregate_validation_result()`` 把五层结果、raw metrics、diagnostics、
+    3. ``aggregate_validation_result()`` 把 hard-gate/reference 结果、raw metrics、diagnostics、
        score 和 tie-breaker 组装为 checkpoint 级 ``Phase1ValidationResult``。
 """
 
@@ -63,6 +64,9 @@ from .phase1_validation_vq_internal import (
     evaluate_vq_internal_rules,
 )
 
+NON_GATE_LAYER_NAMES = frozenset({"label_predictability"})
+"""只用于参考、risk finding 和 tie-breaker，不参与 checkpoint hard gate 的 layer。"""
+
 
 def aggregate_validation_result(
     *,
@@ -85,17 +89,22 @@ def aggregate_validation_result(
     """聚合 checkpoint 级 validation result。
 
     使用场景:
-        ``Phase1CodebookEvaluator.evaluate_checkpoint()`` 在五层 rules 和 scoring
-        都完成后调用。若任一 layer fail，则 ``passed=False`` 且 ``score`` 置为 None。
+        ``Phase1CodebookEvaluator.evaluate_checkpoint()`` 在 rules/reference 和 scoring
+        都完成后调用。若任一 hard-gate layer fail，则 ``passed=False`` 且
+        ``score`` 置为 None。``label_predictability`` 只作参考，不阻断。
 
     设计说明:
         ``score`` 只用于通过 hard gate 的 checkpoint 之间排序。这里即使调用方传入了
-        score，只要任一 layer 失败也会强制写成 ``None``，避免 selector 或 report
-        误把失败 checkpoint 的分数当作可比较候选。
+        score，只要任一 hard-gate layer 失败也会强制写成 ``None``，避免
+        selector 或 report 误把失败 checkpoint 的分数当作可比较候选。
     """
 
     layer_tuple = tuple(layers)
-    failed_layers = tuple(layer.name for layer in layer_tuple if not layer.passed)
+    failed_layers = tuple(
+        layer.name
+        for layer in layer_tuple
+        if not layer.passed and layer.name not in NON_GATE_LAYER_NAMES
+    )
     passed = len(failed_layers) == 0
     return Phase1ValidationResult(
         checkpoint_id=checkpoint_id,

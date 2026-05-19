@@ -1,4 +1,4 @@
-"""Phase I layer 4 label predictability schema, thresholds, and hard gate rules."""
+"""Phase I layer 4 label predictability schema and reference checks."""
 
 from __future__ import annotations
 
@@ -207,14 +207,17 @@ def evaluate_label_predictability_rules(
     metrics: Phase1LabelPredictabilityMetrics,
     thresholds: Phase1LabelPredictabilityThresholds,
 ) -> Phase1LayerResult:
-    """判定第四层 label 可预测性 / selector 可学习性。"""
+    """构造第四层 label 可预测性参考检查。
+
+    Label predictability 是 Phase II selector 的训练目标，单靠轻量 probe
+    validation 不应阻断 Phase I checkpoint。这里保留参考阈值、距离和 warning，
+    供 report、risk finding 和 tie-breaker 使用，但所有结果都不作为 hard gate。
+    """
 
     from .phase1_validation_rule_helpers import (
-        _build_layer_result,
-        _ge,
         _is_missing,
-        _metric_result,
     )
+    from .phase1_metric_results import Phase1LayerResult
 
     layer = "label_predictability"
     num_codes = max(1, int(metrics.num_codes))
@@ -232,28 +235,28 @@ def evaluate_label_predictability_rules(
         else float("nan")
     )
     results = (
-        _ge(
+        _reference_ge(
             name="probe_top1_accuracy",
             value=metrics.probe_top1_accuracy,
             threshold_value=top1_threshold,
             layer=layer,
-            message="probe top-1 accuracy 需要明显高于随机水平",
+            message="probe top-1 accuracy 用于参考是否明显高于随机水平",
         ),
-        _ge(
+        _reference_ge(
             name="probe_top3_accuracy",
             value=metrics.probe_top3_accuracy,
             threshold_value=top3_threshold,
             layer=layer,
-            message="probe top-3 accuracy 需要能缩小 selector 候选范围",
+            message="probe top-3 accuracy 用于 tie-breaker，参考 selector 缩小候选范围的能力",
         ),
-        _ge(
+        _reference_ge(
             name="probe_balanced_accuracy",
             value=metrics.probe_balanced_accuracy,
             threshold_value=thresholds.probe_balanced_accuracy_min,
             layer=layer,
-            message="balanced accuracy 需要避免只预测高频 code",
+            message="balanced accuracy 用于参考 probe 是否只预测高频 code",
         ),
-        _metric_result(
+        _reference_metric_result(
             name="label_entropy_given_morphology",
             value=(
                 metrics.label_entropy_given_morphology
@@ -283,28 +286,118 @@ def evaluate_label_predictability_rules(
                 else False
             ),
             layer=layer,
-            message="给定 morphology 后的 label 条件熵需要明显低于全局 label 熵",
+            message="给定 morphology 后的 label 条件熵用于参考 label 结构可解释性",
             direction_message=(
                 "指标方向：越小越好；变大表示 morphology 对 label 的解释力变弱，"
                 "变小表示 label 结构更能被 morphology 解释"
             ),
         ),
-        _ge(
+        _reference_ge(
             name="mutual_information_lift",
             value=metrics.mutual_information_lift,
             threshold_value=thresholds.mutual_information_lift_min,
             layer=layer,
-            message="label 与可见状态之间需要有显著统计关系",
+            message="mutual information lift 用于参考 label 与可见状态的统计关系",
         ),
-        _ge(
+        _reference_ge(
             name="probe_return_retention",
             value=metrics.probe_return_retention,
             threshold_value=thresholds.probe_return_retention_min,
             layer=layer,
-            message="probe label decoded return 需要保留足够 oracle decoded return",
+            message="probe label decoded return retention 用于参考可预测 label 的收益损失",
         ),
     )
-    return _build_layer_result(layer_id=4, name=layer, metrics=results)
+    return Phase1LayerResult(
+        layer_id=4,
+        name=layer,
+        passed=True,
+        metrics=results,
+    )
+
+
+def _reference_metric_result(
+    *,
+    name: str,
+    value: int | float | str | bool | None,
+    threshold: str,
+    threshold_value: float | tuple[float, float] | None = None,
+    direction: str | None = None,
+    distance_to_threshold: float | None = None,
+    passed: bool,
+    layer: str,
+    message: str,
+    direction_message: str | None = None,
+) -> "Phase1MetricResult":
+    """创建不参与 hard gate 的参考 metric result。"""
+
+    from .phase1_metric_results import Phase1MetricResult
+    from .phase1_validation_rule_helpers import _is_missing
+
+    full_message = message
+    if direction_message is not None:
+        full_message = f"{full_message}；{direction_message}"
+    if _is_missing(value):
+        return Phase1MetricResult(
+            name=name,
+            value=None,
+            threshold=threshold,
+            severity="warn",
+            passed=True,
+            layer=layer,
+            message=f"{full_message}；参考指标缺失或不可计算，不作为 hard gate 失败处理",
+            threshold_value=threshold_value,
+            direction=direction,  # type: ignore[arg-type]
+            distance_to_threshold=None,
+        )
+    return Phase1MetricResult(
+        name=name,
+        value=value,
+        threshold=threshold,
+        severity="pass" if passed else "warn",
+        passed=True,
+        layer=layer,
+        message=(
+            full_message
+            if passed
+            else f"{full_message}；低于参考阈值，仅作为风险参考和 tie-breaker 信号"
+        ),
+        threshold_value=threshold_value,
+        direction=direction,  # type: ignore[arg-type]
+        distance_to_threshold=distance_to_threshold,
+    )
+
+
+def _reference_ge(
+    *,
+    name: str,
+    value: float,
+    threshold_value: float,
+    layer: str,
+    message: str,
+) -> "Phase1MetricResult":
+    """构造“越大越好”的非 gate 参考指标。"""
+
+    from .phase1_validation_rule_helpers import _finite_distance, _is_missing
+
+    return _reference_metric_result(
+        name=name,
+        value=value,
+        threshold=f">= {threshold_value:g}",
+        threshold_value=float(threshold_value),
+        direction="greater_is_better",
+        distance_to_threshold=(
+            _finite_distance(value - threshold_value)
+            if not _is_missing(value)
+            else None
+        ),
+        passed=value >= threshold_value if not _is_missing(value) else False,
+        layer=layer,
+        message=message,
+        direction_message=(
+            "指标方向：越大越好；变大表示 selector 可学习性参考信号增强，"
+            "变小表示 Phase II 训练难度可能上升"
+        ),
+    )
 
 
 def compute_label_predictability_score(metrics: Phase1ValidationMetrics) -> float:

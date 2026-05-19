@@ -8,7 +8,7 @@
     当前选择所需的信息已经由 codebook evaluator 和 metrics 子模块提前计算好，
     主要包括:
 
-    - ``codebook_validation.passed``: 五层 hard gate 是否全部通过；
+    - ``codebook_validation.passed``: 四层 hard gate 是否全部通过；
     - ``codebook_validation.score``: 通过 hard gate 后的综合评分；
     - ``codebook_validation.tie_breaker_metrics``: score 接近时的决胜指标；
     - ``codebook_validation.failed_layers``: 失败候选的审计摘要。
@@ -72,7 +72,7 @@ class Phase1RejectedCheckpointSummary:
     # checkpoint 稳定 ID，通常来自 codebook_validation.checkpoint_id。
     checkpoint_id: str
 
-    # 五层 hard gate 是否全部通过。
+    # 四层 hard gate 是否全部通过；label predictability 只作为参考和 tie-breaker。
     passed: bool
 
     # validation 综合评分。失败 checkpoint 通常为 None。
@@ -236,7 +236,7 @@ class Phase1CheckpointSelector:
                 - ``reason`` 说明没有通过 hard gate 或没有候选输入。
 
         失败语义:
-            如果没有候选通过五层 hard gate，本函数不应返回任意失败 checkpoint
+            如果没有候选通过四层 hard gate，本函数不应返回任意失败 checkpoint
             作为 best checkpoint。Phase II label export 必须依赖
             ``result.has_selection`` 显式判断。
         """
@@ -248,7 +248,7 @@ class Phase1CheckpointSelector:
 
         for checkpoint in validation_checkpoints:
             validation = checkpoint.codebook_validation
-            # 第一层过滤: 五层 validation hard gate 必须全部通过。失败候选不参与
+            # 第一层过滤: 四层 validation hard gate 必须全部通过。失败候选不参与
             # best checkpoint 竞争，只记录失败 layer 和排除原因。
             if not validation.passed:
                 rejected.append(

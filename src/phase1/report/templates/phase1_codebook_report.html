@@ -642,7 +642,7 @@
     <div class="wrap hero">
       <div>
         <h1>{{ header_title }}</h1>
-        <p class="subtitle">Phase I codebook validation 静态审计报告：按五层 hard gate、code diagnostics、oracle-label 盈利性和 selector 可学习性信号复盘 checkpoint。</p>
+        <p class="subtitle">Phase I codebook validation 静态审计报告：按四层 hard gate、code diagnostics、oracle-label 盈利性和 label predictability 参考信号复盘 checkpoint。</p>
       </div>
       <div class="meta" aria-label="run metadata">
         {% for item in header.meta_items %}
@@ -655,7 +655,7 @@
   <main class="wrap">
     <section class="grid summary-grid" aria-label="summary gates">
       <article class="score-card">
-        <h2><span class="metric-with-tip">最终选择结论 <span class="note">Final Decision</span><span class="tip" tabindex="0" data-tip="这个结论先看五层 hard gate 是否全部通过，再看综合评分。PASS 只表示该 checkpoint 有资格进入 Phase II 候选，不等同于最终线上策略盈利。">?</span></span></h2>
+        <h2><span class="metric-with-tip">最终选择结论 <span class="note">Final Decision</span><span class="tip" tabindex="0" data-tip="这个结论先看四层 hard gate 是否全部通过，再看综合评分。Label predictability 只作参考和 tie-breaker，不阻断 checkpoint。PASS 只表示该 checkpoint 有资格进入 Phase II 候选，不等同于最终线上策略盈利。">?</span></span></h2>
         <div class="score-value">{{ summary.score }}<small>/1</small></div>
         <div class="decision"><span class="badge {{ summary.badge_class }}">{{ summary.status_label }}</span>Checkpoint {{ summary.checkpoint_id }}</div>
         <p class="note" style="margin-top:12px;">阶段 {{ summary.stage }}，epoch {{ summary.epoch }}。失败层：{{ summary.failed_layers }}。</p>

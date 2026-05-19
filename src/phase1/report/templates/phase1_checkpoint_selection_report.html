@@ -76,7 +76,7 @@
       <h2 class="with-tip" tabindex="0" data-tip="selector 最终选出的 Phase I 检验点，后续 best checkpoint 保存和 Phase II 标签导出会基于该项。">选中检验点</h2>
       <article class="panel table-wrap">
         <table>
-          <thead><tr><th class="with-tip" tabindex="0" data-tip="检验点稳定 ID，通常对应 stage 和 epoch。">检验点</th><th class="with-tip" tabindex="0" data-tip="训练阶段，例如 vq。">阶段</th><th class="with-tip" tabindex="0" data-tip="该检验点对应的训练轮次。">轮次</th><th class="with-tip" tabindex="0" data-tip="五层 codebook validation hard gate 是否全部通过。">是否通过</th><th class="with-tip" tabindex="0" data-tip="通过 hard gate 后计算的综合选择评分，越高越优。">评分</th><th class="with-tip" tabindex="0" data-tip="未通过的 validation layer 名称；选中项通常为空。">失败层</th></tr></thead>
+          <thead><tr><th class="with-tip" tabindex="0" data-tip="检验点稳定 ID，通常对应 stage 和 epoch。">检验点</th><th class="with-tip" tabindex="0" data-tip="训练阶段，例如 vq。">阶段</th><th class="with-tip" tabindex="0" data-tip="该检验点对应的训练轮次。">轮次</th><th class="with-tip" tabindex="0" data-tip="四层 codebook validation hard gate 是否全部通过；label predictability 只作参考和 tie-breaker。">是否通过</th><th class="with-tip" tabindex="0" data-tip="通过 hard gate 后计算的综合选择评分，越高越优。">评分</th><th class="with-tip" tabindex="0" data-tip="未通过的 validation layer 名称；选中项通常为空。">失败层</th></tr></thead>
           <tbody>
             <tr>
               <td>{{ selected.checkpoint_id }}</td>
@@ -97,7 +97,7 @@
       <h2 class="with-tip" tabindex="0" data-tip="未被最终选中的候选列表，包含 validation 失败、缺少评分或排序竞争落败的检验点。">排除检验点</h2>
       <article class="panel table-wrap">
         <table>
-          <thead><tr><th class="with-tip" tabindex="0" data-tip="被排除候选的稳定 ID。">检验点</th><th class="with-tip" tabindex="0" data-tip="被排除候选所属训练阶段。">阶段</th><th class="with-tip" tabindex="0" data-tip="被排除候选对应的训练轮次。">轮次</th><th class="with-tip" tabindex="0" data-tip="该候选是否通过五层 hard gate。">是否通过</th><th class="with-tip" tabindex="0" data-tip="该候选的综合评分；validation 失败或缺失时可能为空。">评分</th><th class="with-tip" tabindex="0" data-tip="导致 validation 失败的 layer 名称。">失败层</th><th class="with-tip" tabindex="0" data-tip="selector 层给出的排除原因，例如 validation_failed、lower_score 或 tie_breaker_loser。">排除原因</th></tr></thead>
+          <thead><tr><th class="with-tip" tabindex="0" data-tip="被排除候选的稳定 ID。">检验点</th><th class="with-tip" tabindex="0" data-tip="被排除候选所属训练阶段。">阶段</th><th class="with-tip" tabindex="0" data-tip="被排除候选对应的训练轮次。">轮次</th><th class="with-tip" tabindex="0" data-tip="该候选是否通过四层 hard gate；label predictability 只作参考和 tie-breaker。">是否通过</th><th class="with-tip" tabindex="0" data-tip="该候选的综合评分；validation 失败或缺失时可能为空。">评分</th><th class="with-tip" tabindex="0" data-tip="导致 validation 失败的 layer 名称。">失败层</th><th class="with-tip" tabindex="0" data-tip="selector 层给出的排除原因，例如 validation_failed、lower_score 或 tie_breaker_loser。">排除原因</th></tr></thead>
           <tbody>
             {% for row in rejected_rows %}
             <tr>

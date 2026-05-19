@@ -556,7 +556,8 @@ def compute_label_predictability_metrics(
 
     使用场景:
         full checkpoint validation 的第四层 selector 可学习性 raw metric 计算；
-        结果交给 ``evaluate_label_predictability_rules()`` 判定 hard gate。
+        结果交给 ``evaluate_label_predictability_rules()`` 生成参考检查和
+        tie-breaker 信号，不作为 hard gate。
     """
 
     train_x = build_probe_features(train_snapshot.states)
