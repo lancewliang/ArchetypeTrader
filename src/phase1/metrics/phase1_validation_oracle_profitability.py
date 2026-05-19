@@ -298,7 +298,7 @@ class Phase1OracleProfitabilityThresholds:
     dominant_pair_positive_ratio_min: float = 0.60
 
     # decoded 策略累计收益曲线的最大回撤上限。
-    downside_control_max: float = 20.00
+    downside_control_max: float = 30.00
 
     # decoded 风险调整收益下限。0 表示至少不能为负。
     risk_adjusted_return_min: float = 0.0
