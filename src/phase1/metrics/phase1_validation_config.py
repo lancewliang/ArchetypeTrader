@@ -101,7 +101,7 @@ class Phase1ValidationRuntimeConfig:
     top_contribution_ratio: float = 0.05
 
     # label predictability probe 的训练 epoch 数。用于第四层轻量 selector 可学习性验证。
-    probe_epochs: int = 20
+    probe_epochs: int = 100
 
     # label predictability probe 的学习率。用于训练 logistic/shallow MLP 等轻量模型。
     probe_learning_rate: float = 1e-3

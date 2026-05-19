@@ -97,9 +97,10 @@ def build_probe_features(states: np.ndarray) -> np.ndarray:
         states: 状态数组，通常形状为 ``[N, H, state_dim]``。
 
     输出:
-        ``[N, feature_dim]`` 形状的 probe feature。三维输入构造低维可见上下文
-        摘要，按顺序拼接当前 horizon 起点 ``states[:, 0, :]``，以及上一段
-        horizon 的 ``last/mean/std/trend``。第一个样本没有上一段，使用零摘要。
+        ``[N, (H + 1) * state_dim]`` 形状的 probe feature。输入 states 由数据准备
+        阶段使用 train split normalizer 归一化；这里按样本顺序拼接上一分片的
+        完整 ``states`` 序列和当前分片的 ``t0`` 状态。第一条样本没有上一分片，
+        使用零序列填充。
 
     使用场景:
         Layer 4 probe 训练和 validation evaluation 的统一 feature 构造入口。
@@ -107,26 +108,16 @@ def build_probe_features(states: np.ndarray) -> np.ndarray:
 
     values = np.asarray(states, dtype=np.float64)
 
+    if values.ndim != 3:
+        raise ValueError("states must have shape [sample, horizon, state_dim]")
     if values.shape[1] == 0:
         raise ValueError("states must contain at least one timestep")
-    current_start = values[:, 0, :].reshape(values.shape[0], -1)
     previous_segments = np.zeros_like(values)
     if values.shape[0] > 1:
         previous_segments[1:] = values[:-1]
-    previous_last = previous_segments[:, -1, :]
-    previous_mean = np.mean(previous_segments, axis=1)
-    previous_std = np.std(previous_segments, axis=1)
-    previous_trend = previous_segments[:, -1, :] - previous_segments[:, 0, :]
-    return np.concatenate(
-        [
-            current_start,
-            previous_last,
-            previous_mean,
-            previous_std,
-            previous_trend,
-        ],
-        axis=1,
-    )
+    previous_features = previous_segments.reshape(values.shape[0], -1)
+    current_t0 = values[:, 0, :].reshape(values.shape[0], -1)
+    return np.concatenate([previous_features, current_t0], axis=1)
 
 
 
