@@ -53,7 +53,7 @@ class Phase1ArtifactStore(DataFileStore):
 
         目录骨架:
             ``output_dir``:
-                Phase I 根目录，保存 config、normalizer、导出模型、label 和报告。
+                Phase I 根目录，保存 config、导出模型、label 和报告。
             ``checkpoints``:
                 周期性 epoch checkpoint 与 best checkpoint 的目录。
             ``diagnostics``:

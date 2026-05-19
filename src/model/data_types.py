@@ -106,6 +106,9 @@ ArtifactPaths = dict[str, Path]
     ``trajectory_dataset``:
         ``TrajectoryDataset`` 的保存路径。
 
+    ``state_normalizer``:
+        ``state`` 特征归一化参数的保存路径。
+
 含义:
     描述一次数据准备流程会写出的中间产物位置。
 

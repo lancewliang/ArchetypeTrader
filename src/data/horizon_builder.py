@@ -6,6 +6,7 @@ import numpy as np
 import polars as pl
 
 from ..model.data_types import HorizonDataset
+from .state_normalizer import StateNormalizer
 from ..utils.trade_execution import (
     LOB_ASK_PRICE_COLS,
     LOB_ASK_SIZE_COLS,
@@ -33,6 +34,8 @@ class HorizonBuilder:
     ``states`` 是输入 ``dataframe`` 中排除 ``close`` 后的所有列，
     ``prices`` 是单独取出的 ``close`` 列。
     ``depthprices`` 从 ``states`` 中切出五档 ask/bid price 和 size 特征。
+    如果配置了 state normalizer，``states`` 会在这里被标准化，但
+    ``prices`` 和 ``depthprices`` 始终保持原始尺度，供 DP 和成本计算使用。
     """
 
     def __init__(self, horizon: int = 72) -> None:
@@ -55,6 +58,12 @@ class HorizonBuilder:
         if horizon <= 1:
             raise ValueError("horizon must be greater than 1")
         self.horizon = horizon
+        self.state_normalizer: StateNormalizer | None = None
+
+    def set_state_normalizer(self, state_normalizer: StateNormalizer | None) -> None:
+        """设置 state 归一化器。"""
+
+        self.state_normalizer = state_normalizer
 
     def build(
         self,
@@ -116,9 +125,16 @@ class HorizonBuilder:
             np.float32,
             copy=False,
         )
-        states = state_values.reshape(-1, self.horizon, len(state_columns))
+        raw_states = state_values.reshape(-1, self.horizon, len(state_columns))
         depth_indices = [state_columns.index(column) for column in LOB_DEPTH_COLS]
-        depthprices = states[..., depth_indices].copy()
+        depthprices = raw_states[..., depth_indices].copy()
+        if self.state_normalizer is not None:
+            if tuple(state_columns) != self.state_normalizer.feature_columns:
+                raise ValueError(
+                    "dataframe state columns do not match the configured normalizer"
+                )
+            state_values = self.state_normalizer.transform(state_values)
+        states = state_values.reshape(-1, self.horizon, len(state_columns))
         prices = (
             dataframe.select("close")
             .to_numpy()

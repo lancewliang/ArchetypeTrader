@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .data_load import DataLoad
 from .horizon_builder import HorizonBuilder
+from .state_normalizer import StateNormalizer
 from ..model.data_types import TrajectoryDataset
 from ..store.artifact_store import DataStore
 from ..tool.SingleTrade_DP_Planner import SingleTrade_DP_Planner
@@ -65,6 +66,7 @@ class DataPreparer:
         self.data_load = data_load or DataLoad()
         self.data_store = data_store or DataStore(artifacts_root="data")
         self.horizon_builder = HorizonBuilder(horizon=horizon)
+        self.state_normalizer: StateNormalizer | None = None
         self.dp_planner = SingleTrade_DP_Planner(horizon=horizon)
 
     def _prepare_dataset(
@@ -88,12 +90,16 @@ class DataPreparer:
 
         基本流程:
             1. 调用 ``DataLoad.load_feature_file(path)`` 得到 ``pl.DataFrame``。
-            2. 调用 ``HorizonBuilder.build(dataframe)`` 得到 ``horizon_dataset``。
-            3. 调用 ``SingleTrade_DP_Planner.build_trajectory_dataset(horizon_dataset)``
+            2. 调用 ``DataStore.build_artifact_paths(path, split_name)`` 计算产物路径。
+            3. 在 train split 上拟合 ``StateNormalizer``，或在非 train split 上
+               读取已保存的归一化参数。
+            4. 将 ``StateNormalizer`` 注入 ``HorizonBuilder``。
+            5. 调用 ``HorizonBuilder.build(dataframe)`` 得到 ``horizon_dataset``。
+            6. 调用 ``SingleTrade_DP_Planner.build_trajectory_dataset(horizon_dataset)``
                得到 ``trajectory_dataset``。
-            4. 调用 ``DataStore.build_artifact_paths(path, split_name)`` 计算产物路径。
-            5. 调用 ``DataStore.save_horizon_dataset(...)`` 保存 horizon 中间数据。
-            6. 调用 ``DataStore.save_trajectory_dataset(...)`` 保存 trajectory 数据集。
+            7. 调用 ``DataStore.save_horizon_dataset(...)`` 保存 horizon 中间数据。
+            8. 调用 ``DataStore.save_trajectory_dataset(...)`` 保存 trajectory 数据集。
+            9. 若是 train split，则保存 ``StateNormalizer``。
 
         读取产物:
             如果后续流程需要复用已保存的中间产物，可通过
@@ -106,9 +112,21 @@ class DataPreparer:
             使用完全一致的数据准备契约。
         """
         dataframe = self.data_load.load_feature_file(path)
+        artifact_paths = self.data_store.build_artifact_paths(path, split_name)
+        if split_name == "train":
+            state_columns = [
+                column
+                for column, dtype in dataframe.schema.items()
+                if column != "close" and dtype.is_numeric()
+            ]
+            self.state_normalizer = StateNormalizer.fit(dataframe, state_columns)
+        elif self.state_normalizer is None:
+            self.state_normalizer = self.data_store.load_state_normalizer(
+                artifact_paths["state_normalizer"],
+            )
+        self.horizon_builder.set_state_normalizer(self.state_normalizer)
         horizon_dataset = self.horizon_builder.build(dataframe)
         trajectory_dataset = self.dp_planner.build_trajectory_dataset(horizon_dataset)
-        artifact_paths = self.data_store.build_artifact_paths(path, split_name)
         self.data_store.save_horizon_dataset(
             horizon_dataset,
             artifact_paths["horizon_dataset"],
@@ -117,6 +135,11 @@ class DataPreparer:
             trajectory_dataset,
             artifact_paths["trajectory_dataset"],
         )
+        if split_name == "train" and self.state_normalizer is not None:
+            self.data_store.save_state_normalizer(
+                self.state_normalizer,
+                artifact_paths["state_normalizer"],
+            )
         return trajectory_dataset
 
     def prepare_train_dataset(

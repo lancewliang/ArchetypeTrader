@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,7 @@ from ..model.data_types import (
     HorizonDataset,
     TrajectoryDataset,
 )
+from ..data.state_normalizer import StateNormalizer
 
 
 class DataFileStore:
@@ -58,6 +60,7 @@ class DataFileStore:
             至少包含:
                 ``horizon_dataset``: horizon 中间数据的保存路径。
                 ``trajectory_dataset``: demonstration trajectory 数据的保存路径。
+                ``state_normalizer``: state 归一化参数的保存路径。
 
         方法作用:
             根据输入文件和 split 名称，提前规划数据准备阶段的产物位置。
@@ -69,12 +72,14 @@ class DataFileStore:
         root = self._dataset_root(Path(path))
         horizon_path = root / "horizon_datasets" / f"{split_name}.npz"
         trajectory_path = root / "trajectory_datasets" / f"{split_name}.npz"
+        normalizer_path = root / "state_normalizer.json"
         horizon_path.parent.mkdir(parents=True, exist_ok=True)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
 
         paths: ArtifactPaths = {
             "horizon_dataset": horizon_path,
             "trajectory_dataset": trajectory_path,
+            "state_normalizer": normalizer_path,
             f"{split_name}_horizon_dataset": horizon_path,
             f"{split_name}_trajectory_dataset": trajectory_path,
         }
@@ -241,6 +246,43 @@ class DataFileStore:
             (states[index], actions[index], rewards[index])
             for index in range(states.shape[0])
         ]
+
+    def save_state_normalizer(
+        self,
+        normalizer: StateNormalizer,
+        output_path: str | Path,
+    ) -> None:
+        """保存 state 归一化参数。"""
+
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(normalizer.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.artifact_paths["state_normalizer"] = output
+
+    def load_state_normalizer(
+        self,
+        split_name: str | Path,
+    ) -> StateNormalizer:
+        """读取 state 归一化参数。"""
+
+        candidate = Path(split_name)
+        if candidate.suffix:
+            path = candidate
+        else:
+            stored_path = self.artifact_paths.get("state_normalizer")
+            if stored_path is not None:
+                path = Path(stored_path)
+            else:
+                path = self._dataset_root() / "state_normalizer.json"
+        if not path.exists():
+            raise FileNotFoundError(f"state normalizer not found: {path}")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"invalid state normalizer payload: {path}")
+        return StateNormalizer.from_dict(payload)
 
     def _dataset_root(self, input_path: Path | None = None) -> Path:
         """返回数据集产物根目录。"""

@@ -260,7 +260,7 @@ class Phase1CodebookEvaluator:
             sample_ids=sample_ids,
             # [N, H, F]
             states=states_array,
-            # None or [N, H]. HorizonDataset [N, H, 1] prices are normalized below.
+            # None or [N, H]. HorizonDataset [N, H, 1] prices are squeezed below.
             prices=prices,
             # None or [N, H, 20]. LOB depth market data used for execution slippage.
             depthprices=depthprices,

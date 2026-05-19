@@ -138,9 +138,11 @@ def main() -> None:
         batchid=args.batchid,
         artifacts_root=args.data_root,
     )
+    data_load = DataLoad(feature_columns=feature_columns)
+
     preparer = DataPreparer(
         horizon=args.horizon,
-        data_load=DataLoad(feature_columns=feature_columns),
+        data_load=data_load,
         data_store=data_store,
     )
 
