@@ -69,6 +69,34 @@ class HorizonTrainLabelBuilderConfig:
     device: str | torch.device = "cpu"
 
 
+@dataclass(frozen=True)
+class HorizonTrainLabelRow:
+    """单条 horizon-level archetype label 记录。"""
+
+    split: str
+    sample_id: int
+    horizon_start_idx: int
+    horizon_end_idx: int
+    code_label: int
+    demo_return: float
+    latent_values: tuple[float, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        """转成 ``polars.DataFrame`` 可直接消费的行 dict。"""
+
+        payload: dict[str, object] = {
+            "split": self.split,
+            "sample_id": self.sample_id,
+            "horizon_start_idx": self.horizon_start_idx,
+            "horizon_end_idx": self.horizon_end_idx,
+            "code_label": self.code_label,
+            "demo_return": self.demo_return,
+        }
+        for latent_index, value in enumerate(self.latent_values):
+            payload[f"latent_{latent_index}"] = value
+        return payload
+
+
 class HorizonTrainLabelBuilder:
     """使用训练好的 Phase I VQ encoder 生成 Phase II 训练标签。
 
@@ -173,21 +201,20 @@ class HorizonTrainLabelBuilder:
                 batch_size = int(code_labels_cpu.shape[0])
                 for batch_index in range(batch_size):
                     sample_id = sample_offset + batch_index
-                    row: dict[str, object] = {
-                        "split": split_name,
-                        "sample_id": sample_id,
-                        # HorizonBuilder 当前按固定长度连续切块，因此可用
-                        # sample_id 和 horizon 恢复该样本覆盖的相对 bar 范围。
-                        "horizon_start_idx": sample_id * self.config.horizon,
-                        "horizon_end_idx": (sample_id + 1) * self.config.horizon - 1,
-                        "code_label": int(code_labels_cpu[batch_index].item()),
-                        "demo_return": float(rewards_cpu[batch_index].sum().item()),
-                    }
-                    for latent_index, value in enumerate(
-                        latent_cpu[batch_index].tolist()
-                    ):
-                        row[f"latent_{latent_index}"] = float(value)
-                    rows.append(row)
+                    # HorizonBuilder 当前按固定长度连续切块，因此可用
+                    # sample_id 和 horizon 恢复该样本覆盖的相对 bar 范围。
+                    row = HorizonTrainLabelRow(
+                        split=split_name,
+                        sample_id=sample_id,
+                        horizon_start_idx=sample_id * self.config.horizon,
+                        horizon_end_idx=(sample_id + 1) * self.config.horizon - 1,
+                        code_label=int(code_labels_cpu[batch_index].item()),
+                        demo_return=float(rewards_cpu[batch_index].sum().item()),
+                        latent_values=tuple(
+                            float(value) for value in latent_cpu[batch_index].tolist()
+                        ),
+                    )
+                    rows.append(row.to_dict())
                 sample_offset += batch_size
 
         return pl.DataFrame(rows)
@@ -196,4 +223,5 @@ class HorizonTrainLabelBuilder:
 __all__ = [
     "HorizonTrainLabelBuilder",
     "HorizonTrainLabelBuilderConfig",
+    "HorizonTrainLabelRow",
 ]
