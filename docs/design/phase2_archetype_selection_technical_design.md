@@ -4,7 +4,8 @@
 
 Phase II 的目标是训练一个 horizon-level selector：
 
-- 输入当前 horizon 起点可见市场状态 `s_t`;
+- 输入 selector 在线可见状态 `s_sel = (previous_t_states, current_t_states)`：
+  上一分片完整状态序列，以及当前分片前 `TSize` 个状态；
 - 输出一个 archetype id `a_sel in {0, ..., K-1}`;
 - 使用 Phase I 冻结的 codebook embedding 和 decoder 生成该 horizon 的基础动作序列;
 - 以 horizon 内逐步交易收益之和作为环境 reward;
@@ -12,7 +13,7 @@ Phase II 的目标是训练一个 horizon-level selector：
 
 论文公式对应关系：
 
-- `s_sel = s_t`: selector 的观察，只使用 horizon 起点状态；
+- `s_sel = (s_prev[0:H], s_cur[0:TSize])`: selector 的观察，只使用上一分片完整状态和当前分片前 `TSize` 个状态；
 - `a_sel`: selector 选择的 archetype id；
 - `p_theta_d(a_base | s, e_a_sel)`: 冻结 Phase I decoder；
 - `r_t_sel = sum_tau r_tau_step`: horizon-level reward；
@@ -23,7 +24,7 @@ Phase II 的目标是训练一个 horizon-level selector：
 Phase II 工程实现需要满足：
 
 - 复用 Phase I 产物：best checkpoint、codebook embedding、frozen decoder、state normalizer、horizon dataset；
-- selector 在线推理只读取 horizon 起点状态，不读取未来价格、teacher action、teacher reward；
+- selector 在线推理只读取上一分片完整状态序列和当前分片前 `TSize` 个状态，不读取当前分片 `TSize` 之后的状态、未来价格、teacher action、teacher reward；
 - frozen decoder 可在训练/评估中读取完整 horizon states，用于模拟选择某个 archetype 后的基础动作执行；
 - reward 统一复用 `ActionExecutionCalculator`，避免收益口径和 Phase I validation 不一致；
 - assigned label 由 Phase I 离线 label export 产物提供，只作为训练约束和诊断标签，不作为推理输入；
@@ -57,6 +58,9 @@ Phase I 或通用模块中已有的类型优先复用，不在 Phase II 重复�
 | 已有类型/工具 | 来源 | Phase II 用途 |
 |---|---|---|
 | `HorizonDataset` | `src/model/data_types.py` | Phase II dataset builder 的 horizon 输入，包含 `states/prices/depthprices`。 |
+| `TSize` | `src/model/data_types.py` | selector 可见的当前分片状态窗口长度。 |
+| `VisibleStatesDataset` | `src/model/data_types.py` | selector observation，结构为 `(previous_t_states, current_t_states)`。 |
+| `DemonstrationHorizonLabelDataset` | `src/model/data_types.py` | Phase I 离线 label，结构为 `(sample_ids, code_labels)`。 |
 | `ArtifactPaths` | `src/model/data_types.py` | `Phase2ArtifactStore` 路径字典类型。 |
 | `ArchetypeLabelTensor` | `src/model/tensor_data_types.py` | selector action、assigned label 和 code id 的 tensor 类型。 |
 | `ActionLogitTensor` | `src/model/tensor_data_types.py` | frozen decoder 输出动作 logits 的类型。 |
@@ -134,7 +138,7 @@ tests/
 | `src/phase2/phase2_main.py` | 第二阶段主流程编排：加载 Phase I 产物、构建数据、训练 selector、评估、保存 checkpoint/report。 |
 | `src/phase2/phase2_config.py` | 定义训练、环境、模型、reward、checkpoint/report 配置。 |
 | `src/phase2/phase2_selection_data_schema.py` | 定义 Phase II 特有的数据流对象，例如 selection dataset、tensor batch、env step result 和 DQN transition batch；不放评估指标。 |
-| `src/phase2/phase2_selection_dataset.py` | 从 horizon dataset 和 Phase I 导出的 label 表生成 selector dataset，包括 visible state、full horizon states、prices、depthprices、assigned labels。 |
+| `src/phase2/phase2_selection_dataset.py` | 从 horizon dataset 和 Phase I 导出的 label 表生成 selector dataset，包括 `VisibleStatesDataset`、当前 horizon dataset、以及 `DemonstrationHorizonLabelDataset`。 |
 | `src/phase2/phase2_env.py` | horizon-level MDP 环境：接收 selector action，执行 decoder 动作，返回 horizon reward 和下一观察。 |
 | `src/phase2/phase2_artifact_store.py` | 统一规划 Phase II 产物路径：dataset cache、checkpoint、metrics、report。 |
 | `src/phase2/model/phase2_decoder_policy.py` | 封装冻结 Phase I decoder 的模型推理策略：根据 selected code id 生成 base actions。 |
@@ -169,8 +173,17 @@ Phase I best checkpoint
 
 训练时每个 horizon 样本包含两类信息：
 
-- selector 可见信息：`visible_state = states[:, 0, :]`；
-- 环境模拟信息：`states[:, :, :]`、`prices[:, :, 1]`、`depthprices[:, :, 20]`、`assigned_label`。
+- selector 可见信息：`visible_states = (previous_t_states, current_t_states)`；
+- 环境模拟信息：当前分片的 `states[:, :, :]`、`prices[:, :, :]`、`depthprices[:, :, :] | None`、`code_label`。
+
+`Phase2SelectionDatasetBuilder` 会用相邻 horizon 构造样本：
+
+- `previous_t_states = horizon_states[:-1]`，形状 `[sample - 1, horizon, feature_dim]`；
+- `current_t_states = horizon_states[1:, :TSize, :]`，形状 `[sample - 1, TSize, feature_dim]`；
+- `horizon_dataset = (horizon_states[1:], prices[1:], depthprices[1:])`；
+- `demonstration_horizon_label_dataset = (sample_ids[1:], code_labels[1:])`。
+
+因此第 0 条 horizon 只作为第 1 条训练样本的上一分片上下文，不会形成独立 selector 训练样本。
 
 `assigned_label` 来自 Phase I 已落盘的 horizon label 表。Phase II dataset builder
 只读取和对齐该字段，不调用 Phase I encoder，不读取 demonstration trajectory。
@@ -218,16 +231,16 @@ class Phase2RewardConfig:
 
 @dataclass(frozen=True)
 class Phase2TrainConfig:
-    total_steps: int = 3_000_000
+    epochs: int = 100
     batch_size: int = 256
     learning_rate: float = 3e-4
     replay_capacity: int = 200_000
-    learning_starts: int = 10_000
-    train_frequency: int = 4
-    target_update_interval: int = 10_000
+    learning_start_epoch: int = 1
+    updates_per_epoch: int = 1
+    target_update_interval_epochs: int = 5
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
-    epsilon_decay_steps: int = 500_000
+    epsilon_decay_epochs: int = 20
     td_loss_beta: float = 1.0
     imitation_loss_beta: float = 1.0
     max_grad_norm: float = 0.5
@@ -256,7 +269,7 @@ class Phase2MainConfig:
 
 | 字段 | 作用 | 使用位置 |
 |---|---|---|
-| `state_dim` | selector observation 的特征维度，等于 `visible_states.shape[-1]`。 | `Phase2QNetwork.__init__()` 输入层。 |
+| `state_dim` | 单个 state 的特征维度，等于 `current_t_states.shape[-1]`。Q-network 需要结合 `previous_t_states/current_t_states` 的形状决定实际输入编码方式。 | `Phase2QNetwork.__init__()` 输入层或 temporal encoder。 |
 | `num_archetypes` | Phase I codebook 中可选 archetype 数量，也是 Q value 输出维度。 | Q-network 输出层、epsilon-greedy action 范围、评估 code usage。 |
 | `hidden_dim` | Q-network MLP 隐层宽度。 | `model/phase2_q_network.py`。 |
 | `num_layers` | Q-network MLP 隐层层数。 | `model/phase2_q_network.py`。 |
@@ -287,22 +300,22 @@ class Phase2MainConfig:
 - `Phase2DoubleDqnTrainer` 的训练循环、探索策略、replay buffer 和 target network 同步；
 - `Phase2ReplayBuffer` 的容量和采样 batch size；
 - optimizer 和梯度裁剪；
-- checkpoint selection 记录训练步数和训练超参。
+- checkpoint selection 记录训练轮数和训练超参。
 
 字段说明：
 
 | 字段 | 作用 | 使用位置 |
 |---|---|---|
-| `total_steps` | Double DQN 总环境交互步数；每一步对应一个 horizon-level action。 | `Phase2DoubleDqnTrainer.train()` 主循环。 |
+| `epochs` | Double DQN 总训练轮数；每轮遍历或采样一组 horizon-level transition。 | `Phase2DoubleDqnTrainer.train()` 主循环。 |
 | `batch_size` | 每次从 replay buffer 采样的 transition 数。 | `Phase2ReplayBuffer.sample()`。 |
 | `learning_rate` | online Q-network optimizer 学习率。 | trainer 初始化 optimizer。 |
 | `replay_capacity` | replay buffer 最大 transition 数，满后按环形覆盖旧样本。 | `Phase2ReplayBuffer`。 |
-| `learning_starts` | replay 至少积累多少 transition 后开始更新 Q-network。 | trainer update gate。 |
-| `train_frequency` | 每多少个环境 step 执行一次 Q-network update。 | trainer 主循环。 |
-| `target_update_interval` | 每多少个 step 将 online network 硬同步到 target network。 | `sync_target_network()`。 |
-| `epsilon_start` | epsilon-greedy 初始探索率。 | `build_epsilon_by_step()` / `collect_transition()`。 |
-| `epsilon_end` | epsilon-greedy 最低探索率。 | `build_epsilon_by_step()`。 |
-| `epsilon_decay_steps` | epsilon 从 start 线性衰减到 end 的步数。 | `build_epsilon_by_step()`。 |
+| `learning_start_epoch` | 从第几轮开始更新 Q-network。 | trainer update gate。 |
+| `updates_per_epoch` | 每轮执行多少次 Q-network update。 | trainer 主循环。 |
+| `target_update_interval_epochs` | 每多少轮将 online network 硬同步到 target network。 | `sync_target_network()`。 |
+| `epsilon_start` | epsilon-greedy 初始探索率。 | `build_epsilon_by_epoch()` / `collect_transition()`。 |
+| `epsilon_end` | epsilon-greedy 最低探索率。 | `build_epsilon_by_epoch()`。 |
+| `epsilon_decay_epochs` | epsilon 从 start 线性衰减到 end 的轮数。 | `build_epsilon_by_epoch()`。 |
 | `td_loss_beta` | TD loss 权重。 | `compute_double_dqn_loss()`。 |
 | `imitation_loss_beta` | assigned-label imitation loss 权重。 | `compute_double_dqn_loss()`。 |
 | `max_grad_norm` | 梯度裁剪阈值，防止 TD target 波动导致梯度爆炸。 | `update_q_network()`。 |
@@ -332,35 +345,35 @@ class Phase2MainConfig:
 ```python
 @dataclass(frozen=True)
 class Phase2SelectionDataset:
-    visible_states: np.ndarray
-    horizon_states: np.ndarray
-    prices: np.ndarray
-    depthprices: np.ndarray | None
-    assigned_labels: np.ndarray
-    sample_ids: np.ndarray
+    visible_states: VisibleStatesDataset
+    horizon_dataset: HorizonDataset
+    demonstration_horizon_label_dataset: DemonstrationHorizonLabelDataset
 
 @dataclass(frozen=True)
 class Phase2SelectionTensorBatch:
-    visible_states: torch.Tensor
+    previous_t_states: torch.Tensor
+    current_t_states: torch.Tensor
     horizon_states: torch.Tensor
     prices: torch.Tensor
-    depthprices: torch.Tensor | None
+    depthprices: torch.Tensor
     assigned_labels: ArchetypeLabelTensor
     sample_ids: torch.Tensor
 
 @dataclass(frozen=True)
 class Phase2SelectionStepResult:
-    observation: np.ndarray
+    observation: VisibleStatesDataset
     reward: float
     done: bool
     info: dict[str, Any]
 
 @dataclass(frozen=True)
 class Phase2SelectionTransitionBatch:
-    observations: torch.Tensor
+    previous_t_states: torch.Tensor
+    current_t_states: torch.Tensor
     actions: ArchetypeLabelTensor
     rewards: torch.Tensor
-    next_observations: torch.Tensor
+    next_previous_t_states: torch.Tensor
+    next_current_t_states: torch.Tensor
     dones: torch.Tensor
     assigned_labels: ArchetypeLabelTensor
 ```
@@ -369,18 +382,21 @@ class Phase2SelectionTransitionBatch:
 
 - `Phase2SelectionDataset`
   使用场景：dataset builder 的输出、dataset cache 的落盘结构、env/evaluator 的 numpy 输入。
-  它包含 selector 可见的 `visible_states`，也包含环境模拟需要的完整 horizon
-  `horizon_states/prices/depthprices`。`assigned_labels` 只来自 Phase I label 表。
+  当前实现位于 `src/phase2/phase2_selection_dataset.py`，包含 selector 可见的
+  `VisibleStatesDataset`、环境模拟需要的当前 `HorizonDataset`、以及 imitation/诊断使用的
+  `DemonstrationHorizonLabelDataset`。
 - `Phase2SelectionTensorBatch`
-  使用场景：`DataLoader` 或 trainer 小批量训练输入。它是
-  `Phase2SelectionDataset` 的 tensor 化表示，方便搬运到 GPU。
+  使用场景：`DataLoader` 或 trainer 小批量训练输入。当前 builder 的
+  `to_tensor_dataset()` 返回固定 7 列：
+  `previous_t_states, current_t_states, horizon_states, prices, depthprices, assigned_labels, sample_ids`。
+  当 `depthprices is None` 时，使用形状 `[sample, horizon, 0]` 的空 float tensor 保持列数稳定。
 - `Phase2SelectionStepResult`
   使用场景：`ArchetypeSelectionEnv.step()` / `run_horizon()` 的返回值。
   它描述一个 horizon-level action 执行后的 reward、done 和诊断信息。
 - `Phase2SelectionTransitionBatch`
   使用场景：`Phase2ReplayBuffer.sample()` 的输出，以及 Double DQN TD 更新的输入。
-  它保存 horizon-level `observation/action/reward/next_observation/done`，并额外保留
-  `assigned_labels` 用于 imitation regularization。
+  它保存 horizon-level `previous_t_states/current_t_states/action/reward/next_previous_t_states/next_current_t_states/done`，
+  并额外保留 `assigned_labels` 用于 imitation regularization。
 
 ### 7.4 `src/phase2/metrics/phase2_selection_metrics.py`
 
@@ -406,7 +422,7 @@ class Phase2SelectionEvaluationMetrics:
 
 @dataclass(frozen=True)
 class Phase2TrainingResult:
-    global_step: int
+    epoch: int
     best_checkpoint_path: Path
     train_metrics: Mapping[str, float]
     validation_metrics: Phase2SelectionEvaluationMetrics
@@ -429,9 +445,17 @@ class Phase2TrainingResult:
 ### 7.5 `src/phase2/phase2_selection_dataset.py`
 
 ```python
+@dataclass(frozen=True)
+class Phase2SelectionDataset:
+    visible_states: VisibleStatesDataset
+    horizon_dataset: HorizonDataset
+    demonstration_horizon_label_dataset: DemonstrationHorizonLabelDataset
+
 class Phase2SelectionDatasetBuilder:
     def __init__(
         self,
+        *,
+        tsize: TSize = 1,
     ) -> None:
         """初始化 Phase II dataset builder；不持有 Phase I model。"""
 
@@ -442,12 +466,18 @@ class Phase2SelectionDatasetBuilder:
     ) -> Phase2SelectionDataset:
         """从 horizon 数据和 Phase I 导出的 label 表生成 Phase II selector dataset。"""
 
-    def extract_assigned_labels(
+    def validate_horizon_dataset(
+        self,
+        horizon_dataset: HorizonDataset,
+    ) -> None:
+        """检查 states/prices/depthprices 的 3D shape 和 sample/horizon 维度一致性。"""
+
+    def extract_demonstration_horizon_label_dataset(
         self,
         label_table: pl.DataFrame,
         sample_count: int,
-    ) -> np.ndarray:
-        """从 label 表读取 code_label，并按 sample_id 排序成 assigned label 数组。"""
+    ) -> DemonstrationHorizonLabelDataset:
+        """从 label 表读取 sample_id/code_label，并按 sample_id 排序。"""
 
     def validate_label_alignment(
         self,
@@ -456,8 +486,8 @@ class Phase2SelectionDatasetBuilder:
     ) -> None:
         """检查 label 表 sample_id 是否完整、唯一，并与 horizon sample 数一致。"""
 
-    def build_visible_states(self, horizon_states: np.ndarray) -> np.ndarray:
-        """提取 selector 推理可见状态，第一版固定为 horizon 起点 states[:, 0, :]。"""
+    def build_visible_states(self, horizon_states: np.ndarray) -> VisibleStatesDataset:
+        """提取 selector 可见状态：上一分片完整状态 + 当前分片前 tsize 个状态。"""
 
     def validate_no_future_leakage(
         self,
@@ -476,9 +506,11 @@ class Phase2SelectionDatasetBuilder:
 
 - `horizon_dataset` 提供 `states/prices/depthprices`；
 - `label_table` 是 Phase I 离线导出的 horizon label 表，至少包含 `sample_id` 和 `code_label`；
-- `horizon_dataset` 和 `label_table` 必须按 `sample_id` 完整对齐；
+- `horizon_dataset` 和 `label_table` 必须按 `sample_id` 完整对齐，`sample_id` 必须唯一且为完整零基连续区间 `[0, sample_count)`；
+- `build_from_horizon_and_labels()` 先生成全量 label dataset，再丢弃第 0 行，使返回 dataset 的 `sample_ids/code_labels` 对齐当前分片 `horizon_states[1:]`；
+- `to_tensor_dataset()` 的返回列顺序固定为 `previous_t_states, current_t_states, horizon_states, prices, depthprices, assigned_labels, sample_ids`；
 - 本 builder 不加载 Phase I checkpoint，不调用 Phase I encoder，不读取 `TrajectoryDataset`；
-- 若未来 Phase II selector 改为可见历史窗口，只允许在 `build_visible_states()` 中调整，且必须同步更新文档和 leakage test。
+- 若未来 Phase II selector 改变可见窗口，只允许在 `build_visible_states()` 中调整，且必须同步更新文档和 leakage test。
 
 ### 7.6 `src/phase2/model/phase2_decoder_policy.py`
 
@@ -530,8 +562,8 @@ class ArchetypeSelectionEnv:
     ) -> None:
         """构建 horizon-level selection MDP。"""
 
-    def reset(self, index: int | None = None) -> np.ndarray:
-        """重置到一个 horizon 样本，返回 visible_state observation。"""
+    def reset(self, index: int | None = None) -> VisibleStatesDataset:
+        """重置到一个 horizon 样本，返回该样本的 visible states。"""
 
     def step(self, selected_code_id: int) -> Phase2SelectionStepResult:
         """执行一个 horizon-level archetype action 并返回 reward/done/info。"""
@@ -589,8 +621,8 @@ def compute_imitation_kl_loss(
 ) -> torch.Tensor:
     """用 Q value logits 对 assigned label 计算 cross-entropy imitation loss。"""
 
-def build_epsilon_by_step(
-    step: int,
+def build_epsilon_by_epoch(
+    epoch: int,
     train_config: Phase2TrainConfig,
 ) -> float:
     """按线性退火配置返回当前 epsilon-greedy 探索率。"""
@@ -619,12 +651,17 @@ class Phase2QNetwork(nn.Module):
     def __init__(self, config: Phase2ModelConfig) -> None:
         """构建 horizon-level archetype selector Q-network。"""
 
-    def forward(self, visible_states: torch.Tensor) -> Phase2QNetworkOutput:
-        """输入 visible state，输出每个 archetype 的 Q value，形状 [batch, K]。"""
+    def forward(
+        self,
+        previous_t_states: torch.Tensor,
+        current_t_states: torch.Tensor,
+    ) -> Phase2QNetworkOutput:
+        """输入 selector 可见状态，输出每个 archetype 的 Q value，形状 [batch, K]。"""
 
     def select_action(
         self,
-        visible_states: torch.Tensor,
+        previous_t_states: torch.Tensor,
+        current_t_states: torch.Tensor,
         epsilon: float,
         deterministic: bool = False,
     ) -> ArchetypeLabelTensor:
@@ -632,19 +669,25 @@ class Phase2QNetwork(nn.Module):
 
     def greedy_action(
         self,
-        visible_states: torch.Tensor,
+        previous_t_states: torch.Tensor,
+        current_t_states: torch.Tensor,
     ) -> ArchetypeLabelTensor:
         """返回 Q value 最大的 archetype id。"""
 
-    def predict_proba(self, visible_states: torch.Tensor) -> torch.Tensor:
+    def predict_proba(
+        self,
+        previous_t_states: torch.Tensor,
+        current_t_states: torch.Tensor,
+    ) -> torch.Tensor:
         """对 Q value 做 softmax，返回仅供评估/report 使用的伪概率。"""
 ```
 
 说明：
 
-- 第一版用 MLP Q-network，输入 `states[:, 0, :]`，输出 `num_archetypes` 个 Q value；
+- 第一版 Q-network 输入与 `Phase2SelectionDatasetBuilder.to_tensor_dataset()` 对齐，显式接收
+  `previous_t_states` 和 `current_t_states` 两列，输出 `num_archetypes` 个 Q value；
 - 本文件只定义网络结构和 action selection，不包含 replay、target network 同步或 TD loss；
-- 若后续 selector 观察扩展为历史窗口，可增加 temporal encoder，但不能读取未来 horizon；
+- 由于 `previous_t_states` 是完整上一分片序列、`current_t_states` 是当前分片前 `TSize` 个状态，模型实现可以先 flatten，也可以增加 temporal encoder，但不能读取当前分片 `TSize` 之后的状态；
 - 评估时使用 greedy action；训练时由 trainer 传入 epsilon 做探索。
 
 ### 7.10 `src/phase2/rl/phase2_replay_buffer.py`
@@ -652,10 +695,12 @@ class Phase2QNetwork(nn.Module):
 ```python
 @dataclass(frozen=True)
 class Phase2ReplayTransition:
-    observation: np.ndarray
+    previous_t_states: np.ndarray
+    current_t_states: np.ndarray
     action: int
     reward: float
-    next_observation: np.ndarray
+    next_previous_t_states: np.ndarray
+    next_current_t_states: np.ndarray
     done: bool
     assigned_label: int
     sample_id: int
@@ -664,7 +709,8 @@ class Phase2ReplayBuffer:
     def __init__(
         self,
         capacity: int,
-        observation_shape: tuple[int, ...],
+        previous_t_states_shape: tuple[int, ...],
+        current_t_states_shape: tuple[int, ...],
         seed: int,
     ) -> None:
         """初始化固定容量 replay buffer。"""
@@ -685,7 +731,8 @@ class Phase2ReplayBuffer:
 
 说明：
 
-- Phase II 环境一步就是一个 horizon，`next_observation` 是下一个 horizon 起点状态；
+- Phase II 环境一步就是一个 horizon，`next_previous_t_states/next_current_t_states`
+  是下一个可训练 horizon 样本的 selector 可见状态；
 - `assigned_label` 不参与环境状态，只作为 imitation regularization target；
 - replay buffer 不调用模型、不计算 reward，只管理 transition 存取。
 
@@ -727,8 +774,8 @@ def compute_double_dqn_loss(
 
 说明：
 
-- Double DQN target 使用 `online_q_network(next_obs).argmax()` 选动作；
-- target value 使用 `target_q_network(next_obs).gather(next_action)`；
+- Double DQN target 使用 `online_q_network(next_previous_t_states, next_current_t_states).argmax()` 选动作；
+- target value 使用 `target_q_network(next_previous_t_states, next_current_t_states).gather(next_action)`；
 - `done=True` 时不加 bootstrap 项；
 - `total_loss = td_loss_beta * td_loss + imitation_loss_beta * imitation_loss`。
 
@@ -751,7 +798,7 @@ class Phase2DoubleDqnTrainer:
     def train(self) -> Phase2TrainingResult:
         """运行完整 Double DQN 训练循环。"""
 
-    def collect_transition(self, step: int) -> Phase2ReplayTransition:
+    def collect_transition(self, epoch: int) -> Phase2ReplayTransition:
         """按 epsilon-greedy 选择 archetype，执行 env.step() 并生成 replay transition。"""
 
     def update_q_network(
@@ -765,7 +812,7 @@ class Phase2DoubleDqnTrainer:
 
     def should_save_checkpoint(
         self,
-        step: int,
+        epoch: int,
         validation_metrics: Phase2SelectionEvaluationMetrics,
     ) -> bool:
         """根据验证收益、label consistency 和风险指标判断是否保存 checkpoint。"""
@@ -773,11 +820,12 @@ class Phase2DoubleDqnTrainer:
 
 说明：
 
-- 论文写 `optimized for 3M steps`，工程第一版按用户要求实现 Double DQN；
-- horizon 环境一步结束，但 replay 仍保留 `next_observation`，用于跨 horizon bootstrap；
+- 工程第一版按 epoch 控制训练循环，每轮执行 horizon transition 采样和若干次 Q-network update；
+- horizon 环境一步结束，但 replay 仍保留下一条可训练样本的
+  `next_previous_t_states/next_current_t_states`，用于跨 horizon bootstrap；
 - `update_q_network()` 必须分别记录 `td_loss`、`imitation_loss`、`total_loss`、
   `mean_q_selected`、`mean_td_target`、`epsilon`、`mean_horizon_reward`；
-- target network 按 `target_update_interval` 周期性硬同步，第一版不做 soft update。
+- target network 按 `target_update_interval_epochs` 周期性硬同步，第一版不做 soft update。
 
 ### 7.13 `src/phase2/evaluators/phase2_evaluator.py`
 
@@ -865,12 +913,12 @@ class Phase2SelectionCheckpointMetadata:
     train_batch_id: str
     phase1_checkpoint_path: str
     phase1_checkpoint_hash: str | None
-    global_step: int
+    epoch: int
     validation_metrics: Phase2SelectionEvaluationMetrics
 
 @dataclass(frozen=True)
 class Phase2Checkpoint:
-    global_step: int
+    epoch: int
     is_best: bool
     config: Mapping[str, Any]
     q_network_state_dict: Mapping[str, Any]
@@ -946,7 +994,7 @@ class Phase2ArtifactStore(DataFileStore):
     def load_phase2_checkpoint(
         self,
         *,
-        global_step: int | None = None,
+        epoch: int | None = None,
         best: bool = False,
     ) -> Phase2Checkpoint:
         """读取 Phase II checkpoint payload，对齐 Phase1ArtifactStore.load_phase1_checkpoint()。"""
@@ -981,7 +1029,7 @@ class Phase2MainFlow:
         self,
         dataset: Phase2SelectionDataset,
     ) -> Phase2QNetwork:
-        """根据 state_dim 和 num_archetypes 创建 selector。"""
+        """根据 visible state shape 和 num_archetypes 创建 selector。"""
 
     def _train_double_dqn(
         self,
@@ -1043,7 +1091,7 @@ class Phase2SelectionReport:
 
 | 测试文件 | 验证内容 |
 |---|---|
-| `tests/test_phase2_selection_dataset_label_contract.py` | `visible_states == horizon_states[:, 0, :]`，assigned label 数量与样本数一致，禁止未来泄漏。 |
+| `tests/test_phase2_selection_dataset_label_contract.py` | `previous_t_states == original_horizon_states[:-1]`、`current_t_states == original_horizon_states[1:, :tsize, :]`、返回的 `sample_ids/code_labels == sorted_labels[1:]`，并验证缺列、重复 sample_id、非连续 sample_id、null code_label 和未来泄漏校验。 |
 | `tests/test_phase2_decoder_policy.py` | frozen decoder 对同一 code id 输出稳定动作，动作形状 `[batch, H]` 且取值在 `{0,1,2}`。 |
 | `tests/test_phase2_double_dqn_loss.py` | Double DQN target 使用 online argmax 和 target gather，done 样本不 bootstrap。 |
 | `tests/test_phase2_env_reward_contract.py` | env `step()` 一步结束，reward 等于 `ActionExecutionCalculator` 的 horizon return。 |
@@ -1064,7 +1112,7 @@ class Phase2SelectionReport:
 ## 10. 关键约束
 
 - Phase I model 在 Phase II 必须冻结；
-- selector observation 只允许包含当前 horizon 起点可见状态；
+- selector observation 只允许包含上一分片完整状态序列和当前分片前 `TSize` 个状态；
 - DP teacher 和 VQ encoder 只允许在 Phase I 离线流程生成 label；Phase II dataset builder 不调用它们；
 - reward 口径必须复用 `ActionExecutionCalculator`；
 - checkpoint 必须记录 Phase I checkpoint lineage；
