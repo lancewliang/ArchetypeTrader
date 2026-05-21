@@ -163,7 +163,7 @@ Phase I best checkpoint
   -> Phase2SelectionDatasetBuilder.build_from_horizon_and_labels()
   -> Phase2SelectionDataset
   -> ArchetypeSelectionEnv + FrozenArchetypeDecoderPolicy
-  -> Phase2DoubleDqnTrainer.train()
+  -> Phase2MainFlow loops Phase2DoubleDqnTrainer.train_one_epoch()
   -> Phase2Evaluator.evaluate()
   -> save Phase2Checkpoint + Phase2ValidationCheckpoint
   -> Phase2CheckpointSelector.select_best_from_dir()
@@ -296,7 +296,8 @@ class Phase2MainConfig:
 
 使用场景：
 
-- `Phase2DoubleDqnTrainer` 的训练循环、探索策略、replay buffer 和 target network 同步；
+- `Phase2MainFlow` 控制总训练轮数，`Phase2DoubleDqnTrainer` 负责单轮训练、探索策略、
+  replay buffer 更新和 target network 同步；
 - `Phase2ReplayBuffer` 的容量和采样 batch size；
 - optimizer 和梯度裁剪；
 - validation checkpoint selection 记录训练轮数和训练超参。
@@ -305,12 +306,12 @@ class Phase2MainConfig:
 
 | 字段 | 作用 | 使用位置 |
 |---|---|---|
-| `epochs` | Double DQN 总训练轮数；每轮遍历或采样一组 horizon-level transition。 | `Phase2DoubleDqnTrainer.train()` 主循环。 |
+| `epochs` | Double DQN 总训练轮数；每轮遍历或采样一组 horizon-level transition。 | `Phase2MainFlow._train_double_dqn()` 外层循环。 |
 | `batch_size` | 每次从 replay buffer 采样的 transition 数。 | `Phase2ReplayBuffer.sample()`。 |
 | `learning_rate` | online Q-network optimizer 学习率。 | trainer 初始化 optimizer。 |
 | `replay_capacity` | replay buffer 最大 transition 数，满后按环形覆盖旧样本。 | `Phase2ReplayBuffer`。 |
 | `learning_start_epoch` | 从第几轮开始更新 Q-network。 | trainer update gate。 |
-| `updates_per_epoch` | 每轮执行多少次 Q-network update。 | trainer 主循环。 |
+| `updates_per_epoch` | 每轮执行多少次 Q-network update。 | `Phase2DoubleDqnTrainer.train_one_epoch()`。 |
 | `target_update_interval_epochs` | 每多少轮将 online network 硬同步到 target network。 | `sync_target_network()`。 |
 | `epsilon_start` | epsilon-greedy 初始探索率。 | `build_epsilon_by_epoch()` / `collect_transition()`。 |
 | `epsilon_end` | epsilon-greedy 最低探索率。 | `build_epsilon_by_epoch()`。 |
@@ -766,6 +767,52 @@ def compute_double_dqn_loss(
 ### 7.12 `src/phase2/rl/phase2_double_dqn_trainer.py`
 
 ```python
+class Phase2DoubleDqnLossCalculator(Protocol):
+    def __call__(
+        self,
+        online_q_network: Phase2QNetwork,
+        target_q_network: Phase2QNetwork,
+        batch: Phase2SelectionTransitionBatch,
+        reward_config: Phase2RewardConfig,
+        train_config: Phase2TrainConfig,
+    ) -> Phase2DoubleDqnLossOutput:
+        """调用 phase2_double_dqn_loss.py 中的 loss 计算逻辑。"""
+
+class Phase2CheckpointBuilder(Protocol):
+    def __call__(
+        self,
+        epoch: int,
+        online_q_network: Phase2QNetwork,
+        target_q_network: Phase2QNetwork,
+        optimizer: torch.optim.Optimizer,
+        epoch_stats: "Phase2EpochStats",
+    ) -> Phase2Checkpoint:
+        """由 main flow 注入 lineage/config 上下文，构造该 epoch 的模型 checkpoint payload。"""
+
+@dataclass(frozen=True)
+class Phase2TrainerStepStats:
+    """一次 replay update 的可记录训练指标。"""
+
+    total_loss: float
+    td_loss: float
+    imitation_loss: float
+    mean_q_selected: float
+    mean_td_target: float
+    grad_norm: float | None
+
+@dataclass(frozen=True)
+class Phase2EpochStats:
+    """一个 epoch 的 transition 收集和网络更新摘要。"""
+
+    epoch: int
+    epsilon: float
+    transition_count: int
+    update_count: int
+    mean_horizon_reward: float
+    mean_total_loss: float | None
+    mean_td_loss: float | None
+    mean_imitation_loss: float | None
+
 class Phase2DoubleDqnTrainer:
     def __init__(
         self,
@@ -775,41 +822,80 @@ class Phase2DoubleDqnTrainer:
         replay_buffer: Phase2ReplayBuffer,
         train_config: Phase2TrainConfig,
         reward_config: Phase2RewardConfig,
+        optimizer: torch.optim.Optimizer,
+        loss_calculator: Phase2DoubleDqnLossCalculator,
+        checkpoint_builder: Phase2CheckpointBuilder,
         device: torch.device | str,
     ) -> None:
-        """初始化 online/target network、optimizer、replay buffer 和训练配置。"""
+        """保存外部注入组件；trainer 不创建模型、不计算 reward、不验证、不保存文件。"""
 
-    def train(self) -> Phase2TrainingResult:
-        """运行完整 Double DQN 训练循环。"""
+    def train_one_epoch(
+        self,
+        epoch: int,
+        sample_indices: Sequence[int] | None = None,
+    ) -> Phase2Checkpoint:
+        """训练一个 epoch，并返回该 epoch 训练完成后的 Phase2Checkpoint payload。"""
 
-    def collect_transition(self, epoch: int) -> Phase2ReplayTransition:
-        """按 epsilon-greedy 选择 archetype，执行 env.step() 并生成 replay transition。"""
+    def select_action(
+        self,
+        visible_states: VisibleStatesDataset,
+        epsilon: float,
+        deterministic: bool = False,
+    ) -> int:
+        """训练时执行 epsilon-greedy；验证/测试时 deterministic=True 走 greedy。"""
+
+    def collect_transition(
+        self,
+        sample_index: int | None,
+        epsilon: float,
+    ) -> Phase2ReplayTransition:
+        """reset env、选择 archetype、执行 env.step()，并组装 replay transition。"""
+
+    def should_update(self, epoch: int) -> bool:
+        """判断 replay buffer 是否已有足够样本且达到 learning_start_epoch。"""
 
     def update_q_network(
         self,
         batch: Phase2SelectionTransitionBatch,
-    ) -> dict[str, float]:
-        """计算 Double DQN loss，反向传播并更新 online q-network。"""
+    ) -> Phase2TrainerStepStats:
+        """调用 loss_calculator 计算 loss，只负责 backward、clip grad 和 optimizer.step。"""
 
     def sync_target_network(self) -> None:
-        """将 online q-network 参数同步到 target q-network。"""
+        """硬同步 target network；第一版按 target_update_interval_epochs 触发。"""
 
-    def should_save_checkpoint(
+    def build_checkpoint(
         self,
         epoch: int,
-        validation_result: Phase2ValidationResult,
-    ) -> bool:
-        """根据 validation_result.metrics 中的验证收益、label consistency 和风险指标判断是否保存 checkpoint。"""
+        epoch_stats: Phase2EpochStats,
+    ) -> Phase2Checkpoint:
+        """调用 checkpoint_builder 生成 checkpoint payload；不执行 torch.save。"""
 ```
 
 说明：
 
-- 工程第一版按 epoch 控制训练循环，每轮执行 horizon transition 采样和若干次 Q-network update；
+- 文件边界保持训练编排：`Phase2DoubleDqnTrainer` 不初始化 Q-network，不实现
+  `compute_double_dqn_loss()`，不计算 reward，不执行 validation，不直接写 checkpoint 文件；
+- `Phase2DoubleDqnTrainer` 的粒度是“一轮训练”：主流程负责 `for epoch in epochs`、
+  validation、best checkpoint 选择、artifact 保存和最终 report；
+- 模型从外部注入，`optimizer` 也从外部注入，便于主流程恢复训练或替换优化器；
+- loss 使用 `phase2_double_dqn_loss.py` 中的 `compute_double_dqn_loss()` 或等价
+  `loss_calculator` 注入，trainer 只消费
+  `Phase2DoubleDqnLossOutput(total_loss, td_loss, imitation_loss, mean_q_selected, mean_td_target)`；
+- reward 仍由 `ArchetypeSelectionEnv.step()` 和 `phase2_selection_reward.py` 负责，
+  trainer 只把 step result 转成 replay transition；
+- checkpoint 由 `checkpoint_builder` 构造为 `Phase2Checkpoint` payload，trainer 返回该对象；
+  路径规划、hash、`torch.save` 和 validation checkpoint 关联仍由 artifact store/main flow 处理；
+- `select_action()` 放在 trainer 中承接探索策略：训练阶段使用 epsilon-greedy，
+  validation/test 使用 deterministic greedy；Q-network 可保留 `greedy_action()` 等纯模型工具；
+- 工程第一版每次 `train_one_epoch()` 遍历或随机采样一轮 horizon transition，
+  并在 replay buffer 达到 `batch_size` 且超过 `learning_start_epoch` 后执行若干次 update；
 - horizon 环境一步结束，但 replay 仍保留下一条可训练样本的
   `next_visible_states`，用于跨 horizon bootstrap；
 - `update_q_network()` 必须分别记录 `td_loss`、`imitation_loss`、`total_loss`、
   `mean_q_selected`、`mean_td_target`、`epsilon`、`mean_horizon_reward`；
-- target network 按 `target_update_interval_epochs` 周期性硬同步，第一版不做 soft update。
+- target network 第一版按 `target_update_interval_epochs` 周期性硬同步；若后续需要对齐
+  MacroHFT 的 `tau=0.005` 软更新，可新增 `soft_sync_target_network(tau)`，但不应把该逻辑混入
+  loss/reward 模块。
 
 ### 7.13 `src/phase2/evaluators/phase2_evaluator.py`
 
@@ -1083,7 +1169,7 @@ class Phase2MainFlow:
         val_dataset: Phase2SelectionDataset,
         phase1_model: ArchetypeVQModel,
     ) -> Phase2TrainingResult:
-        """创建 online/target q-network、env、replay buffer、trainer/evaluator 并运行训练。"""
+        """创建 online/target q-network、env、replay buffer、trainer/evaluator，并循环调用 train_one_epoch。"""
 
     def _write_final_report(
         self,
