@@ -25,8 +25,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from model.data_types import VisibleStatesDataset
-
+from ...model.data_types import VisibleStatesDataset
 from ...model.tensor_data_types import ArchetypeLabelTensor
 from ..phase2_config import Phase2ModelConfig
 
