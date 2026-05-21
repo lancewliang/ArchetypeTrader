@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import math
 
 from .phase2_checkpoint import Phase2ValidationCheckpoint
 
@@ -104,4 +105,47 @@ class Phase2CheckpointSelector:
             Phase II selector。
         """
 
-        raise NotImplementedError("Phase2 checkpoint selection is not implemented yet.")
+        eligible: list[Phase2ValidationCheckpoint] = []
+        for checkpoint in validation_checkpoints:
+            try:
+                score = float(checkpoint.validation_result.metrics.mean_return)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(score):
+                continue
+            eligible.append(checkpoint)
+
+        if not eligible:
+            return Phase2CheckpointSelectionResult(
+                checkpoint=None,
+                selected_checkpoint_id=None,
+                selected_epoch=None,
+                selected_score=None,
+            )
+
+        selected = max(eligible, key=self._ranking_key)
+        return Phase2CheckpointSelectionResult(
+            checkpoint=selected,
+            selected_checkpoint_id=self._checkpoint_id(selected),
+            selected_epoch=selected.epoch,
+            selected_score=float(selected.validation_result.metrics.mean_return),
+        )
+
+    def _ranking_key(self, checkpoint: Phase2ValidationCheckpoint) -> tuple[float, ...]:
+        """返回可稳定排序的主分数和 tie-breaker。"""
+
+        metrics = checkpoint.validation_result.metrics
+        return (
+            float(metrics.mean_return),
+            float(metrics.sharpe_like),
+            float(metrics.win_rate),
+            float(metrics.median_return),
+            -float(metrics.mean_turnover),
+            -float(checkpoint.epoch),
+        )
+
+    @staticmethod
+    def _checkpoint_id(checkpoint: Phase2ValidationCheckpoint) -> str:
+        """生成当前骨架可用的稳定 checkpoint id。"""
+
+        return f"phase2_epoch_{checkpoint.epoch:04d}"

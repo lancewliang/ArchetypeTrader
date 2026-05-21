@@ -147,6 +147,7 @@ class Phase2MainFlow:
         self.q_network: Phase2QNetwork | None = None
         self.datasets: dict[str, Phase2SelectionDataset] = {}
         self.validation_checkpoints: list[Phase2ValidationCheckpoint] = []
+        self.best_checkpoint_selection: Phase2CheckpointSelectionResult | None = None
     
 
     def run(self) -> None:
@@ -229,7 +230,7 @@ class Phase2MainFlow:
         """
 
         self.phase1_model = self._load_phase1_model()
-        for split_name in ("train", "val"):
+        for split_name in ("train", "val", "test"):
             self.datasets[split_name] = self._build_or_load_dataset(split_name)
 
     def build_components(self) -> None:
@@ -477,8 +478,51 @@ class Phase2MainFlow:
                     validation_result=validation_result,
                 )
             )
-    def select_and_save_best_checkpoint(self) -> None:     
-        pass
+
+    def select_and_save_best_checkpoint(self) -> None:
+        """选择并固化 Phase II best model checkpoint。
+
+        输入:
+            消费训练过程中累积的 ``self.validation_checkpoints``。每个 validation
+            checkpoint 只保存评估结果和 epoch；模型权重从 artifact store 中按
+            同一 epoch 读取。
+
+        输出:
+            无返回值。成功时写出 ``best_checkpoint.pt`` 和 best validation result；
+            选择摘要保存在 ``self.best_checkpoint_selection``，供 report 或后续流程
+            读取。
+
+        使用场景:
+            ``run()`` 在所有训练 epoch 完成后调用。本方法只编排 selector 和
+            artifact store，不重新运行 evaluator，也不重新计算 validation metrics。
+        """
+
+        selection_result = self.checkpoint_selector.select_best(
+            self.validation_checkpoints,
+        )
+        self.best_checkpoint_selection = selection_result
+
+        if not selection_result.has_selection or selection_result.selected_epoch is None:
+            logger.error("no eligible Phase II validation checkpoint found")
+            return
+
+        best_checkpoint = self.artifact_store.load_phase2_checkpoint(
+            epoch=selection_result.selected_epoch,
+        )
+        best_checkpoint_path = self.artifact_store.save_best_checkpoint(best_checkpoint)
+        if selection_result.checkpoint is not None:
+            self.artifact_store.save_best_validation_result(
+                selection_result.checkpoint.validation_result,
+            )
+
+        logger.info(
+            "Phase II best checkpoint selected: epoch=%d score=%.6f path=%s",
+            selection_result.selected_epoch,
+            selection_result.selected_score
+            if selection_result.selected_score is not None
+            else float("nan"),
+            best_checkpoint_path,
+        )
     
      
 
