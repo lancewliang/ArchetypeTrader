@@ -351,13 +351,9 @@ class Phase2SelectionDataset:
 
 @dataclass(frozen=True)
 class Phase2SelectionTensorBatch:
-    previous_t_states: torch.Tensor
-    current_t_states: torch.Tensor
-    horizon_states: torch.Tensor
-    prices: torch.Tensor
-    depthprices: torch.Tensor
-    assigned_labels: ArchetypeLabelTensor
-    sample_ids: torch.Tensor
+    visible_states: VisibleStatesDataset
+    horizon_dataset: HorizonDataset
+    demonstration_horizon_label_dataset: DemonstrationHorizonLabelDataset
 
 @dataclass(frozen=True)
 class Phase2SelectionStepResult:
@@ -368,14 +364,12 @@ class Phase2SelectionStepResult:
 
 @dataclass(frozen=True)
 class Phase2SelectionTransitionBatch:
-    previous_t_states: torch.Tensor
-    current_t_states: torch.Tensor
+    visible_states: VisibleStatesDataset
     actions: ArchetypeLabelTensor
     rewards: torch.Tensor
-    next_previous_t_states: torch.Tensor
-    next_current_t_states: torch.Tensor
+    next_visible_states: VisibleStatesDataset
     dones: torch.Tensor
-    assigned_labels: ArchetypeLabelTensor
+    demonstration_horizon_label_dataset: DemonstrationHorizonLabelDataset
 ```
 
 说明：
@@ -386,17 +380,18 @@ class Phase2SelectionTransitionBatch:
   `VisibleStatesDataset`、环境模拟需要的当前 `HorizonDataset`、以及 imitation/诊断使用的
   `DemonstrationHorizonLabelDataset`。
 - `Phase2SelectionTensorBatch`
-  使用场景：`DataLoader` 或 trainer 小批量训练输入。当前 builder 的
-  `to_tensor_dataset()` 返回固定 7 列：
-  `previous_t_states, current_t_states, horizon_states, prices, depthprices, assigned_labels, sample_ids`。
-  当 `depthprices is None` 时，使用形状 `[sample, horizon, 0]` 的空 float tensor 保持列数稳定。
+  使用场景：`DataLoader` 或 trainer 小批量训练输入。当前 schema 保持和
+  `Phase2SelectionDataset` 一致的三段结构：selector 可见状态、当前 horizon
+  数据、以及 Phase I assigned label 数据。后续 tensor 化实现可在这些 tuple
+  内部承载 tensor，但字段边界不拆散。
 - `Phase2SelectionStepResult`
   使用场景：`ArchetypeSelectionEnv.step()` / `run_horizon()` 的返回值。
   它描述一个 horizon-level action 执行后的 reward、done 和诊断信息。
 - `Phase2SelectionTransitionBatch`
   使用场景：`Phase2ReplayBuffer.sample()` 的输出，以及 Double DQN TD 更新的输入。
-  它保存 horizon-level `previous_t_states/current_t_states/action/reward/next_previous_t_states/next_current_t_states/done`，
-  并额外保留 `assigned_labels` 用于 imitation regularization。
+  它保存 horizon-level `visible_states/action/reward/next_visible_states/done`，
+  并额外保留 `demonstration_horizon_label_dataset` 用于 imitation regularization
+  和样本追踪。
 
 ### 7.4 `src/phase2/metrics/phase2_selection_metrics.py`
 
@@ -695,22 +690,18 @@ class Phase2QNetwork(nn.Module):
 ```python
 @dataclass(frozen=True)
 class Phase2ReplayTransition:
-    previous_t_states: np.ndarray
-    current_t_states: np.ndarray
+    visible_states: VisibleStatesDataset
     action: int
     reward: float
-    next_previous_t_states: np.ndarray
-    next_current_t_states: np.ndarray
+    next_visible_states: VisibleStatesDataset
     done: bool
-    assigned_label: int
-    sample_id: int
+    demonstration_horizon_label_dataset: DemonstrationHorizonLabelDataset
 
 class Phase2ReplayBuffer:
     def __init__(
         self,
         capacity: int,
-        previous_t_states_shape: tuple[int, ...],
-        current_t_states_shape: tuple[int, ...],
+        visible_state_shapes: tuple[tuple[int, ...], tuple[int, ...]],
         seed: int,
     ) -> None:
         """初始化固定容量 replay buffer。"""
@@ -731,9 +722,10 @@ class Phase2ReplayBuffer:
 
 说明：
 
-- Phase II 环境一步就是一个 horizon，`next_previous_t_states/next_current_t_states`
-  是下一个可训练 horizon 样本的 selector 可见状态；
-- `assigned_label` 不参与环境状态，只作为 imitation regularization target；
+- Phase II 环境一步就是一个 horizon，`next_visible_states` 是下一个可训练
+  horizon 样本的 selector 可见状态；
+- `demonstration_horizon_label_dataset` 不参与环境状态，只作为 imitation
+  regularization target 和样本追踪信息；
 - replay buffer 不调用模型、不计算 reward，只管理 transition 存取。
 
 ### 7.11 `src/phase2/rl/phase2_double_dqn_loss.py`
@@ -774,8 +766,8 @@ def compute_double_dqn_loss(
 
 说明：
 
-- Double DQN target 使用 `online_q_network(next_previous_t_states, next_current_t_states).argmax()` 选动作；
-- target value 使用 `target_q_network(next_previous_t_states, next_current_t_states).gather(next_action)`；
+- Double DQN target 使用 `online_q_network(*batch.next_visible_states).argmax()` 选动作；
+- target value 使用 `target_q_network(*batch.next_visible_states).gather(next_action)`；
 - `done=True` 时不加 bootstrap 项；
 - `total_loss = td_loss_beta * td_loss + imitation_loss_beta * imitation_loss`。
 
@@ -822,7 +814,7 @@ class Phase2DoubleDqnTrainer:
 
 - 工程第一版按 epoch 控制训练循环，每轮执行 horizon transition 采样和若干次 Q-network update；
 - horizon 环境一步结束，但 replay 仍保留下一条可训练样本的
-  `next_previous_t_states/next_current_t_states`，用于跨 horizon bootstrap；
+  `next_visible_states`，用于跨 horizon bootstrap；
 - `update_q_network()` 必须分别记录 `td_loss`、`imitation_loss`、`total_loss`、
   `mean_q_selected`、`mean_td_target`、`epsilon`、`mean_horizon_reward`；
 - target network 按 `target_update_interval_epochs` 周期性硬同步，第一版不做 soft update。
