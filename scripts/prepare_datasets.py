@@ -16,13 +16,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.data_load import DataLoad  # noqa: E402
 from src.data.data_preparer import DataPreparer  # noqa: E402
 from src.data.resolve_factor import (  # noqa: E402
     FACTORS_ROOT,
-    build_feature_columns,
-    build_feature_columns_from_file,
-    resolve_factor_config_path,
 )
 from src.store.artifact_store import DataStore  # noqa: E402
 
@@ -30,7 +26,6 @@ from src.store.artifact_store import DataStore  # noqa: E402
 DEFAULT_PAIR = "AL"
 DEFAULT_BATCHID = "batch_001"
 DEFAULT_HORIZON = 72
-DEFAULT_FACTOR_SET = "short"
 SPLIT_CANDIDATES = {
     "train": ("train.feather", "df_train.feather"),
     "val": (
@@ -70,20 +65,6 @@ def parse_args() -> argparse.Namespace:
         help="固定 horizon 长度，默认 72。",
     )
     parser.add_argument(
-        "--factor-set",
-        default=DEFAULT_FACTOR_SET,
-        help=(
-            "因子配置文件名，不含 .txt 时会自动补齐；默认读取 "
-            "src/factors/<PAIR>/short.txt。"
-        ),
-    )
-    parser.add_argument(
-        "--factor-file",
-        type=Path,
-        default=None,
-        help="显式因子配置文件路径；提供后优先于 --factor-set。",
-    )
-    parser.add_argument(
         "--factors-root",
         type=Path,
         default=FACTORS_ROOT,
@@ -117,20 +98,7 @@ def main() -> None:
     """执行前置数据处理主流程。"""
 
     args = parse_args()
-    if args.factor_file is not None:
-        feature_columns = build_feature_columns_from_file(args.factor_file)
-        factor_source = args.factor_file
-    else:
-        feature_columns = build_feature_columns(
-            pair=args.pair,
-            factor_set=args.factor_set,
-            factors_root=args.factors_root,
-        )
-        factor_source = resolve_factor_config_path(
-            pair=args.pair,
-            factor_set=args.factor_set,
-            factors_root=args.factors_root,
-        )
+    factor_source = args.factors_root / args.pair
 
     pair_dir = args.data_root / args.pair
     data_store = DataStore(
@@ -138,13 +106,16 @@ def main() -> None:
         batchid=args.batchid,
         artifacts_root=args.data_root,
     )
-    data_load = DataLoad(feature_columns=feature_columns)
 
     preparer = DataPreparer(
         horizon=args.horizon,
-        data_load=data_load,
+        pair=args.pair,
         data_store=data_store,
     )
+    feature_spec = preparer.feature_spec
+    if feature_spec is None:
+        raise RuntimeError("feature_spec must be initialized by DataPreparer")
+    feature_columns = list(feature_spec.required_columns)
 
     split_files = {
         "train": resolve_split_file(
@@ -167,7 +138,11 @@ def main() -> None:
     prepared_any = False
     print(
         f"[features] source={factor_source} columns={len(feature_columns)} "
-        f"state_features={len(feature_columns) - 1}"
+        f"price_columns={len(feature_spec.price_columns)} "
+        f"state_features={len(feature_spec.state_columns)} "
+        f"relative_state_features={len(feature_spec.relative_state_columns)} "
+        f"trend_state_features={len(feature_spec.trend_state_columns)} "
+        f"normalizers={len(feature_spec.normalizer_keys)}"
     )
     for split_name, split_file in split_files.items():
         if split_file is None:

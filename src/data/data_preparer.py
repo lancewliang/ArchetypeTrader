@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from .data_load import DataLoad
+from .feature_spec import FeatureInputSpec, build_feature_input_spec
 from .horizon_builder import HorizonBuilder
+from .resolve_factor import FACTORS_ROOT
 from .state_normalizer import StateNormalizer
 from ..model.data_types import TrajectoryDataset
 from ..store.artifact_store import DataStore
@@ -41,6 +43,7 @@ class DataPreparer:
     def __init__(
         self,
         horizon: int = 72,
+        pair: str | None = None,
         data_load: DataLoad | None = None,
         data_store: DataStore | None = None,
     ) -> None:
@@ -48,6 +51,12 @@ class DataPreparer:
 
         参数:
             horizon: 每个样本的固定时间窗口长度 ``h``，默认 72。
+            pair: 可选交易标的。提供后，DataPreparer 会在内部构建
+                ``FeatureInputSpec`` 并用其 required columns 初始化 ``DataLoad``。
+            factors_root: 因子配置根目录，和 ``pair`` 一起用于内部构建
+                ``FeatureInputSpec``。
+            feature_spec: 可选三路输入特征规格，主要用于测试或外部显式注入。
+                未提供但提供了 ``pair`` 时，会由 DataPreparer 内部生成。
             data_load: 数据读取组件。用于从 feature 文件读取 ``pl.DataFrame``。
             data_store: 数据产物读写组件。用于计算产物路径、保存中间产物，
                 以及读取已经固化的产出物。
@@ -63,7 +72,17 @@ class DataPreparer:
             数据读取、产物读写规则，否则数据集之间的 schema 和审计方式会不一致。
         """
         self.horizon = horizon
-        self.data_load = data_load or DataLoad()
+       
+        self.feature_spec = build_feature_input_spec(
+                pair=pair,
+                factors_root=FACTORS_ROOT,
+            )
+        self.pair = pair
+        self.factors_root = Path(FACTORS_ROOT)
+        feature_columns = (
+            list(self.feature_spec.required_columns) if self.feature_spec is not None else None
+        )
+        self.data_load = data_load or DataLoad(feature_columns=feature_columns)
         self.data_store = data_store or DataStore(artifacts_root="data")
         self.horizon_builder = HorizonBuilder(horizon=horizon)
         self.state_normalizer: StateNormalizer | None = None
