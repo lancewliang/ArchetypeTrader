@@ -2,9 +2,12 @@
 
 from .data_types import (
     ArtifactPaths,
+    DemonstrationHorizonLabelDataset,
     DemonstrationTrajectory,
     HorizonDataset,
+    TSize,
     TrajectoryDataset,
+    VisibleStatesDataset,
 )
 from .tensor_data_types import (
     ActionLogitTensor,
@@ -50,6 +53,7 @@ __all__ = [
     "classify_trajectory_directions",
     "CodebookDeadCodeResetResult",
     "CodebookInitResult",
+    "DemonstrationHorizonLabelDataset",
     "DemonstrationTrajectory",
     "DemonstrationTrajectoryTensor",
     "HorizonDataset",
@@ -57,9 +61,11 @@ __all__ = [
     "LatentTensor",
     "ModelOutputs",
     "QuantizeOutput",
+    "TSize",
     "TrajectoryDataset",
     "TrajectoryTensorBatch",
     "TrajectoryTensorDataset",
+    "VisibleStatesDataset",
     "VQArchetypeModel",
     "VectorQuantizer",
     "build_trajectory_tensor_dataset",

@@ -93,6 +93,33 @@ TrajectoryDataset = list[DemonstrationTrajectory]
     提取可复用的 trading archetype。
 """
 
+TSize = int
+"""Phase II selector 可见状态的 t 步长。
+
+含义:
+    ``TSize`` 定义 ``VisibleStatesDataset`` 中当前分片 t 状态窗口的长度。若
+    ``TSize == 4``，则当前分片可见状态包含 4 个连续 timestep。
+"""
+
+VisibleStatesDataset = tuple[np.ndarray, np.ndarray]
+"""Phase II selector 输入模型的可见状态数据集。
+
+结构:
+    ``VisibleStatesDataset = (previous_t_states, current_t_states)``
+
+形状:
+    ``previous_t_states``: ``[x - 1, horizon, feature_dim]``
+        上一个分片的所有 t 状态。第 0 条样本没有上一分片，因此不会形成
+        selector 训练样本。
+
+    ``current_t_states``: ``[x - 1, TSize, feature_dim]``
+        当前分片的所有 t 状态，窗口长度由 ``TSize`` 定义。
+
+含义:
+    这是 Phase II selector 选择模型的直接输入类型。它只包含 selector 在线可见
+    的状态信息，不包含当前分片未来状态、价格、teacher action 或 reward。
+"""
+
 ArtifactPaths = dict[str, Path]
 """数据准备产出物路径集合。
 
@@ -115,4 +142,29 @@ ArtifactPaths = dict[str, Path]
 为什么:
     ``DataStore`` 统一管理产物路径，可以避免 train/test/validation
     使用不一致的命名规则或目录结构。
+"""
+
+
+DemonstrationHorizonLabelDataset = tuple[np.ndarray, np.ndarray]
+"""Phase I demonstration horizon 的标签向量数据集。
+
+结构:
+    ``DemonstrationHorizonLabelDataset = (sample_ids, code_labels)``
+
+来源:
+    由 ``HorizonTrainLabelBuilder`` 生成的 ``HorizonTrainLabelRow`` 序列派生而来。
+    其中 ``sample_ids`` 对应 ``HorizonTrainLabelRow.sample_id`` 字段，
+    ``code_labels`` 对应 ``HorizonTrainLabelRow.code_label`` 字段。
+
+形状:
+    ``sample_ids``: ``[x]``
+        horizon 样本位置索引，通常为完整的零基连续区间 ``0..x-1``。
+
+    ``code_labels``: ``[x]``
+        Phase I VQ codebook 分配给每个 horizon 的 archetype id。
+
+含义:
+    这是 Phase I 离线导出的 horizon-level supervision。Phase II selector
+    可用 ``sample_ids`` 将 label 与 ``HorizonDataset`` 的样本行对齐，并用
+    ``code_labels`` 作为选择模型的 supervised/imitation target。
 """
