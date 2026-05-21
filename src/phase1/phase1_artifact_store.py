@@ -259,7 +259,7 @@ class Phase1ArtifactStore(DataFileStore):
     def load_phase1_horizon_labels(
         self,
         split_name: str = "train",
-    ) -> Any:
+    ) -> pl.DataFrame:
         """读取 Phase I horizon-level archetype labels。
 
         参数:

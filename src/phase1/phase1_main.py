@@ -34,6 +34,7 @@ from .horizon_train_label_builder import (
 )
 from .metrics import CodeAssignmentSnapshot, Phase1Metrics, Phase1ValidationResult
 from .report import Phase1CheckpointSelectionReport, Phase1CodebookReport
+from ..utils import RuntimeUtils
 
 
 logger = logging.getLogger("archetype_trader.phase1")
@@ -161,7 +162,7 @@ class Phase1MainFlow:
         """
 
         self.config = config
-        self.device = self._resolve_device(config.device)        
+        self.device = RuntimeUtils.resolve_device(config.device, logger=logger)
         self.horizon_datasets: dict[str, HorizonDataset] = {}
         self.trajectory_datasets: dict[str, TrajectoryDataset] = {}   
         self.data_load: DataLoad | None = None
@@ -180,12 +181,6 @@ class Phase1MainFlow:
         self.validation_results: dict[int, Phase1ValidationResult] = {}
         self.assignment_history: list[CodeAssignmentSnapshot] = []
         self.horizon_train_label_builder: HorizonTrainLabelBuilder | None = None
-
-    def _resolve_device(self, device: str) -> torch.device:
-        requested_device = torch.device(device)
-        if requested_device.type == "cuda" and not torch.cuda.is_available():
-            return torch.device("cpu")
-        return requested_device
 
     def run(self) -> None:
         """按论文 Phase I 顺序执行 Archetype Discovery。

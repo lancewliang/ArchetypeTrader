@@ -127,6 +127,36 @@ class RuntimeUtils:
         )
 
     @staticmethod
+    def resolve_device(
+        device: str,
+        *,
+        logger: logging.Logger | None = None,
+    ) -> "torch.device":
+        """解析 PyTorch 运行设备。
+
+        参数:
+            device: 设备字符串，例如 ``"cuda"``、``"cuda:0"`` 或 ``"cpu"``。
+            logger: 可选 logger。请求 CUDA 但不可用时，会写一条 warning。
+
+        返回:
+            ``torch.device``。如果请求 CUDA 但当前 PyTorch CUDA 不可用，则回退到
+            CPU。
+
+        使用场景:
+            Phase I/II/III 主流程初始化时统一解析训练设备，避免每个阶段重复维护
+            ``cuda`` fallback 逻辑。
+        """
+
+        import torch
+
+        requested_device = torch.device(device)
+        if requested_device.type == "cuda" and not torch.cuda.is_available():
+            if logger is not None:
+                logger.warning("cuda requested but unavailable; fallback to cpu")
+            return torch.device("cpu")
+        return requested_device
+
+    @staticmethod
     def _resolve_log_level(level: int | str) -> int:
         if isinstance(level, int):
             return level
