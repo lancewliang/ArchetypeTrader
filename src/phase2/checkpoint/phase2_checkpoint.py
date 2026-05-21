@@ -22,32 +22,10 @@
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from ..metrics.phase2_metric_results import Phase2ValidationResult
 from ..phase2_config import Phase2TrainConfig
 
 
-@dataclass(frozen=True)
-class Phase2ValidationResult:
-    """Phase II validation 结果摘要。
-
-    功能说明:
-        保存 evaluator 已经计算好的 selection metrics 和诊断信息，作为
-        validation checkpoint、report 和 checkpoint selector 的共享输入。
-
-    设计边界:
-        本类只承载结果，不负责计算指标、应用阈值或决定 best checkpoint。
-        ``metrics`` 应保存可排序、可报告的稳定字段；``diagnostics`` 保存解释性
-        信息，例如 code usage、label consistency 或 reward distribution。
-
-    使用场景:
-        ``Phase2Evaluator`` 评估某个 epoch 后返回该对象，再由
-        ``Phase2ValidationCheckpoint`` 关联到对应的模型 checkpoint。
-    """
-
-    # selection evaluator 产出的核心指标，例如 mean_return、risk 和 consistency。
-    metrics: Mapping[str, Any]
-
-    # 诊断信息，用于 report 和失败分析，不直接作为主排序字段。
-    diagnostics: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
