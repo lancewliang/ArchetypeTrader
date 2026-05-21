@@ -28,7 +28,7 @@ Phase II 工程实现需要满足：
 - frozen decoder 可在训练/评估中读取完整 horizon states，用于模拟选择某个 archetype 后的基础动作执行；
 - reward 统一复用 `ActionExecutionCalculator`，避免收益口径和 Phase I validation 不一致；
 - assigned label 由 Phase I 离线 label export 产物提供，只作为训练约束和诊断标签，不作为推理输入；
-- checkpoint 中保存 q-network 权重、配置、训练指标、验证指标、Phase I checkpoint 引用，保证可审计。
+- 模型 checkpoint 只保存 q-network 权重、优化器状态和恢复模型所需配置；validation checkpoint 单独保存校验指标和模型 checkpoint 引用，保证模型参数和检验指标可独立审计。
 
 ## 2. 非目标
 
@@ -109,7 +109,6 @@ src/phase2/
   evaluators/
     __init__.py
     phase2_evaluator.py
-    phase2_selection_evaluator.py
   checkpoint/
     __init__.py
     phase2_checkpoint.py
@@ -127,6 +126,7 @@ tests/
   test_phase2_env_reward_contract.py
   test_phase2_replay_buffer.py
   test_phase2_selection_metrics_schema.py
+  test_phase2_checkpoint_schema.py
   test_phase2_q_network_forward.py
 ```
 
@@ -140,18 +140,17 @@ tests/
 | `src/phase2/phase2_selection_data_schema.py` | 定义 Phase II 特有的数据流对象，例如 selection dataset、tensor batch、env step result 和 DQN transition batch；不放评估指标。 |
 | `src/phase2/phase2_selection_dataset.py` | 从 horizon dataset 和 Phase I 导出的 label 表生成 selector dataset，包括 `VisibleStatesDataset`、当前 horizon dataset、以及 `DemonstrationHorizonLabelDataset`。 |
 | `src/phase2/phase2_env.py` | horizon-level MDP 环境：接收 selector action，执行 decoder 动作，返回 horizon reward 和下一观察。 |
-| `src/phase2/phase2_artifact_store.py` | 统一规划 Phase II 产物路径：dataset cache、checkpoint、metrics、report。 |
+| `src/phase2/phase2_artifact_store.py` | 统一规划 Phase II 产物路径：dataset cache、model checkpoint、validation checkpoint、report。 |
 | `src/phase2/model/phase2_decoder_policy.py` | 封装冻结 Phase I decoder 的模型推理策略：根据 selected code id 生成 base actions。 |
 | `src/phase2/model/phase2_q_network.py` | Double DQN 使用的 selector Q-network，输入 visible state，输出每个 archetype 的 Q value。 |
-| `src/phase2/metrics/phase2_selection_metrics.py` | 定义 selection 评估指标、训练结果摘要和可序列化 metrics payload。 |
+| `src/phase2/metrics/phase2_selection_metrics.py` | 定义 selection 评估指标和可序列化 metrics payload。 |
 | `src/phase2/rl/phase2_selection_reward.py` | RL reward 和 imitation regularization 的基础计算，供 Double DQN loss/trainer 复用。 |
 | `src/phase2/rl/phase2_replay_buffer.py` | Double DQN replay buffer，存储 horizon-level transition 并提供 batch sample。 |
 | `src/phase2/rl/phase2_double_dqn_loss.py` | Double DQN TD target、TD loss 和 assigned-label imitation regularization。 |
 | `src/phase2/rl/phase2_double_dqn_trainer.py` | Double DQN 训练循环：epsilon-greedy 采样、replay 更新、target network 同步和 checkpoint 触发。 |
-| `src/phase2/evaluators/phase2_evaluator.py` | Phase II 基础 evaluator 入口，保持和 Phase I `phase1_evaluator.py` 命名一致。 |
-| `src/phase2/evaluators/phase2_selection_evaluator.py` | selection 专项评估：收益、label consistency、code usage 和 decoder action quality。 |
-| `src/phase2/checkpoint/phase2_checkpoint.py` | 保存/加载 Phase II checkpoint payload，记录 Phase I checkpoint lineage。 |
-| `src/phase2/checkpoint/phase2_checkpoint_selector.py` | 从多个 Phase II checkpoint 中按 validation 指标选择 best checkpoint。 |
+| `src/phase2/evaluators/phase2_evaluator.py` | Phase II 统一 evaluator，直接负责 selection 收益、label consistency、code usage 和 decoder action quality 评估；不再拆 `phase2_selection_evaluator.py`。 |
+| `src/phase2/checkpoint/phase2_checkpoint.py` | 定义 Phase II validation result、model checkpoint、validation checkpoint 和训练结果摘要；骨架代码已加入文件说明、类说明、设计边界和使用场景，模型参数与校验指标分开保存。 |
+| `src/phase2/checkpoint/phase2_checkpoint_selector.py` | 从多个 Phase II validation checkpoint 中按 `validation_result.metrics` 选择 best model checkpoint；骨架代码已加入文件说明、选择结果说明、selector 使用场景和非 I/O 边界。 |
 | `src/phase2/report/phase2_selection_report.py` | 输出 JSON/HTML selection report，不重新计算核心指标。 |
 
 ## 6. 核心数据流
@@ -165,8 +164,8 @@ Phase I best checkpoint
   -> Phase2SelectionDataset
   -> ArchetypeSelectionEnv + FrozenArchetypeDecoderPolicy
   -> Phase2DoubleDqnTrainer.train()
-  -> Phase2SelectionEvaluator.evaluate()
-  -> Phase2Checkpoint.save()
+  -> Phase2Evaluator.evaluate()
+  -> save Phase2Checkpoint + Phase2ValidationCheckpoint
   -> Phase2CheckpointSelector.select_best_from_dir()
   -> Phase2SelectionReport.write_report()
 ```
@@ -262,7 +261,7 @@ class Phase2MainConfig:
 使用场景：
 
 - `Phase2MainFlow._create_q_network()` 根据它创建 online/target `Phase2QNetwork`；
-- checkpoint 保存该配置，确保恢复 checkpoint 时能重建相同网络结构；
+- model checkpoint 保存该配置，确保恢复 checkpoint 时能重建相同网络结构；
 - evaluator/report 读取 `num_archetypes` 做 code usage、混淆矩阵和输出维度校验。
 
 字段说明：
@@ -281,7 +280,7 @@ class Phase2MainConfig:
 
 - `phase2_env.py` 和 `phase2_selection_reward.py` 用它统一交易 reward 口径；
 - `phase2_double_dqn_loss.py` 用 `gamma` 计算 TD target；
-- checkpoint/report 保存它，保证收益、折扣和 imitation regularization 可审计。
+- model checkpoint/report 保存它，保证收益、折扣和 imitation regularization 可审计。
 
 字段说明：
 
@@ -300,7 +299,7 @@ class Phase2MainConfig:
 - `Phase2DoubleDqnTrainer` 的训练循环、探索策略、replay buffer 和 target network 同步；
 - `Phase2ReplayBuffer` 的容量和采样 batch size；
 - optimizer 和梯度裁剪；
-- checkpoint selection 记录训练轮数和训练超参。
+- validation checkpoint selection 记录训练轮数和训练超参。
 
 字段说明：
 
@@ -414,26 +413,15 @@ class Phase2SelectionEvaluationMetrics:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2SelectionEvaluationMetrics":
         """从 checkpoint/report payload 恢复 selection evaluation metrics。"""
-
-@dataclass(frozen=True)
-class Phase2TrainingResult:
-    epoch: int
-    best_checkpoint_path: Path
-    train_metrics: Mapping[str, float]
-    validation_metrics: Phase2SelectionEvaluationMetrics
-    selected_checkpoint_summary: Mapping[str, Any]
-
-    def to_dict(self) -> dict[str, object]:
-        """序列化为 report/checkpoint selector 可保存的训练结果摘要。"""
 ```
 
 说明：
 
 - `Phase2SelectionEvaluationMetrics` 同时比较 selector、oracle assigned label、
   random label 的收益差异；
-- evaluator 只负责计算该对象，checkpoint selector 和 report 只消费该对象；
-- `Phase2TrainingResult` 是训练主流程返回给 checkpoint selector 和 report 的
-  交接结果，因此和 metrics payload 放在同一模块，不放在 data schema；
+- `Phase2ValidationResult` 不放在 metrics 模块，放在
+  `src/phase2/checkpoint/phase2_checkpoint.py`，因为它的职责是承载 validation checkpoint
+  中记录的校验结果 metrics；
 - 后续如果需要 hard gate、tie-breaker 或 risk finding，应继续在
   `src/phase2/metrics/` 下拆分，不放回 data schema。
 
@@ -805,9 +793,9 @@ class Phase2DoubleDqnTrainer:
     def should_save_checkpoint(
         self,
         epoch: int,
-        validation_metrics: Phase2SelectionEvaluationMetrics,
+        validation_result: Phase2ValidationResult,
     ) -> bool:
-        """根据验证收益、label consistency 和风险指标判断是否保存 checkpoint。"""
+        """根据 validation_result.metrics 中的验证收益、label consistency 和风险指标判断是否保存 checkpoint。"""
 ```
 
 说明：
@@ -825,29 +813,6 @@ class Phase2DoubleDqnTrainer:
 class Phase2Evaluator:
     def __init__(
         self,
-        selection_evaluator: Phase2SelectionEvaluator,
-    ) -> None:
-        """保存 Phase II 各专项 evaluator，作为主流程统一评估入口。"""
-
-    def evaluate(
-        self,
-        dataset: Phase2SelectionDataset,
-        deterministic: bool = True,
-    ) -> Phase2SelectionEvaluationMetrics:
-        """调用 selection evaluator，返回 Phase II 统一评估指标。"""
-```
-
-说明：
-
-- 对齐 Phase I 的 `phase1_evaluator.py`：主流程只依赖基础 evaluator；
-- 后续如果 Phase II 增加风险、漂移或归因评估，可以继续拆到独立专项 evaluator。
-
-### 7.14 `src/phase2/evaluators/phase2_selection_evaluator.py`
-
-```python
-class Phase2SelectionEvaluator:
-    def __init__(
-        self,
         q_network: Phase2QNetwork,
         decoder_policy: FrozenArchetypeDecoderPolicy,
         reward_config: Phase2RewardConfig,
@@ -859,8 +824,10 @@ class Phase2SelectionEvaluator:
         self,
         dataset: Phase2SelectionDataset,
         deterministic: bool = True,
-    ) -> Phase2SelectionEvaluationMetrics:
-        """用 greedy Q action 评估 selector 在一个 split 上的 horizon return 和 label consistency。"""
+        split_name: str = "validation",
+        epoch: int | None = None,
+    ) -> Phase2ValidationResult:
+        """用 greedy Q action 评估 selector，并把 metrics 放入 Phase2ValidationResult.metrics。"""
 
     def evaluate_oracle_assigned_labels(
         self,
@@ -892,57 +859,139 @@ class Phase2SelectionEvaluator:
 
 说明：
 
+- Phase II 只有 archetype selection 一个评估主题，`phase2_selection_evaluator.py`
+  会与 `phase2_evaluator.py` 职责重复，因此不单独创建；
+- 对齐 Phase I 的 `phase1_evaluator.py`：主流程只依赖基础 evaluator；
 - validation 选择 checkpoint 时使用 greedy Q action；
 - 报告中同时呈现 selector return、assigned-label baseline、random baseline；
 - `label_top1_match` 不是唯一目标，selector 可以为了收益偏离 assigned label，但偏离需要被记录。
 
-### 7.15 `src/phase2/checkpoint/phase2_checkpoint.py`
+### 7.14 `src/phase2/checkpoint/phase2_checkpoint.py`
+
+当前骨架代码职责:
+
+- 文件级说明明确 checkpoint payload 的职责边界：只定义强类型数据容器，不执行 `torch.save`、JSON 序列化、文件 I/O 或 best 选择；
+- `Phase2ValidationResult` 已说明 metrics 与 diagnostics 的用途：metrics 供排序和报告复用，diagnostics 供 code usage、label consistency、reward distribution 等诊断使用；
+- `Phase2Checkpoint` 已说明只保存 selector 模型恢复所需的 epoch、`Phase2TrainConfig`、Q-network state dict 和 optimizer state dict，不保存 validation metrics；
+- `Phase2ValidationCheckpoint` 已说明作为 validation result 与模型 checkpoint 的轻量关联 payload；第一版骨架只保留 epoch 和 validation result，后续按完整契约补充 model checkpoint path/hash 与 Phase I lineage；
+- 该文件不负责判断 checkpoint 是否合格，也不表达 best checkpoint 语义。
 
 ```python
 @dataclass(frozen=True)
-class Phase2SelectionCheckpointMetadata:
-    pair: str
-    train_batch_id: str
-    phase1_checkpoint_path: str
-    phase1_checkpoint_hash: str | None
-    epoch: int
-    validation_metrics: Phase2SelectionEvaluationMetrics
+class Phase2ValidationResult:
+    split_name: str
+    epoch: int | None
+    metrics: Phase2SelectionEvaluationMetrics
+    diagnostics: Mapping[str, Any]
+
+    def to_dict(self) -> dict[str, object]:
+        """序列化为 validation checkpoint/report/artifact store 可保存的 validation result。"""
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ValidationResult":
+        """从 validation checkpoint/report payload 恢复 validation result。"""
 
 @dataclass(frozen=True)
 class Phase2Checkpoint:
+    pair: str
+    train_batch_id: str
     epoch: int
-    is_best: bool
+    phase1_checkpoint_path: str
+    phase1_checkpoint_hash: str | None
     config: Mapping[str, Any]
     q_network_state_dict: Mapping[str, Any]
     optimizer_state_dict: Mapping[str, Any]
-    metadata: Phase2SelectionCheckpointMetadata
 
     def to_dict(self) -> dict[str, object]:
-        """转换为 torch.save 友好的 checkpoint payload。"""
+        """转换为 torch.save 友好的模型 checkpoint payload，不包含 metrics。"""
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2Checkpoint":
-        """从 checkpoint payload 恢复强类型对象。"""
-```
+        """从模型 checkpoint payload 恢复强类型对象。"""
 
-### 7.16 `src/phase2/checkpoint/phase2_checkpoint_selector.py`
+@dataclass(frozen=True)
+class Phase2ValidationCheckpoint:
+    pair: str
+    train_batch_id: str
+    epoch: int
+    model_checkpoint_path: str
+    model_checkpoint_hash: str | None
+    phase1_checkpoint_path: str
+    phase1_checkpoint_hash: str | None
+    validation_result: Phase2ValidationResult
 
-```python
-class Phase2CheckpointSelector:
-    def select_best_from_dir(
-        self,
-        checkpoint_dir: Path,
-    ) -> Path:
-        """按 validation mean_return 和风险/一致性 tie-breaker 选择最佳 checkpoint。"""
+    def to_dict(self) -> dict[str, object]:
+        """转换为 JSON 友好的 validation checkpoint payload。"""
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ValidationCheckpoint":
+        """从 validation checkpoint payload 恢复强类型对象。"""
+
+@dataclass(frozen=True)
+class Phase2TrainingResult:
+    epoch: int
+    best_model_checkpoint_path: Path
+    best_validation_checkpoint_path: Path
+    train_metrics: Mapping[str, float]
+    validation_result: Phase2ValidationResult
+    selected_checkpoint_summary: Mapping[str, Any]
+
+    def to_dict(self) -> dict[str, object]:
+        """序列化为 report/checkpoint selector 可保存的训练结果摘要。"""
 ```
 
 说明：
 
-- checkpoint 必须记录 Phase I checkpoint 路径或 hash；
-- 不能只保存 q-network 权重，否则无法确认 decoder/codebook 来源；
-- `select_best_from_dir()` 不重新跑评估，只读取 checkpoint metadata。
+- `Phase2ValidationResult` 放在 checkpoint 文件中；它的目的是持有 checkpoint 中记录的校验
+  metrics 和诊断信息；
+- `Phase2Checkpoint` 只持有模型参数、优化器状态、模型配置和恢复模型所需 lineage；
+- `Phase2Checkpoint` 不持有 metrics、不持有 `Phase2ValidationResult`，也不负责表达 best；
+- lineage 字段直接放在 `Phase2Checkpoint` 和 `Phase2ValidationCheckpoint` 上，不再拆
+  metadata 包装类；
+- `Phase2ValidationCheckpoint` 持有 `Phase2ValidationResult`，用于记录某个 epoch/model checkpoint
+  对应的校验结果；
+- `model_checkpoint_path` / `model_checkpoint_hash` 把 validation checkpoint 关联到具体模型参数文件，
+  checkpoint selector 通过 validation checkpoint 选择对应的 model checkpoint。
 
-### 7.17 `src/phase2/phase2_artifact_store.py`
+### 7.15 `src/phase2/checkpoint/phase2_checkpoint_selector.py`
+
+当前骨架代码职责:
+
+- 文件级说明明确 selector 只消费 `Phase2ValidationCheckpoint`，不加载 Q-network 权重、不访问 optimizer state、不读取训练数据，也不重新运行 evaluator；
+- `Phase2CheckpointSelectionResult` 已建模为选择结果摘要，字段包括被选中的 checkpoint、checkpoint id、epoch、score，并提供 `has_selection` 判断；
+- `Phase2CheckpointSelector` 已说明预期策略：读取 `validation_result.metrics` 中的收益、风险和 label consistency 字段，完成过滤、主评分排序和 tie-breaker；
+- `select_best()` 当前仍是骨架入口，后续需要补齐候选过滤、排序、tie-breaker、失败摘要和空候选处理；
+- 保存或复制 best model checkpoint 的动作仍由 `Phase2MainFlow` 或 `Phase2ArtifactStore` 负责。
+
+```python
+@dataclass(frozen=True)
+class Phase2CheckpointSelectionResult:
+    checkpoint: Phase2ValidationCheckpoint | None
+    selected_checkpoint_id: str | None
+    selected_epoch: int | None
+    selected_score: float | None
+
+    @property
+    def has_selection(self) -> bool:
+        """判断是否成功选出 validation checkpoint。"""
+
+class Phase2CheckpointSelector:
+    def select_best(
+        self,
+        validation_checkpoints: Sequence[Phase2ValidationCheckpoint],
+    ) -> Phase2CheckpointSelectionResult:
+        """按 validation_result.metrics.mean_return 和风险/一致性 tie-breaker 选择最佳 validation checkpoint。"""
+```
+
+说明：
+
+- selector 不读取模型参数文件，只读取 validation checkpoint；
+- 返回的 `Phase2ValidationCheckpoint.model_checkpoint_path` 指向最终应加载或复制为 best 的
+  `Phase2Checkpoint`；
+- validation checkpoint 必须记录 Phase I checkpoint 路径或 hash，以及 model checkpoint 路径或 hash；
+- `select_best_from_dir()` 不重新跑评估，只读取 validation checkpoint payload。
+
+### 7.16 `src/phase2/phase2_artifact_store.py`
 
 ```python
 class Phase2ArtifactStore(DataFileStore):
@@ -970,18 +1019,28 @@ class Phase2ArtifactStore(DataFileStore):
     ) -> Phase2SelectionDataset:
         """读取 Phase II dataset cache。"""
 
-    def save_metrics(
+    def save_phase2_validation_checkpoint(
         self,
-        split_name: str,
-        metrics: Phase2SelectionEvaluationMetrics,
+        validation_checkpoint: Phase2ValidationCheckpoint,
     ) -> Path:
-        """保存评估指标 JSON。"""
+        """保存 Phase II validation checkpoint JSON，其中 metrics 位于 validation_result.metrics。"""
+
+    def load_phase2_validation_checkpoint(
+        self,
+        *,
+        epoch: int | None = None,
+        best: bool = False,
+    ) -> Phase2ValidationCheckpoint:
+        """读取 Phase II validation checkpoint payload。"""
+
+    def load_phase2_all_validation_checkpoints(self) -> list[Phase2ValidationCheckpoint]:
+        """读取所有 Phase II validation checkpoint，供 checkpoint selector 排序。"""
 
     def save_phase2_checkpoint(
         self,
         checkpoint: Phase2Checkpoint,
     ) -> Path:
-        """保存 Phase II checkpoint payload，对齐 Phase1ArtifactStore.save_phase1_checkpoint()。"""
+        """保存 Phase II model checkpoint payload，不包含 validation metrics。"""
 
     def load_phase2_checkpoint(
         self,
@@ -989,16 +1048,17 @@ class Phase2ArtifactStore(DataFileStore):
         epoch: int | None = None,
         best: bool = False,
     ) -> Phase2Checkpoint:
-        """读取 Phase II checkpoint payload，对齐 Phase1ArtifactStore.load_phase1_checkpoint()。"""
+        """读取 Phase II model checkpoint payload。"""
 ```
 
 说明：
 
 - 推荐路径：`artifacts/{pair}/{batch_id}/phase2/`;
 - dataset cache 只缓存 Phase II 所需数组，不重复保存 Phase I model；
-- metrics JSON 用于 report 和 checkpoint selector 复用。
+- model checkpoint 和 validation checkpoint 分目录保存，避免模型参数文件和校验指标互相耦合；
+- validation checkpoint JSON 用于 report 和 checkpoint selector 复用。
 
-### 7.18 `src/phase2/phase2_main.py`
+### 7.17 `src/phase2/phase2_main.py`
 
 ```python
 class Phase2MainFlow:
@@ -1045,7 +1105,7 @@ class Phase2MainFlow:
 - 私有方法只负责编排，不放置模型细节；
 - 所有路径通过 `Phase2ArtifactStore` 获取。
 
-### 7.19 `src/phase2/report/phase2_selection_report.py`
+### 7.18 `src/phase2/report/phase2_selection_report.py`
 
 ```python
 class Phase2SelectionReport:
@@ -1053,16 +1113,16 @@ class Phase2SelectionReport:
         self,
         output_dir: Path,
         training_result: Phase2TrainingResult,
-        validation_metrics: Phase2SelectionEvaluationMetrics,
-        test_metrics: Phase2SelectionEvaluationMetrics | None = None,
+        validation_result: Phase2ValidationResult,
+        test_result: Phase2ValidationResult | None = None,
     ) -> None:
         """写出 JSON 和 HTML 报告。"""
 
     def build_context(
         self,
         training_result: Phase2TrainingResult,
-        validation_metrics: Phase2SelectionEvaluationMetrics,
-        test_metrics: Phase2SelectionEvaluationMetrics | None,
+        validation_result: Phase2ValidationResult,
+        test_result: Phase2ValidationResult | None,
     ) -> dict[str, Any]:
         """构建模板上下文。"""
 
@@ -1088,17 +1148,18 @@ class Phase2SelectionReport:
 | `tests/test_phase2_double_dqn_loss.py` | Double DQN target 使用 online argmax 和 target gather，done 样本不 bootstrap。 |
 | `tests/test_phase2_env_reward_contract.py` | env `step()` 一步结束，reward 等于 `ActionExecutionCalculator` 的 horizon return。 |
 | `tests/test_phase2_replay_buffer.py` | replay buffer add/sample 的 shape、dtype、容量覆盖和 seed 可复现性正确。 |
-| `tests/test_phase2_selection_metrics_schema.py` | selection metrics 和 training result 支持稳定 `to_dict()` / `from_dict()` 或等价序列化。 |
+| `tests/test_phase2_selection_metrics_schema.py` | selection metrics 支持稳定 `to_dict()` / `from_dict()` 或等价序列化。 |
+| `tests/test_phase2_checkpoint_schema.py` | validation result、training result、model checkpoint 和 validation checkpoint 支持稳定序列化；model checkpoint 不包含 metrics，validation checkpoint 持有 `Phase2ValidationResult` 并可关联到 model checkpoint。 |
 | `tests/test_phase2_q_network_forward.py` | q-network forward/select_action 输出 shape 正确，Q value 最后一维等于 `num_archetypes`。 |
 
 ## 9. 实现顺序建议
 
-1. 实现 `phase2_config.py`、`phase2_selection_data_schema.py` 和 `metrics/phase2_selection_metrics.py`，稳定数据与指标契约；
+1. 实现 `phase2_config.py`、`phase2_selection_data_schema.py` 和 `metrics/phase2_selection_metrics.py`，稳定数据与纯指标契约；
 2. 实现 `phase2_selection_dataset.py`，读取/校验 Phase I exported labels 并做 no-leakage 测试；
 3. 实现 `model/phase2_decoder_policy.py` 和 `phase2_env.py`，打通 code id 到 horizon reward；
 4. 实现 `model/phase2_q_network.py`，完成 Q-network forward/select_action 单测；
 5. 实现 `rl/phase2_replay_buffer.py`、`rl/phase2_double_dqn_loss.py` 和 `rl/phase2_double_dqn_trainer.py` 的最小 Double DQN 更新；
-6. 实现 `evaluators/phase2_selection_evaluator.py`、`checkpoint/phase2_checkpoint.py`、`checkpoint/phase2_checkpoint_selector.py` 和 `report/phase2_selection_report.py`；
+6. 实现 `evaluators/phase2_evaluator.py`、`checkpoint/phase2_checkpoint.py`、`checkpoint/phase2_checkpoint_selector.py` 和 `report/phase2_selection_report.py`；
 7. 增加 `scripts/train_phase2.py`，接入完整训练流程。
 
 ## 10. 关键约束
@@ -1107,5 +1168,5 @@ class Phase2SelectionReport:
 - selector observation 只允许包含上一分片完整状态序列和当前分片前 `TSize` 个状态；
 - DP teacher 和 VQ encoder 只允许在 Phase I 离线流程生成 label；Phase II dataset builder 不调用它们；
 - reward 口径必须复用 `ActionExecutionCalculator`；
-- checkpoint 必须记录 Phase I checkpoint lineage；
+- model checkpoint 必须记录 Phase I checkpoint lineage；validation checkpoint 必须记录对应 model checkpoint lineage；
 - validation/test 指标必须区分 trading return 和 label imitation quality。
