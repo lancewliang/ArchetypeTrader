@@ -56,18 +56,6 @@ class Phase2ValidationMetrics:
     # 平均换手率或行为强度指标。
     mean_turnover: float
 
-    # selector selected code 与 Phase I assigned label 的 top-1 一致率。
-    label_top1_match: float
-
-    # selector 实际使用 archetype 的分布熵。
-    code_usage_entropy: float
-
-    # 使用 Phase I assigned label 作为 action 的 baseline return。
-    oracle_label_return: float
-
-    # 随机选择 archetype 的 baseline return。
-    random_label_return: float
-
 
 @dataclass(frozen=True)
 class Phase2ValidationResult:
@@ -90,5 +78,3 @@ class Phase2ValidationResult:
     # evaluator 产出的核心指标，例如 mean_return、risk 和 consistency。
     metrics: Phase2ValidationMetrics
 
-    # 诊断信息，用于 report 和失败分析，不直接作为主排序字段。
-    diagnostics: Mapping[str, Any]
