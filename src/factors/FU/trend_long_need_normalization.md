@@ -1,0 +1,4 @@
+ofi_240
+trade_volume_delta_slope_240
+turnover_delta_slope_240
+open_interest_slope_240

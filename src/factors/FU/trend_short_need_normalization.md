@@ -1,0 +1,12 @@
+ofi_30
+ofi_60
+ofi_120
+trade_volume_delta_slope_30
+trade_volume_delta_slope_60
+trade_volume_delta_slope_120
+turnover_delta_slope_30
+turnover_delta_slope_60
+turnover_delta_slope_120
+open_interest_slope_30
+open_interest_slope_60
+open_interest_slope_120
