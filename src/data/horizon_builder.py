@@ -64,13 +64,7 @@ class HorizonBuilder:
             raise ValueError("horizon must be greater than 1")
         self.horizon = horizon
         self.feature_spec = feature_spec
-        self.state_normalizer: StateNormalizer | None = None
         self.feature_normalizers: dict[str, StateNormalizer] = {}
-
-    def set_state_normalizer(self, state_normalizer: StateNormalizer | None) -> None:
-        """设置 state 归一化器。"""
-
-        self.state_normalizer = state_normalizer
 
     def set_feature_normalizers(
         self,
@@ -113,65 +107,7 @@ class HorizonBuilder:
         if "close" not in dataframe.columns:
             raise ValueError("dataframe must contain a 'close' column")
 
-        if self.feature_spec is not None:
-            return self._build_from_feature_spec(dataframe)
-
-        return self._build_legacy(dataframe)
-
-    def _build_legacy(self, dataframe: pl.DataFrame) -> HorizonDataset:
-        """按旧单路 states 逻辑构建数据，兼容迁移期调用。"""
-
-        state_columns = [
-            column
-            for column, dtype in dataframe.schema.items()
-            if column != "close" and dtype.is_numeric()
-        ]
-        if not state_columns:
-            raise ValueError("dataframe must contain at least one state feature column")
-        missing_depth_columns = [
-            column for column in LOB_DEPTH_COLS if column not in state_columns
-        ]
-        if missing_depth_columns:
-            missing = ", ".join(missing_depth_columns)
-            raise ValueError(
-                f"dataframe must contain numeric LOB depth columns: {missing}"
-            )
-
-        usable_rows = len(dataframe) // self.horizon * self.horizon
-        if usable_rows == 0:
-            raise ValueError(
-                f"dataframe has {len(dataframe)} rows, fewer than horizon={self.horizon}"
-            )
-        dataframe = dataframe.head(usable_rows)
-
-        state_values = dataframe.select(state_columns).to_numpy().astype(
-            np.float32,
-            copy=False,
-        )
-        raw_states = state_values.reshape(-1, self.horizon, len(state_columns))
-        depth_indices = [state_columns.index(column) for column in LOB_DEPTH_COLS]
-        depthprices = raw_states[..., depth_indices].copy()
-        if self.state_normalizer is not None:
-            if tuple(state_columns) != self.state_normalizer.feature_columns:
-                raise ValueError(
-                    "dataframe state columns do not match the configured normalizer"
-                )
-            state_values = self.state_normalizer.transform(state_values)
-        states = state_values.reshape(-1, self.horizon, len(state_columns))
-        prices = (
-            dataframe.select("close")
-            .to_numpy()
-            .astype(np.float32, copy=False)
-            .reshape(-1, self.horizon, 1)
-        )
-        if not np.isfinite(states).all():
-            raise ValueError("state features contain non-finite values")
-        if not np.isfinite(prices).all():
-            raise ValueError("close prices contain non-finite values")
-        if not np.isfinite(depthprices).all():
-            raise ValueError("LOB depth features contain non-finite values")
-        empty = np.empty((states.shape[0], states.shape[1], 0), dtype=np.float32)
-        return states, empty, empty, prices, depthprices
+        return self._build_from_feature_spec(dataframe)
 
     def _build_from_feature_spec(self, dataframe: pl.DataFrame) -> HorizonDataset:
         """按三路 feature spec 构建 ``states/relative_states/trend_states``。"""

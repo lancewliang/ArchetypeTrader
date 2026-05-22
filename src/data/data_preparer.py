@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import polars as pl
+
 from .data_load import DataLoad
-from .feature_spec import FeatureInputSpec, build_feature_input_spec
+from .feature_spec import build_feature_input_spec
 from .horizon_builder import HorizonBuilder
 from .resolve_factor import FACTORS_ROOT
 from .state_normalizer import StateNormalizer
@@ -44,20 +46,14 @@ class DataPreparer:
         self,
         horizon: int = 72,
         pair: str | None = None,
-        data_load: DataLoad | None = None,
         data_store: DataStore | None = None,
     ) -> None:
         """初始化 DataPreparer。
 
         参数:
             horizon: 每个样本的固定时间窗口长度 ``h``，默认 72。
-            pair: 可选交易标的。提供后，DataPreparer 会在内部构建
-                ``FeatureInputSpec`` 并用其 required columns 初始化 ``DataLoad``。
-            factors_root: 因子配置根目录，和 ``pair`` 一起用于内部构建
-                ``FeatureInputSpec``。
-            feature_spec: 可选三路输入特征规格，主要用于测试或外部显式注入。
-                未提供但提供了 ``pair`` 时，会由 DataPreparer 内部生成。
-            data_load: 数据读取组件。用于从 feature 文件读取 ``pl.DataFrame``。
+            pair: 交易标的。DataPreparer 会在内部构建 ``FeatureInputSpec``，
+                并用其 required columns 初始化 ``DataLoad``。
             data_store: 数据产物读写组件。用于计算产物路径、保存中间产物，
                 以及读取已经固化的产出物。
 
@@ -72,21 +68,66 @@ class DataPreparer:
             数据读取、产物读写规则，否则数据集之间的 schema 和审计方式会不一致。
         """
         self.horizon = horizon
-       
-        self.feature_spec = build_feature_input_spec(
-                pair=pair,
-                factors_root=FACTORS_ROOT,
-            )
-        self.pair = pair
         self.factors_root = Path(FACTORS_ROOT)
-        feature_columns = (
-            list(self.feature_spec.required_columns) if self.feature_spec is not None else None
+        self.pair = pair
+        self.feature_spec = build_feature_input_spec(
+            pair=pair,
+            factors_root=self.factors_root,
         )
-        self.data_load = data_load or DataLoad(feature_columns=feature_columns)
+        feature_columns = list(self.feature_spec.required_columns)
+        self.data_load = DataLoad(feature_columns=feature_columns)
         self.data_store = data_store or DataStore(artifacts_root="data")
-        self.horizon_builder = HorizonBuilder(horizon=horizon)
-        self.state_normalizer: StateNormalizer | None = None
+        self.horizon_builder = HorizonBuilder(
+            horizon=horizon,
+            feature_spec=self.feature_spec,
+        )
+        self.feature_normalizers: dict[str, StateNormalizer] | None = None
         self.dp_planner = SingleTrade_DP_Planner(horizon=horizon)
+
+    def _fit_feature_normalizers(
+        self,
+        dataframe: pl.DataFrame,
+    ) -> dict[str, StateNormalizer]:
+        """Fit block-level normalizers required by the three-input feature spec."""
+
+        normalizers: dict[str, StateNormalizer] = {}
+        for block in self.feature_spec.iter_blocks():
+            if not block.normalize:
+                continue
+            key = block.effective_normalizer_key
+            if key in normalizers:
+                if tuple(block.columns) != normalizers[key].feature_columns:
+                    raise ValueError(
+                        f"normalizer key {key!r} is reused for different columns"
+                    )
+                continue
+            normalizers[key] = StateNormalizer.fit(dataframe, block.columns)
+        return normalizers
+
+    def _validate_feature_normalizers(
+        self,
+        normalizers: dict[str, StateNormalizer],
+    ) -> None:
+        """Validate that all normalized feature blocks have fitted parameters."""
+
+        missing = [
+            key
+            for key in self.feature_spec.normalizer_keys
+            if key not in normalizers
+        ]
+        if missing:
+            raise ValueError(
+                "missing feature normalizers: " + ", ".join(missing)
+            )
+
+        for block in self.feature_spec.iter_blocks():
+            if not block.normalize:
+                continue
+            key = block.effective_normalizer_key
+            if tuple(block.columns) != normalizers[key].feature_columns:
+                raise ValueError(
+                    f"feature normalizer {key!r} columns do not match block columns"
+                )
 
     def _prepare_dataset(
         self,
@@ -110,15 +151,15 @@ class DataPreparer:
         基本流程:
             1. 调用 ``DataLoad.load_feature_file(path)`` 得到 ``pl.DataFrame``。
             2. 调用 ``DataStore.build_artifact_paths(path, split_name)`` 计算产物路径。
-            3. 在 train split 上拟合 ``StateNormalizer``，或在非 train split 上
-               读取已保存的归一化参数。
-            4. 将 ``StateNormalizer`` 注入 ``HorizonBuilder``。
+            3. 在 train split 上拟合 feature block normalizers，或在非 train split
+               上读取已保存的归一化参数。
+            4. 将 feature block normalizers 注入 ``HorizonBuilder``。
             5. 调用 ``HorizonBuilder.build(dataframe)`` 得到 ``horizon_dataset``。
             6. 调用 ``SingleTrade_DP_Planner.build_trajectory_dataset(horizon_dataset)``
                得到 ``trajectory_dataset``。
             7. 调用 ``DataStore.save_horizon_dataset(...)`` 保存 horizon 中间数据。
             8. 调用 ``DataStore.save_trajectory_dataset(...)`` 保存 trajectory 数据集。
-            9. 若是 train split，则保存 ``StateNormalizer``。
+            9. 若是 train split，则保存 feature block normalizers。
 
         读取产物:
             如果后续流程需要复用已保存的中间产物，可通过
@@ -133,17 +174,15 @@ class DataPreparer:
         dataframe = self.data_load.load_feature_file(path)
         artifact_paths = self.data_store.build_artifact_paths(path, split_name)
         if split_name == "train":
-            state_columns = [
-                column
-                for column, dtype in dataframe.schema.items()
-                if column != "close" and dtype.is_numeric()
-            ]
-            self.state_normalizer = StateNormalizer.fit(dataframe, state_columns)
-        elif self.state_normalizer is None:
-            self.state_normalizer = self.data_store.load_state_normalizer(
-                artifact_paths["state_normalizer"],
+            self.feature_normalizers = self._fit_feature_normalizers(dataframe)
+        elif self.feature_normalizers is None:
+            self.feature_normalizers = self.data_store.load_feature_normalizers(
+                artifact_paths["feature_normalizers"],
             )
-        self.horizon_builder.set_state_normalizer(self.state_normalizer)
+        if self.feature_normalizers is None:
+            raise RuntimeError("feature_normalizers must be initialized")
+        self._validate_feature_normalizers(self.feature_normalizers)
+        self.horizon_builder.set_feature_normalizers(self.feature_normalizers)
         horizon_dataset = self.horizon_builder.build(dataframe)
         trajectory_dataset = self.dp_planner.build_trajectory_dataset(horizon_dataset)
         self.data_store.save_horizon_dataset(
@@ -154,10 +193,10 @@ class DataPreparer:
             trajectory_dataset,
             artifact_paths["trajectory_dataset"],
         )
-        if split_name == "train" and self.state_normalizer is not None:
-            self.data_store.save_state_normalizer(
-                self.state_normalizer,
-                artifact_paths["state_normalizer"],
+        if split_name == "train":
+            self.data_store.save_feature_normalizers(
+                self.feature_normalizers,
+                artifact_paths["feature_normalizers"],
             )
         return trajectory_dataset
 

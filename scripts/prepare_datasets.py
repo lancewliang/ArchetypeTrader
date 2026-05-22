@@ -64,12 +64,6 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_HORIZON,
         help="固定 horizon 长度，默认 72。",
     )
-    parser.add_argument(
-        "--factors-root",
-        type=Path,
-        default=FACTORS_ROOT,
-        help="因子配置根目录，默认项目下的 src/factors。",
-    )
     parser.add_argument("--train-file", type=Path, default=None)
     parser.add_argument("--val-file", type=Path, default=None)
     parser.add_argument("--test-file", type=Path, default=None)
@@ -98,7 +92,7 @@ def main() -> None:
     """执行前置数据处理主流程。"""
 
     args = parse_args()
-    factor_source = args.factors_root / args.pair
+    factor_source = FACTORS_ROOT / args.pair
 
     pair_dir = args.data_root / args.pair
     data_store = DataStore(
@@ -113,8 +107,6 @@ def main() -> None:
         data_store=data_store,
     )
     feature_spec = preparer.feature_spec
-    if feature_spec is None:
-        raise RuntimeError("feature_spec must be initialized by DataPreparer")
     feature_columns = list(feature_spec.required_columns)
 
     split_files = {
