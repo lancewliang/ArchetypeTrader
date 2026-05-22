@@ -30,10 +30,14 @@ from ..model.data_types import VisibleStates
 from ..utils import ActionExecutionCalculator
 from .phase2_config import Phase2RewardConfig
 from .model.phase2_decoder_policy import FrozenArchetypeDecoderPolicy
+from .phase2_selection_dataset import Phase2SelectionDataset
 
-if TYPE_CHECKING:
-    from .phase2_selection_dataset import Phase2SelectionDataset
 
+@dataclass(frozen=True)
+class Phase2SelectionStepResultInfo:
+    """Phase II horizon-level env step 结果诊断信息 schema。"""
+    sample_id: str
+    selected_code_id: str
 
 @dataclass(frozen=True)
 class Phase2SelectionStepResult:
@@ -58,7 +62,7 @@ class Phase2SelectionStepResult:
     done: bool
 
     # 诊断信息，例如 sample_id、selected_code_id、assigned_label、return、fee、turnover。
-    info: dict[str, Any]
+    info: Phase2SelectionStepResultInfo
 
 
 class ArchetypeSelectionEnv:
@@ -109,7 +113,7 @@ class ArchetypeSelectionEnv:
         )
         self.current_index: int | None = None
 
-    def reset(self, index: int | None = None) -> VisibleStates:
+    def reset(self) -> Phase2SelectionStepResult:
         """重置到一个 horizon 样本并返回 visible states。
 
         功能说明:
@@ -120,10 +124,7 @@ class ArchetypeSelectionEnv:
         使用场景:
             trainer 在采集每个 horizon transition 前调用；当 ``index`` 为 None 时，
             后续实现可采用顺序、随机或外部 sampler 策略。
-
-        参数:
-            index: 可选样本索引。指定时重置到该样本；为空时由环境自行选择。
-
+    
         返回:
             当前样本的 ``VisibleStates``。
         """

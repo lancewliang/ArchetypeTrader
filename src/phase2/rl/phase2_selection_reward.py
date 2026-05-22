@@ -107,32 +107,7 @@ def compute_imitation_kl_loss(
     raise NotImplementedError("Phase2 imitation KL loss is not implemented yet.")
 
 
-def build_epsilon_by_epoch(
-    epoch: int,
-    train_config: Phase2TrainConfig,
-) -> float:
-    """根据 epoch 计算 epsilon-greedy 探索率。
 
-    功能说明:
-        按 ``Phase2TrainConfig.epsilon_start``、``epsilon_end`` 和
-        ``epsilon_decay_epochs`` 做线性退火，返回当前训练轮次使用的 epsilon。
-
-    输入参数:
-        epoch: 当前训练轮次，通常由 ``Phase2MainFlow`` 或 trainer 外层循环传入。
-        train_config: Phase II 训练配置，包含 epsilon 起点、终点和衰减长度。
-
-    输出:
-        ``float``，当前 epoch 的探索率。
-
-    使用场景:
-        ``Phase2DoubleDqnTrainer.train_one_epoch()`` 在收集 transition 前调用，
-        并传给 ``select_action()``。
-
-    论文算法:
-        这是训练稳定性策略，不直接改变目标函数；用于 epsilon-greedy 行为策略采样。
-    """
-
-    raise NotImplementedError("Phase2 epsilon schedule is not implemented yet.")
 
 
 def normalize_horizon_rewards(
