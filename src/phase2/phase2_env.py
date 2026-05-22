@@ -21,15 +21,44 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ..model.data_types import VisibleStatesDataset
-from ..utils import ActionExecutionCalculator, ActionExecutionResult
+from ..model.data_types import VisibleStates
+from ..utils import ActionExecutionCalculator
 from .phase2_config import Phase2RewardConfig
-from .phase2_selection_data_schema import Phase2SelectionDataset, Phase2SelectionStepResult
 from .model.phase2_decoder_policy import FrozenArchetypeDecoderPolicy
+
+if TYPE_CHECKING:
+    from .phase2_selection_dataset import Phase2SelectionDataset
+
+
+@dataclass(frozen=True)
+class Phase2SelectionStepResult:
+    """Phase II horizon-level env step 结果 schema。
+
+    适用场景:
+        作为 ``ArchetypeSelectionEnv.step()`` 和 ``run_horizon()`` 的返回对象。
+
+    字段解释:
+        ``observation`` 是下一次 selector 决策可见状态；``reward`` 是当前
+        horizon-level action 的交易收益；``done`` 表示当前 horizon 是否结束；
+        ``info`` 承载训练、评估和报告所需的诊断字段。
+    """
+
+    # 下一 observation，结构为 previous/current 各三路 states。
+    observation: VisibleStates
+
+    # 当前 horizon 执行 selected archetype 后得到的 scalar reward。
+    reward: float
+
+    # Phase II 环境一步对应一个 horizon，通常为 True。
+    done: bool
+
+    # 诊断信息，例如 sample_id、selected_code_id、assigned_label、return、fee、turnover。
+    info: dict[str, Any]
 
 
 class ArchetypeSelectionEnv:
@@ -80,7 +109,7 @@ class ArchetypeSelectionEnv:
         )
         self.current_index: int | None = None
 
-    def reset(self, index: int | None = None) -> VisibleStatesDataset:
+    def reset(self, index: int | None = None) -> VisibleStates:
         """重置到一个 horizon 样本并返回 visible states。
 
         功能说明:
@@ -96,7 +125,7 @@ class ArchetypeSelectionEnv:
             index: 可选样本索引。指定时重置到该样本；为空时由环境自行选择。
 
         返回:
-            当前样本的 ``VisibleStatesDataset``。
+            当前样本的 ``VisibleStates``。
         """
 
         raise NotImplementedError("Phase2 env reset is not implemented yet.")

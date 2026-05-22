@@ -27,7 +27,6 @@ import numpy as np
 
 from ..metrics.phase2_metric_results import Phase2ValidationResult
 from ..phase2_config import Phase2RewardConfig
-from ..phase2_selection_data_schema import Phase2SelectionDataset
 
 class Phase2Evaluator:
     """Phase II archetype selector 的统一评估入口。

@@ -126,6 +126,24 @@ TSize = int
     ``TSize == 4``，则当前分片可见状态包含 4 个连续 timestep。
 """
 
+VisibleStates = tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]
+
+VisibleStatesBatch = tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]
+
 VisibleStatesDataset = tuple[
     np.ndarray,
     np.ndarray,
@@ -171,14 +189,7 @@ VisibleStatesDataset = tuple[
     的状态信息，不包含当前分片未来状态、价格、teacher action 或 reward。
 """
 
-VisibleStatesBatch = tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-]
+
 
 ArtifactPaths = dict[str, Path]
 """数据准备产出物路径集合。
@@ -204,7 +215,8 @@ ArtifactPaths = dict[str, Path]
     使用不一致的命名规则或目录结构。
 """
 
-
+DemonstrationHorizonLabel = tuple[int, int]
+DemonstrationHorizonLabelBatch = tuple[np.ndarray, np.ndarray]
 DemonstrationHorizonLabelDataset = tuple[np.ndarray, np.ndarray]
 """Phase I demonstration horizon 的标签向量数据集。
 

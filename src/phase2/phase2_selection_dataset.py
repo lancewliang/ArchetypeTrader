@@ -46,7 +46,7 @@ from ..model.data_types import (
     TSize,
     VisibleStatesDataset,
 )
-
+ 
 
 @dataclass(frozen=True)
 class Phase2SelectionDataset:

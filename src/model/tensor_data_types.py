@@ -375,7 +375,7 @@ dtype:
     Q-network、Double DQN loss 和 evaluator 应消费该类型，而不是直接消费 numpy
     dataset 类型。
 """
-
+DemonstrationHorizonLabelTensorBatch = tuple[torch.Tensor, torch.Tensor]
 
 __all__ = [
     "ActionLogitTensor",

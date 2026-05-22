@@ -20,35 +20,10 @@
 """
 
 from __future__ import annotations
-
-from dataclasses import dataclass
-
 import torch
 from torch import nn
-
 from ...model.tensor_data_types import VisibleStatesTensorBatch
 from ..phase2_config import Phase2ModelConfig
-
-
-@dataclass(frozen=True)
-class Phase2QNetworkOutput:
-    """Phase II Q-network 前向输出。
-
-    功能说明:
-        保存 selector 对每个 archetype 的 Q value。该对象让 trainer、evaluator 和
-        后续 diagnostics 使用同一个稳定输出结构。
-
-    设计边界:
-        本类只承载 forward 结果，不计算 action、不应用 softmax、不参与 loss。
-
-    使用场景:
-        ``Phase2QNetwork.forward()`` 返回该对象；Double DQN loss 从
-        ``q_values`` 中 gather selected action 的 Q value。
-    """
-
-    # 每个 archetype 的 Q value，形状为 [batch, num_archetypes]。
-    q_values: torch.Tensor
-
 
 class Phase2QNetwork(nn.Module):
     """Phase II horizon-level archetype selector Q-network.
@@ -114,7 +89,7 @@ class Phase2QNetwork(nn.Module):
     def forward(
         self,
         visible_states: VisibleStatesTensorBatch,
-    ) -> Phase2QNetworkOutput:
+    ) -> torch.Tensor:
         """批量输入 selector 可见状态，输出每个 archetype 的 Q value。
 
         功能说明:
@@ -149,7 +124,7 @@ class Phase2QNetwork(nn.Module):
         q_values = self.q_head(fused_features)
         # fused_features: [batch, hidden_dim * 3 * 6]
         # q_values:       [batch, num_archetypes]
-        return Phase2QNetworkOutput(q_values=q_values)
+        return q_values
 
     @staticmethod
     def _build_q_head(config: Phase2ModelConfig) -> nn.Sequential:
@@ -243,9 +218,7 @@ class Phase2QNetwork(nn.Module):
                 "activation": nn.ReLU(),
                 "dropout": nn.Dropout(config.dropout),
             }
-        )
-
-   
+        )   
 
     def _encode_stream(
         self,
@@ -283,5 +256,4 @@ class Phase2QNetwork(nn.Module):
 
 __all__ = [
     "Phase2QNetwork",
-    "Phase2QNetworkOutput",
 ]

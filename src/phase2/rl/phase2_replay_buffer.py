@@ -25,8 +25,12 @@ from dataclasses import dataclass
 
 import torch
 
-from ...model.data_types import DemonstrationHorizonLabelDataset, VisibleStatesDataset
-from ..phase2_selection_data_schema import Phase2SelectionTransitionBatch
+from ...model.tensor_data_types import (
+    DemonstrationHorizonLabelTensorBatch,
+    VisibleStatesTensorBatch,
+)
+
+from ...model.data_types import DemonstrationHorizonLabel,  VisibleStates
 
 
 @dataclass(frozen=True)
@@ -46,7 +50,7 @@ class Phase2ReplayTransition:
     """
 
     # 当前 selector observation，结构为 previous/current 各三路 states。
-    visible_states: VisibleStatesDataset
+    visible_states: VisibleStates
 
     # selector 选择的 archetype id。
     action: int
@@ -55,14 +59,47 @@ class Phase2ReplayTransition:
     reward: float
 
     # 下一条可训练 horizon 样本的 selector observation。
-    next_visible_states: VisibleStatesDataset
+    next_visible_states: VisibleStates
 
     # horizon/episode 是否结束。
     done: bool
 
     # Phase I assigned label 数据，用于 imitation regularization 和样本追踪。
-    demonstration_horizon_label_dataset: DemonstrationHorizonLabelDataset
+    demonstration_horizon_label: DemonstrationHorizonLabel
 
+
+
+@dataclass(frozen=True)
+class Phase2SelectionTransitionTensorBatch:
+    """Phase II Double DQN replay transition batch schema。
+
+    适用场景:
+        作为 ``Phase2ReplayBuffer.sample()`` 的输出，以及
+        ``compute_double_dqn_loss()`` 的输入。
+
+    字段解释:
+        保存 Double DQN 更新所需的当前 observation、action、reward、下一
+        observation 和 done mask，同时保留 assigned label 作为 imitation
+        regularization target。
+    """
+
+    # selector observation，结构为 previous/current 各三路 states。
+    visible_states: VisibleStatesTensorBatch
+
+    # selector 选择的 archetype id，形状 [batch]。
+    actions: torch.Tensor
+
+    # horizon-level reward，形状 [batch]。
+    rewards: torch.Tensor
+
+    # selector observation，结构为 previous/current 各三路 states。
+    next_visible_states: VisibleStatesTensorBatch
+ 
+    # episode/horizon 结束标记，形状 [batch]。
+    dones: torch.Tensor
+
+    # Phase I assigned label 数据，结构为 (sample_ids, code_labels)。
+    demonstration_horizon_label_batch: DemonstrationHorizonLabelTensorBatch
 
 class Phase2ReplayBuffer:
     """Phase II fixed-capacity replay buffer 骨架。
@@ -127,7 +164,7 @@ class Phase2ReplayBuffer:
         self,
         batch_size: int,
         device: torch.device | str,
-    ) -> Phase2SelectionTransitionBatch:
+    ) -> Phase2SelectionTransitionTensorBatch:
         """随机采样 Double DQN 训练 batch。
 
         功能说明:

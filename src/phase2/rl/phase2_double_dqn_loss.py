@@ -44,11 +44,8 @@ import torch
 from ...model.tensor_data_types import ArchetypeLabelTensor
 from .phase2_selection_reward import compute_imitation_kl_loss
 
-if TYPE_CHECKING:
-    from ..model.phase2_q_network import Phase2QNetwork
-    from ..phase2_config import Phase2RewardConfig, Phase2TrainConfig
-    from ..phase2_selection_data_schema import Phase2SelectionTransitionBatch
-
+from ..model.phase2_q_network import Phase2QNetwork
+from ..phase2_config import Phase2RewardConfig, Phase2TrainConfig
 
 @dataclass(frozen=True)
 class Phase2DoubleDqnLossOutput:
