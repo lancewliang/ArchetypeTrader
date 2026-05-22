@@ -2,8 +2,8 @@
 
 文件功能说明:
     本文件定义 Phase II 的主流程编排入口。Phase II 的目标是训练一个
-    horizon-level selector：输入在线可见状态 ``(previous_t_states,
-    current_t_states)``，输出一个 archetype id，并通过冻结的 Phase I decoder
+    horizon-level selector：输入在线可见的 previous/current 三路状态，
+    输出一个 archetype id，并通过冻结的 Phase I decoder
     生成基础动作序列，最后用 horizon-level trading reward 训练 Double DQN。
 
 设计边界:
@@ -434,13 +434,13 @@ class Phase2MainFlow:
             lr=self.train_config.learning_rate,
         )
 
-        previous_t_states, current_t_states = train_dataset.visible_states
+        visible_state_shapes = tuple(
+            tuple(visible_state.shape[1:])
+            for visible_state in train_dataset.visible_states
+        )
         replay_buffer = Phase2ReplayBuffer(
             capacity=self.train_config.replay_capacity,
-            visible_state_shapes=(
-                tuple(previous_t_states.shape[1:]),
-                tuple(current_t_states.shape[1:]),
-            ),
+            visible_state_shapes=visible_state_shapes,
             seed=self.train_config.seed,
         )
         env = ArchetypeSelectionEnv(

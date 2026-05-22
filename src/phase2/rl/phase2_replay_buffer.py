@@ -45,7 +45,7 @@ class Phase2ReplayTransition:
         trainer 调用 env 后构造该对象，并传入 ``Phase2ReplayBuffer.add()``。
     """
 
-    # 当前 selector observation，结构为 (previous_t_states, current_t_states)。
+    # 当前 selector observation，结构为 previous/current 各三路 states。
     visible_states: VisibleStatesDataset
 
     # selector 选择的 archetype id。
@@ -84,7 +84,7 @@ class Phase2ReplayBuffer:
     def __init__(
         self,
         capacity: int,
-        visible_state_shapes: tuple[tuple[int, ...], tuple[int, ...]],
+        visible_state_shapes: tuple[tuple[int, ...], ...],
         seed: int,
     ) -> None:
         """初始化固定容量 replay buffer。
@@ -99,7 +99,7 @@ class Phase2ReplayBuffer:
 
         参数:
             capacity: replay buffer 最大 transition 数。
-            visible_state_shapes: ``(previous_t_states_shape, current_t_states_shape)``，
+            visible_state_shapes: ``VisibleStatesDataset`` 六个数组各自的 shape，
                 不包含 batch 维度。
             seed: 随机采样 seed，保证训练和测试可复现。
         """

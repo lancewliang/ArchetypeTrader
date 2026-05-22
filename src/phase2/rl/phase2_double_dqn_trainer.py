@@ -137,8 +137,8 @@ class Phase2DoubleDqnTrainer:
             ``deterministic=True``，直接使用 greedy action。
 
         输入参数:
-            visible_states: selector 在线可见状态，结构为
-                ``(previous_t_states, current_t_states)``，不能包含未来 horizon 信息。
+            visible_states: selector 在线可见状态，结构为 previous/current 各三路
+                states，不能包含未来 horizon 信息。
             epsilon: 探索率。训练时由 epoch 调度产生；deterministic 模式下应被忽略。
             deterministic: 是否强制使用 greedy action。
 

@@ -2,7 +2,7 @@
 
 文件功能说明:
     本文件定义 Phase II horizon-level archetype selector 的 Q-network 接口。
-    selector 输入在线可见状态 ``(previous_t_states, current_t_states)``，输出每个
+    selector 输入在线可见的 previous/current 三路状态，输出每个
     archetype 的 Q value，供 Double DQN trainer、evaluator 和 checkpoint 保存复用。
 
 设计边界:
@@ -55,7 +55,7 @@ class Phase2QNetwork(nn.Module):
 
     功能说明:
         接收 selector 在线可见状态，并输出每个 archetype 的 Q value。第一版接口
-        显式接收 ``previous_t_states`` 和 ``current_t_states`` 两列，和
+        显式接收 previous/current 各三路状态，和
         ``Phase2SelectionDatasetBuilder.to_tensor_dataset()`` 的输出保持一致。
 
     设计边界:
@@ -93,18 +93,18 @@ class Phase2QNetwork(nn.Module):
         """输入 selector 可见状态，输出每个 archetype 的 Q value。
 
         功能说明:
-            后续实现应编码上一分片完整状态序列和当前分片前 ``TSize`` 个状态，
-            并输出 ``[batch, num_archetypes]`` 的 Q value。
+            后续实现应编码上一分片完整三路状态序列和当前分片前 ``TSize`` 个
+            三路状态，并输出 ``[batch, num_archetypes]`` 的 Q value。
 
         使用场景:
             Double DQN loss 计算 online/target Q value；evaluator 计算 greedy action；
             diagnostics 可读取全部 Q value 分布。
 
         参数:
-            previous_t_states: 上一分片完整状态序列，预期形状为
-                ``[batch, horizon, state_dim]``。
-            current_t_states: 当前分片可见状态窗口，预期形状为
-                ``[batch, TSize, state_dim]``。
+            visible_states: 六元组，顺序为
+                ``previous_t_states, previous_t_relative_states,
+                previous_t_trend_states, current_t_states,
+                current_t_relative_states, current_t_trend_states``。
 
         返回:
             ``Phase2QNetworkOutput``，其中 ``q_values`` 形状为

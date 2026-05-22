@@ -126,19 +126,45 @@ TSize = int
     ``TSize == 4``，则当前分片可见状态包含 4 个连续 timestep。
 """
 
-VisibleStatesDataset = tuple[np.ndarray, np.ndarray]
+VisibleStatesDataset = tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]
 """Phase II selector 输入模型的可见状态数据集。
 
 结构:
-    ``VisibleStatesDataset = (previous_t_states, current_t_states)``
+    ``VisibleStatesDataset = (
+        previous_t_states,
+        previous_t_relative_states,
+        previous_t_trend_states,
+        current_t_states,
+        current_t_relative_states,
+        current_t_trend_states,
+    )``
 
 形状:
     ``previous_t_states``: ``[x - 1, horizon, feature_dim]``
         上一个分片的所有 t 状态。第 0 条样本没有上一分片，因此不会形成
         selector 训练样本。
 
+    ``previous_t_relative_states``: ``[x - 1, horizon, relative_feature_dim]``
+        上一个分片的所有相对状态。
+
+    ``previous_t_trend_states``: ``[x - 1, horizon, trend_feature_dim]``
+        上一个分片的所有趋势状态。
+
     ``current_t_states``: ``[x - 1, TSize, feature_dim]``
         当前分片的所有 t 状态，窗口长度由 ``TSize`` 定义。
+
+    ``current_t_relative_states``: ``[x - 1, TSize, relative_feature_dim]``
+        当前分片可见窗口内的相对状态。
+
+    ``current_t_trend_states``: ``[x - 1, TSize, trend_feature_dim]``
+        当前分片可见窗口内的趋势状态。
 
 含义:
     这是 Phase II selector 选择模型的直接输入类型。它只包含 selector 在线可见

@@ -35,7 +35,7 @@ class Phase2SelectionDataset:
         target 和诊断标签。
     """
 
-    # selector observation，结构为 (previous_t_states, current_t_states)。
+    # selector observation，结构为 previous/current 各三路 states。
     visible_states: VisibleStatesDataset
 
     # 当前可训练 horizon 数据，结构为
@@ -55,11 +55,11 @@ class Phase2SelectionTensorBatch:
         之间传递的小批量 tensor 输入。
 
     字段解释:
-        前两列是 selector 可见状态；中间三列是环境模拟和 decoder 推理需要的
+        前六列是 selector 可见状态；中间五列是环境模拟和 decoder 推理需要的
         当前 horizon 数据；最后两列是 imitation label 和样本追踪信息。
     """
 
-    # selector observation，结构为 (previous_t_states, current_t_states)。
+    # selector observation，结构为 previous/current 各三路 states。
     visible_states: VisibleStatesDataset
 
     # 当前可训练 horizon 数据，结构为
@@ -83,7 +83,7 @@ class Phase2SelectionStepResult:
         ``info`` 承载训练、评估和报告所需的诊断字段。
     """
 
-    # 下一 observation，结构为 (previous_t_states, current_t_states)。
+    # 下一 observation，结构为 previous/current 各三路 states。
     observation: VisibleStatesDataset
 
     # 当前 horizon 执行 selected archetype 后得到的 scalar reward。
@@ -110,7 +110,7 @@ class Phase2SelectionTransitionBatch:
         regularization target。
     """
 
-    # selector observation，结构为 (previous_t_states, current_t_states)。
+    # selector observation，结构为 previous/current 各三路 states。
     visible_states: VisibleStatesDataset
 
     # selector 选择的 archetype id，形状 [batch]。
@@ -119,7 +119,7 @@ class Phase2SelectionTransitionBatch:
     # horizon-level reward，形状 [batch]。
     rewards: torch.Tensor
 
-    # selector observation，结构为 (previous_t_states, current_t_states)。
+    # selector observation，结构为 previous/current 各三路 states。
     next_visible_states: VisibleStatesDataset
  
     # episode/horizon 结束标记，形状 [batch]。

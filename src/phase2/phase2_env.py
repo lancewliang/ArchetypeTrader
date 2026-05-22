@@ -85,7 +85,7 @@ class ArchetypeSelectionEnv:
 
         功能说明:
             后续实现应根据 ``index`` 或内部 sampler 选择当前样本，并返回该样本的
-            ``(previous_t_states, current_t_states)``。返回值只能包含 selector
+            previous/current 各三路 states。返回值只能包含 selector
             在线可见状态，不能包含当前 horizon 未来状态、价格或 label。
 
         使用场景:
@@ -120,4 +120,3 @@ class ArchetypeSelectionEnv:
         """
 
         raise NotImplementedError("Phase2 env step is not implemented yet.")
-
