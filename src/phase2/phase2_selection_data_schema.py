@@ -38,7 +38,8 @@ class Phase2SelectionDataset:
     # selector observation，结构为 (previous_t_states, current_t_states)。
     visible_states: VisibleStatesDataset
 
-    # 当前可训练 horizon 数据，结构为 (horizon_states, prices, depthprices)。
+    # 当前可训练 horizon 数据，结构为
+    # (horizon_states, relative_states, trend_states, prices, depthprices)。
     horizon_dataset: HorizonDataset
 
     # Phase I assigned label 数据，结构为 (sample_ids, code_labels)。
@@ -61,7 +62,8 @@ class Phase2SelectionTensorBatch:
     # selector observation，结构为 (previous_t_states, current_t_states)。
     visible_states: VisibleStatesDataset
 
-    # 当前可训练 horizon 数据，结构为 (horizon_states, prices, depthprices)。
+    # 当前可训练 horizon 数据，结构为
+    # (horizon_states, relative_states, trend_states, prices, depthprices)。
     horizon_dataset: HorizonDataset
 
     # Phase I assigned label 数据，结构为 (sample_ids, code_labels)。

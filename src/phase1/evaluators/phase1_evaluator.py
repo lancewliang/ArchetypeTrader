@@ -42,5 +42,5 @@ class Phase1Evaluator:
         for batch in dataloader:
             batch = move_trajectory_batch_to_device(batch, self.device)
             outputs = self.model(batch)
-            totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs, actions=batch[1])
+            totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs, actions=batch[3])
         return totals.averaged()

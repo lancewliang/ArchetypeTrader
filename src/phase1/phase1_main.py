@@ -265,8 +265,9 @@ class Phase1MainFlow:
             论文先从训练数据中采样 n 个长度为 h 的 data chunks，再对每个 chunk
             应用 single-trade DP planner。每个 horizon 的市场观测记为
             s_demo=(s_0,...,s_{h-1})，DP 输出动作序列 a_demo，执行动作得到
-            reward 序列 r_demo，最终组成 tau=(s_demo, a_demo, r_demo) 作为
-            VQ archetype extraction 的训练数据集 D。
+            reward 序列 r_demo，最终组成
+            tau=(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)
+            作为 VQ archetype extraction 的训练数据集 D。
         """
       
         for split_name in ("train", "val", "test"):
@@ -312,7 +313,7 @@ class Phase1MainFlow:
                 shuffle=False,
             )
 
-        first_states, _, _ = train_dataset[0]
+        first_states, _, _, _, _ = train_dataset[0]
         state_dim = int(first_states.shape[-1])
         model = ArchetypeVQModel(
             state_dim=state_dim,
@@ -433,7 +434,7 @@ class Phase1MainFlow:
                 if collected >= max_samples:
                     break
                 batch = move_trajectory_batch_to_device(batch, self.device)
-                _, actions, _ = batch
+                _, _, _, actions, _ = batch
                 z_e = self.model.encoder(batch).detach().cpu()
                 directions = classify_trajectory_directions(actions).detach().cpu()
 
@@ -598,7 +599,7 @@ class Phase1MainFlow:
             )
             outputs.total_loss.backward()
             self.optimizer.step()
-            totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs, actions=batch[1])
+            totals.add_batch(batch_size=batch[0].shape[0], outputs=outputs, actions=batch[3])
         return totals.averaged()
 
     def _evaluate_checkpoint(

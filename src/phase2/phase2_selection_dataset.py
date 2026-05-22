@@ -5,8 +5,10 @@ archetype label 表对齐，生成 Phase II horizon-level selector 训练数据�
 
 输入:
     horizon_dataset:
-        ``HorizonDataset = (states, prices, depthprices)``。
+        ``HorizonDataset = (states, relative_states, trend_states, prices, depthprices)``。
         ``states`` 形状为 ``[sample, horizon, feature_dim]``；
+        ``relative_states`` 形状为 ``[sample, horizon, relative_feature_dim]``；
+        ``trend_states`` 形状为 ``[sample, horizon, trend_feature_dim]``；
         ``prices`` 形状为 ``[sample, horizon, price_dim]``；
         ``depthprices`` 形状为 ``[sample, horizon, depth_dim]`` 或 ``None``。
     label_table:
@@ -59,10 +61,10 @@ class Phase2SelectionDataset:
         visible_states: 输入给 selector、用于训练选择模型的可见状态，即
             ``VisibleStatesDataset``。第一个元素是上一分片的完整状态序列，
             第二个元素是当前分片的 t 状态窗口，t 步长由 builder 的 ``tsize`` 定义。
-        horizon_dataset: 完整 horizon 数据，结构为 ``(horizon_states, prices,
-            depthprices)``，即 ``HorizonDataset``。其中 ``horizon_states`` 用于
-            frozen decoder 和环境模拟，``prices/depthprices`` 用于交易执行和
-            reward 计算。
+        horizon_dataset: 完整 horizon 数据，结构为
+            ``(horizon_states, relative_states, trend_states, prices, depthprices)``，
+            即 ``HorizonDataset``。其中 ``horizon_states`` 用于 frozen decoder
+            和环境模拟，``prices/depthprices`` 用于交易执行和 reward 计算。
         demonstration_horizon_label_dataset: Phase I VQ 导出的 horizon-level
             label dataset，结构为 ``(sample_ids, code_labels)``，即
             ``DemonstrationHorizonLabelDataset``。``sample_ids`` 来自
@@ -110,7 +112,8 @@ class Phase2SelectionDatasetBuilder:
         """从 horizon 数据和 Phase I 导出的 label 表生成 selector dataset。
 
         输入:
-            horizon_dataset: 三元组 ``(horizon_states, prices, depthprices)``。
+            horizon_dataset: 五元组
+                ``(horizon_states, relative_states, trend_states, prices, depthprices)``。
                 ``horizon_states`` 是完整 horizon 状态；
                 ``prices`` 和 ``depthprices`` 供环境模拟与 reward 计算使用。
             label_table: Phase I 导出的 label 表，至少包含 ``sample_id`` 和
@@ -129,7 +132,13 @@ class Phase2SelectionDatasetBuilder:
             抛出 ``ValueError``。
         """
 
-        horizon_states, prices, depthprices = horizon_dataset
+        (
+            horizon_states,
+            relative_states,
+            trend_states,
+            prices,
+            depthprices,
+        ) = _unpack_horizon_dataset(horizon_dataset)
         sample_count = int(horizon_states.shape[0])
 
         self.validate_horizon_dataset(horizon_dataset)
@@ -143,6 +152,8 @@ class Phase2SelectionDatasetBuilder:
         sample_ids, code_labels = full_demonstration_horizon_label_dataset
         current_horizon_dataset = (
             horizon_states[1:].copy(),
+            relative_states[1:].copy(),
+            trend_states[1:].copy(),
             prices[1:].copy(),
             None if depthprices is None else depthprices[1:].copy(),
         )
@@ -169,20 +180,39 @@ class Phase2SelectionDatasetBuilder:
             无返回值。校验通过即静默返回。
 
         异常:
-            当 ``states/prices/depthprices`` 不是三维数组，或 sample/horizon
-            维度不一致时抛出 ``ValueError``。
+            当 ``states/relative_states/trend_states/prices/depthprices`` 不是
+            三维数组，或 sample/horizon 维度不一致时抛出 ``ValueError``。
         """
 
-        horizon_states, prices, depthprices = horizon_dataset
+        (
+            horizon_states,
+            relative_states,
+            trend_states,
+            prices,
+            depthprices,
+        ) = _unpack_horizon_dataset(horizon_dataset)
         if horizon_states.ndim != 3:
             raise ValueError(
                 "horizon states must have shape [sample, horizon, feature_dim]"
             )
+        if relative_states.ndim != 3:
+            raise ValueError(
+                "relative_states must have shape "
+                "[sample, horizon, relative_feature_dim]"
+            )
+        if trend_states.ndim != 3:
+            raise ValueError(
+                "trend_states must have shape [sample, horizon, trend_feature_dim]"
+            )
         if prices.ndim != 3:
             raise ValueError("prices must have shape [sample, horizon, price_dim]")
-        if horizon_states.shape[:2] != prices.shape[:2]:
+        if (
+            relative_states.shape[:2] != horizon_states.shape[:2]
+            or trend_states.shape[:2] != horizon_states.shape[:2]
+            or prices.shape[:2] != horizon_states.shape[:2]
+        ):
             raise ValueError(
-                "horizon states and prices must have the same sample/horizon shape"
+                "horizon dataset arrays must have the same sample/horizon shape"
             )
         if depthprices is not None:
             if depthprices.ndim != 3:
@@ -328,7 +358,7 @@ class Phase2SelectionDatasetBuilder:
             ``ValueError``。
         """
 
-        horizon_states, _, _ = dataset.horizon_dataset
+        horizon_states, _, _, _, _ = _unpack_horizon_dataset(dataset.horizon_dataset)
         previous_t_states, current_t_states = dataset.visible_states
         if previous_t_states.ndim != 3:
             raise ValueError("previous_t_states must be a 3D array")
@@ -365,15 +395,15 @@ class Phase2SelectionDatasetBuilder:
                 ``build_from_horizon_and_labels`` 的契约校验。
 
         输出:
-            ``torch.utils.data.TensorDataset``，固定包含 7 列。
+            ``torch.utils.data.TensorDataset``，固定包含 9 列。
 
         返回列顺序:
-            ``previous_t_states, current_t_states, horizon_states, prices,
-            depthprices, assigned_labels, sample_ids``。
+            ``previous_t_states, current_t_states, horizon_states, relative_states,
+            trend_states, prices, depthprices, assigned_labels, sample_ids``。
 
         dtype:
-            ``previous_t_states/current_t_states/horizon_states/prices/depthprices`` 为
-            ``torch.float32``；
+            ``previous_t_states/current_t_states/horizon_states/relative_states/
+            trend_states/prices/depthprices`` 为 ``torch.float32``；
             ``assigned_labels/sample_ids`` 为 ``torch.long``。
 
         如果 ``dataset.horizon_dataset`` 中的 ``depthprices`` 为 ``None``，
@@ -387,8 +417,16 @@ class Phase2SelectionDatasetBuilder:
             dtype=torch.float32,
         )
         current_t_states = torch.as_tensor(current_t_states_np, dtype=torch.float32)
-        horizon_states_np, prices_np, depthprices_np = dataset.horizon_dataset
+        (
+            horizon_states_np,
+            horizon_relative_states_np,
+            horizon_trend_states_np,
+            prices_np,
+            depthprices_np,
+        ) = _unpack_horizon_dataset(dataset.horizon_dataset)
         horizon_states = torch.as_tensor(horizon_states_np, dtype=torch.float32)
+        horizon_relative_states = torch.as_tensor(horizon_relative_states_np, dtype=torch.float32)
+        horizon_trend_states = torch.as_tensor(horizon_trend_states_np, dtype=torch.float32)
         prices = torch.as_tensor(prices_np, dtype=torch.float32)
         if depthprices_np is None:
             depthprices = torch.empty(
@@ -408,11 +446,26 @@ class Phase2SelectionDatasetBuilder:
             previous_t_states,
             current_t_states,
             horizon_states,
+            horizon_relative_states,
+            horizon_trend_states,
             prices,
             depthprices,
             assigned_labels,
             sample_ids,
-        )
+    )
+
+
+def _unpack_horizon_dataset(
+    horizon_dataset: HorizonDataset,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    """返回标准五元组，并兼容旧三元组产物。"""
+
+    if len(horizon_dataset) == 5:
+        return horizon_dataset    
+    raise ValueError(
+        "horizon_dataset must be "
+        "(states, relative_states, trend_states, prices, depthprices)"
+    )
 
 
 __all__ = [

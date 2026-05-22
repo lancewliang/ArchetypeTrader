@@ -5,13 +5,14 @@
     固定长度 ``h`` 的 horizon，再用 single-trade DP planner 为每个 horizon
     生成 demonstration trajectory:
 
-        ``tau = (s_demo, a_demo, r_demo)``
+        ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``
 
-    其中 ``s_demo`` 是 horizon 内的市场状态序列，``a_demo`` 是 DP teacher
-    给出的 short/flat/long 动作序列，``r_demo`` 是执行该动作序列得到的逐步
-    reward。Phase I 的 VQ encoder-decoder 训练完成后，encoder 会把整条
-    trajectory 编码为连续 latent ``z_e``，VQ codebook 再把 ``z_e`` 分配给
-    最近的离散 archetype code。
+    其中 ``s_demo`` 是 horizon 内的主市场状态序列，``relative_s_demo`` 和
+    ``trend_s_demo`` 是额外两路状态序列，``a_demo`` 是 DP teacher 给出的
+    short/flat/long 动作序列，``r_demo`` 是执行该动作序列得到的逐步 reward。
+    Phase I 的 VQ encoder-decoder 训练完成后，encoder 会把整条 trajectory
+    编码为连续 latent ``z_e``，VQ codebook 再把 ``z_e`` 分配给最近的离散
+    archetype code。
 
 本模块用途:
     本模块负责把训练好的 Phase I VQ 模型应用到已固化的
@@ -140,7 +141,8 @@ class HorizonTrainLabelBuilder:
             model: 已加载 best checkpoint 权重的 ``ArchetypeVQModel``。本方法只
                 调用 ``model.encode``，不会执行 decoder，也不会更新参数。
             trajectory_dataset: DP planner 已经生成并固化的 demonstration
-                trajectories，数据形式为 ``[(s_demo, a_demo, r_demo), ...]``。
+                trajectories，数据形式为
+                ``[(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo), ...]``。
             split_name: 当前数据 split 名称，例如 ``train``、``val``、``test``。
                 该字段会写入 label 表，方便后续阶段审计来源。
 
@@ -150,7 +152,7 @@ class HorizonTrainLabelBuilder:
             2. 将 numpy trajectory 转成 PyTorch ``TensorDataset``，批量送入
                与模型相同的 device。
             3. 在 ``torch.no_grad`` 和 ``model.eval`` 下调用
-               ``model.encode((states, actions, rewards))``。
+               ``model.encode(batch)``。
             4. ``model.encode`` 内部先用 trajectory encoder 生成 ``z_e``，
                再通过 VQ codebook 取最近 code，返回 ``code_labels``。
             5. 为每个 horizon 生成一行 label:
@@ -188,14 +190,15 @@ class HorizonTrainLabelBuilder:
 
         with torch.no_grad():
             for batch in dataloader:
-                states, actions, rewards = move_trajectory_batch_to_device(
+                batch = move_trajectory_batch_to_device(
                     batch,
                     self.device,
                 )
                 # encode 对应论文中的 q_theta_e + VQ nearest-code assignment。
-                code_labels, latent = model.encode((states, actions, rewards))
+                code_labels, latent = model.encode(batch)
                 code_labels_cpu = code_labels.detach().cpu()
                 latent_cpu = latent.detach().cpu()
+                rewards = batch[4]
                 rewards_cpu = rewards.detach().cpu()
 
                 batch_size = int(code_labels_cpu.shape[0])
