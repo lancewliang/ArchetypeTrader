@@ -306,6 +306,77 @@ dtype:
 """
 
 
+VisibleStatesTensor: TypeAlias = tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]
+"""Phase II selector 单个决策的可见状态 Tensor。
+
+结构:
+    ``VisibleStatesTensor = (
+        previous_t_states,
+        previous_t_relative_states,
+        previous_t_trend_states,
+        current_t_states,
+        current_t_relative_states,
+        current_t_trend_states,
+    )``
+
+形状:
+    ``previous_t_states``: ``[horizon, feature_dim]``
+    ``previous_t_relative_states``: ``[horizon, relative_feature_dim]``
+    ``previous_t_trend_states``: ``[horizon, trend_feature_dim]``
+    ``current_t_states``: ``[TSize, feature_dim]``
+    ``current_t_relative_states``: ``[TSize, relative_feature_dim]``
+    ``current_t_trend_states``: ``[TSize, trend_feature_dim]``
+
+含义:
+    这是 selector 做一次在线决策时可见的单样本 observation。它不包含当前 horizon
+    的未来状态、价格、盘口深度、Phase I label 或 reward。
+"""
+
+VisibleStatesTensorBatch: TypeAlias = tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]
+"""Phase II selector 可见状态的 Tensor batch。
+
+结构:
+    ``VisibleStatesTensorBatch = (
+        previous_t_states,
+        previous_t_relative_states,
+        previous_t_trend_states,
+        current_t_states,
+        current_t_relative_states,
+        current_t_trend_states,
+    )``
+
+形状:
+    ``previous_t_states``: ``[batch, horizon, feature_dim]``
+    ``previous_t_relative_states``: ``[batch, horizon, relative_feature_dim]``
+    ``previous_t_trend_states``: ``[batch, horizon, trend_feature_dim]``
+    ``current_t_states``: ``[batch, TSize, feature_dim]``
+    ``current_t_relative_states``: ``[batch, TSize, relative_feature_dim]``
+    ``current_t_trend_states``: ``[batch, TSize, trend_feature_dim]``
+
+dtype:
+    六路 tensor 通常均为 ``torch.float32``。
+
+含义:
+    这是 ``VisibleStatesDataset`` 进入 PyTorch 模型后的 batch 表示。Phase II
+    Q-network、Double DQN loss 和 evaluator 应消费该类型，而不是直接消费 numpy
+    dataset 类型。
+"""
+
+
 __all__ = [
     "ActionLogitTensor",
     "ArchetypeLabelTensor",
@@ -314,6 +385,8 @@ __all__ = [
     "LatentTensor",
     "TrajectoryTensorBatch",
     "TrajectoryTensorDataset",
+    "VisibleStatesTensor",
+    "VisibleStatesTensorBatch",
     "build_trajectory_tensor_dataset",
     "move_trajectory_batch_to_device",
 ]

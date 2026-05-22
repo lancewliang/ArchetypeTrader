@@ -17,6 +17,8 @@ from .tensor_data_types import (
     LatentTensor,
     TrajectoryTensorBatch,
     TrajectoryTensorDataset,
+    VisibleStatesTensor,
+    VisibleStatesTensorBatch,
     build_trajectory_tensor_dataset,
     move_trajectory_batch_to_device,
 )
@@ -67,7 +69,9 @@ __all__ = [
     "TrajectoryDataset",
     "TrajectoryTensorBatch",
     "TrajectoryTensorDataset",
+    "VisibleStatesTensor",
     "VisibleStatesDataset",
+    "VisibleStatesTensorBatch",
     "VQArchetypeModel",
     "VectorQuantizer",
     "build_trajectory_tensor_dataset",
