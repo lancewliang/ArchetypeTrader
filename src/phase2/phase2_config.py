@@ -24,8 +24,14 @@ class Phase2DatasetConfig:
 class Phase2ModelConfig:
     """Phase II selector Q-network 配置。"""
 
-    # 单个 state 的特征维度。
+    # 原始 state stream 的特征维度。
     state_dim: int
+
+    # relative state stream 的特征维度。
+    relative_state_dim: int
+
+    # trend state stream 的特征维度。
+    trend_state_dim: int
 
     # Phase I codebook 中可选 archetype 数量，也是 Q value 输出维度。
     num_archetypes: int

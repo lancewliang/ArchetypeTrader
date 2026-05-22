@@ -22,11 +22,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 import torch
 from torch import nn
-from torch.nn.parameter import UninitializedParameter
 
 from ...model.tensor_data_types import VisibleStatesTensorBatch
 from ..phase2_config import Phase2ModelConfig
@@ -61,8 +59,8 @@ class Phase2QNetwork(nn.Module):
         ``Phase2SelectionDatasetBuilder.to_tensor_dataset()`` 的输出保持一致。
 
     设计边界:
-        本类只负责 Q-network 的模型接口。它使用六路状态各自的 lazy temporal
-        encoder 处理不同 feature 维度，再把 pooled 表征交给 MLP Q head。
+        本类只负责 Q-network 的模型接口。它使用六路状态各自的 temporal encoder
+        处理不同 feature 维度，再把 pooled 表征交给 MLP Q head。
 
     使用场景:
         trainer 创建 online network 和 target network；checkpoint 只保存本网络的
@@ -72,17 +70,27 @@ class Phase2QNetwork(nn.Module):
     VISIBLE_STATE_COUNT = 6
     STREAM_POOL_COUNT = 3
 
+    _VISIBLE_STATE_NAMES = (
+        "previous_t_states",
+        "previous_t_relative_states",
+        "previous_t_trend_states",
+        "current_t_states",
+        "current_t_relative_states",
+        "current_t_trend_states",
+    )
+
     def __init__(self, config: Phase2ModelConfig) -> None:
         """构建 horizon-level archetype selector Q-network。
 
         功能说明:
             保存 Q-network 配置，创建六路 visible state temporal encoder 和
-            ``num_archetypes`` 维 Q-value head。每路 encoder 使用 lazy projection，
-            因此 relative/trend 的 feature 维度会在第一次 forward 时由输入推断。
+            ``num_archetypes`` 维 Q-value head。六路 encoder 的输入维度由
+            ``state_dim``、``relative_state_dim``、``trend_state_dim`` 显式确定，
+            不依赖第一次 forward 的 lazy 初始化。
 
         输入参数:
-            config: Phase II selector 模型配置，包含 state_dim、num_archetypes、
-                hidden_dim、num_layers 和 dropout。
+            config: Phase II selector 模型配置，包含三路输入维度、
+                num_archetypes、hidden_dim、num_layers 和 dropout。
 
         输出:
             无返回值。初始化后对象持有 ``stream_encoders``、``q_head`` 和
@@ -96,9 +104,10 @@ class Phase2QNetwork(nn.Module):
 
         super().__init__()
         self.config = config
+        self.visible_state_feature_dims = self._visible_state_feature_dims(config)
         self.stream_encoders = nn.ModuleList(
-            self._build_stream_encoder(config)
-            for _ in range(self.VISIBLE_STATE_COUNT)
+            self._build_stream_encoder(config, input_dim)
+            for input_dim in self.visible_state_feature_dims
         )
         self.q_head = self._build_q_head(config)
 
@@ -131,9 +140,7 @@ class Phase2QNetwork(nn.Module):
         使用场景:
             Double DQN loss 计算 online/target Q value；批量 diagnostics 读取全部
             Q value 分布；trainer 从 replay buffer 取 batch 后更新 Q-network。
-        """
-
-        
+        """ 
         stream_features = [
             self._encode_stream(encoder, stream_state)
             for encoder, stream_state in zip(self.stream_encoders, visible_states)
@@ -185,16 +192,41 @@ class Phase2QNetwork(nn.Module):
         layers.append(nn.Linear(current_dim, config.num_archetypes))
         return nn.Sequential(*layers)
 
+    @classmethod
+    def _visible_state_feature_dims(
+        cls,
+        config: Phase2ModelConfig,
+    ) -> tuple[int, int, int, int, int, int]:
+        """返回六路 visible state 的显式 feature 维度。"""
+
+        dims = (
+            config.state_dim,
+            config.relative_state_dim,
+            config.trend_state_dim,
+            config.state_dim,
+            config.relative_state_dim,
+            config.trend_state_dim,
+        )
+        for name, dim in zip(cls._VISIBLE_STATE_NAMES, dims):
+            if dim <= 0:
+                raise ValueError(f"{name} feature dim must be positive, got {dim}")
+        return dims
+
     @staticmethod
-    def _build_stream_encoder(config: Phase2ModelConfig) -> nn.ModuleDict:
+    def _build_stream_encoder(
+        config: Phase2ModelConfig,
+        input_dim: int,
+    ) -> nn.ModuleDict:
         """构建单路 visible state encoder 的子模块集合。
 
         功能说明:
-            创建 lazy feature projection、LayerNorm、ReLU 和 dropout。输入 feature
-            维度在第一次调用 ``_encode_stream()`` 时由 ``nn.LazyLinear`` 自动初始化。
+            创建 feature projection、LayerNorm、ReLU 和 dropout。输入 feature
+            维度由 ``Phase2ModelConfig`` 显式提供，避免 state dict 中出现 lazy
+            参数，也让 checkpoint 恢复前后结构一致。
 
         输入参数:
             config: Phase II selector 模型配置，提供 hidden_dim 和 dropout。
+            input_dim: 该路 visible state 的 feature 维度。
 
         输出:
             ``nn.ModuleDict``，包含 ``projection``、``norm``、``activation`` 和
@@ -206,12 +238,14 @@ class Phase2QNetwork(nn.Module):
 
         return nn.ModuleDict(
             {
-                "projection": nn.LazyLinear(config.hidden_dim),
+                "projection": nn.Linear(input_dim, config.hidden_dim),
                 "norm": nn.LayerNorm(config.hidden_dim),
                 "activation": nn.ReLU(),
                 "dropout": nn.Dropout(config.dropout),
             }
         )
+
+   
 
     def _encode_stream(
         self,

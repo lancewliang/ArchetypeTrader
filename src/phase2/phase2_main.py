@@ -145,6 +145,9 @@ class Phase2MainFlow:
 
         self.phase1_model: ArchetypeVQModel | None = None
         self.q_network: Phase2QNetwork | None = None
+        self.state_dim: int | None = None
+        self.relative_state_dim: int | None = None
+        self.trend_state_dim: int | None = None
         self.datasets: dict[str, Phase2SelectionDataset] = {}
         self.validation_checkpoints: list[Phase2ValidationCheckpoint] = []
         self.best_checkpoint_selection: Phase2CheckpointSelectionResult | None = None
@@ -317,6 +320,8 @@ class Phase2MainFlow:
             checkpoint.model_state_dict
         )
         self.state_dim = state_dim
+        self.relative_state_dim = relative_state_dim
+        self.trend_state_dim = trend_state_dim
         model = ArchetypeVQModel(
             state_dim=state_dim,
             relative_state_dim=relative_state_dim,
@@ -375,7 +380,8 @@ class Phase2MainFlow:
 
         输入:
             dataset: Phase II selection dataset。方法从 visible state shape 推断
-                ``state_dim``，并从 Phase I model 或 label 兜底推断 ``num_archetypes``。
+                三路输入维度，并从 Phase I model 或 label 兜底推断
+                ``num_archetypes``。
 
         输出:
             移动到 ``self.device`` 的 ``Phase2QNetwork``。
@@ -388,13 +394,51 @@ class Phase2MainFlow:
         设计边界:
             本方法只创建模型对象，不实现 forward/select_action，不加载 Phase II
             checkpoint。模型结构细节属于 ``model/phase2_q_network.py``。
-        """ 
+        """
 
+        state_dim, relative_state_dim, trend_state_dim = (
+            self._infer_visible_state_feature_dims(dataset)
+        )
         model_config = Phase2ModelConfig(
-            state_dim = self.state_dim,
+            state_dim=state_dim,
+            relative_state_dim=relative_state_dim,
+            trend_state_dim=trend_state_dim,
             num_archetypes=self.phase1_config.num_archetypes,
         )
         return Phase2QNetwork(model_config).to(self.device)
+
+    @staticmethod
+    def _infer_visible_state_feature_dims(
+        dataset: Phase2SelectionDataset,
+    ) -> tuple[int, int, int]:
+        """从 Phase II visible states 推断三路 Q-network 输入维度。"""
+
+        if len(dataset.visible_states) != Phase2QNetwork.VISIBLE_STATE_COUNT:
+            raise ValueError(
+                "phase2 visible_states must contain "
+                f"{Phase2QNetwork.VISIBLE_STATE_COUNT} arrays, "
+                f"got {len(dataset.visible_states)}"
+            )
+        feature_dims = tuple(
+            int(visible_state.shape[-1])
+            for visible_state in dataset.visible_states
+        )
+        state_dim, relative_state_dim, trend_state_dim = feature_dims[:3]
+        expected_feature_dims = (
+            state_dim,
+            relative_state_dim,
+            trend_state_dim,
+            state_dim,
+            relative_state_dim,
+            trend_state_dim,
+        )
+        if feature_dims != expected_feature_dims:
+            raise ValueError(
+                "phase2 visible state feature dims must be "
+                "(state, relative, trend, state, relative, trend), "
+                f"got {feature_dims}"
+            )
+        return state_dim, relative_state_dim, trend_state_dim
 
     def _train_double_dqn(
         self,

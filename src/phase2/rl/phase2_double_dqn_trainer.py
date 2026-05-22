@@ -28,15 +28,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Sequence
 
 import torch
-
-if TYPE_CHECKING:
-    from ...model.data_types import VisibleStatesDataset
-    from ..checkpoint.phase2_checkpoint import Phase2Checkpoint
-    from ..model.phase2_q_network import Phase2QNetwork
-    from ..phase2_config import Phase2RewardConfig, Phase2TrainConfig
-    from ..phase2_env import ArchetypeSelectionEnv
-    from ..phase2_selection_data_schema import Phase2SelectionTransitionBatch
-    from .phase2_replay_buffer import Phase2ReplayBuffer, Phase2ReplayTransition
+from ...model.data_types import VisibleStatesDataset
+from ..checkpoint.phase2_checkpoint import Phase2Checkpoint
+from ..model.phase2_q_network import Phase2QNetwork
+from ..phase2_config import Phase2RewardConfig, Phase2TrainConfig
+from ..phase2_env import ArchetypeSelectionEnv
+from ..phase2_selection_data_schema import Phase2SelectionTransitionBatch
+from .phase2_replay_buffer import Phase2ReplayBuffer, Phase2ReplayTransition
 
 
 class Phase2DoubleDqnTrainer:

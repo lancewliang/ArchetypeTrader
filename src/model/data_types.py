@@ -171,6 +171,15 @@ VisibleStatesDataset = tuple[
     的状态信息，不包含当前分片未来状态、价格、teacher action 或 reward。
 """
 
+VisibleStatesBatch = tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]
+
 ArtifactPaths = dict[str, Path]
 """数据准备产出物路径集合。
 
