@@ -85,12 +85,15 @@ class HorizonBuilder:
                 其中 ``close`` 列就是价格列，会被单独返回为 ``prices``。
 
         输出:
-            返回 ``HorizonDataset``，即 ``(states, prices, depthprices)``。
+            返回 ``HorizonDataset``，即
+            ``(states, relative_states, trend_states, prices, depthprices)``。
             ``states`` 的 ``shape`` 为 ``[x, h, len(states)]``。
+            ``relative_states`` 的 ``shape`` 为 ``[x, h, len(relative_states)]``。
+            ``trend_states`` 的 ``shape`` 为 ``[x, h, len(trend_states)]``。
             ``prices`` 的 ``shape`` 为 ``[x, h, 1]``。
             ``depthprices`` 的 ``shape`` 为 ``[x, h, 20]``。
             其中 ``h = horizon``，``x = len(dataframe) / h``。
-            ``states`` 不包含 ``close`` 列，``prices`` 只包含 ``close`` 列。
+            三路状态不包含 ``close`` 列，``prices`` 只包含 ``close`` 列。
             ``depthprices`` 从 ``states`` 中的 LOB price/size 特征切出。
 
         方法作用:

@@ -28,17 +28,29 @@ from torch.utils.data import TensorDataset
 from .data_types import TrajectoryDataset
 
 
-HorizonTensorDataset: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+HorizonTensorDataset: TypeAlias = tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]
 """固定 horizon 的 Tensor 数据集。
 
 结构:
-    ``HorizonTensorDataset = (states, prices, depthprices)``
+    ``HorizonTensorDataset = (states, relative_states, trend_states, prices, depthprices)``
 
 形状:
     ``states``: ``[x, h, feature_dim]``
         ``x`` 表示 horizon 样本数量。
         ``h`` 表示每个 horizon 的时间步长度，论文实验默认 72。
         ``feature_dim`` 表示状态特征数量。
+
+    ``relative_states``: ``[x, h, relative_feature_dim]``
+        相对状态特征，来自 ``relative_need_normalization`` 和 ``relative`` block。
+
+    ``trend_states``: ``[x, h, trend_feature_dim]``
+        趋势状态特征，来自长短周期 trend block。
 
     ``prices``: ``[x, h, 1]``
         价格来自原始 feature ``DataFrame`` 的 ``close`` 列。
@@ -48,6 +60,8 @@ HorizonTensorDataset: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tensor
 
 dtype:
     ``states`` 通常为 ``torch.float32``。
+    ``relative_states`` 通常为 ``torch.float32``。
+    ``trend_states`` 通常为 ``torch.float32``。
     ``prices`` 通常为 ``torch.float32``。
     ``depthprices`` 通常为 ``torch.float32``。
 
@@ -56,15 +70,29 @@ dtype:
     GPU 搬运，以及后续生成 demonstration trajectory。
 """
 
-DemonstrationTrajectoryTensor: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+DemonstrationTrajectoryTensor: TypeAlias = tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]
 """单条 demonstration trajectory 的 Tensor 表示。
 
 结构:
-    ``DemonstrationTrajectoryTensor = (s_demo, a_demo, r_demo)``
+    ``DemonstrationTrajectoryTensor = (
+        s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo
+    )``
 
 形状:
     ``s_demo``: ``[h, feature_dim]``
         单个 horizon 的状态序列。
+
+    ``relative_s_demo``: ``[h, relative_feature_dim]``
+        单个 horizon 的相对状态序列。
+
+    ``trend_s_demo``: ``[h, trend_feature_dim]``
+        单个 horizon 的趋势状态序列。
 
     ``a_demo``: ``[h]``
         DP teacher 动作序列。
@@ -74,6 +102,8 @@ DemonstrationTrajectoryTensor: TypeAlias = tuple[torch.Tensor, torch.Tensor, tor
 
 dtype:
     ``s_demo`` 通常为 ``torch.float32``。
+    ``relative_s_demo`` 通常为 ``torch.float32``。
+    ``trend_s_demo`` 通常为 ``torch.float32``。
     ``a_demo`` 必须为 ``torch.long``，用于 ``Embedding`` 或
     ``cross_entropy`` target。
     ``r_demo`` 通常为 ``torch.float32``。
@@ -83,7 +113,7 @@ dtype:
 
 为什么:
     Phase I 的 encoder 不只看市场状态，还看 teacher 动作和 reward 路径。
-    这三个 Tensor 一起构成论文里的 ``tau``，用于蒸馏离散 trading archetype。
+    这些 Tensor 一起构成论文里的 ``tau``，用于蒸馏离散 trading archetype。
 """
 
 TrajectoryTensorDataset: TypeAlias = list[DemonstrationTrajectoryTensor]
@@ -91,22 +121,34 @@ TrajectoryTensorDataset: TypeAlias = list[DemonstrationTrajectoryTensor]
 
 结构:
     ``TrajectoryTensorDataset = [tau_0, tau_1, ..., tau_{n-1}]``
-    ``tau = (s_demo, a_demo, r_demo)``
+    ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``
 
 含义:
     这是 ``TrajectoryDataset`` 转成 Tensor 后的逐样本集合。
     适合在自定义 ``Dataset`` 中按 index 返回单条 trajectory。
 """
 
-TrajectoryTensorBatch: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+TrajectoryTensorBatch: TypeAlias = tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]
 """Phase I 训练 batch。
 
 结构:
-    ``TrajectoryTensorBatch = (states, actions, rewards)``
+    ``TrajectoryTensorBatch = (states, relative_states, trend_states, actions, rewards)``
 
 形状:
     ``states``: ``[batch, h, feature_dim]``
         batch 内多条 demonstration trajectory 的状态序列。
+
+    ``relative_states``: ``[batch, h, relative_feature_dim]``
+        batch 内多条 demonstration trajectory 的相对状态序列。
+
+    ``trend_states``: ``[batch, h, trend_feature_dim]``
+        batch 内多条 demonstration trajectory 的趋势状态序列。
 
     ``actions``: ``[batch, h]``
         batch 内多条 DP teacher 动作序列。
@@ -116,12 +158,14 @@ TrajectoryTensorBatch: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tenso
 
 dtype:
     ``states`` 通常为 ``torch.float32``。
+    ``relative_states`` 通常为 ``torch.float32``。
+    ``trend_states`` 通常为 ``torch.float32``。
     ``actions`` 必须为 ``torch.long``。
     ``rewards`` 通常为 ``torch.float32``。
 
 用途:
     这是 ``VQArchetype`` 模型 ``forward`` 最自然的输入形式。
-    encoder 用 ``states/actions/rewards`` 生成连续 latent，VQ codebook
+    当前 encoder 用主 ``states/actions/rewards`` 生成连续 latent，VQ codebook
     把 latent 离散化为 archetype label，decoder 再根据
     ``states`` 和选中的 archetype 重构 ``actions``。
 """
@@ -132,25 +176,40 @@ def build_trajectory_tensor_dataset(
 ) -> TensorDataset:
     """将 numpy ``TrajectoryDataset`` 转为 Phase I 训练用 ``TensorDataset``。
 
-    返回的 ``TensorDataset`` 包含第四列稳定 ``sample_ids``。模型训练和评估仍通过
-    ``move_trajectory_batch_to_device()`` 只消费前三列 ``states/actions/rewards``；
-    codebook validation evaluator 可读取第四列做 assignment churn 和 prices 对齐。
+    返回的 ``TensorDataset`` 包含第六列稳定 ``sample_ids``。模型训练和评估通过
+    ``move_trajectory_batch_to_device()`` 消费前五列 Tensor；codebook validation
+    evaluator 可读取第六列做 assignment churn 和 prices 对齐。
     """
 
     states = torch.as_tensor(
         np.stack([trajectory[0] for trajectory in trajectory_dataset]),
         dtype=torch.float32,
     )
-    actions = torch.as_tensor(
+    relative_states = torch.as_tensor(
         np.stack([trajectory[1] for trajectory in trajectory_dataset]),
-        dtype=torch.long,
+        dtype=torch.float32,
     )
-    rewards = torch.as_tensor(
+    trend_states = torch.as_tensor(
         np.stack([trajectory[2] for trajectory in trajectory_dataset]),
         dtype=torch.float32,
     )
+    actions = torch.as_tensor(
+        np.stack([trajectory[3] for trajectory in trajectory_dataset]),
+        dtype=torch.long,
+    )
+    rewards = torch.as_tensor(
+        np.stack([trajectory[4] for trajectory in trajectory_dataset]),
+        dtype=torch.float32,
+    )
     sample_ids = torch.arange(len(trajectory_dataset), dtype=torch.long)
-    return TensorDataset(states, actions, rewards, sample_ids)
+    return TensorDataset(
+        states,
+        relative_states,
+        trend_states,
+        actions,
+        rewards,
+        sample_ids,
+    )
 
 
 def move_trajectory_batch_to_device(
@@ -159,15 +218,20 @@ def move_trajectory_batch_to_device(
 ) -> TrajectoryTensorBatch:
     """将 Phase I trajectory batch 搬到目标 device。
 
-    输入 batch 可包含第四列 ``sample_ids``。模型只需要前三列，因此这里保留返回
-    ``(states, actions, rewards)`` 的稳定契约。
+    输入 batch 可包含第六列 ``sample_ids``。返回值保持和
+    ``DemonstrationTrajectoryTensor`` 对齐的前五列稳定契约。
+    为兼容旧产物，本函数也接受 ``(states, actions, rewards[, sample_ids])``，
+    并补出空的 ``relative_states`` / ``trend_states``。
     """
 
-    if len(batch) < 3:
+    if len(batch) >= 5:
+        states, relative_states, trend_states, actions, rewards = batch[:5]
+    else:
         raise ValueError("trajectory batch must contain at least states, actions, rewards")
-    states, actions, rewards = batch[:3]
     return (
         states.to(device),
+        relative_states.to(device),
+        trend_states.to(device),
         actions.to(device),
         rewards.to(device),
     )
