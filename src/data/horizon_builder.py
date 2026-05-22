@@ -6,6 +6,7 @@ import numpy as np
 import polars as pl
 
 from ..model.data_types import HorizonDataset
+from .feature_spec import FeatureBlock, FeatureInputSpec
 from .state_normalizer import StateNormalizer
 from ..utils.trade_execution import (
     LOB_ASK_PRICE_COLS,
@@ -38,7 +39,11 @@ class HorizonBuilder:
     ``prices`` 和 ``depthprices`` 始终保持原始尺度，供 DP 和成本计算使用。
     """
 
-    def __init__(self, horizon: int = 72) -> None:
+    def __init__(
+        self,
+        horizon: int = 72,
+        feature_spec: FeatureInputSpec | None = None,
+    ) -> None:
         """初始化 HorizonBuilder。
 
         参数:
@@ -58,12 +63,22 @@ class HorizonBuilder:
         if horizon <= 1:
             raise ValueError("horizon must be greater than 1")
         self.horizon = horizon
+        self.feature_spec = feature_spec
         self.state_normalizer: StateNormalizer | None = None
+        self.feature_normalizers: dict[str, StateNormalizer] = {}
 
     def set_state_normalizer(self, state_normalizer: StateNormalizer | None) -> None:
         """设置 state 归一化器。"""
 
         self.state_normalizer = state_normalizer
+
+    def set_feature_normalizers(
+        self,
+        feature_normalizers: dict[str, StateNormalizer] | None,
+    ) -> None:
+        """设置 feature block 归一化器。"""
+
+        self.feature_normalizers = dict(feature_normalizers or {})
 
     def build(
         self,
@@ -97,6 +112,14 @@ class HorizonBuilder:
         """
         if "close" not in dataframe.columns:
             raise ValueError("dataframe must contain a 'close' column")
+
+        if self.feature_spec is not None:
+            return self._build_from_feature_spec(dataframe)
+
+        return self._build_legacy(dataframe)
+
+    def _build_legacy(self, dataframe: pl.DataFrame) -> HorizonDataset:
+        """按旧单路 states 逻辑构建数据，兼容迁移期调用。"""
 
         state_columns = [
             column
@@ -147,4 +170,121 @@ class HorizonBuilder:
             raise ValueError("close prices contain non-finite values")
         if not np.isfinite(depthprices).all():
             raise ValueError("LOB depth features contain non-finite values")
-        return states, prices, depthprices
+        empty = np.empty((states.shape[0], states.shape[1], 0), dtype=np.float32)
+        return states, empty, empty, prices, depthprices
+
+    def _build_from_feature_spec(self, dataframe: pl.DataFrame) -> HorizonDataset:
+        """按三路 feature spec 构建 ``states/relative_states/trend_states``。"""
+
+        if self.feature_spec is None:
+            raise ValueError("feature_spec is required")
+
+        self._validate_required_columns(dataframe, self.feature_spec.required_columns)
+
+        usable_rows = len(dataframe) // self.horizon * self.horizon
+        if usable_rows == 0:
+            raise ValueError(
+                f"dataframe has {len(dataframe)} rows, fewer than horizon={self.horizon}"
+            )
+        dataframe = dataframe.head(usable_rows)
+
+        states = self._build_state_tensor(dataframe, self.feature_spec.state_blocks)
+        relative_states = self._build_state_tensor(
+            dataframe,
+            self.feature_spec.relative_state_blocks,
+        )
+        trend_states = self._build_state_tensor(
+            dataframe,
+            self.feature_spec.trend_state_blocks,
+        )
+        prices = (
+            dataframe.select("close")
+            .to_numpy()
+            .astype(np.float32, copy=False)
+            .reshape(-1, self.horizon, 1)
+        )
+        depthprices = self._build_depthprices(dataframe)
+
+        for name, values in (
+            ("states", states),
+            ("relative_states", relative_states),
+            ("trend_states", trend_states),
+            ("prices", prices),
+            ("depthprices", depthprices),
+        ):
+            if not np.isfinite(values).all():
+                raise ValueError(f"{name} contain non-finite values")
+        return states, relative_states, trend_states, prices, depthprices
+
+    def _build_state_tensor(
+        self,
+        dataframe: pl.DataFrame,
+        blocks: tuple[FeatureBlock, ...],
+    ) -> np.ndarray:
+        """Build one state tensor from ordered feature blocks."""
+
+        values = [
+            self._build_block_values(dataframe, block)
+            for block in blocks
+        ]
+        matrix = np.concatenate(values, axis=1)
+        return matrix.reshape(-1, self.horizon, matrix.shape[1])
+
+    def _build_block_values(
+        self,
+        dataframe: pl.DataFrame,
+        block: FeatureBlock,
+    ) -> np.ndarray:
+        """Read and optionally normalize one feature block."""
+
+        self._validate_required_columns(dataframe, block.columns)
+        values = dataframe.select(list(block.columns)).to_numpy().astype(
+            np.float32,
+            copy=False,
+        )
+        if not block.normalize:
+            return values
+
+        key = block.effective_normalizer_key
+        normalizer = self.feature_normalizers.get(key)
+        if normalizer is None:
+            raise ValueError(f"missing feature normalizer for block {key!r}")
+        if tuple(block.columns) != normalizer.feature_columns:
+            raise ValueError(
+                f"feature normalizer {key!r} columns do not match block columns"
+            )
+        return normalizer.transform(values)
+
+    def _build_depthprices(self, dataframe: pl.DataFrame) -> np.ndarray:
+        """Build unnormalized LOB depth tensor from raw dataframe columns."""
+
+        self._validate_required_columns(dataframe, LOB_DEPTH_COLS)
+        return (
+            dataframe.select(list(LOB_DEPTH_COLS))
+            .to_numpy()
+            .astype(np.float32, copy=False)
+            .reshape(-1, self.horizon, len(LOB_DEPTH_COLS))
+        )
+
+    @staticmethod
+    def _validate_required_columns(
+        dataframe: pl.DataFrame,
+        columns: tuple[str, ...],
+    ) -> None:
+        """Validate that required columns exist and are numeric."""
+
+        missing = [column for column in columns if column not in dataframe.columns]
+        if missing:
+            raise ValueError(
+                "dataframe is missing required columns: " + ", ".join(missing)
+            )
+        non_numeric = [
+            column
+            for column in columns
+            if not dataframe.schema[column].is_numeric()
+        ]
+        if non_numeric:
+            raise ValueError(
+                "dataframe required columns must be numeric: "
+                + ", ".join(non_numeric)
+            )

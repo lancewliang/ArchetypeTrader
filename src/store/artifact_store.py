@@ -73,13 +73,16 @@ class DataFileStore:
         horizon_path = root / "horizon_datasets" / f"{split_name}.npz"
         trajectory_path = root / "trajectory_datasets" / f"{split_name}.npz"
         normalizer_path = root / "state_normalizer.json"
+        feature_normalizers_path = root / "feature_normalizers"
         horizon_path.parent.mkdir(parents=True, exist_ok=True)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+        feature_normalizers_path.mkdir(parents=True, exist_ok=True)
 
         paths: ArtifactPaths = {
             "horizon_dataset": horizon_path,
             "trajectory_dataset": trajectory_path,
             "state_normalizer": normalizer_path,
+            "feature_normalizers": feature_normalizers_path,
             f"{split_name}_horizon_dataset": horizon_path,
             f"{split_name}_trajectory_dataset": trajectory_path,
         }
@@ -94,9 +97,11 @@ class DataFileStore:
         """保存 horizon 中间数据。
 
         参数:
-            horizon_dataset: ``HorizonBuilder`` 的输出。
-                通常为 ``(states, prices, depthprices)``。
+            horizon_dataset: ``HorizonBuilder`` 的输出。新格式为
+                ``(states, relative_states, trend_states, prices, depthprices)``。
                 ``states`` shape 为 ``[x, h, len(states)]``。
+                ``relative_states`` shape 为 ``[x, h, len(relative_states)]``。
+                ``trend_states`` shape 为 ``[x, h, len(trend_states)]``。
                 ``prices`` shape 为 ``[x, h, 1]``。
                 ``depthprices`` shape 为 ``[x, h, 20]``。
             output_path: horizon 中间数据保存路径。
@@ -111,18 +116,41 @@ class DataFileStore:
             horizon 数据是从 feature 文件到 trajectory 数据之间的重要中间结果。
             单独保存可以支持复查 ``close`` 价格切分、状态 shape 和后续 DP 输入。
         """
-        states, prices, depthprices = horizon_dataset
+        states, relative_states, trend_states, prices, depthprices = horizon_dataset
+        states = np.asarray(states, dtype=np.float32)
+        relative_states = np.asarray(relative_states, dtype=np.float32)
+        trend_states = np.asarray(trend_states, dtype=np.float32)
+        prices = np.asarray(prices, dtype=np.float32)
         depthprices = np.asarray(depthprices, dtype=np.float32)
+        if states.ndim != 3:
+            raise ValueError("states must have shape [x, h, feature_dim]")
+        if relative_states.ndim != 3:
+            raise ValueError(
+                "relative_states must have shape [x, h, relative_feature_dim]"
+            )
+        if trend_states.ndim != 3:
+            raise ValueError("trend_states must have shape [x, h, trend_feature_dim]")
+        if prices.ndim != 3 or prices.shape[-1] != 1:
+            raise ValueError("prices must have shape [x, h, 1]")
         if depthprices.ndim != 3 or depthprices.shape[-1] != 20:
             raise ValueError(
                 "depthprices must have shape [x, h, 20] with LOB prices and sizes"
             )
+        if (
+            relative_states.shape[:2] != states.shape[:2]
+            or trend_states.shape[:2] != states.shape[:2]
+            or prices.shape[:2] != states.shape[:2]
+            or depthprices.shape[:2] != states.shape[:2]
+        ):
+            raise ValueError("horizon dataset arrays must share [x, h]")
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             output,
-            states=np.asarray(states, dtype=np.float32),
-            prices=np.asarray(prices, dtype=np.float32),
+            states=states,
+            relative_states=relative_states,
+            trend_states=trend_states,
+            prices=prices,
             depthprices=depthprices,
         )
 
@@ -136,8 +164,11 @@ class DataFileStore:
             split_name: split 名称，例如 ``train``、``val``、``test``。
 
         输出:
-            返回 ``HorizonDataset``，通常为 ``(states, prices, depthprices)``。
+            返回 ``HorizonDataset``，新格式为
+            ``(states, relative_states, trend_states, prices, depthprices)``。
             ``states`` shape 为 ``[x, h, len(states)]``。
+            ``relative_states`` shape 为 ``[x, h, len(relative_states)]``。
+            ``trend_states`` shape 为 ``[x, h, len(trend_states)]``。
             ``prices`` shape 为 ``[x, h, 1]``。
             ``depthprices`` shape 为 ``[x, h, 20]``。
 
@@ -162,8 +193,22 @@ class DataFileStore:
                     "horizon dataset depthprices must have shape [x, h, 20]; "
                     "regenerate it with LOB prices and sizes"
                 )
+            states = payload["states"].astype(np.float32, copy=False)
+            if "relative_states" in payload:
+                relative_states = payload["relative_states"].astype(
+                    np.float32,
+                    copy=False,
+                )
+            else:
+                relative_states = np.empty((*states.shape[:2], 0), dtype=np.float32)
+            if "trend_states" in payload:
+                trend_states = payload["trend_states"].astype(np.float32, copy=False)
+            else:
+                trend_states = np.empty((*states.shape[:2], 0), dtype=np.float32)
             return (
-                payload["states"].astype(np.float32, copy=False),
+                states,
+                relative_states,
+                trend_states,
                 payload["prices"].astype(np.float32, copy=False),
                 depthprices,
             )
@@ -178,7 +223,8 @@ class DataFileStore:
         参数:
             trajectory_dataset: ``SingleTrade_DP_Planner`` 的输出。
                 数据形式为 ``D = [tau_0, tau_1, ..., tau_{n-1}]``。
-                每个 ``tau`` 都是 ``(s_demo, a_demo, r_demo)``。
+                每个 ``tau`` 都是
+                ``(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``。
             output_path: trajectory 数据集保存路径。
 
         输出:
@@ -196,20 +242,33 @@ class DataFileStore:
 
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
+        states = np.stack([tau[0] for tau in trajectory_dataset]).astype(
+            np.float32,
+            copy=False,
+        )
+        relative_states = np.stack([tau[1] for tau in trajectory_dataset]).astype(
+            np.float32,
+            copy=False,
+        )
+        trend_states = np.stack([tau[2] for tau in trajectory_dataset]).astype(
+            np.float32,
+            copy=False,
+        )
+        actions = np.stack([tau[3] for tau in trajectory_dataset]).astype(
+            np.int64,
+            copy=False,
+        )
+        rewards = np.stack([tau[4] for tau in trajectory_dataset]).astype(
+            np.float32,
+            copy=False,
+        )
         np.savez_compressed(
             output,
-            states=np.stack([tau[0] for tau in trajectory_dataset]).astype(
-                np.float32,
-                copy=False,
-            ),
-            actions=np.stack([tau[1] for tau in trajectory_dataset]).astype(
-                np.int64,
-                copy=False,
-            ),
-            rewards=np.stack([tau[2] for tau in trajectory_dataset]).astype(
-                np.float32,
-                copy=False,
-            ),
+            states=states,
+            relative_states=relative_states,
+            trend_states=trend_states,
+            actions=actions,
+            rewards=rewards,
         )
 
     def load_trajectory_dataset(
@@ -224,7 +283,8 @@ class DataFileStore:
         输出:
             返回 ``TrajectoryDataset``。
             数据形式为 ``D = [tau_0, tau_1, ..., tau_{n-1}]``，
-            每个 ``tau`` 都是 ``(s_demo, a_demo, r_demo)``。
+            每个 ``tau`` 都是
+            ``(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``。
 
         方法作用:
             从已保存的产出物中恢复 DP teacher 生成的 demonstration trajectories。
@@ -237,15 +297,75 @@ class DataFileStore:
         path = self._resolve_dataset_path("trajectory", split_name)
         with np.load(path) as payload:
             states = payload["states"].astype(np.float32, copy=False)
+            if "relative_states" in payload:
+                relative_states = payload["relative_states"].astype(
+                    np.float32,
+                    copy=False,
+                )
+            else:
+                relative_states = np.empty((*states.shape[:2], 0), dtype=np.float32)
+            if "trend_states" in payload:
+                trend_states = payload["trend_states"].astype(np.float32, copy=False)
+            else:
+                trend_states = np.empty((*states.shape[:2], 0), dtype=np.float32)
             actions = payload["actions"].astype(np.int64, copy=False)
             rewards = payload["rewards"].astype(np.float32, copy=False)
 
-        if states.shape[0] != actions.shape[0] or states.shape[0] != rewards.shape[0]:
+        if (
+            states.shape[0] != actions.shape[0]
+            or states.shape[0] != rewards.shape[0]
+            or relative_states.shape[0] != states.shape[0]
+            or trend_states.shape[0] != states.shape[0]
+        ):
             raise ValueError(f"invalid trajectory dataset file: {path}")
         return [
-            (states[index], actions[index], rewards[index])
+            (
+                states[index],
+                relative_states[index],
+                trend_states[index],
+                actions[index],
+                rewards[index],
+            )
             for index in range(states.shape[0])
         ]
+
+    def save_feature_normalizers(
+        self,
+        normalizers: dict[str, StateNormalizer],
+        output_dir: str | Path,
+    ) -> None:
+        """保存 feature block 归一化参数。"""
+
+        output = Path(output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        for key, normalizer in normalizers.items():
+            path = output / f"{key}.json"
+            path.write_text(
+                json.dumps(normalizer.to_dict(), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        self.artifact_paths["feature_normalizers"] = output
+
+    def load_feature_normalizers(
+        self,
+        input_dir: str | Path,
+    ) -> dict[str, StateNormalizer]:
+        """读取 feature block 归一化参数。"""
+
+        directory = Path(input_dir)
+        if not directory.exists():
+            raise FileNotFoundError(f"feature normalizers not found: {directory}")
+        if not directory.is_dir():
+            raise ValueError(f"feature normalizers path is not a directory: {directory}")
+        normalizers: dict[str, StateNormalizer] = {}
+        for path in sorted(directory.glob("*.json")):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError(f"invalid feature normalizer payload: {path}")
+            normalizers[path.stem] = StateNormalizer.from_dict(payload)
+        if not normalizers:
+            raise ValueError(f"feature normalizers directory is empty: {directory}")
+        return normalizers
 
     def save_state_normalizer(
         self,

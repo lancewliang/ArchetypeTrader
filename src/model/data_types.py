@@ -19,17 +19,23 @@ from pathlib import Path
 import numpy as np
 
 
-HorizonDataset = tuple[np.ndarray, np.ndarray, np.ndarray]
+HorizonDataset = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 """固定 horizon 的中间数据集。
 
 结构:
-    ``HorizonDataset = (states, prices, depthprices)``
+    ``HorizonDataset = (states, relative_states, trend_states, prices, depthprices)``
 
 形状:
     ``states``: ``[x, h, feature_dim]``
         ``x`` 表示 horizon 样本数量。
         ``h`` 表示每个 horizon 的时间步长度，论文实验默认 72。
-        ``feature_dim`` 表示状态特征数量。
+        ``feature_dim`` 表示市场状态特征数量。
+
+    ``relative_states``: ``[x, h, relative_feature_dim]``
+        相对状态特征，来自 ``relative_need_normalization`` 和 ``relative`` block。
+
+    ``trend_states``: ``[x, h, trend_feature_dim]``
+        趋势状态特征，来自长短周期 trend block。
 
     ``prices``: ``[x, h, 1]``
         价格来自 feature ``DataFrame`` 的 ``close`` 列。
@@ -43,24 +49,37 @@ HorizonDataset = tuple[np.ndarray, np.ndarray, np.ndarray]
         ``bid1_size`` ... ``bid5_size``。
 
 含义:
-    ``states`` 是模型观察到的市场状态序列，不包含 ``close`` 价格列。
+    ``states``、``relative_states`` 和 ``trend_states`` 是模型观察到的三路状态
+    序列，不包含 ``close`` 价格列。
     ``prices`` 是 DP teacher 和 reward 计算所需的结算价格序列。
-    ``depthprices`` 是从 ``states`` 中额外切出的盘口深度行情序列。
+    ``depthprices`` 是从原始 LOB 行情列切出的盘口深度行情序列，保持未归一化尺度。
 
 为什么:
-    状态输入和价格序列用途不同。状态给模型学习，
-    价格给 ``SingleTrade_DP_Planner`` 生成 ``a_demo`` 和 ``r_demo``。
+    状态输入和价格序列用途不同。三路状态给模型学习，价格和未归一化 LOB
+    深度给 ``SingleTrade_DP_Planner`` 生成 ``a_demo`` 和 ``r_demo``。
 """
 
-DemonstrationTrajectory = tuple[np.ndarray, np.ndarray, np.ndarray]
+DemonstrationTrajectory = tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]
 """单条 demonstration trajectory。
 
 结构:
-    ``DemonstrationTrajectory = (s_demo, a_demo, r_demo)``
+    ``DemonstrationTrajectory = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``
 
 形状:
     ``s_demo``: ``[h, feature_dim]``
-        单个 horizon 的状态序列。
+        单个 horizon 的市场状态序列。
+
+    ``relative_s_demo``: ``[h, relative_feature_dim]``
+        单个 horizon 的相对状态序列。
+
+    ``trend_s_demo``: ``[h, trend_feature_dim]``
+        单个 horizon 的趋势状态序列。
 
     ``a_demo``: ``[h]``
         单个 horizon 的 DP teacher 动作序列。
@@ -79,7 +98,7 @@ TrajectoryDataset = list[DemonstrationTrajectory]
 
 结构:
     ``TrajectoryDataset = [tau_0, tau_1, ..., tau_{n-1}]``
-    ``tau = (s_demo, a_demo, r_demo)``
+    ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``
 
 形状:
     每个 ``tau`` 的形状见 ``DemonstrationTrajectory``。

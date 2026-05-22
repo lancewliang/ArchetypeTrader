@@ -18,7 +18,7 @@ class SingleTrade_DP_Planner:
     它的目标是在每个长度为 ``h`` 的 horizon 内，根据价格序列寻找一条
     最优或高质量的 teacher action 序列，并把状态、动作和奖励组合成：
 
-    ``tau = (s_demo, a_demo, r_demo)``
+    ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``
 
     其中:
         ``s_demo`` 的 shape 为 ``[h, feature_dim]``。
@@ -78,6 +78,8 @@ class SingleTrade_DP_Planner:
     def build_trajectory(
         self,
         states: np.ndarray,
+        relative_states: np.ndarray,
+        trend_states: np.ndarray,
         prices: np.ndarray,
         depthprices: np.ndarray,
     ) -> DemonstrationTrajectory:
@@ -85,12 +87,19 @@ class SingleTrade_DP_Planner:
 
         参数:
             states: 单个 horizon 的市场状态矩阵，shape 为 ``[h, feature_dim]``。
+            relative_states: 单个 horizon 的相对状态矩阵，
+                shape 为 ``[h, relative_feature_dim]``。
+            trend_states: 单个 horizon 的趋势状态矩阵，
+                shape 为 ``[h, trend_feature_dim]``。
             prices: 单个 horizon 的价格序列，shape 为 ``[h]``。
             depthprices: 单个 horizon 的 LOB 深度行情，shape 为 ``[h, 20]``。
 
         输出:
-            返回 ``DemonstrationTrajectory``，即 ``tau = (s_demo, a_demo, r_demo)``。
+            返回 ``DemonstrationTrajectory``，即
+            ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``。
             ``s_demo`` 的 shape 为 ``[h, feature_dim]``。
+            ``relative_s_demo`` 的 shape 为 ``[h, relative_feature_dim]``。
+            ``trend_s_demo`` 的 shape 为 ``[h, trend_feature_dim]``。
             ``a_demo`` 的 shape 为 ``[h]``。
             ``r_demo`` 的 shape 为 ``[h]``。
 
@@ -104,16 +113,28 @@ class SingleTrade_DP_Planner:
             而不是孤立的动作序列。该方法把 DP teacher 输出整理成模型训练契约。
         """
         states = np.asarray(states, dtype=np.float32)
+        relative_states = np.asarray(relative_states, dtype=np.float32)
+        trend_states = np.asarray(trend_states, dtype=np.float32)
         prices = np.asarray(prices, dtype=np.float32).reshape(-1)
         depthprices = np.asarray(depthprices, dtype=np.float32)
         if states.ndim != 2:
             raise ValueError("states must have shape [h, feature_dim]")
+        if relative_states.ndim != 2:
+            raise ValueError(
+                "relative_states must have shape [h, relative_feature_dim]"
+            )
+        if trend_states.ndim != 2:
+            raise ValueError("trend_states must have shape [h, trend_feature_dim]")
         if prices.ndim != 1:
             raise ValueError("prices must have shape [h]")
         if depthprices.ndim != 2 or depthprices.shape[1] != LOB_DEPTH_WIDTH:
             raise ValueError(f"depthprices must have shape [h, {LOB_DEPTH_WIDTH}]")
         if states.shape[0] != prices.shape[0]:
             raise ValueError("states and prices must share horizon length")
+        if relative_states.shape[0] != prices.shape[0]:
+            raise ValueError("relative_states and prices must share horizon length")
+        if trend_states.shape[0] != prices.shape[0]:
+            raise ValueError("trend_states and prices must share horizon length")
         if states.shape[0] != depthprices.shape[0]:
             raise ValueError("states and depthprices must share horizon length")
         if states.shape[0] != self.horizon:
@@ -123,7 +144,7 @@ class SingleTrade_DP_Planner:
 
         actions = self.plan(prices, depthprices)
         rewards = self.compute_rewards(prices, actions, depthprices)
-        return states, actions, rewards
+        return states, relative_states, trend_states, actions, rewards
 
     def build_trajectory_dataset(
         self,
@@ -133,15 +154,18 @@ class SingleTrade_DP_Planner:
 
         参数:
             horizon_dataset: ``HorizonBuilder`` 的输出，
-                即 ``(states, prices, depthprices)``。
+                即 ``(states, relative_states, trend_states, prices, depthprices)``。
                 ``states`` 的 shape 为 ``[n, h, feature_dim]``。
+                ``relative_states`` 的 shape 为 ``[n, h, relative_feature_dim]``。
+                ``trend_states`` 的 shape 为 ``[n, h, trend_feature_dim]``。
                 ``prices`` 的 shape 为 ``[n, h, 1]``，来自 feature 文件的 ``close`` 列。
                 ``depthprices`` 的 shape 为 ``[n, h, 20]``，来自 states 中的 LOB
                 深度行情。
 
         输出:
             返回 ``TrajectoryDataset``，即 ``D = [tau_0, tau_1, ..., tau_{n-1}]``。
-            每个 ``tau_i`` 都是 ``(s_demo, a_demo, r_demo)``。
+            每个 ``tau_i`` 都是
+            ``(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``。
 
         方法作用:
             从 ``horizon_dataset`` 中取出每个 horizon 的 ``states``、``prices`` 和
@@ -152,12 +176,26 @@ class SingleTrade_DP_Planner:
             论文中的训练数据集定义为 ``D = {tau_i}_{i=0}^{n-1}``。
             该方法把单条 trajectory 生成逻辑扩展到完整训练集。
         """
-        states_batch, prices_batch, depthprices_batch = horizon_dataset
+        (
+                states_batch,
+                relative_states_batch,
+                trend_states_batch,
+                prices_batch,
+                depthprices_batch,
+            ) = horizon_dataset
         states_batch = np.asarray(states_batch, dtype=np.float32)
+        relative_states_batch = np.asarray(relative_states_batch, dtype=np.float32)
+        trend_states_batch = np.asarray(trend_states_batch, dtype=np.float32)
         prices_batch = np.asarray(prices_batch, dtype=np.float32)
         depthprices_batch = np.asarray(depthprices_batch, dtype=np.float32)
         if states_batch.ndim != 3:
             raise ValueError("states must have shape [n, h, feature_dim]")
+        if relative_states_batch.ndim != 3:
+            raise ValueError(
+                "relative_states must have shape [n, h, relative_feature_dim]"
+            )
+        if trend_states_batch.ndim != 3:
+            raise ValueError("trend_states must have shape [n, h, trend_feature_dim]")
         if prices_batch.ndim != 3 or prices_batch.shape[-1] != 1:
             raise ValueError("prices must have shape [n, h, 1]")
         if (
@@ -167,6 +205,10 @@ class SingleTrade_DP_Planner:
             raise ValueError(f"depthprices must have shape [n, h, {LOB_DEPTH_WIDTH}]")
         if states_batch.shape[:2] != prices_batch.shape[:2]:
             raise ValueError("states and prices must share [n, h]")
+        if relative_states_batch.shape[:2] != prices_batch.shape[:2]:
+            raise ValueError("relative_states and prices must share [n, h]")
+        if trend_states_batch.shape[:2] != prices_batch.shape[:2]:
+            raise ValueError("trend_states and prices must share [n, h]")
         if states_batch.shape[:2] != depthprices_batch.shape[:2]:
             raise ValueError("states and depthprices must share [n, h]")
         if states_batch.shape[1] != self.horizon:
@@ -177,6 +219,8 @@ class SingleTrade_DP_Planner:
         return [
             self.build_trajectory(
                 states_batch[index],
+                relative_states_batch[index],
+                trend_states_batch[index],
                 prices_batch[index, :, 0],
                 depthprices_batch[index],
             )
