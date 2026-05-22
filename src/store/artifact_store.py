@@ -224,7 +224,7 @@ class DataFileStore:
             trajectory_dataset: ``SingleTrade_DP_Planner`` 的输出。
                 数据形式为 ``D = [tau_0, tau_1, ..., tau_{n-1}]``。
                 每个 ``tau`` 都是
-                ``(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``。
+                ``(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo, sample_id)``。
             output_path: trajectory 数据集保存路径。
 
         输出:
@@ -262,6 +262,7 @@ class DataFileStore:
             np.float32,
             copy=False,
         )
+        sample_ids = np.asarray([tau[5] for tau in trajectory_dataset], dtype=np.int64)
         np.savez_compressed(
             output,
             states=states,
@@ -269,6 +270,7 @@ class DataFileStore:
             trend_states=trend_states,
             actions=actions,
             rewards=rewards,
+            sample_ids=sample_ids,
         )
 
     def load_trajectory_dataset(
@@ -284,7 +286,7 @@ class DataFileStore:
             返回 ``TrajectoryDataset``。
             数据形式为 ``D = [tau_0, tau_1, ..., tau_{n-1}]``，
             每个 ``tau`` 都是
-            ``(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``。
+            ``(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo, sample_id)``。
 
         方法作用:
             从已保存的产出物中恢复 DP teacher 生成的 demonstration trajectories。
@@ -310,12 +312,17 @@ class DataFileStore:
                 trend_states = np.empty((*states.shape[:2], 0), dtype=np.float32)
             actions = payload["actions"].astype(np.int64, copy=False)
             rewards = payload["rewards"].astype(np.float32, copy=False)
+            if "sample_ids" in payload:
+                sample_ids = payload["sample_ids"].astype(np.int64, copy=False)
+            else:
+                sample_ids = np.arange(states.shape[0], dtype=np.int64)
 
         if (
             states.shape[0] != actions.shape[0]
             or states.shape[0] != rewards.shape[0]
             or relative_states.shape[0] != states.shape[0]
             or trend_states.shape[0] != states.shape[0]
+            or sample_ids.shape != (states.shape[0],)
         ):
             raise ValueError(f"invalid trajectory dataset file: {path}")
         return [
@@ -325,6 +332,7 @@ class DataFileStore:
                 trend_states[index],
                 actions[index],
                 rewards[index],
+                int(sample_ids[index]),
             )
             for index in range(states.shape[0])
         ]

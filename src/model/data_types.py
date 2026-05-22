@@ -65,11 +65,14 @@ DemonstrationTrajectory = tuple[
     np.ndarray,
     np.ndarray,
     np.ndarray,
+    int,
 ]
 """单条 demonstration trajectory。
 
 结构:
-    ``DemonstrationTrajectory = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``
+    ``DemonstrationTrajectory = (
+        s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo, sample_id
+    )``
 
 形状:
     ``s_demo``: ``[h, feature_dim]``
@@ -88,6 +91,9 @@ DemonstrationTrajectory = tuple[
     ``r_demo``: ``[h]``
         单个 horizon 的逐步 reward 序列。
 
+    ``sample_id``: scalar
+        当前 trajectory 在 split 内的稳定 horizon 样本编号。
+
 含义:
     ``DemonstrationTrajectory`` 是论文中的 ``tau``，
     是 Phase I VQ encoder-decoder 的单个训练样本。
@@ -98,7 +104,7 @@ TrajectoryDataset = list[DemonstrationTrajectory]
 
 结构:
     ``TrajectoryDataset = [tau_0, tau_1, ..., tau_{n-1}]``
-    ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``
+    ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo, sample_id)``
 
 形状:
     每个 ``tau`` 的形状见 ``DemonstrationTrajectory``。

@@ -4,11 +4,11 @@
 
 类的功能:
     模型接收一条或一批 DP demonstration trajectory：
-    ``(states, relative_states, trend_states, actions, rewards)``，当前 encoder
-    使用主 ``states/actions/rewards`` 压缩成连续 latent ``z_e``，再通过
-    Vector Quantizer 把 ``z_e`` 分配到有限 codebook 中的一个离散 archetype，
-    最后由 decoder 根据市场状态和 archetype 向量重构每个时间步的 teacher
-    action。
+    ``(states, relative_states, trend_states, actions, rewards, sample_ids)``，
+    当前 encoder 使用主 ``states/actions/rewards`` 压缩成连续 latent ``z_e``，
+    再通过 Vector Quantizer 把 ``z_e`` 分配到有限 codebook 中的一个离散
+    archetype，最后由 decoder 根据市场状态和 archetype 向量重构每个时间步
+    的 teacher action。
 
 为什么设计这个类:
     交易策略不应该只是一条固定动作序列。Phase I 的目标是从 DP teacher
@@ -162,7 +162,7 @@ class ArchetypeTrajectoryEncoder(nn.Module):
     def forward(self, batch: TrajectoryTensorBatch) -> LatentTensor:
         """返回每条 trajectory 的连续 latent ``z_e``，形状为 ``[batch, latent_dim]``。"""
 
-        states, _, _, actions, rewards = _normalize_trajectory_batch(batch)
+        states, _, _, actions, rewards, _ = _normalize_trajectory_batch(batch)
 
         # 三路输入先独立对齐到 hidden_dim，避免不同 dtype/尺度直接混合。
         state_emb = self.state_adapter(states.float())
@@ -289,7 +289,8 @@ class ArchetypeVQModel(nn.Module):
 
     模块说明:
         1. ``encoder``:
-           输入 ``(states, relative_states, trend_states, actions, rewards)``，
+           输入 ``(states, relative_states, trend_states, actions, rewards,
+           sample_ids)``，
            当前使用主 ``states/actions/rewards`` 输出连续 latent ``z_e``。
            它负责从 DP teacher trajectory 中抽取整段交易行为模式。
         2. ``quantizer``:
@@ -391,7 +392,7 @@ class ArchetypeVQModel(nn.Module):
         """
 
         batch = _normalize_trajectory_batch(batch)
-        states, _, _, actions, _ = batch
+        states, _, _, actions, _, _ = batch
         z_e = self.encoder(batch)
         quantize_output = self.quantizer(z_e)
         action_logits = self.decoder(states, quantize_output.quantized)
@@ -429,7 +430,7 @@ class ArchetypeVQModel(nn.Module):
         """
 
         batch = _normalize_trajectory_batch(batch)
-        states, _, _, actions, _ = batch
+        states, _, _, actions, _, _ = batch
         z_e = self.encoder(batch)
         action_logits = self.decoder(states, z_e)
         zero = z_e.new_zeros(())
@@ -604,12 +605,12 @@ class ArchetypeVQModel(nn.Module):
 def _normalize_trajectory_batch(batch: TrajectoryTensorBatch) -> TrajectoryTensorBatch:
     """统一模型输入形状，减少训练代码里的样板转换。"""
 
-    if len(batch) >= 5:
-        states, relative_states, trend_states, actions, rewards = batch[:5]    
+    if len(batch) >= 6:
+        states, relative_states, trend_states, actions, rewards, sample_ids = batch[:6]
     else:
         raise ValueError(
             "trajectory batch must be "
-            "(states, relative_states, trend_states, actions, rewards)"
+            "(states, relative_states, trend_states, actions, rewards, sample_ids)"
         )
     if states.ndim != 3:
         raise ValueError("states must have shape [batch, horizon, state_dim]")
@@ -618,13 +619,19 @@ def _normalize_trajectory_batch(batch: TrajectoryTensorBatch) -> TrajectoryTenso
             "relative_states must have shape [batch, horizon, relative_feature_dim]"
         )
     if trend_states.ndim != 3:
-        raise ValueError("trend_states must have shape [batch, horizon, trend_feature_dim]")
+        raise ValueError(
+            "trend_states must have shape [batch, horizon, trend_feature_dim]"
+        )
     if actions.ndim != 2:
         raise ValueError("actions must have shape [batch, horizon]")
     if rewards.ndim == 2:
         rewards = rewards.unsqueeze(-1)
     if rewards.ndim != 3 or rewards.shape[-1] != 1:
-        raise ValueError("rewards must have shape [batch, horizon] or [batch, horizon, 1]")
+        raise ValueError(
+            "rewards must have shape [batch, horizon] or [batch, horizon, 1]"
+        )
+    if sample_ids.ndim != 1:
+        raise ValueError("sample_ids must have shape [batch]")
     if states.shape[:2] != actions.shape:
         raise ValueError("states and actions must share [batch, horizon]")
     if relative_states.shape[:2] != states.shape[:2]:
@@ -633,7 +640,9 @@ def _normalize_trajectory_batch(batch: TrajectoryTensorBatch) -> TrajectoryTenso
         raise ValueError("trend_states and states must share [batch, horizon]")
     if states.shape[:2] != rewards.shape[:2]:
         raise ValueError("states and rewards must share [batch, horizon]")
-    return states, relative_states, trend_states, actions, rewards
+    if sample_ids.shape != (states.shape[0],):
+        raise ValueError("sample_ids must match batch size")
+    return states, relative_states, trend_states, actions, rewards, sample_ids
 
 
 # 设计文档里的新名字。

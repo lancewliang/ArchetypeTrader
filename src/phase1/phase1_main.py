@@ -140,11 +140,12 @@ class Phase1MainFlow:
 
     论文描述:
         该流程对应论文三阶段框架中的第一阶段。Phase I 先用 single-trade DP
-        planner 在固定 horizon 上生成高质量示范轨迹 tau=(s_demo, a_demo,
-        r_demo)，再用 LSTM encoder 将轨迹编码为连续 latent z_e，经 VQ codebook
-        离散化为 z_q，最后由 decoder 根据状态和 z_q 重构动作序列。训练完成后，
-        codebook 中的离散向量即论文所称可复用 trading archetypes，并为 Phase II
-        的 horizon-level selector 提供可选择的 archetype 集合。
+        planner 在固定 horizon 上生成高质量示范轨迹 tau=(s_demo,
+        relative_s_demo, trend_s_demo, a_demo, r_demo, sample_id)，再用 LSTM
+        encoder 将轨迹编码为连续 latent z_e，经 VQ codebook 离散化为 z_q，
+        最后由 decoder 根据状态和 z_q 重构动作序列。训练完成后，codebook
+        中的离散向量即论文所称可复用 trading archetypes，并为 Phase II 的
+        horizon-level selector 提供可选择的 archetype 集合。
     """
 
     def __init__(self, config: Phase1MainConfig) -> None:
@@ -266,7 +267,7 @@ class Phase1MainFlow:
             应用 single-trade DP planner。每个 horizon 的市场观测记为
             s_demo=(s_0,...,s_{h-1})，DP 输出动作序列 a_demo，执行动作得到
             reward 序列 r_demo，最终组成
-            tau=(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)
+            tau=(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo, sample_id)
             作为 VQ archetype extraction 的训练数据集 D。
         """
       
@@ -313,7 +314,7 @@ class Phase1MainFlow:
                 shuffle=False,
             )
 
-        first_states, _, _, _, _ = train_dataset[0]
+        first_states = train_dataset[0][0]
         state_dim = int(first_states.shape[-1])
         model = ArchetypeVQModel(
             state_dim=state_dim,
@@ -434,7 +435,7 @@ class Phase1MainFlow:
                 if collected >= max_samples:
                     break
                 batch = move_trajectory_batch_to_device(batch, self.device)
-                _, _, _, actions, _ = batch
+                _, _, _, actions, _, _ = batch
                 z_e = self.model.encoder(batch).detach().cpu()
                 directions = classify_trajectory_directions(actions).detach().cpu()
 

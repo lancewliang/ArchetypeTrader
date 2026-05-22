@@ -200,9 +200,8 @@ class Phase1CodebookEvaluator:
         total_samples = 0
 
         for batch in dataloader:
-            raw_batch = batch
             batch = move_trajectory_batch_to_device(batch, self.device)
-            states, _, _, actions, rewards = batch
+            states, _, _, actions, rewards, sample_ids = batch
             outputs = self.model(batch)
             quantize_output = self.model.quantizer.quantize(outputs.z_e)
             decoded_actions = outputs.action_logits.argmax(dim=-1)
@@ -224,7 +223,7 @@ class Phase1CodebookEvaluator:
             z_e_parts.append(outputs.z_e.detach().cpu().numpy())
             z_q_parts.append(quantize_output.z_q_no_grad.detach().cpu().numpy())
             distance_parts.append(quantize_output.distances.detach().cpu().numpy())
-            sample_id_parts.append(raw_batch[5].detach().cpu().numpy())           
+            sample_id_parts.append(sample_ids.detach().cpu().numpy())
 
         if total_samples <= 0:
             raise ValueError("validation dataloader produced no samples")

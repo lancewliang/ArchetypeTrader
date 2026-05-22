@@ -18,12 +18,13 @@ class SingleTrade_DP_Planner:
     它的目标是在每个长度为 ``h`` 的 horizon 内，根据价格序列寻找一条
     最优或高质量的 teacher action 序列，并把状态、动作和奖励组合成：
 
-    ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``
+    ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo, sample_id)``
 
     其中:
         ``s_demo`` 的 shape 为 ``[h, feature_dim]``。
         ``a_demo`` 的 shape 为 ``[h]``，动作取值为 ``{0, 1, 2}``。
         ``r_demo`` 的 shape 为 ``[h]``，表示逐步 reward。
+        ``sample_id`` 是 split 内稳定 horizon 样本编号。
 
     为什么需要这个类:
         Phase I 的 VQ encoder-decoder 需要 demonstration trajectories
@@ -82,6 +83,7 @@ class SingleTrade_DP_Planner:
         trend_states: np.ndarray,
         prices: np.ndarray,
         depthprices: np.ndarray,
+        sample_id: int,
     ) -> DemonstrationTrajectory:
         """为单个 horizon 生成 demonstration trajectory。
 
@@ -93,15 +95,19 @@ class SingleTrade_DP_Planner:
                 shape 为 ``[h, trend_feature_dim]``。
             prices: 单个 horizon 的价格序列，shape 为 ``[h]``。
             depthprices: 单个 horizon 的 LOB 深度行情，shape 为 ``[h, 20]``。
+            sample_id: 当前 horizon trajectory 在 split 内的稳定样本编号。
 
         输出:
             返回 ``DemonstrationTrajectory``，即
-            ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``。
+            ``tau = (
+                s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo, sample_id
+            )``。
             ``s_demo`` 的 shape 为 ``[h, feature_dim]``。
             ``relative_s_demo`` 的 shape 为 ``[h, relative_feature_dim]``。
             ``trend_s_demo`` 的 shape 为 ``[h, trend_feature_dim]``。
             ``a_demo`` 的 shape 为 ``[h]``。
             ``r_demo`` 的 shape 为 ``[h]``。
+            ``sample_id`` 是 scalar int。
 
         方法作用:
             先调用 ``plan`` 生成 teacher actions，再调用 ``compute_rewards`` 生成
@@ -144,7 +150,7 @@ class SingleTrade_DP_Planner:
 
         actions = self.plan(prices, depthprices)
         rewards = self.compute_rewards(prices, actions, depthprices)
-        return states, relative_states, trend_states, actions, rewards
+        return states, relative_states, trend_states, actions, rewards, int(sample_id)
 
     def build_trajectory_dataset(
         self,
@@ -165,7 +171,7 @@ class SingleTrade_DP_Planner:
         输出:
             返回 ``TrajectoryDataset``，即 ``D = [tau_0, tau_1, ..., tau_{n-1}]``。
             每个 ``tau_i`` 都是
-            ``(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``。
+            ``(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo, sample_id)``。
 
         方法作用:
             从 ``horizon_dataset`` 中取出每个 horizon 的 ``states``、``prices`` 和
@@ -223,6 +229,7 @@ class SingleTrade_DP_Planner:
                 trend_states_batch[index],
                 prices_batch[index, :, 0],
                 depthprices_batch[index],
+                sample_id=index,
             )
             for index in range(states_batch.shape[0])
         ]

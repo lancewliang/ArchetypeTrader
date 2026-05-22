@@ -5,11 +5,12 @@
     固定长度 ``h`` 的 horizon，再用 single-trade DP planner 为每个 horizon
     生成 demonstration trajectory:
 
-        ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo)``
+        ``tau = (s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo, sample_id)``
 
     其中 ``s_demo`` 是 horizon 内的主市场状态序列，``relative_s_demo`` 和
     ``trend_s_demo`` 是额外两路状态序列，``a_demo`` 是 DP teacher 给出的
-    short/flat/long 动作序列，``r_demo`` 是执行该动作序列得到的逐步 reward。
+    short/flat/long 动作序列，``r_demo`` 是执行该动作序列得到的逐步 reward，
+    ``sample_id`` 是 split 内稳定 horizon 样本编号。
     Phase I 的 VQ encoder-decoder 训练完成后，encoder 会把整条 trajectory
     编码为连续 latent ``z_e``，VQ codebook 再把 ``z_e`` 分配给最近的离散
     archetype code。
@@ -142,7 +143,13 @@ class HorizonTrainLabelBuilder:
                 调用 ``model.encode``，不会执行 decoder，也不会更新参数。
             trajectory_dataset: DP planner 已经生成并固化的 demonstration
                 trajectories，数据形式为
-                ``[(s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo), ...]``。
+                ``[
+                    (
+                        s_demo, relative_s_demo, trend_s_demo, a_demo, r_demo,
+                        sample_id
+                    ),
+                    ...
+                ]``。
             split_name: 当前数据 split 名称，例如 ``train``、``val``、``test``。
                 该字段会写入 label 表，方便后续阶段审计来源。
 
@@ -186,7 +193,6 @@ class HorizonTrainLabelBuilder:
         model.eval()
 
         rows: list[dict[str, object]] = []
-        sample_offset = 0
 
         with torch.no_grad():
             for batch in dataloader:
@@ -200,10 +206,11 @@ class HorizonTrainLabelBuilder:
                 latent_cpu = latent.detach().cpu()
                 rewards = batch[4]
                 rewards_cpu = rewards.detach().cpu()
+                sample_ids_cpu = batch[5].detach().cpu()
 
                 batch_size = int(code_labels_cpu.shape[0])
                 for batch_index in range(batch_size):
-                    sample_id = sample_offset + batch_index
+                    sample_id = int(sample_ids_cpu[batch_index].item())
                     # HorizonBuilder 当前按固定长度连续切块，因此可用
                     # sample_id 和 horizon 恢复该样本覆盖的相对 bar 范围。
                     row = HorizonTrainLabelRow(
@@ -218,7 +225,6 @@ class HorizonTrainLabelBuilder:
                         ),
                     )
                     rows.append(row.to_dict())
-                sample_offset += batch_size
 
         return pl.DataFrame(rows)
 
