@@ -29,11 +29,12 @@ from .codebook import (
     initialize_codebook_from_directional_kmeans,
     reset_dead_codes_from_latents,
 )
+from .archetype_decoder import ArchetypeActionDecoder
+from .archetype_encoder import ArchetypeTrajectoryEncoder
+from .market_state_input import MarketStateInputEncoder
 from .vq_archetype import (
-    ArchetypeActionDecoder,
     ArchetypeDecoder,
     ArchetypeEncoder,
-    ArchetypeTrajectoryEncoder,
     ArchetypeVQModel,
     VQArchetypeModel,
     VqModelOutputs,
@@ -59,6 +60,7 @@ __all__ = [
     "HorizonDataset",
     "HorizonTensorDataset",
     "LatentTensor",
+    "MarketStateInputEncoder",
     "ModelOutputs",
     "QuantizeOutput",
     "TSize",

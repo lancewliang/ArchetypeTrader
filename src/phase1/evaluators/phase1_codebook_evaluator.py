@@ -185,6 +185,8 @@ class Phase1CodebookEvaluator:
 
         self.model.eval()
         state_parts: list[np.ndarray] = []
+        relative_state_parts: list[np.ndarray] = []
+        trend_state_parts: list[np.ndarray] = []
         action_parts: list[np.ndarray] = []
         reward_parts: list[np.ndarray] = []
         decoded_action_parts: list[np.ndarray] = []
@@ -201,7 +203,7 @@ class Phase1CodebookEvaluator:
 
         for batch in dataloader:
             batch = move_trajectory_batch_to_device(batch, self.device)
-            states, _, _, actions, rewards, sample_ids = batch
+            states, relative_states, trend_states, actions, rewards, sample_ids = batch
             outputs = self.model(batch)
             quantize_output = self.model.quantizer.quantize(outputs.z_e)
             decoded_actions = outputs.action_logits.argmax(dim=-1)
@@ -215,6 +217,8 @@ class Phase1CodebookEvaluator:
             total_actions += int(actions.numel())
 
             state_parts.append(states.detach().cpu().numpy())
+            relative_state_parts.append(relative_states.detach().cpu().numpy())
+            trend_state_parts.append(trend_states.detach().cpu().numpy())
             action_parts.append(actions.detach().cpu().numpy())
             reward_parts.append(rewards.detach().cpu().numpy())
             decoded_action_parts.append(decoded_actions.detach().cpu().numpy())
@@ -229,6 +233,8 @@ class Phase1CodebookEvaluator:
             raise ValueError("validation dataloader produced no samples")
 
         states_array = np.concatenate(state_parts, axis=0)
+        relative_states_array = np.concatenate(relative_state_parts, axis=0)
+        trend_states_array = np.concatenate(trend_state_parts, axis=0)
         if sample_id_parts:
             sample_ids = np.concatenate(sample_id_parts, axis=0).astype(np.int64)
             if sample_ids.shape != (total_samples,):
@@ -260,6 +266,10 @@ class Phase1CodebookEvaluator:
             sample_ids=sample_ids,
             # [N, H, F]
             states=states_array,
+            # [N, H, F_relative]
+            relative_states=relative_states_array,
+            # [N, H, F_trend]
+            trend_states=trend_states_array,
             # None or [N, H]. HorizonDataset [N, H, 1] prices are squeezed below.
             prices=prices,
             # None or [N, H, 20]. LOB depth market data used for execution slippage.

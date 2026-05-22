@@ -5,10 +5,10 @@
 类的功能:
     模型接收一条或一批 DP demonstration trajectory：
     ``(states, relative_states, trend_states, actions, rewards, sample_ids)``，
-    当前 encoder 使用主 ``states/actions/rewards`` 压缩成连续 latent ``z_e``，
+    encoder 使用三路市场状态、actions 和 rewards 压缩成连续 latent ``z_e``，
     再通过 Vector Quantizer 把 ``z_e`` 分配到有限 codebook 中的一个离散
-    archetype，最后由 decoder 根据市场状态和 archetype 向量重构每个时间步
-    的 teacher action。
+    archetype，最后由 decoder 根据三路市场状态和 archetype 向量重构每个
+    时间步的 teacher action。
 
 为什么设计这个类:
     交易策略不应该只是一条固定动作序列。Phase I 的目标是从 DP teacher
@@ -33,18 +33,22 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from .archetype_decoder import ArchetypeActionDecoder
+from .archetype_encoder import ArchetypeTrajectoryEncoder
 from .codebook import (
     CodebookInitResult,
     QuantizeOutput,
     VectorQuantizer,
     classify_trajectory_directions,
 )
+from .market_state_input import MarketStateInputEncoder
 from .tensor_data_types import (
     ActionLogitTensor,
     ArchetypeLabelTensor,
     LatentTensor,
     TrajectoryTensorBatch,
 )
+from .trajectory_batch import normalize_trajectory_batch as _normalize_trajectory_batch
 
 
 @dataclass(frozen=True)
@@ -71,215 +75,6 @@ class VqModelOutputs:
     total_loss: torch.Tensor
 
 
-class ArchetypeTrajectoryEncoder(nn.Module):
-    """把一条 demonstration trajectory 编码成连续 latent ``z_e``。
-
-    设计原因:
-        archetype 不是单个时点的市场状态，而是一整段 horizon 内
-        ``状态-动作-reward`` 的联合行为模式。encoder 同时读取三路输入，
-        让 latent 能表达 DP teacher 在该 horizon 中为什么这样交易。
-
-    网络层说明:
-        1. ``state_adapter``:
-           把每个时间步的市场特征 ``[state_dim]`` 投影到统一的
-           ``hidden_dim`` 表示空间。``LayerNorm`` 稳定不同特征尺度，
-           ``GELU`` 提供非线性，使原始技术指标/市场状态可以组合成更
-           适合时序建模的局部状态 embedding。
-        2. ``action_embedding`` + ``action_norm``:
-           把离散 teacher action id 映射成 ``hidden_dim`` 向量。这样
-           short/flat/long 不再只是整数类别，而是可学习的动作语义向量；
-           ``LayerNorm`` 让动作分支的数值尺度和状态、reward 分支更接近。
-        3. ``reward_adapter``:
-           把每个时间步的一维 reward 投影到 ``hidden_dim``。reward 分支
-           让 encoder 看到 teacher 动作带来的即时收益/代价，帮助区分
-           表面动作相似但盈亏路径不同的 trajectory。
-        4. ``fusion``:
-           在每个时间步拼接 ``state/action/reward`` 三路 embedding 后，
-           压回 ``hidden_dim``。这一层学习“在该市场状态下采取该动作并
-           获得该 reward”的局部行为含义。
-        5. ``lstm``:
-           沿 horizon 聚合局部行为 embedding，建模持仓延续、反转、止盈
-           等跨时间步模式。这里使用单向 LSTM，encoder 编码整条 teacher
-           trajectory；decoder 的因果性由 decoder 自身保证。
-        6. ``projection``:
-           把 LSTM 的最后隐状态压缩成 ``latent_dim`` 连续 latent ``z_e``。
-           这个低维瓶颈迫使模型保留整条 trajectory 的核心交易风格，而
-           不是保存每个时间步的细节。
-    """
-
-    def __init__(
-        self,
-        state_dim: int,
-        hidden_dim: int = 128,
-        latent_dim: int = 16,
-        action_dim: int = 3,
-        num_layers: int = 1,
-        dropout: float = 0.0,
-    ) -> None:
-        super().__init__()
-        self.state_dim = state_dim
-        self.hidden_dim = hidden_dim
-        self.latent_dim = latent_dim
-        self.action_dim = action_dim
-
-        # 状态分支：连续市场特征 -> hidden_dim 局部状态表示。
-        self.state_adapter = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-        )
-        # 动作分支：离散 teacher action -> 可学习动作语义向量。
-        self.action_embedding = nn.Embedding(action_dim, hidden_dim)
-        self.action_norm = nn.LayerNorm(hidden_dim)
-        # Reward 分支：一维逐步收益 -> hidden_dim 收益/代价表示。
-        self.reward_adapter = nn.Sequential(
-            nn.Linear(1, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-        )
-        # 三路信息融合：每个时间步形成统一的行为 token。
-        self.fusion = nn.Sequential(
-            nn.Linear(hidden_dim * 3, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-        )
-        # 时序聚合：把 horizon 内的行为 token 汇总成 trajectory-level 表示。
-        self.lstm = nn.LSTM(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0,
-            bidirectional=False,
-        )
-        # Latent 投影：trajectory-level hidden -> VQ 使用的连续 latent z_e。
-        self.projection = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, latent_dim),
-        )
-
-    def forward(self, batch: TrajectoryTensorBatch) -> LatentTensor:
-        """返回每条 trajectory 的连续 latent ``z_e``，形状为 ``[batch, latent_dim]``。"""
-
-        states, _, _, actions, rewards, _ = _normalize_trajectory_batch(batch)
-
-        # 三路输入先独立对齐到 hidden_dim，避免不同 dtype/尺度直接混合。
-        state_emb = self.state_adapter(states.float())
-        action_emb = self.action_norm(self.action_embedding(actions.long()))
-        reward_emb = self.reward_adapter(rewards.float())
-
-        # 在时间步维度保持不变，只在最后一维融合 state/action/reward 信息。
-        fused = self.fusion(torch.cat([state_emb, action_emb, reward_emb], dim=-1))
-        _, (hidden, _) = self.lstm(fused)
-        # hidden: [num_layers, batch, hidden_dim]；取最后一层作为整条轨迹摘要。
-        last_hidden = hidden[-1]
-        return self.projection(last_hidden)
-
-
-class ArchetypeActionDecoder(nn.Module):
-    """根据市场状态序列和 archetype latent 重构逐步动作 logits。
-
-    设计原因:
-        decoder 是 Phase II/III 使用 archetype 的执行入口。它必须是因果的：
-        第 ``tau`` 步动作只能依赖 ``s_0...s_tau`` 和选中的 archetype，
-        不能偷看 horizon 后面的未来状态。
-
-    网络层说明:
-        1. ``state_adapter``:
-           把每个时间步的市场状态投影到 ``hidden_dim``，与 encoder 的状态
-           分支保持同一表示宽度。decoder 只接收 states，不接收未来动作或
-           reward，因此推理阶段可以直接使用。
-        2. ``z_q_seq`` 扩展:
-           ``z_q`` 是每条 trajectory 一个 archetype 向量。forward 中会把它
-           从 ``[batch, latent_dim]`` 扩展为 ``[batch, horizon, latent_dim]``，
-           让每个时间步都知道当前要执行哪类交易原型。
-        3. ``decoder_input`` 拼接:
-           每个时间步输入为 ``[state_emb_t, z_q]``。状态提供当前市场上下文，
-           archetype 提供全局交易风格/计划。
-        4. ``lstm``:
-           单向 LSTM 逐步处理 ``decoder_input``，第 ``tau`` 步 hidden 只包含
-           到 ``tau`` 为止的信息，因此满足因果解码要求。
-        5. ``action_head``:
-           把每个时间步的 LSTM hidden 映射成 ``action_dim`` logits。训练时
-           logits 用于 ``cross_entropy`` 重构 teacher action；推理时用
-           ``argmax`` 得到基础动作序列。
-    """
-
-    def __init__(
-        self,
-        state_dim: int,
-        hidden_dim: int = 128,
-        latent_dim: int = 16,
-        action_dim: int = 3,
-        num_layers: int = 1,
-        dropout: float = 0.0,
-    ) -> None:
-        super().__init__()
-        self.state_dim = state_dim
-        self.hidden_dim = hidden_dim
-        self.latent_dim = latent_dim
-        self.action_dim = action_dim
-
-        # 状态编码：把实时市场状态对齐到 decoder 的 hidden 表示空间。
-        self.state_adapter = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-        )
-        # 因果时序解码：每步输入为 state embedding + archetype latent。
-        self.lstm = nn.LSTM(
-            input_size=hidden_dim + latent_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0,
-            bidirectional=False,
-        )
-        # 动作分类头：每个时间步 hidden -> short/flat/long logits。
-        self.action_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, action_dim),
-        )
-
-    def forward(self, states: torch.Tensor, z_q: LatentTensor) -> ActionLogitTensor:
-        """返回动作 logits。
-
-        输入形状:
-            ``states``: ``[batch, horizon, state_dim]``
-                一批市场状态序列。``batch`` 是样本数，``horizon`` 是每条
-                trajectory 的时间步长度，``state_dim`` 是单步状态特征数。
-
-            ``z_q``: ``[batch, latent_dim]``
-                每条 trajectory 对应的 archetype latent/codebook 向量。
-                ``z_q.shape[0]`` 必须和 ``states.shape[0]`` 一致。
-
-        内部形状:
-            ``state_emb``: ``[batch, horizon, hidden_dim]``
-            ``z_q_seq``: ``[batch, horizon, latent_dim]``
-            ``decoder_input``: ``[batch, horizon, hidden_dim + latent_dim]``
-
-        输出形状:
-            ``action_logits``: ``[batch, horizon, action_dim]``
-        """
-
-        if states.ndim != 3:
-            raise ValueError("states must have shape [batch, horizon, state_dim]")
-        if z_q.ndim != 2:
-            raise ValueError("z_q must have shape [batch, latent_dim]")
-        if states.shape[0] != z_q.shape[0]:
-            raise ValueError("states and z_q must have the same batch size")
-
-        batch_size, horizon, _ = states.shape
-        state_emb = self.state_adapter(states.float())
-        # 同一个 archetype 条件向量复制到该 trajectory 的所有时间步。
-        z_q_seq = z_q.float().unsqueeze(1).expand(batch_size, horizon, self.latent_dim)
-        decoder_input = torch.cat([state_emb, z_q_seq], dim=-1)
-        hidden_seq, _ = self.lstm(decoder_input)
-        return self.action_head(hidden_seq)
-
-
 class ArchetypeVQModel(nn.Module):
     """Phase I VQ encoder-decoder 总模型。
 
@@ -291,14 +86,14 @@ class ArchetypeVQModel(nn.Module):
         1. ``encoder``:
            输入 ``(states, relative_states, trend_states, actions, rewards,
            sample_ids)``，
-           当前使用主 ``states/actions/rewards`` 输出连续 latent ``z_e``。
+           使用三路市场状态、actions 和 rewards 输出连续 latent ``z_e``。
            它负责从 DP teacher trajectory 中抽取整段交易行为模式。
         2. ``quantizer``:
            把 ``z_e`` 映射到最近的 codebook 向量 ``z_q``，并输出离散
            ``code_indices``。这是模型从连续表示变成 archetype label 的核心。
         3. ``decoder``:
-           输入 ``states`` 和 ``z_q``，重构逐步动作 logits。它验证 code
-           是否真的包含足够信息来指导 action generation。
+           输入 ``states/relative_states/trend_states`` 和 ``z_q``，重构逐步
+           动作 logits。它验证 code 是否真的包含足够信息来指导 action generation。
         4. ``_build_outputs``:
            统一计算 action reconstruction loss 和 VQ loss，并把训练/诊断
            需要的中间 Tensor 打包返回。
@@ -307,6 +102,8 @@ class ArchetypeVQModel(nn.Module):
     def __init__(
         self,
         state_dim: int,
+        relative_state_dim: int,
+        trend_state_dim: int,
         action_dim: int = 3,
         hidden_dim: int = 128,
         latent_dim: int = 16,
@@ -326,7 +123,7 @@ class ArchetypeVQModel(nn.Module):
             保存模型超参数，并创建三个核心子模块：
             ``encoder`` 负责把 demonstration trajectory 压缩成 ``z_e``；
             ``quantizer`` 负责把 ``z_e`` 离散化为 archetype code；
-            ``decoder`` 负责根据 states 和 archetype code 重构动作 logits。
+            ``decoder`` 负责根据三路市场状态和 archetype code 重构动作 logits。
 
         使用场景:
             在 Phase I 训练脚本、checkpoint 加载、离线 label 生成工具中创建
@@ -336,6 +133,8 @@ class ArchetypeVQModel(nn.Module):
 
         super().__init__()
         self.state_dim = state_dim
+        self.relative_state_dim = relative_state_dim
+        self.trend_state_dim = trend_state_dim
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
@@ -344,6 +143,8 @@ class ArchetypeVQModel(nn.Module):
         # Trajectory -> 连续 latent：学习 DP teacher 的整段行为摘要。
         self.encoder = ArchetypeTrajectoryEncoder(
             state_dim=state_dim,
+            relative_state_dim=relative_state_dim,
+            trend_state_dim=trend_state_dim,
             hidden_dim=hidden_dim,
             latent_dim=latent_dim,
             action_dim=action_dim,
@@ -359,6 +160,8 @@ class ArchetypeVQModel(nn.Module):
         # states + archetype -> action logits：检验并复用离散原型的执行能力。
         self.decoder = ArchetypeActionDecoder(
             state_dim=state_dim,
+            relative_state_dim=relative_state_dim,
+            trend_state_dim=trend_state_dim,
             hidden_dim=hidden_dim,
             latent_dim=latent_dim,
             action_dim=action_dim,
@@ -380,8 +183,7 @@ class ArchetypeVQModel(nn.Module):
             2. 用 ``encoder`` 从 trajectory batch 得到连续 latent ``z_e``。
             3. 用 ``quantizer`` 把 ``z_e`` 映射成离散 code 和 STE 后的
                ``z_q``。
-            4. 用 ``decoder`` 根据 ``states`` 和 ``z_q`` 重构
-               ``action_logits``。
+            4. 用 ``decoder`` 根据三路市场状态和 ``z_q`` 重构 ``action_logits``。
             5. 调用 ``_build_outputs`` 计算 reconstruction loss、VQ loss，
                并打包所有训练和诊断需要的 Tensor。
 
@@ -392,10 +194,15 @@ class ArchetypeVQModel(nn.Module):
         """
 
         batch = _normalize_trajectory_batch(batch)
-        states, _, _, actions, _, _ = batch
+        states, relative_states, trend_states, actions, _, _ = batch
         z_e = self.encoder(batch)
         quantize_output = self.quantizer(z_e)
-        action_logits = self.decoder(states, quantize_output.quantized)
+        action_logits = self.decoder(
+            states,
+            relative_states,
+            trend_states,
+            quantize_output.quantized,
+        )
         return self._build_outputs(
             action_logits=action_logits,
             actions=actions,
@@ -430,9 +237,9 @@ class ArchetypeVQModel(nn.Module):
         """
 
         batch = _normalize_trajectory_batch(batch)
-        states, _, _, actions, _, _ = batch
+        states, relative_states, trend_states, actions, _, _ = batch
         z_e = self.encoder(batch)
-        action_logits = self.decoder(states, z_e)
+        action_logits = self.decoder(states, relative_states, trend_states, z_e)
         zero = z_e.new_zeros(())
         code_indices = z_e.new_zeros((z_e.shape[0],), dtype=torch.long)
         return self._build_outputs(
@@ -484,6 +291,8 @@ class ArchetypeVQModel(nn.Module):
     def decode(
         self,
         states_seq: torch.Tensor,
+        relative_states_seq: torch.Tensor,
+        trend_states_seq: torch.Tensor,
         code_id: ArchetypeLabelTensor,
     ) -> tuple[torch.Tensor, ActionLogitTensor]:
         """在线生成，根据指定 archetype 生成基础动作。
@@ -533,6 +342,29 @@ class ArchetypeVQModel(nn.Module):
             raise ValueError(
                 f"states_seq last dim must be {self.state_dim}, got {states_seq.shape[-1]}"
             )
+        if relative_states_seq.ndim != 2:
+            raise ValueError(
+                "relative_states_seq must have shape "
+                "[partial_horizon, relative_state_dim]"
+            )
+        if relative_states_seq.shape[-1] != self.relative_state_dim:
+            raise ValueError(
+                "relative_states_seq last dim must be "
+                f"{self.relative_state_dim}, got {relative_states_seq.shape[-1]}"
+            )
+        if trend_states_seq.ndim != 2:
+            raise ValueError(
+                "trend_states_seq must have shape [partial_horizon, trend_state_dim]"
+            )
+        if trend_states_seq.shape[-1] != self.trend_state_dim:
+            raise ValueError(
+                "trend_states_seq last dim must be "
+                f"{self.trend_state_dim}, got {trend_states_seq.shape[-1]}"
+            )
+        if relative_states_seq.shape[0] != states_seq.shape[0]:
+            raise ValueError("relative_states_seq and states_seq must share horizon")
+        if trend_states_seq.shape[0] != states_seq.shape[0]:
+            raise ValueError("trend_states_seq and states_seq must share horizon")
 
         if not torch.is_tensor(code_id):
             code_id = torch.as_tensor(code_id, dtype=torch.long, device=states_seq.device)
@@ -543,8 +375,15 @@ class ArchetypeVQModel(nn.Module):
         code_id = code_id.reshape(1).long()
 
         states_batch = states_seq.unsqueeze(0)
+        relative_states_batch = relative_states_seq.unsqueeze(0)
+        trend_states_batch = trend_states_seq.unsqueeze(0)
         z_q = self.quantizer.embedding_from_code(code_id.to(states_seq.device))
-        decode_logits = self.decoder(states_batch, z_q).squeeze(0)
+        decode_logits = self.decoder(
+            states_batch,
+            relative_states_batch,
+            trend_states_batch,
+            z_q,
+        ).squeeze(0)
         base_actions = decode_logits.argmax(dim=-1)
         return base_actions, decode_logits
 
@@ -602,49 +441,6 @@ class ArchetypeVQModel(nn.Module):
         )
 
 
-def _normalize_trajectory_batch(batch: TrajectoryTensorBatch) -> TrajectoryTensorBatch:
-    """统一模型输入形状，减少训练代码里的样板转换。"""
-
-    if len(batch) >= 6:
-        states, relative_states, trend_states, actions, rewards, sample_ids = batch[:6]
-    else:
-        raise ValueError(
-            "trajectory batch must be "
-            "(states, relative_states, trend_states, actions, rewards, sample_ids)"
-        )
-    if states.ndim != 3:
-        raise ValueError("states must have shape [batch, horizon, state_dim]")
-    if relative_states.ndim != 3:
-        raise ValueError(
-            "relative_states must have shape [batch, horizon, relative_feature_dim]"
-        )
-    if trend_states.ndim != 3:
-        raise ValueError(
-            "trend_states must have shape [batch, horizon, trend_feature_dim]"
-        )
-    if actions.ndim != 2:
-        raise ValueError("actions must have shape [batch, horizon]")
-    if rewards.ndim == 2:
-        rewards = rewards.unsqueeze(-1)
-    if rewards.ndim != 3 or rewards.shape[-1] != 1:
-        raise ValueError(
-            "rewards must have shape [batch, horizon] or [batch, horizon, 1]"
-        )
-    if sample_ids.ndim != 1:
-        raise ValueError("sample_ids must have shape [batch]")
-    if states.shape[:2] != actions.shape:
-        raise ValueError("states and actions must share [batch, horizon]")
-    if relative_states.shape[:2] != states.shape[:2]:
-        raise ValueError("relative_states and states must share [batch, horizon]")
-    if trend_states.shape[:2] != states.shape[:2]:
-        raise ValueError("trend_states and states must share [batch, horizon]")
-    if states.shape[:2] != rewards.shape[:2]:
-        raise ValueError("states and rewards must share [batch, horizon]")
-    if sample_ids.shape != (states.shape[0],):
-        raise ValueError("sample_ids must match batch size")
-    return states, relative_states, trend_states, actions, rewards, sample_ids
-
-
 # 设计文档里的新名字。
 ArchetypeEncoder = ArchetypeTrajectoryEncoder
 ArchetypeDecoder = ArchetypeActionDecoder
@@ -659,6 +455,7 @@ __all__ = [
     "ArchetypeVQModel",
     "classify_trajectory_directions",
     "CodebookInitResult",
+    "MarketStateInputEncoder",
     "VqModelOutputs",
     "QuantizeOutput",
     "VQArchetypeModel",

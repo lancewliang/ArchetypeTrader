@@ -162,6 +162,12 @@ class Phase1EvaluationSnapshot:
     # horizon 状态特征数组，shape=[N, H, F]。用于 label predictability probe 和部分 morphology 诊断。
     states: np.ndarray
 
+    # horizon 相对状态特征数组，shape=[N, H, F_relative]。用于 decoder 条件输入。
+    relative_states: np.ndarray
+
+    # horizon 趋势状态特征数组，shape=[N, H, F_trend]。用于 decoder 条件输入。
+    trend_states: np.ndarray
+
     # horizon 价格序列，shape=[N, H]。用于收益、fee drag、morphology 和 oracle profitability 计算；缺失时可为 None。
     prices: np.ndarray | None
 
@@ -203,6 +209,8 @@ class Phase1EvaluationSnapshot:
 
         sample_ids = _require_ndarray("sample_ids", self.sample_ids)
         states = _require_ndarray("states", self.states)
+        relative_states = _require_ndarray("relative_states", self.relative_states)
+        trend_states = _require_ndarray("trend_states", self.trend_states)
         demo_actions = _require_ndarray("demo_actions", self.demo_actions)
         demo_rewards = _require_ndarray("demo_rewards", self.demo_rewards)
         decoded_actions = _require_ndarray("decoded_actions", self.decoded_actions)
@@ -213,11 +221,22 @@ class Phase1EvaluationSnapshot:
         distances = _require_ndarray("distances", self.distances)
 
         _require_ndim("states", states, 3)
+        _require_ndim("relative_states", relative_states, 3)
+        _require_ndim("trend_states", trend_states, 3)
         n_samples, horizon, _ = states.shape
         nh_shape = (n_samples, horizon)
         n_shape = (n_samples,)
 
         _require_shape("sample_ids", sample_ids, n_shape)
+        if relative_states.shape[:2] != nh_shape:
+            raise ValueError(
+                "relative_states must have leading shape "
+                f"{nh_shape}, got {relative_states.shape}"
+            )
+        if trend_states.shape[:2] != nh_shape:
+            raise ValueError(
+                f"trend_states must have leading shape {nh_shape}, got {trend_states.shape}"
+            )
         _require_shape("demo_actions", demo_actions, nh_shape)
         _require_shape("demo_rewards", demo_rewards, nh_shape)
         _require_shape("decoded_actions", decoded_actions, nh_shape)
@@ -267,6 +286,8 @@ class Phase1EvaluationSnapshot:
             "epoch": self.epoch,
             "sample_ids": _array_to_payload(self.sample_ids),
             "states": _array_to_payload(self.states),
+            "relative_states": _array_to_payload(self.relative_states),
+            "trend_states": _array_to_payload(self.trend_states),
             "prices": _array_to_payload(self.prices),
             "demo_actions": _array_to_payload(self.demo_actions),
             "demo_rewards": _array_to_payload(self.demo_rewards),
@@ -297,6 +318,8 @@ class Phase1EvaluationSnapshot:
             epoch=int(payload["epoch"]),
             sample_ids=np.asarray(payload["sample_ids"]),
             states=np.asarray(payload["states"]),
+            relative_states=np.asarray(payload["relative_states"]),
+            trend_states=np.asarray(payload["trend_states"]),
             prices=_array_from_payload(payload.get("prices")),
             demo_actions=np.asarray(payload["demo_actions"]),
             demo_rewards=np.asarray(payload["demo_rewards"]),

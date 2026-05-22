@@ -313,10 +313,14 @@ class Phase2MainFlow:
         """
         checkpoint = self.phase1_store.load_best_checkpoint()
          
-        state_dim = self._infer_phase1_state_dim(checkpoint.model_state_dict)
+        state_dim, relative_state_dim, trend_state_dim = self._infer_phase1_state_dims(
+            checkpoint.model_state_dict
+        )
         self.state_dim = state_dim
         model = ArchetypeVQModel(
             state_dim=state_dim,
+            relative_state_dim=relative_state_dim,
+            trend_state_dim=trend_state_dim,
             action_dim=self.phase1_config.action_dim,
             hidden_dim=self.phase1_config.hidden_dim,
             latent_dim=self.phase1_config.latent_dim,
@@ -526,27 +530,50 @@ class Phase2MainFlow:
     
      
 
-    def _infer_phase1_state_dim(self, state_dict: Mapping[str, Any]) -> int:
-        """从 Phase I checkpoint state dict 推断 state_dim。
+    def _infer_phase1_state_dims(self, state_dict: Mapping[str, Any]) -> tuple[int, int, int]:
+        """从 Phase I checkpoint state dict 推断三路状态维度。
 
         输入:
             state_dict: Phase I checkpoint 中的 model state dict。
 
         输出:
-            ``int``，单步 state feature 维度。
+            ``(state_dim, relative_state_dim, trend_state_dim)``。
 
         使用场景:
             ``_load_phase1_model()`` 重建 ``ArchetypeVQModel`` 时调用。当前 Phase I
-            checkpoint config 不保证保存 ``state_dim``，因此从 encoder 第一层权重
-            的输入维度反推。
+            checkpoint config 不保证保存三路输入维度，因此从 encoder 三个输入
+            adapter 第一层权重的输入维度反推。
         """
 
-        state_weight = state_dict.get("encoder.state_adapter.0.weight")
+        state_weight = state_dict.get(
+            "encoder.market_input_encoder.state_adapter.0.weight"
+        )
+        relative_state_weight = state_dict.get(
+            "encoder.market_input_encoder.relative_state_adapter.0.weight"
+        )
+        trend_state_weight = state_dict.get(
+            "encoder.market_input_encoder.trend_state_adapter.0.weight"
+        )
         if not isinstance(state_weight, torch.Tensor):
             raise ValueError(
-                "phase1 checkpoint is missing encoder.state_adapter.0.weight"
+                "phase1 checkpoint is missing "
+                "encoder.market_input_encoder.state_adapter.0.weight"
             )
-        return int(state_weight.shape[1])
+        if not isinstance(relative_state_weight, torch.Tensor):
+            raise ValueError(
+                "phase1 checkpoint is missing "
+                "encoder.market_input_encoder.relative_state_adapter.0.weight"
+            )
+        if not isinstance(trend_state_weight, torch.Tensor):
+            raise ValueError(
+                "phase1 checkpoint is missing "
+                "encoder.market_input_encoder.trend_state_adapter.0.weight"
+            )
+        return (
+            int(state_weight.shape[1]),
+            int(relative_state_weight.shape[1]),
+            int(trend_state_weight.shape[1]),
+        )
 
 __all__ = [
     "Phase2FatalError",

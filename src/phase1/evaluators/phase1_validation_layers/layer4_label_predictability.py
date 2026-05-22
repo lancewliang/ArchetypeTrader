@@ -449,6 +449,8 @@ def _confusion_matrix(
 def decode_probe_top1_actions(
     model: Any,
     states: np.ndarray,
+    relative_states: np.ndarray,
+    trend_states: np.ndarray,
     predicted_code_ids: np.ndarray,
     device: torch.device | str,
 ) -> np.ndarray:
@@ -457,6 +459,8 @@ def decode_probe_top1_actions(
     输入参数:
         model: ``ArchetypeVQModel`` 或兼容对象，需要提供 ``quantizer`` 和 ``decoder``。
         states: 状态序列数组，形状为 ``[N, H, state_dim]``。
+        relative_states: 相对状态序列数组，形状为 ``[N, H, relative_state_dim]``。
+        trend_states: 趋势状态序列数组，形状为 ``[N, H, trend_state_dim]``。
         code_ids: probe 预测或指定的 code id，形状为 ``[N]``。
         device: decoder 推理设备。
 
@@ -470,6 +474,8 @@ def decode_probe_top1_actions(
     return decode_labels(
         model=model,
         states=states,
+        relative_states=relative_states,
+        trend_states=trend_states,
         code_ids=predicted_code_ids,
         device=device,
     )
@@ -504,6 +510,8 @@ def _probe_return_retention(
     probe_actions = decode_probe_top1_actions(
         model=model,
         states=val_snapshot.states,
+        relative_states=val_snapshot.relative_states,
+        trend_states=val_snapshot.trend_states,
         predicted_code_ids=predicted_labels,
         device=device,
     )

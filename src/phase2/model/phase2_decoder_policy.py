@@ -76,6 +76,8 @@ class FrozenArchetypeDecoderPolicy:
     def decode_actions(
         self,
         horizon_states: torch.Tensor,
+        horizon_relative_states: torch.Tensor,
+        horizon_trend_states: torch.Tensor,
         selected_code_ids: ArchetypeLabelTensor,
     ) -> torch.Tensor:
         """根据 horizon states 和 selected code ids 输出 base actions。
@@ -92,6 +94,10 @@ class FrozenArchetypeDecoderPolicy:
         参数:
             horizon_states: 当前 horizon 的完整状态序列，预期形状为
                 ``[batch, horizon, state_dim]``。
+            horizon_relative_states: 当前 horizon 的相对状态序列，预期形状为
+                ``[batch, horizon, relative_state_dim]``。
+            horizon_trend_states: 当前 horizon 的趋势状态序列，预期形状为
+                ``[batch, horizon, trend_state_dim]``。
             selected_code_ids: selector 选择的 archetype id，预期形状为 ``[batch]``。
 
         返回:
@@ -99,11 +105,25 @@ class FrozenArchetypeDecoderPolicy:
             decoder 一致：``0=short, 1=flat, 2=long``。
         """
 
-        raise NotImplementedError("Frozen decoder action decoding is not implemented yet.")
+        with torch.no_grad():
+            states = horizon_states.to(self.device, dtype=torch.float32)
+            relative_states = horizon_relative_states.to(self.device, dtype=torch.float32)
+            trend_states = horizon_trend_states.to(self.device, dtype=torch.float32)
+            code_ids = selected_code_ids.to(self.device, dtype=torch.long)
+            z_q = self.get_code_embeddings(code_ids)
+            logits = self.phase1_model.decoder(
+                states,
+                relative_states,
+                trend_states,
+                z_q,
+            )
+            return logits.argmax(dim=-1)
 
     def decode_all_codes(
         self,
         horizon_states: torch.Tensor,
+        horizon_relative_states: torch.Tensor,
+        horizon_trend_states: torch.Tensor,
     ) -> torch.Tensor:
         """为每个样本解码全部 archetype 的 base actions。
 
@@ -118,12 +138,53 @@ class FrozenArchetypeDecoderPolicy:
         参数:
             horizon_states: 当前 batch 的完整 horizon states，预期形状为
                 ``[batch, horizon, state_dim]``。
+            horizon_relative_states: 当前 batch 的完整 relative states，预期形状为
+                ``[batch, horizon, relative_state_dim]``。
+            horizon_trend_states: 当前 batch 的完整 trend states，预期形状为
+                ``[batch, horizon, trend_state_dim]``。
 
         返回:
             base action ids，预期形状为 ``[batch, num_archetypes, horizon]``。
         """
 
-        raise NotImplementedError("Frozen decoder all-code decoding is not implemented yet.")
+        with torch.no_grad():
+            states = horizon_states.to(self.device, dtype=torch.float32)
+            relative_states = horizon_relative_states.to(self.device, dtype=torch.float32)
+            trend_states = horizon_trend_states.to(self.device, dtype=torch.float32)
+            if states.ndim != 3:
+                raise ValueError(
+                    "horizon_states must have shape [batch, horizon, state_dim]"
+                )
+            batch_size, horizon, _ = states.shape
+            num_codes = int(self.phase1_model.num_archetypes)
+            code_ids = torch.arange(num_codes, device=self.device, dtype=torch.long)
+            code_ids = code_ids.unsqueeze(0).expand(batch_size, num_codes).reshape(-1)
+            expanded_states = states.unsqueeze(1).expand(
+                batch_size,
+                num_codes,
+                horizon,
+                states.shape[-1],
+            ).reshape(batch_size * num_codes, horizon, states.shape[-1])
+            expanded_relative_states = relative_states.unsqueeze(1).expand(
+                batch_size,
+                num_codes,
+                horizon,
+                relative_states.shape[-1],
+            ).reshape(batch_size * num_codes, horizon, relative_states.shape[-1])
+            expanded_trend_states = trend_states.unsqueeze(1).expand(
+                batch_size,
+                num_codes,
+                horizon,
+                trend_states.shape[-1],
+            ).reshape(batch_size * num_codes, horizon, trend_states.shape[-1])
+            z_q = self.get_code_embeddings(code_ids)
+            logits = self.phase1_model.decoder(
+                expanded_states,
+                expanded_relative_states,
+                expanded_trend_states,
+                z_q,
+            )
+            return logits.argmax(dim=-1).reshape(batch_size, num_codes, horizon)
 
     def get_code_embeddings(
         self,
@@ -146,4 +207,6 @@ class FrozenArchetypeDecoderPolicy:
             codebook embedding tensor，形状为 ``[batch, latent_dim]``。
         """
 
-        raise NotImplementedError("Code embedding lookup is not implemented yet.")
+        return self.phase1_model.quantizer.embedding_from_code(
+            selected_code_ids.to(self.device, dtype=torch.long)
+        )

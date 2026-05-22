@@ -164,6 +164,8 @@ def decode_labels(
     *,
     model: Any,
     states: np.ndarray,
+    relative_states: np.ndarray,
+    trend_states: np.ndarray,
     code_ids: np.ndarray,
     device: torch.device | str,
 ) -> np.ndarray:
@@ -172,6 +174,8 @@ def decode_labels(
     输入参数:
         model: ``ArchetypeVQModel`` 或兼容对象，需要提供 ``quantizer`` 和 ``decoder``。
         states: 状态序列数组，形状为 ``[N, H, state_dim]``。
+        relative_states: 相对状态序列数组，形状为 ``[N, H, relative_state_dim]``。
+        trend_states: 趋势状态序列数组，形状为 ``[N, H, trend_state_dim]``。
         code_ids: 每个样本要使用的 code id，形状为 ``[N]``。
         device: decoder 推理设备。
 
@@ -191,9 +195,19 @@ def decode_labels(
     model.eval()
     with torch.no_grad():
         state_tensor = torch.as_tensor(states, dtype=torch.float32, device=torch_device)
+        relative_state_tensor = torch.as_tensor(
+            relative_states,
+            dtype=torch.float32,
+            device=torch_device,
+        )
+        trend_state_tensor = torch.as_tensor(
+            trend_states,
+            dtype=torch.float32,
+            device=torch_device,
+        )
         label_tensor = torch.as_tensor(code_ids, dtype=torch.long, device=torch_device)
         z_q = model.quantizer.embedding_from_code(label_tensor)
-        logits = model.decoder(state_tensor, z_q)
+        logits = model.decoder(state_tensor, relative_state_tensor, trend_state_tensor, z_q)
         return logits.argmax(dim=-1).cpu().numpy()
 
 
@@ -201,6 +215,8 @@ def decode_random_labels(
     *,
     model: Any,
     states: np.ndarray,
+    relative_states: np.ndarray,
+    trend_states: np.ndarray,
     num_archetypes: int,
     trials: int,
     seed: int,
@@ -211,6 +227,8 @@ def decode_random_labels(
     输入参数:
         model: ``ArchetypeVQModel`` 或兼容对象。
         states: 状态序列数组，形状为 ``[N, H, state_dim]``。
+        relative_states: 相对状态序列数组，形状为 ``[N, H, relative_state_dim]``。
+        trend_states: 趋势状态序列数组，形状为 ``[N, H, trend_state_dim]``。
         num_archetypes: random label 采样空间大小。
         trials: 随机采样 trial 数，最小按 1 处理。
         seed: deterministic random seed。
@@ -238,6 +256,8 @@ def decode_random_labels(
             decode_labels(
                 model=model,
                 states=states,
+                relative_states=relative_states,
+                trend_states=trend_states,
                 code_ids=random_labels,
                 device=device,
             )
@@ -274,6 +294,8 @@ def compute_random_label_returns(
     random_action_trials = decode_random_labels(
         model=model,
         states=snapshot.states,
+        relative_states=snapshot.relative_states,
+        trend_states=snapshot.trend_states,
         num_archetypes=num_codes,
         trials=runtime_config.random_label_trials,
         seed=runtime_config.random_seed,

@@ -179,9 +179,9 @@ dtype:
 用途:
     这是 ``VQArchetype`` 模型 ``forward`` 最自然的输入形式。模型使用
     前五列，第六列稳定 ``sample_ids`` 用于评估、label 导出和跨快照对齐。
-    当前 encoder 用主 ``states/actions/rewards`` 生成连续 latent，VQ codebook
-    把 latent 离散化为 archetype label，decoder 再根据
-    ``states`` 和选中的 archetype 重构 ``actions``。
+    encoder 用 ``states/relative_states/trend_states/actions/rewards`` 生成连续
+    latent，VQ codebook 把 latent 离散化为 archetype label，decoder 再根据
+    三路市场状态和选中的 archetype 重构 ``actions``。
 """
 
 

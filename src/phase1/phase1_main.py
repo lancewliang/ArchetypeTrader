@@ -315,9 +315,15 @@ class Phase1MainFlow:
             )
 
         first_states = train_dataset[0][0]
+        first_relative_states = train_dataset[0][1]
+        first_trend_states = train_dataset[0][2]
         state_dim = int(first_states.shape[-1])
+        relative_state_dim = int(first_relative_states.shape[-1])
+        trend_state_dim = int(first_trend_states.shape[-1])
         model = ArchetypeVQModel(
             state_dim=state_dim,
+            relative_state_dim=relative_state_dim,
+            trend_state_dim=trend_state_dim,
             action_dim=self.config.action_dim,
             hidden_dim=self.config.hidden_dim,
             latent_dim=self.config.latent_dim,
