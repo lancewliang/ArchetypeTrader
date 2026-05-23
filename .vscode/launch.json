@@ -37,6 +37,18 @@
                 "PYTHONPATH": "${workspaceFolder}"
             },
             "console": "integratedTerminal"
+        },
+        {
+            "name": "Python Debugger: train_phase2.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/train_phase2.py",
+            "cwd": "${workspaceFolder}",
+            "python": "/home/lanceliang/miniconda3/envs/ArchetypeTrade/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "console": "integratedTerminal"
         }
     ]
 }
