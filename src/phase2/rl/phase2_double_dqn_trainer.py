@@ -16,11 +16,7 @@ from ...model.data_types import VisibleStates
 from ..checkpoint.phase2_checkpoint import Phase2Checkpoint
 from ..model.phase2_q_network import Phase2QNetwork
 from ..phase2_config import Phase2RewardConfig, Phase2TrainConfig
-from ..phase2_env import ArchetypeSelectionEnv, Phase2SelectionStepResult
-from .phase2_double_dqn_loss import (
-    Phase2DoubleDqnLossOutput,
-    compute_double_dqn_loss,
-)
+from ..phase2_env import ArchetypeSelectionEnv
 from .phase2_replay_buffer import (
     Phase2ReplayBuffer,
     Phase2ReplayTransition,
