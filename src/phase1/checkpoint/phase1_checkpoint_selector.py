@@ -378,9 +378,8 @@ class Phase1CheckpointSelector:
             3. tie-breaker 仍相同时，选择更早 epoch。
         """
 
-        candidate_score = candidate.codebook_validation.score.total_score
-        
-        best_score = current_best.codebook_validation.score.total_score
+        candidate_score = candidate.codebook_validation.score
+        best_score = current_best.codebook_validation.score
         
         # 理论上进入 eligible 的候选都应有 score；这里保留防御式判断，避免调用方
         # 直接复用私有函数时因 None 比较导致异常。
@@ -389,7 +388,7 @@ class Phase1CheckpointSelector:
 
         # score 超出 tie tolerance 时，不再看 tie-breaker，直接按综合分高低选择。
         if not scores_are_tied(best_score, candidate_score):
-            return candidate_score > best_score
+            return candidate_score.total_score > best_score.total_score
 
         # score 视为打平时，使用预先计算好的 tie_breaker_metrics 做细粒度比较。
         tie_breaker_comparison = compare_phase1_tie_breaker(
@@ -412,9 +411,8 @@ class Phase1CheckpointSelector:
         best checkpoint 是因为最高 score、tie-breaker，还是更早 epoch 被选中。
         """
 
-        candidate_score = candidate.codebook_validation.score.total_score
-        
-        best_score = previous_best.codebook_validation.score.total_score
+        candidate_score = candidate.codebook_validation.score
+        best_score = previous_best.codebook_validation.score
         
         # None 分支是防御式兜底；正常 select_best 流程中 eligible 不会出现 None score。
         if candidate_score is None or best_score is None:
@@ -443,9 +441,8 @@ class Phase1CheckpointSelector:
         而不是 hard gate 失败原因。
         """
 
-        selected_score = selected.codebook_validation.score.total_score
-        
-        rejected_score = rejected.codebook_validation.score.total_score
+        selected_score = selected.codebook_validation.score
+        rejected_score = rejected.codebook_validation.score
         
         # 正常情况下不会进入该分支；保留兜底可让摘要原因保持可序列化。
         if selected_score is None or rejected_score is None:
