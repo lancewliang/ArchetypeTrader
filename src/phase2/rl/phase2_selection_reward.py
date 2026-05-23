@@ -40,9 +40,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-if TYPE_CHECKING:
-    from ...utils import ActionExecutionResult
-    from ..phase2_config import Phase2RewardConfig, Phase2TrainConfig
+from ...utils import ActionExecutionResult
+from ..phase2_config import Phase2RewardConfig, Phase2TrainConfig
 
 
 def compute_selection_reward(

@@ -178,7 +178,7 @@ class Phase2DoubleDqnTrainer:
                     batch_size=self.train_config.batch_size,
                     device=self.device,
                 )
-                self.update_q_network(batch)
+                loss_output = self.update_q_network(batch)
 
             if self._should_sync_target(epoch):
                 self.sync_target_network()
@@ -278,7 +278,8 @@ class Phase2DoubleDqnTrainer:
             self.online_q_network.parameters(),
             max_norm=self.train_config.max_grad_norm,
         )
-        self.optimizer.step()       
+        self.optimizer.step()     
+        return loss_output
 
     def sync_target_network(self) -> None:
         """将 online Q-network 参数硬同步到 target Q-network。

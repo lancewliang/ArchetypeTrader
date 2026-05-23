@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from phase2.rl.phase2_replay_buffer import Phase2SelectionTransitionTensorBatch
+
 from ...model.tensor_data_types import ArchetypeLabelTensor
 from .phase2_selection_reward import compute_imitation_kl_loss
 
@@ -77,7 +79,7 @@ class Phase2DoubleDqnLossOutput:
 def compute_double_dqn_targets(
     online_q_network: Phase2QNetwork,
     target_q_network: Phase2QNetwork,
-    batch: Phase2SelectionTransitionBatch,
+    batch: Phase2SelectionTransitionTensorBatch,
     gamma: float,
 ) -> torch.Tensor:
     """计算 Double DQN bootstrap target。
@@ -144,7 +146,7 @@ def compute_td_loss(
 def compute_double_dqn_loss(
     online_q_network: Phase2QNetwork,
     target_q_network: Phase2QNetwork,
-    batch: Phase2SelectionTransitionBatch,
+    batch: Phase2SelectionTransitionTensorBatch,
     reward_config: Phase2RewardConfig,
     train_config: Phase2TrainConfig,
 ) -> Phase2DoubleDqnLossOutput:
