@@ -6,6 +6,9 @@ reward 计算、replay 采样和 Double DQN loss 细节分别保留在各自模�
 
 from __future__ import annotations
 
+import logging
+import time
+
 import numpy as np
 import torch
 
@@ -24,6 +27,9 @@ from .phase2_replay_buffer import (
     Phase2ReplayTransition,
     Phase2SelectionTransitionTensorBatch,
 )
+
+
+logger = logging.getLogger("archetype_trader.phase2.rl.double_dqn_trainer")
 
 
 def build_epsilon_by_epoch(
@@ -152,9 +158,27 @@ class Phase2DoubleDqnTrainer:
         self.online_q_network.train()
         self.target_q_network.eval()
 
+        epoch_started_at = time.perf_counter()
         epsilon = build_epsilon_by_epoch(epoch, self.train_config)
         step_result = self.env.reset()
         totals = Phase2Metrics(stage="selector", split="train", epoch=epoch)
+        total_steps = len(self.env)
+        progress_interval = self._progress_log_interval(total_steps)
+        steps_collected = 0
+        updates_run = 0
+        update_start_logged = False
+
+        logger.info(
+            "Phase II Double DQN epoch started: epoch=%d samples=%d epsilon=%.6f "
+            "replay_size=%d batch_size=%d updates_per_step=%d",
+            epoch,
+            total_steps,
+            epsilon,
+            len(self.replay_buffer),
+            self.train_config.batch_size,
+            self.train_config.updates_per_epoch,
+        )
+
         while step_result.done is not True:
             visible_states = step_result.observation
             action = self.select_action(
@@ -176,9 +200,36 @@ class Phase2DoubleDqnTrainer:
                 ),
             )
             self.replay_buffer.add(transition)
+            steps_collected += 1
 
             if not self.should_update(epoch):
+                if self._should_log_progress(
+                    completed_steps=steps_collected,
+                    total_steps=total_steps,
+                    progress_interval=progress_interval,
+                ):
+                    logger.info(
+                        "Phase II Double DQN progress: epoch=%d steps=%d/%d "
+                        "updates=%d replay_size=%d waiting_for_update=True",
+                        epoch,
+                        steps_collected,
+                        total_steps,
+                        updates_run,
+                        len(self.replay_buffer),
+                    )
                 continue
+
+            if not update_start_logged:
+                logger.info(
+                    "Phase II Double DQN updates started: epoch=%d step=%d/%d "
+                    "replay_size=%d batch_size=%d",
+                    epoch,
+                    steps_collected,
+                    total_steps,
+                    len(self.replay_buffer),
+                    self.train_config.batch_size,
+                )
+                update_start_logged = True
 
             for _ in range(self.train_config.updates_per_epoch):
                 batch = self.replay_buffer.sample(
@@ -186,16 +237,63 @@ class Phase2DoubleDqnTrainer:
                     device=self.device,
                 )
                 loss_output = self.update_q_network(batch)
+                updates_run += 1
                 totals.add_batch(
                     batch_size=batch.actions.shape[0],
                     outputs=loss_output,
                     actions=batch.actions,
                 )
-        # 消费的 checkpoint payload。
-        if self._should_sync_target(epoch):
-            self.sync_target_network()
 
-        return totals.averaged()
+            if self._should_log_progress(
+                completed_steps=steps_collected,
+                total_steps=total_steps,
+                progress_interval=progress_interval,
+            ):
+                averaged_metrics = totals.averaged()
+                logger.info(
+                    "Phase II Double DQN progress: epoch=%d steps=%d/%d "
+                    "updates=%d replay_size=%d total_loss=%.6f td_loss=%.6f "
+                    "imitation_loss=%.6f reward_mean=%.6f grad_norm=%.6f",
+                    epoch,
+                    steps_collected,
+                    total_steps,
+                    updates_run,
+                    len(self.replay_buffer),
+                    averaged_metrics.total_loss,
+                    averaged_metrics.td_loss,
+                    averaged_metrics.imitation_loss,
+                    averaged_metrics.reward_mean,
+                    averaged_metrics.grad_norm,
+                )
+            # 消费的 checkpoint payload。        
+            self.sync_target_network()
+            logger.info(
+                "Phase II Double DQN target network synced: epoch=%d updates=%d "
+                "replay_size=%d",
+                epoch,
+                updates_run,
+                len(self.replay_buffer),
+            )
+
+        averaged_metrics = totals.averaged()
+        logger.info(
+            "Phase II Double DQN epoch finished: epoch=%d steps=%d/%d updates=%d "
+            "replay_size=%d duration_sec=%.2f total_loss=%.6f td_loss=%.6f "
+            "imitation_loss=%.6f reward_mean=%.6f grad_norm=%.6f",
+            epoch,
+            steps_collected,
+            total_steps,
+            updates_run,
+            len(self.replay_buffer),
+            time.perf_counter() - epoch_started_at,
+            averaged_metrics.total_loss,
+            averaged_metrics.td_loss,
+            averaged_metrics.imitation_loss,
+            averaged_metrics.reward_mean,
+            averaged_metrics.grad_norm,
+        )
+
+        return averaged_metrics
 
     def select_action(
         self,
@@ -335,22 +433,29 @@ class Phase2DoubleDqnTrainer:
             optimizer_state_dict=self.optimizer.state_dict(),
         )
 
-    def _should_sync_target(self, epoch: int) -> bool:
-        """判断当前 epoch 结束后是否需要同步 target network。
+    @staticmethod
+    def _progress_log_interval(total_steps: int) -> int:
+        """返回 epoch 内进度日志的 step 间隔，默认约每 10% 打一次。"""
 
-        功能说明:
-            读取 ``target_update_interval_epochs``。当同步间隔大于 0，且当前 epoch
-            可以被同步间隔整除时，返回 True；否则返回 False。
+        if total_steps <= 0:
+            return 1
+        return max(total_steps // 10, 1)
 
-        输入参数:
-            epoch: 当前训练轮次。
+    @staticmethod
+    def _should_log_progress(
+        completed_steps: int,
+        total_steps: int,
+        progress_interval: int,
+    ) -> bool:
+        """判断当前 step 是否需要输出一次 epoch 进度日志。"""
 
-        输出:
-            ``bool``。为 True 表示应调用 ``sync_target_network()``。
-        """
-
-        interval = self.train_config.target_update_interval_epochs
-        return interval > 0 and epoch % interval == 0
+        if completed_steps <= 0:
+            return False
+        return (
+            completed_steps == 1
+            or completed_steps >= total_steps
+            or completed_steps % progress_interval == 0
+        )
 
     def _visible_states_to_tensor_batch(
         self,

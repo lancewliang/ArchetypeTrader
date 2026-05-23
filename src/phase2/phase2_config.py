@@ -71,10 +71,10 @@ class Phase2TrainConfig:
     """Phase II Double DQN 训练配置。"""
 
     # Double DQN 总训练轮数。
-    epochs: int = 100
+    epochs: int = 50
 
     # 每次从 replay buffer 采样的 transition 数。
-    batch_size: int = 256
+    batch_size: int = 1024
 
     # online Q-network optimizer 学习率。
     learning_rate: float = 3e-4
@@ -86,7 +86,7 @@ class Phase2TrainConfig:
     learning_start_epoch: int = 1
 
     # 每轮执行多少次 Q-network update。
-    updates_per_epoch: int = 1
+    updates_per_epoch: int = 2
 
     # 每多少轮将 online network 同步到 target network。
     target_update_interval_epochs: int = 5
