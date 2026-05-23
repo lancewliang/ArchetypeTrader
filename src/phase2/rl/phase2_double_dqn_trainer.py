@@ -96,11 +96,14 @@ class Phase2DoubleDqnTrainer:
 
         功能说明:
             保存 online/target Q-network、环境、replay buffer、optimizer、配置和
-            运行设备，并将两套 Q-network 移动到目标设备。初始化结束时执行一次
-            target network 硬同步，保证训练开始前 target 参数与 online 参数一致。
+            运行设备，并将 online/target Q-network 移动到目标设备。额外创建一份
+            CPU-only exploration Q-network，专门服务逐样本 ``select_action()``。
+            初始化结束时执行一次 target/exploration network 硬同步，保证训练开始前
+            target 和 exploration 参数与 online 参数一致。
 
         输入参数:
-            online_q_network: 当前被训练的 Q-network，用于动作选择和梯度更新。
+            online_q_network: 当前被训练的 Q-network，用于梯度更新和 Double DQN
+                next-action selection。
             target_q_network: Double DQN target network，用于 bootstrap target 估计。
             env: Phase II horizon-level 交互环境，负责执行 archetype action 并返回
                 reward、next observation 和 done。
@@ -117,16 +120,24 @@ class Phase2DoubleDqnTrainer:
         """
 
         self.device = torch.device(device)
+        self.exploration_device = torch.device("cpu")
         self.online_q_network = online_q_network.to(self.device)
         self.target_q_network = target_q_network.to(self.device)
+        self.exploration_q_network = Phase2QNetwork(
+            online_q_network.config
+        ).to(self.exploration_device)
+        for parameter in self.exploration_q_network.parameters():
+            parameter.requires_grad_(False)
         self.env = env
         self.replay_buffer = replay_buffer
         self.train_config = train_config
         self.reward_config = reward_config
         self.optimizer = optimizer
         self.rng = np.random.default_rng(train_config.seed)
+        self._exploration_q_network_needs_sync = True
 
         self.sync_target_network()
+        self.sync_exploration_network()
 
     def train_one_epoch(
         self,
@@ -157,6 +168,7 @@ class Phase2DoubleDqnTrainer:
 
         self.online_q_network.train()
         self.target_q_network.eval()
+        self.exploration_q_network.eval()
 
         epoch_started_at = time.perf_counter()
         epsilon = build_epsilon_by_epoch(epoch, self.train_config)
@@ -305,8 +317,9 @@ class Phase2DoubleDqnTrainer:
 
         功能说明:
             训练阶段在 ``deterministic=False`` 时执行 epsilon-greedy 行为策略：
-            以 ``epsilon`` 概率随机选择 archetype，否则使用 online Q-network 对
-            当前 visible states 计算 Q values，并选择 Q value 最大的 action。
+            以 ``epsilon`` 概率随机选择 archetype，否则使用 CPU-only exploration
+            Q-network 对当前 visible states 计算 Q values，并选择 Q value 最大的
+            action。
             当 ``deterministic=True`` 时忽略 epsilon，直接走 greedy action。
 
         输入参数:
@@ -323,9 +336,13 @@ class Phase2DoubleDqnTrainer:
         if not deterministic and self.rng.random() < epsilon:
             return int(self.rng.integers(self.online_q_network.config.num_archetypes))
 
-        visible_state_batch = self._visible_states_to_tensor_batch(visible_states)
+        visible_state_batch = self._visible_states_to_tensor_batch(
+            visible_states,
+            device=self.exploration_device,
+        )
         with torch.no_grad():
-            q_values = self.online_q_network(visible_state_batch)
+            self.exploration_q_network.eval()
+            q_values = self.exploration_q_network(visible_state_batch)
         return int(torch.argmax(q_values, dim=-1).item())
 
     def should_update(self, epoch: int) -> bool:
@@ -406,6 +423,27 @@ class Phase2DoubleDqnTrainer:
 
         self.target_q_network.load_state_dict(self.online_q_network.state_dict())
         self.target_q_network.eval()
+        self.sync_exploration_network()
+
+    def sync_exploration_network(self) -> None:
+        """将 online Q-network 参数硬同步到 CPU exploration Q-network。
+
+        功能说明:
+            ``select_action()`` 是逐样本探索路径，小 batch 在 GPU 上频繁调度开销较高。
+            这里维护一份只读 CPU Q-network，权重来自 online Q-network，专门用于
+            epsilon-greedy 的 greedy action 计算。同步采用懒触发：online 更新后先
+            标记 exploration 过期，下一次真正需要 greedy action 时才复制权重。
+
+        输入参数:
+            无。
+
+        输出:
+            无返回值。该方法会原地修改 exploration Q-network 参数。
+        """
+
+        self.exploration_q_network.load_state_dict(self.online_q_network.state_dict())
+        self.exploration_q_network.eval()
+        self._exploration_q_network_needs_sync = False
 
     def build_checkpoint(self, epoch: int) -> Phase2Checkpoint:
         """构造 checkpoint payload，但不负责写入磁盘。
@@ -460,13 +498,14 @@ class Phase2DoubleDqnTrainer:
     def _visible_states_to_tensor_batch(
         self,
         visible_states: VisibleStates,
+        device: torch.device | str | None = None,
     ) -> tuple[torch.Tensor, ...]:
         """把单样本 visible states 转为 Q-network 可消费的 tensor batch。
 
         功能说明:
             将六路 numpy visible state 转成 ``torch.float32`` tensor，并移动到
-            trainer 的目标设备。如果输入是单样本 ``[time, feature]``，则补 batch
-            维度为 ``[1, time, feature]``；如果输入已经是
+            指定 device，未传入时使用 trainer 的训练设备。如果输入是单样本
+            ``[time, feature]``，则补 batch 维度为 ``[1, time, feature]``；如果输入已经是
             ``[batch, time, feature]``，则保持 batch 维度不变。
 
         输入参数:
@@ -481,12 +520,13 @@ class Phase2DoubleDqnTrainer:
             ``ValueError``。
         """
 
+        target_device = self.device if device is None else torch.device(device)
         tensors: list[torch.Tensor] = []
         for state in visible_states:
             tensor = torch.as_tensor(
                 state,
                 dtype=torch.float32,
-                device=self.device,
+                device=target_device,
             )
             if tensor.ndim == 2:
                 tensor = tensor.unsqueeze(0)
