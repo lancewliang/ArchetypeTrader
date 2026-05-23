@@ -141,7 +141,7 @@ class Phase2ReplayBuffer:
                 不包含 batch 维度。
             seed: 随机采样 seed，保证训练和测试可复现。
         """
-
+        self.capacity = capacity
         self.visible_state_shapes = _validate_visible_state_shapes(
             visible_state_shapes
         )

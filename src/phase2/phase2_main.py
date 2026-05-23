@@ -507,7 +507,8 @@ class Phase2MainFlow:
             device=self.device,
         )
         for epoch in range(1, self.train_config.epochs + 1):
-            latest_checkpoint = trainer.train_one_epoch(epoch=epoch)
+            train_metrics = trainer.train_one_epoch(epoch=epoch)
+            latest_checkpoint = trainer.build_checkpoint(epoch)
             self.artifact_store.save_phase2_checkpoint(latest_checkpoint)
             validation_result = evaluator.evaluate_checkpoint(
                 dataset=val_dataset,

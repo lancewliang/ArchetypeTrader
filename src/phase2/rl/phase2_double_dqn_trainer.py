@@ -124,15 +124,15 @@ class Phase2DoubleDqnTrainer:
     def train_one_epoch(
         self,
         epoch: int,
-    ) -> Phase2Checkpoint:
-        """执行一个 Double DQN 训练 epoch 并返回 checkpoint payload。
+    ) -> Phase2Metrics:
+        """执行一个 Double DQN 训练 epoch 并返回 Phase2Metrics。
 
         功能说明:
             本方法是 Phase II 单轮训练的主干编排入口。它先根据 epoch 计算
             epsilon，再逐样本采集 transition 并写入 replay buffer；当 buffer 达到
             warmup 条件后，从 replay 中采样 batch，调用 ``update_q_network()``
             执行 Double DQN 参数更新；epoch 结束时按配置同步 target network，并返回
-            当前 online Q-network 的 checkpoint payload。
+            当前 online Q-network 的 loss output。
 
         输入参数:
             epoch: 当前训练轮次，用于 epsilon 调度、learning start 判断、target
@@ -141,8 +141,7 @@ class Phase2DoubleDqnTrainer:
                 env dataset 中全部可见状态样本。
 
         输出:
-            ``Phase2Checkpoint``，包含 epoch、训练配置、online Q-network state dict
-            和 optimizer state dict。不包含 validation 指标，也不负责写盘。
+            ``Phase2DoubleDqnLossOutput``，包含当前 online Q-network 的 loss output。
 
         当 ``sample_indices=None`` 时，表示遍历 env dataset 中已知的全部训练样本。
         这样可以让外层 ``Phase2MainFlow`` 保持简单，并把采样策略变化收敛在
@@ -154,7 +153,8 @@ class Phase2DoubleDqnTrainer:
 
         epsilon = build_epsilon_by_epoch(epoch, self.train_config)
         step_result = self.env.reset()
-
+        loss_output = None
+        totals = Phase2Metrics(epoch=epoch)
         while step_result.done is not True:
             visible_states = step_result.observation
             action = self.select_action(
@@ -185,13 +185,13 @@ class Phase2DoubleDqnTrainer:
                     batch_size=self.train_config.batch_size,
                     device=self.device,
                 )
-                self.update_q_network(batch)
-
+                loss_output = self.update_q_network(batch)
+                totals.add_batch(batch_size=batch[0].shape[0], outputs=loss_output, actions=batch[1])
         # 消费的 checkpoint payload。
         if self._should_sync_target(epoch):
             self.sync_target_network()
 
-        return self.build_checkpoint(epoch)
+        return totals
 
     def select_action(
         self,
