@@ -192,6 +192,11 @@ class HorizonBuilder:
             raise ValueError(
                 f"feature normalizer {key!r} columns do not match block columns"
             )
+        print(
+            f"[normalize] block={block.name} normalizer={key} "
+            f"rows={values.shape[0]} columns={values.shape[1]} "
+            f"fields={', '.join(block.columns)}"
+        )
         return normalizer.transform(values)
 
     def _build_depthprices(self, dataframe: pl.DataFrame) -> np.ndarray:
