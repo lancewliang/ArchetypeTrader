@@ -36,8 +36,10 @@ from .phase2_selection_dataset import Phase2SelectionDataset
 @dataclass(frozen=True)
 class Phase2SelectionStepResultInfo:
     """Phase II horizon-level env step 结果诊断信息 schema。"""
-    sample_id: str
-    selected_code_id: str
+
+    sample_id: int
+    selected_code_id: int
+    assigned_code_label: int
 
 @dataclass(frozen=True)
 class Phase2SelectionStepResult:

@@ -6,9 +6,6 @@ reward 计算、replay 采样和 Double DQN loss 细节分别保留在各自模�
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-from typing import Any
-
 import numpy as np
 import torch
 
@@ -17,11 +14,16 @@ from ..checkpoint.phase2_checkpoint import Phase2Checkpoint
 from ..model.phase2_q_network import Phase2QNetwork
 from ..phase2_config import Phase2RewardConfig, Phase2TrainConfig
 from ..phase2_env import ArchetypeSelectionEnv
+from .phase2_double_dqn_loss import (
+    Phase2DoubleDqnLossOutput,
+    compute_double_dqn_loss,
+)
 from .phase2_replay_buffer import (
     Phase2ReplayBuffer,
     Phase2ReplayTransition,
     Phase2SelectionTransitionTensorBatch,
 )
+
 
 def build_epsilon_by_epoch(
     epoch: int,
@@ -48,7 +50,14 @@ def build_epsilon_by_epoch(
         这是训练稳定性策略，不直接改变目标函数；用于 epsilon-greedy 行为策略采样。
     """
 
-    raise NotImplementedError("Phase2 epsilon schedule is not implemented yet.")
+    start = float(train_config.epsilon_start)
+    end = float(train_config.epsilon_end)
+    decay_epochs = int(train_config.epsilon_decay_epochs)
+    if decay_epochs <= 0:
+        return end
+    elapsed_epochs = max(epoch - 1, 0)
+    progress = min(elapsed_epochs, decay_epochs) / decay_epochs
+    return start + (end - start) * progress
 
 
 class Phase2DoubleDqnTrainer:
@@ -114,7 +123,7 @@ class Phase2DoubleDqnTrainer:
 
     def train_one_epoch(
         self,
-        epoch: int
+        epoch: int,
     ) -> Phase2Checkpoint:
         """执行一个 Double DQN 训练 epoch 并返回 checkpoint payload。
 
@@ -161,8 +170,10 @@ class Phase2DoubleDqnTrainer:
                 reward=float(step_result.reward),
                 next_visible_states=step_result.observation,
                 done=bool(step_result.done),
-                demonstration_horizon_label=tuple[step_result.info.sample_id,
-                                                step_result.info.selected_code_id]
+                demonstration_horizon_label=(
+                    int(step_result.info.sample_id),
+                    int(step_result.info.assigned_code_label),
+                ),
             )
             self.replay_buffer.add(transition)
 
@@ -174,12 +185,11 @@ class Phase2DoubleDqnTrainer:
                     batch_size=self.train_config.batch_size,
                     device=self.device,
                 )
-                loss_output = self.update_q_network(batch)
-
-            if self._should_sync_target(epoch):
-                self.sync_target_network()
+                self.update_q_network(batch)
 
         # 消费的 checkpoint payload。
+        if self._should_sync_target(epoch):
+            self.sync_target_network()
 
         return self.build_checkpoint(epoch)
 
@@ -215,7 +225,6 @@ class Phase2DoubleDqnTrainer:
         with torch.no_grad():
             q_values = self.online_q_network(visible_state_batch)
         return int(torch.argmax(q_values, dim=-1).item())
- 
 
     def should_update(self, epoch: int) -> bool:
         """判断 replay buffer 是否已满足 Q-network 更新条件。
@@ -241,7 +250,7 @@ class Phase2DoubleDqnTrainer:
     def update_q_network(
         self,
         batch: Phase2SelectionTransitionTensorBatch,
-    ) :
+    ) -> Phase2DoubleDqnLossOutput:
         """使用一个 replay batch 执行一次 online Q-network 参数更新。
 
         功能说明:
@@ -255,8 +264,9 @@ class Phase2DoubleDqnTrainer:
                 assigned label。
 
         输出:
-            ``dict[str, float]``，包含 total loss、TD loss、imitation loss、
-            selected Q 均值、TD target 均值和梯度范数等训练诊断指标。
+            ``Phase2DoubleDqnLossOutput``，包含 total loss、TD loss、
+            imitation loss、selected Q 均值、TD target 均值和梯度范数等训练
+            诊断指标。
         """
 
         self.online_q_network.train()
@@ -274,8 +284,8 @@ class Phase2DoubleDqnTrainer:
             self.online_q_network.parameters(),
             max_norm=self.train_config.max_grad_norm,
         )
-        self.optimizer.step()     
-        return loss_output
+        self.optimizer.step()
+        return loss_output.with_grad_norm(float(grad_norm.detach().cpu().item()))
 
     def sync_target_network(self) -> None:
         """将 online Q-network 参数硬同步到 target Q-network。
@@ -314,9 +324,13 @@ class Phase2DoubleDqnTrainer:
         return Phase2Checkpoint(
             epoch=epoch,
             config=self.train_config,
-            q_network_state_dict= self.online_q_network.state_dict(),
+            q_network_state_dict={
+                name: value.detach().cpu().clone()
+                for name, value in self.online_q_network.state_dict().items()
+            },
             optimizer_state_dict=self.optimizer.state_dict(),
-        ) 
+        )
+
     def _should_sync_target(self, epoch: int) -> bool:
         """判断当前 epoch 结束后是否需要同步 target network。
 
