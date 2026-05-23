@@ -24,6 +24,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
+
+from phase2.phase2_selection_dataset import Phase2SelectionDataset
 
 from ..metrics.phase2_metric_results import Phase2ValidationResult
 from ..phase2_config import Phase2RewardConfig
@@ -54,7 +57,7 @@ class Phase2Evaluator:
     def __init__(
         self,
         reward_config: Phase2RewardConfig,
-        device: "torch.device | str",
+        device: torch.device | str,
     ) -> None:
         """初始化 Phase II evaluator 依赖。
 
