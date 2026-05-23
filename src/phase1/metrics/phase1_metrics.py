@@ -84,6 +84,15 @@ class Phase1Metrics:
     # commitment loss。累加器状态下是加权总和；averaged() 后是样本平均值。
     commitment_loss: float = 0.0
 
+    # reward 加权动作重构 loss。用于观察高收益/高风险 timestep 是否被重点学习。
+    return_weighted_ce_loss: float = 0.0
+
+    # decoded 额外换手平滑 loss。用于观察模型是否减少 teacher 之外的频繁切换。
+    turnover_smooth_loss: float = 0.0
+
+    # 低收益/低机会 horizon 的换手对齐 loss。用于压制高换手低收益相关性。
+    turnover_return_alignment_loss: float = 0.0
+
     # 动作重构准确率。训练中会随 batch 更新为当前累计准确率；averaged() 后为最终准确率。
     action_accuracy: float = 0.0
 
@@ -123,6 +132,15 @@ class Phase1Metrics:
         self.vq_loss += _tensor_to_float(outputs.vq_loss) * batch_size
         self.codebook_loss += _tensor_to_float(outputs.codebook_loss) * batch_size
         self.commitment_loss += _tensor_to_float(outputs.commitment_loss) * batch_size
+        self.return_weighted_ce_loss += (
+            _tensor_to_float(outputs.return_weighted_ce_loss) * batch_size
+        )
+        self.turnover_smooth_loss += (
+            _tensor_to_float(outputs.turnover_smooth_loss) * batch_size
+        )
+        self.turnover_return_alignment_loss += (
+            _tensor_to_float(outputs.turnover_return_alignment_loss) * batch_size
+        )
 
         if actions is not None:
             self._add_action_accuracy(outputs=outputs, actions=actions)
@@ -179,6 +197,11 @@ class Phase1Metrics:
             vq_loss=self.vq_loss / self.num_samples,
             codebook_loss=self.codebook_loss / self.num_samples,
             commitment_loss=self.commitment_loss / self.num_samples,
+            return_weighted_ce_loss=self.return_weighted_ce_loss / self.num_samples,
+            turnover_smooth_loss=self.turnover_smooth_loss / self.num_samples,
+            turnover_return_alignment_loss=(
+                self.turnover_return_alignment_loss / self.num_samples
+            ),
             action_accuracy=(
                 self.correct_actions / self.total_actions if self.total_actions > 0 else 0.0
             ),
@@ -201,6 +224,9 @@ class Phase1Metrics:
             "vq_loss": self.vq_loss,
             "codebook_loss": self.codebook_loss,
             "commitment_loss": self.commitment_loss,
+            "return_weighted_ce_loss": self.return_weighted_ce_loss,
+            "turnover_smooth_loss": self.turnover_smooth_loss,
+            "turnover_return_alignment_loss": self.turnover_return_alignment_loss,
             "action_accuracy": self.action_accuracy,
         }
         if include_context:
@@ -232,6 +258,11 @@ class Phase1Metrics:
             vq_loss=float(payload.get("vq_loss", 0.0)),
             codebook_loss=float(payload.get("codebook_loss", 0.0)),
             commitment_loss=float(payload.get("commitment_loss", 0.0)),
+            return_weighted_ce_loss=float(payload.get("return_weighted_ce_loss", 0.0)),
+            turnover_smooth_loss=float(payload.get("turnover_smooth_loss", 0.0)),
+            turnover_return_alignment_loss=float(
+                payload.get("turnover_return_alignment_loss", 0.0)
+            ),
             action_accuracy=float(payload.get("action_accuracy", 0.0)),
             correct_actions=int(payload.get("correct_actions", 0)),
             total_actions=int(payload.get("total_actions", 0)),

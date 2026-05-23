@@ -171,8 +171,8 @@ class Phase2DoubleDqnTrainer:
                 next_visible_states=step_result.observation,
                 done=bool(step_result.done),
                 demonstration_horizon_label=(
-                    int(step_result.info.sample_id),
-                    int(step_result.info.assigned_code_label),
+                    int(step_result.info.demo_sample_id),
+                    int(step_result.info.demo_assigned_code_label),
                 ),
             )
             self.replay_buffer.add(transition)

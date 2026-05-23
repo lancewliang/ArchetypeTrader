@@ -22,7 +22,7 @@ from src.utils import RuntimeUtils  # noqa: E402
 
 
 PAIR = "FU"
-TRAIN_BATCH_ID = "batch_001"
+TRAIN_BATCH_ID = "batch_005"
 OUTPUT_DIR = PROJECT_ROOT / "artifacts" / PAIR / TRAIN_BATCH_ID / "phase1"
 SEED = 42
 LOG_LEVEL = "INFO"

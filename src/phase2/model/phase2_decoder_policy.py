@@ -83,9 +83,10 @@ class FrozenArchetypeDecoderPolicy:
         """根据 horizon states 和 selected code ids 输出 base actions。
 
         功能说明:
-            后续实现应从 Phase I codebook 中取出 ``selected_code_ids`` 对应的
-            embeddings，调用冻结 decoder 得到 action logits，再用 ``argmax`` 转成
-            动作 id 序列。
+            从 Phase I codebook 中取出 ``selected_code_ids`` 对应的 embeddings，
+            按 horizon 时间步逐步调用冻结 decoder。第 ``tau`` 步只输入
+            ``0..tau`` 的状态 prefix，并取 prefix 最后一步 logits 转成动作 id，
+            避免接口层把未来状态传给当前步动作生成。
 
         使用场景:
             ``ArchetypeSelectionEnv.step()`` 执行 selector action 时调用，是 Phase II
@@ -111,13 +112,12 @@ class FrozenArchetypeDecoderPolicy:
             trend_states = horizon_trend_states.to(self.device, dtype=torch.float32)
             code_ids = selected_code_ids.to(self.device, dtype=torch.long)
             z_q = self.get_code_embeddings(code_ids)
-            logits = self.phase1_model.decoder(
+            return self._decode_actions_stepwise(
                 states,
                 relative_states,
                 trend_states,
                 z_q,
             )
-            return logits.argmax(dim=-1)
 
     def decode_all_codes(
         self,
@@ -128,8 +128,8 @@ class FrozenArchetypeDecoderPolicy:
         """为每个样本解码全部 archetype 的 base actions。
 
         功能说明:
-            后续实现应对每个样本枚举 Phase I codebook 中的全部 code id，调用冻结
-            decoder 生成每个 code 对应的基础动作序列。
+            对每个样本枚举 Phase I codebook 中的全部 code id，并复用逐步解码逻辑
+            生成每个 code 对应的基础动作序列。
 
         使用场景:
             evaluator 计算 oracle best-code upper bound、诊断不同 code 的收益分布，
@@ -178,13 +178,12 @@ class FrozenArchetypeDecoderPolicy:
                 trend_states.shape[-1],
             ).reshape(batch_size * num_codes, horizon, trend_states.shape[-1])
             z_q = self.get_code_embeddings(code_ids)
-            logits = self.phase1_model.decoder(
+            return self._decode_actions_stepwise(
                 expanded_states,
                 expanded_relative_states,
                 expanded_trend_states,
                 z_q,
-            )
-            return logits.argmax(dim=-1).reshape(batch_size, num_codes, horizon)
+            ).reshape(batch_size, num_codes, horizon)
 
     def get_code_embeddings(
         self,
@@ -210,3 +209,74 @@ class FrozenArchetypeDecoderPolicy:
         return self.phase1_model.quantizer.embedding_from_code(
             selected_code_ids.to(self.device, dtype=torch.long)
         )
+
+    def _decode_actions_stepwise(
+        self,
+        states: torch.Tensor,
+        relative_states: torch.Tensor,
+        trend_states: torch.Tensor,
+        z_q: LatentTensor,
+    ) -> torch.Tensor:
+        """逐步生成 base actions，每一步只暴露当前及历史 state prefix。"""
+
+        self._validate_decode_inputs(
+            states=states,
+            relative_states=relative_states,
+            trend_states=trend_states,
+            z_q=z_q,
+        )
+        horizon = int(states.shape[1])
+        action_steps: list[torch.Tensor] = []
+        for step_index in range(horizon):
+            prefix_end = step_index + 1
+            logits = self.phase1_model.decoder(
+                states[:, :prefix_end, :],
+                relative_states[:, :prefix_end, :],
+                trend_states[:, :prefix_end, :],
+                z_q,
+            )
+            if logits.ndim != 3:
+                raise ValueError(
+                    "decoder logits must have shape [batch, prefix, action_dim], "
+                    f"got {tuple(logits.shape)}"
+                )
+            expected_prefix_shape = (states.shape[0], prefix_end)
+            if logits.shape[:2] != expected_prefix_shape:
+                raise ValueError(
+                    "decoder logits prefix shape must match input prefix, "
+                    f"got {tuple(logits.shape[:2])}, expected {expected_prefix_shape}"
+                )
+            action_steps.append(torch.argmax(logits[:, -1, :], dim=-1))
+        return torch.stack(action_steps, dim=1)
+
+    @staticmethod
+    def _validate_decode_inputs(
+        *,
+        states: torch.Tensor,
+        relative_states: torch.Tensor,
+        trend_states: torch.Tensor,
+        z_q: LatentTensor,
+    ) -> None:
+        """校验 frozen decoder stepwise 推理的基础 batch/horizon 形状。"""
+
+        if states.ndim != 3:
+            raise ValueError("horizon_states must have shape [batch, horizon, state_dim]")
+        if states.shape[1] <= 0:
+            raise ValueError("horizon_states horizon length must be positive")
+        if relative_states.ndim != 3:
+            raise ValueError(
+                "horizon_relative_states must have shape "
+                "[batch, horizon, relative_state_dim]"
+            )
+        if trend_states.ndim != 3:
+            raise ValueError(
+                "horizon_trend_states must have shape [batch, horizon, trend_state_dim]"
+            )
+        if relative_states.shape[:2] != states.shape[:2]:
+            raise ValueError("horizon relative states must share [batch, horizon]")
+        if trend_states.shape[:2] != states.shape[:2]:
+            raise ValueError("horizon trend states must share [batch, horizon]")
+        if z_q.ndim != 2:
+            raise ValueError("z_q must have shape [batch, latent_dim]")
+        if z_q.shape[0] != states.shape[0]:
+            raise ValueError("z_q batch size must match states batch size")

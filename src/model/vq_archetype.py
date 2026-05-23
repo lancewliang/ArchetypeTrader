@@ -72,6 +72,9 @@ class VqModelOutputs:
     vq_loss: torch.Tensor
     codebook_loss: torch.Tensor
     commitment_loss: torch.Tensor
+    return_weighted_ce_loss: torch.Tensor
+    turnover_smooth_loss: torch.Tensor
+    turnover_return_alignment_loss: torch.Tensor
     total_loss: torch.Tensor
 
 
@@ -111,6 +114,12 @@ class ArchetypeVQModel(nn.Module):
         commitment_cost: float = 0.25,
         num_layers: int = 1,
         dropout: float = 0.0,
+        return_weighted_ce_weight: float = 0.25,
+        return_weight_scale: float = 2.0,
+        return_weight_max: float = 5.0,
+        turnover_smooth_loss_weight: float = 0.05,
+        turnover_return_alignment_loss_weight: float = 0.03,
+        turnover_return_alignment_scale: float = 2.0,
     ) -> None:
         """初始化 Phase I VQ archetype 模型。
 
@@ -139,6 +148,14 @@ class ArchetypeVQModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.num_archetypes = num_archetypes
+        self.return_weighted_ce_weight = float(return_weighted_ce_weight)
+        self.return_weight_scale = float(return_weight_scale)
+        self.return_weight_max = float(return_weight_max)
+        self.turnover_smooth_loss_weight = float(turnover_smooth_loss_weight)
+        self.turnover_return_alignment_loss_weight = float(
+            turnover_return_alignment_loss_weight
+        )
+        self.turnover_return_alignment_scale = float(turnover_return_alignment_scale)
 
         # Trajectory -> 连续 latent：学习 DP teacher 的整段行为摘要。
         self.encoder = ArchetypeTrajectoryEncoder(
@@ -194,7 +211,7 @@ class ArchetypeVQModel(nn.Module):
         """
 
         batch = _normalize_trajectory_batch(batch)
-        states, relative_states, trend_states, actions, _, _ = batch
+        states, relative_states, trend_states, actions, rewards, _ = batch
         z_e = self.encoder(batch)
         quantize_output = self.quantizer(z_e)
         action_logits = self.decoder(
@@ -213,6 +230,7 @@ class ArchetypeVQModel(nn.Module):
             vq_loss=quantize_output.vq_loss,
             codebook_loss=quantize_output.codebook_loss,
             commitment_loss=quantize_output.commitment_loss,
+            rewards=rewards,
         )
 
     def forward_pretrain(self, batch: TrajectoryTensorBatch) -> VqModelOutputs:
@@ -237,7 +255,7 @@ class ArchetypeVQModel(nn.Module):
         """
 
         batch = _normalize_trajectory_batch(batch)
-        states, relative_states, trend_states, actions, _, _ = batch
+        states, relative_states, trend_states, actions, rewards, _ = batch
         z_e = self.encoder(batch)
         action_logits = self.decoder(states, relative_states, trend_states, z_e)
         zero = z_e.new_zeros(())
@@ -252,6 +270,7 @@ class ArchetypeVQModel(nn.Module):
             vq_loss=zero,
             codebook_loss=zero,
             commitment_loss=zero,
+            rewards=rewards,
         )
 
     @torch.no_grad()
@@ -399,6 +418,7 @@ class ArchetypeVQModel(nn.Module):
         vq_loss: torch.Tensor,
         codebook_loss: torch.Tensor,
         commitment_loss: torch.Tensor,
+        rewards: torch.Tensor,
     ) -> VqModelOutputs:
         """统一计算 loss 并打包模型输出。
 
@@ -421,11 +441,34 @@ class ArchetypeVQModel(nn.Module):
             依赖稳定的返回字段读取 loss、code label 和诊断信息。
         """
 
-        reconstruction_loss = F.cross_entropy(
-            action_logits.reshape(-1, self.action_dim),
-            actions.reshape(-1).long(),
+        flat_logits = action_logits.reshape(-1, self.action_dim)
+        flat_actions = actions.reshape(-1).long()
+        timestep_ce = F.cross_entropy(
+            flat_logits,
+            flat_actions,
+            reduction="none",
+        ).reshape_as(actions)
+        reconstruction_loss = timestep_ce.mean()
+        return_weighted_ce_loss = self._compute_return_weighted_ce_loss(
+            timestep_ce=timestep_ce,
+            rewards=rewards,
         )
-        total_loss = reconstruction_loss + vq_loss
+        turnover_smooth_loss = self._compute_turnover_smooth_loss(
+            action_logits=action_logits,
+            actions=actions,
+        )
+        turnover_return_alignment_loss = self._compute_turnover_return_alignment_loss(
+            action_logits=action_logits,
+            rewards=rewards,
+        )
+        total_loss = (
+            reconstruction_loss
+            + vq_loss
+            + self.return_weighted_ce_weight * return_weighted_ce_loss
+            + self.turnover_smooth_loss_weight * turnover_smooth_loss
+            + self.turnover_return_alignment_loss_weight
+            * turnover_return_alignment_loss
+        )
         return VqModelOutputs(
             action_logits=action_logits,
             z_e=z_e,
@@ -437,8 +480,119 @@ class ArchetypeVQModel(nn.Module):
             vq_loss=vq_loss,
             codebook_loss=codebook_loss,
             commitment_loss=commitment_loss,
+            return_weighted_ce_loss=return_weighted_ce_loss,
+            turnover_smooth_loss=turnover_smooth_loss,
+            turnover_return_alignment_loss=turnover_return_alignment_loss,
             total_loss=total_loss,
         )
+
+    def _compute_return_weighted_ce_loss(
+        self,
+        *,
+        timestep_ce: torch.Tensor,
+        rewards: torch.Tensor,
+    ) -> torch.Tensor:
+        """Use reward magnitude to emphasize high-opportunity timesteps."""
+
+        if self.return_weighted_ce_weight <= 0.0:
+            return timestep_ce.new_zeros(())
+
+        reward_values = rewards
+        if reward_values.ndim == 3 and reward_values.shape[-1] == 1:
+            reward_values = reward_values.squeeze(-1)
+        if reward_values.shape != timestep_ce.shape:
+            raise ValueError(
+                "rewards and timestep CE must have the same shape, "
+                f"got {tuple(reward_values.shape)} and {tuple(timestep_ce.shape)}"
+            )
+
+        opportunity = torch.nan_to_num(reward_values.float().abs(), nan=0.0)
+        mean_opportunity = opportunity.mean().clamp_min(1e-8)
+        weights = 1.0 + self.return_weight_scale * (opportunity / mean_opportunity)
+        weights = weights.clamp(max=max(1.0, self.return_weight_max))
+        weights = weights / weights.mean().clamp_min(1e-8)
+        return (timestep_ce * weights).mean()
+
+    def _compute_turnover_smooth_loss(
+        self,
+        *,
+        action_logits: ActionLogitTensor,
+        actions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Penalize decoded expected-position churn beyond teacher turnover."""
+
+        if self.turnover_smooth_loss_weight <= 0.0 or action_logits.shape[1] < 2:
+            return action_logits.new_zeros(())
+
+        position_values = torch.linspace(
+            -1.0,
+            1.0,
+            steps=self.action_dim,
+            dtype=action_logits.dtype,
+            device=action_logits.device,
+        )
+        action_probabilities = F.softmax(action_logits, dim=-1)
+        expected_positions = torch.sum(action_probabilities * position_values, dim=-1)
+        decoded_turnover = torch.abs(expected_positions[:, 1:] - expected_positions[:, :-1])
+
+        teacher_positions = actions.float() - 1.0
+        teacher_turnover = torch.abs(teacher_positions[:, 1:] - teacher_positions[:, :-1])
+        excess_turnover = torch.relu(decoded_turnover - teacher_turnover)
+        return excess_turnover.mean()
+
+    def _compute_turnover_return_alignment_loss(
+        self,
+        *,
+        action_logits: ActionLogitTensor,
+        rewards: torch.Tensor,
+    ) -> torch.Tensor:
+        """Penalize high expected turnover on lower-opportunity horizons."""
+
+        if (
+            self.turnover_return_alignment_loss_weight <= 0.0
+            or action_logits.shape[1] < 2
+        ):
+            return action_logits.new_zeros(())
+
+        reward_values = rewards
+        if reward_values.ndim == 3 and reward_values.shape[-1] == 1:
+            reward_values = reward_values.squeeze(-1)
+        if reward_values.ndim != 2 or reward_values.shape != action_logits.shape[:2]:
+            raise ValueError(
+                "rewards must have shape [batch, horizon], got "
+                f"{tuple(reward_values.shape)} for logits {tuple(action_logits.shape)}"
+            )
+
+        position_values = torch.linspace(
+            -1.0,
+            1.0,
+            steps=self.action_dim,
+            dtype=action_logits.dtype,
+            device=action_logits.device,
+        )
+        action_probabilities = F.softmax(action_logits, dim=-1)
+        expected_positions = torch.sum(action_probabilities * position_values, dim=-1)
+
+        executable_positions = expected_positions[:, :-1]
+        previous_positions = torch.cat(
+            [
+                expected_positions.new_zeros((expected_positions.shape[0], 1)),
+                expected_positions[:, :-2],
+            ],
+            dim=1,
+        )
+        horizon_turnover = torch.abs(executable_positions - previous_positions).sum(dim=1)
+
+        sample_return = torch.nan_to_num(
+            reward_values[:, :-1].float().sum(dim=1),
+            nan=0.0,
+        ).detach()
+        return_mean = sample_return.mean()
+        return_std = sample_return.std(unbiased=False).clamp_min(1e-6)
+        low_return_score = torch.sigmoid((return_mean - sample_return) / return_std)
+        weights = 1.0 + self.turnover_return_alignment_scale * low_return_score
+        weights = weights / weights.mean().clamp_min(1e-8)
+        return (horizon_turnover * weights).mean()
 
 
 # 设计文档里的新名字。
