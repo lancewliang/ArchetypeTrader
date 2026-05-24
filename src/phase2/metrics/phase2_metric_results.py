@@ -18,8 +18,107 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Mapping
+from dataclasses import asdict, dataclass
+from typing import Any, Literal, Mapping
+
+
+MetricSeverity = Literal["pass", "warn", "fail", "skip"]
+MetricDirection = Literal["greater_is_better", "less_is_better", "between", "equal"]
+MetricThresholdValue = float | tuple[float, float] | bool | None
+
+
+@dataclass(frozen=True)
+class Phase2MetricResult:
+    """单个 Phase II validation metric 的判定结果。"""
+
+    name: str
+    value: int | float | str | bool | None
+    threshold: str
+    severity: MetricSeverity
+    passed: bool
+    layer: str
+    message: str = ""
+    threshold_value: MetricThresholdValue = None
+    direction: MetricDirection | None = None
+    distance_to_threshold: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为普通 dict。"""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2MetricResult":
+        """从 dict 恢复 metric result。"""
+
+        return cls(
+            name=str(payload["name"]),
+            value=payload.get("value"),
+            threshold=str(payload["threshold"]),
+            severity=payload["severity"],  # type: ignore[arg-type]
+            passed=bool(payload["passed"]),
+            layer=str(payload["layer"]),
+            message=str(payload.get("message", "")),
+            threshold_value=_threshold_value_from_payload(
+                payload.get("threshold_value")
+            ),
+            direction=(
+                str(direction)
+                if (direction := payload.get("direction")) is not None
+                else None
+            ),  # type: ignore[arg-type]
+            distance_to_threshold=(
+                float(distance)
+                if (distance := payload.get("distance_to_threshold")) is not None
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class Phase2LayerResult:
+    """单个 Phase II validation layer 的判定结果。"""
+
+    layer_id: int
+    name: str
+    passed: bool
+    metrics: tuple[Phase2MetricResult, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为普通 dict。"""
+
+        return {
+            "layer_id": self.layer_id,
+            "name": self.name,
+            "passed": self.passed,
+            "metrics": [metric.to_dict() for metric in self.metrics],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2LayerResult":
+        """从 dict 恢复 layer result。"""
+
+        return cls(
+            layer_id=int(payload["layer_id"]),
+            name=str(payload["name"]),
+            passed=bool(payload["passed"]),
+            metrics=tuple(
+                Phase2MetricResult.from_dict(metric)
+                for metric in payload.get("metrics", ())
+            ),
+        )
+
+
+def _threshold_value_from_payload(value: Any) -> MetricThresholdValue:
+    """恢复机器可读阈值。"""
+
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, tuple | list):
+        if len(value) != 2:
+            return None
+        return (float(value[0]), float(value[1]))
+    return float(value)
 
 
 @dataclass(frozen=True)
@@ -77,4 +176,3 @@ class Phase2ValidationResult:
 
     # evaluator 产出的核心指标，例如 mean_return、risk 和 consistency。
     metrics: Phase2ValidationMetrics
-

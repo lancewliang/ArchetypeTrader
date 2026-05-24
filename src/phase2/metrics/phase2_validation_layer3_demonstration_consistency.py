@@ -1,0 +1,201 @@
+"""Phase II layer 3 demonstration consistency metrics."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from typing import Any, Mapping
+
+from src.utils import _dataclass_from_mapping
+
+from .phase2_metric_results import Phase2LayerResult
+from .phase2_validation_rule_helpers import (
+    _between,
+    _build_layer_result,
+    _ge,
+    _le,
+)
+
+
+@dataclass(frozen=True)
+class Phase2DemonstrationConsistencyPayload:
+    """Layer 3 raw metrics 计算的中间 payload。"""
+
+    selected_code_ids: tuple[int, ...] = ()
+    assigned_code_labels: tuple[int, ...] = ()
+    selector_returns: tuple[float, ...] = ()
+    assigned_label_returns: tuple[float, ...] = ()
+    selected_q_values: tuple[float, ...] = ()
+    assigned_label_q_values: tuple[float, ...] = ()
+
+    def __post_init__(self) -> None:
+        """标准化 payload 字段。"""
+
+        object.__setattr__(
+            self,
+            "selected_code_ids",
+            tuple(int(value) for value in self.selected_code_ids),
+        )
+        object.__setattr__(
+            self,
+            "assigned_code_labels",
+            tuple(int(value) for value in self.assigned_code_labels),
+        )
+        for field_name in (
+            "selector_returns",
+            "assigned_label_returns",
+            "selected_q_values",
+            "assigned_label_q_values",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                tuple(float(value) for value in getattr(self, field_name)),
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为普通 dict。"""
+
+        return {
+            "selected_code_ids": list(self.selected_code_ids),
+            "assigned_code_labels": list(self.assigned_code_labels),
+            "selector_returns": list(self.selector_returns),
+            "assigned_label_returns": list(self.assigned_label_returns),
+            "selected_q_values": list(self.selected_q_values),
+            "assigned_label_q_values": list(self.assigned_label_q_values),
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> "Phase2DemonstrationConsistencyPayload":
+        """从 dict 恢复 payload。"""
+
+        return cls(
+            selected_code_ids=tuple(int(v) for v in payload.get("selected_code_ids", ())),
+            assigned_code_labels=tuple(
+                int(v) for v in payload.get("assigned_code_labels", ())
+            ),
+            selector_returns=tuple(float(v) for v in payload.get("selector_returns", ())),
+            assigned_label_returns=tuple(
+                float(v) for v in payload.get("assigned_label_returns", ())
+            ),
+            selected_q_values=tuple(
+                float(v) for v in payload.get("selected_q_values", ())
+            ),
+            assigned_label_q_values=tuple(
+                float(v) for v in payload.get("assigned_label_q_values", ())
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class Phase2DemonstrationConsistencyMetrics:
+    """Layer 3 demonstration consistency raw metrics。"""
+
+    label_match_rate: float
+    cross_entropy_to_assigned: float
+    kl_to_assigned_onehot: float
+    label_q_margin: float
+    profitable_deviation_rate: float
+    unprofitable_deviation_rate: float
+    deviation_return_delta: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为普通 dict。"""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> "Phase2DemonstrationConsistencyMetrics":
+        """从 dict 恢复 metrics。"""
+
+        return _dataclass_from_mapping(cls, payload)
+
+
+@dataclass(frozen=True)
+class Phase2DemonstrationConsistencyThresholds:
+    """Layer 3 demonstration consistency 阈值配置。"""
+
+    label_match_rate_min: float = 0.20
+    label_match_rate_max: float = 0.90
+    unprofitable_deviation_rate_max: float = 0.25
+    profitable_deviation_rate_warn_min: float = 0.20
+    deviation_return_delta_warn_min: float = 0.0
+    label_q_margin_warn_min: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为普通 dict。"""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> "Phase2DemonstrationConsistencyThresholds":
+        """从 dict 恢复 thresholds。"""
+
+        return _dataclass_from_mapping(cls, payload)
+
+
+def evaluate_demonstration_consistency_rules(
+    metrics: Phase2DemonstrationConsistencyMetrics,
+    thresholds: Phase2DemonstrationConsistencyThresholds,
+) -> Phase2LayerResult:
+    """构造 Layer 3 hard gate/warn 结果。"""
+
+    layer = "demonstration_consistency"
+    results = (
+        _between(
+            name="label_match_rate",
+            value=metrics.label_match_rate,
+            lower=thresholds.label_match_rate_min,
+            upper=thresholds.label_match_rate_max,
+            layer=layer,
+            message="selector 需要保留 Phase I label 先验，但不应完全退化为复现 assigned label",
+        ),
+        _le(
+            name="unprofitable_deviation_rate",
+            value=metrics.unprofitable_deviation_rate,
+            threshold_value=thresholds.unprofitable_deviation_rate_max,
+            layer=layer,
+            message="偏离 assigned label 且亏于 KL baseline 的比例不能过高",
+        ),
+        _ge(
+            name="profitable_deviation_rate",
+            value=metrics.profitable_deviation_rate,
+            threshold_value=thresholds.profitable_deviation_rate_warn_min,
+            layer=layer,
+            message="有收益证明的偏离比例过低时，Phase II 选择价值不足",
+            severity_when_failed="warn",
+        ),
+        _ge(
+            name="deviation_return_delta",
+            value=metrics.deviation_return_delta,
+            threshold_value=thresholds.deviation_return_delta_warn_min,
+            layer=layer,
+            message="偏离 assigned label 的样本平均收益差应非负",
+            severity_when_failed="warn",
+        ),
+        _ge(
+            name="label_q_margin",
+            value=metrics.label_q_margin,
+            threshold_value=thresholds.label_q_margin_warn_min,
+            layer=layer,
+            message="selected code 相对 assigned label 的 Q 值应有优势",
+            severity_when_failed="warn",
+        ),
+    )
+    return _build_layer_result(layer_id=3, name=layer, metrics=results)
+
+
+__all__ = [
+    "Phase2DemonstrationConsistencyMetrics",
+    "Phase2DemonstrationConsistencyPayload",
+    "Phase2DemonstrationConsistencyThresholds",
+    "evaluate_demonstration_consistency_rules",
+]
