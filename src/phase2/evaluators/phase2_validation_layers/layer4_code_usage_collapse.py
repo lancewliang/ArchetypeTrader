@@ -21,7 +21,29 @@ def compute_code_usage_collapse_metrics(
     num_archetypes: int,
     train_label_distribution: tuple[float, ...] | None = None,
 ) -> Phase2LayerComputation:
-    """Compute code usage entropy, collapse and distribution drift metrics."""
+    """Compute code usage entropy, collapse and distribution drift metrics.
+
+    算法:
+        1. 将 selector selected code 和 Phase I assigned label 分别转换为
+           ``[0, K)`` 上的归一化分布；
+        2. 对 selector 分布计算 Shannon entropy 和 perplexity；
+        3. 统计 active code 数、最大/最小使用比例；
+        4. 计算 selector 分布相对 train label 分布和 validation label 分布的 KL；
+        5. 从 per-code diagnostics 中汇总 dead profitable code 数和 active code
+           最小 support。
+
+    核心公式:
+        - ``p_k = count(selected_code == k) / N``
+        - ``entropy = -Σ_k p_k log(p_k)``，忽略 ``p_k = 0`` 项
+        - ``perplexity = exp(entropy)``
+        - ``active_code_count = Σ_k 1[p_k > 0]``
+        - ``max_code_usage_ratio = max_k p_k``
+        - ``KL(p || q) = Σ_k p_k log(p_k / q_k)``，实现中加 eps 平滑
+
+    说明:
+        本层关注 selector 是否真正利用 archetype set。entropy/perplexity 和
+        active count 过低表示 code collapse；max usage 过高表示单 code 支配。
+    """
 
     selected = np.asarray(payload.selected_code_ids, dtype=np.int64)
     assigned = np.asarray(payload.assigned_code_labels, dtype=np.int64)
@@ -35,6 +57,8 @@ def compute_code_usage_collapse_metrics(
 
     entropy = _entropy(selector_distribution)
     active_count = int(np.sum(selector_distribution > 0.0))
+    # min_code_usage_ratio 只在被使用过的 code 上取最小值；完全未使用 code 已通过
+    # active_count/perplexity 体现，不把 0 混入该诊断值。
     positive_ratios = selector_distribution[selector_distribution > 0.0]
     per_code_diagnostics = tuple(payload.per_code_diagnostics)
 
@@ -86,7 +110,29 @@ def build_per_code_usage_diagnostics(
     active_ratio_min: float = 0.01,
     profitable_return_min: float = 0.0,
 ) -> tuple[Phase2PerCodeUsageDiagnostic, ...]:
-    """Build per-code usage rows used by Layer 4 and report cards."""
+    """Build per-code usage rows used by Layer 4 and report cards.
+
+    算法:
+        1. 分别计算 selector selected code 分布和 assigned label 分布；
+        2. 对每个 code k 构造两个 mask：
+           ``selected_mask = selected_code == k``，
+           ``kl_mask = assigned_label == k``；
+        3. 在两个 mask 下分别计算 selector/assigned mean return 和 support；
+        4. 用 selector usage ratio 判断该 code 是否 active；
+        5. 如果 assigned baseline 中该 code 盈利但 selector 不 active，则标记为
+           dead profitable code。
+
+    核心公式:
+        - ``selector_ratio_k = count(selected == k) / N_selected``
+        - ``kl_ratio_k = count(assigned == k) / N_assigned``
+        - ``selector_mean_return_k = mean(selector_return_i | selected_i = k)``
+        - ``kl_mean_return_k = mean(kl_return_i | assigned_i = k)``
+        - ``uplift_vs_kl_k = selector_mean_return_k - kl_mean_return_k``
+
+    用途:
+        per-code 诊断用于报告中定位哪些 archetype 被充分使用、贡献收益，哪些
+        原本盈利但被 selector 忽略。
+    """
 
     selected_distribution = _distribution(selected_code_ids, num_archetypes)
     kl_distribution = _distribution(assigned_code_labels, num_archetypes)
@@ -124,7 +170,15 @@ def build_per_code_usage_diagnostics(
 
 
 def _distribution(values: np.ndarray, num_archetypes: int) -> np.ndarray:
-    """Return normalized code distribution over [0, K)."""
+    """Return normalized code distribution over [0, K).
+
+    公式:
+        ``p_k = count(values == k and 0 <= k < K) / total_valid_count``。
+
+    防御:
+        非法 code 会被过滤；没有合法 code 时返回全 0 分布，让上层指标可继续
+        生成并由 Layer 0/Layer 4 rules 暴露问题。
+    """
 
     if num_archetypes <= 0:
         return np.asarray([], dtype=np.float64)
@@ -137,7 +191,14 @@ def _distribution(values: np.ndarray, num_archetypes: int) -> np.ndarray:
 
 
 def _entropy(probabilities: np.ndarray) -> float:
-    """Shannon entropy over non-zero probabilities."""
+    """Shannon entropy over non-zero probabilities.
+
+    公式:
+        ``H(p) = -Σ_k p_k log(p_k)``，忽略 ``p_k = 0``，因为极限项为 0。
+
+    用途:
+        分布越集中，entropy 越低；单一 code collapse 时 entropy 接近 0。
+    """
 
     positive = probabilities[probabilities > 0.0]
     if positive.size == 0:
@@ -146,7 +207,18 @@ def _entropy(probabilities: np.ndarray) -> float:
 
 
 def _kl(left: np.ndarray, right: np.ndarray) -> float:
-    """KL(left || right) with small smoothing."""
+    """KL(left || right) with small smoothing.
+
+    公式:
+        ``KL(p || q) = Σ_k p_k log(p_k / q_k)``。
+
+    实现细节:
+        给 p、q 加 ``eps=1e-12`` 后重新归一化，避免 q_k=0 时除零或 log inf。
+
+    用途:
+        衡量 selector 使用分布相对 train/validation label 先验的漂移；越小表示
+        分布越接近，偏离较大时需要由收益 uplift 解释。
+    """
 
     if left.size == 0 or right.size != left.size:
         return nan_value()
@@ -159,7 +231,14 @@ def _kl(left: np.ndarray, right: np.ndarray) -> float:
 
 
 def _masked_mean(values: np.ndarray, mask: np.ndarray) -> float:
-    """Mean over masked finite values."""
+    """Mean over masked finite values.
+
+    公式:
+        ``mean(values_i | mask_i and isfinite(values_i))``。
+
+    用途:
+        per-code return 只在该 code 对应样本上聚合，且跳过 NaN/inf。
+    """
 
     size = min(values.shape[0], mask.shape[0])
     if size <= 0:
@@ -173,7 +252,14 @@ def _masked_mean(values: np.ndarray, mask: np.ndarray) -> float:
 def _min_per_code_sample_count(
     rows: tuple[Phase2PerCodeUsageDiagnostic, ...],
 ) -> int:
-    """Minimum selected support among active codes."""
+    """Minimum selected support among active codes.
+
+    公式:
+        ``min(selector_count_k | code k is active)``。
+
+    用途:
+        判断 per-code return 是否有足够样本支撑；没有 active code 时返回 0。
+    """
 
     active_counts = [item.selector_count for item in rows if item.is_active]
     if not active_counts:
