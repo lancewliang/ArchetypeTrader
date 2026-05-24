@@ -16,7 +16,7 @@
 使用场景:
     ``Phase2MainFlow`` 在 validation/test 阶段创建本 evaluator，并调用
     ``evaluate()`` 生成 ``Phase2ValidationResult``。trainer 和 checkpoint
-    selector 后续只消费该结果中的 metrics 和 diagnostics，不重新运行评估逻辑。
+    selector 后续只消费该结果中的 metrics、layers 和 payloads，不重新运行评估逻辑。
 """
 
 from __future__ import annotations
@@ -91,8 +91,9 @@ class Phase2Evaluator:
         功能说明:
             使用 selector 对 ``dataset.visible_states`` 做 archetype 选择，再通过
             frozen decoder policy 和统一 reward 口径计算 horizon return。评估结果
-            应写入 ``Phase2ValidationResult.metrics``，解释性诊断写入
-            ``Phase2ValidationResult.diagnostics``。
+            应写入 ``Phase2ValidationResult.metrics``，分层阈值判定写入
+            ``Phase2ValidationResult.layers``，raw metrics 和报表过程数据写入
+            ``Phase2ValidationResult.layer_computations`` / ``payloads``。
 
         使用场景:
             validation checkpoint 保存前调用；训练结束生成 report 前调用；

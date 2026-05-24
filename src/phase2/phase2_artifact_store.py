@@ -17,10 +17,7 @@ import torch
 
 from ..store.artifact_store import DataFileStore
 from .checkpoint.phase2_checkpoint import Phase2Checkpoint
-from .metrics.phase2_metric_results import (
-    Phase2ValidationMetrics,
-    Phase2ValidationResult,
-)
+from .metrics.phase2_metric_results import Phase2ValidationResult
 from .phase2_config import Phase2TrainConfig
 
 
@@ -224,8 +221,8 @@ class Phase2ArtifactStore(DataFileStore):
         """保存 Phase II validation result 的骨架入口。
 
         功能说明:
-            后续实现应把 ``Phase2ValidationResult.metrics`` 和
-            ``Phase2ValidationResult.diagnostics`` 保存为 JSON 友好的评估结果文件。
+            后续实现应把 ``Phase2ValidationResult.metrics``、``layers``、
+            ``layer_computations`` 和 ``payloads`` 保存为 JSON 友好的评估结果文件。
             它只保存评估结果，不保存模型权重。
 
         适用场景:
@@ -447,25 +444,13 @@ class Phase2ArtifactStore(DataFileStore):
     def _validation_result_to_dict(
         validation_result: Phase2ValidationResult,
     ) -> dict[str, Any]:
-        payload = asdict(validation_result)
-        return dict(payload)
+        return validation_result.to_dict()
 
     @staticmethod
     def _validation_result_from_dict(
         payload: Mapping[str, Any],
     ) -> Phase2ValidationResult:
-        metrics_payload = payload.get("metrics")
-        if not isinstance(metrics_payload, Mapping):
-            raise ValueError("invalid phase2 validation result payload: missing metrics")
-        metrics_fields = {field.name for field in fields(Phase2ValidationMetrics)}
-        metrics = Phase2ValidationMetrics(
-            **{
-                key: value
-                for key, value in metrics_payload.items()
-                if key in metrics_fields
-            }
-        )
-        return Phase2ValidationResult(metrics=metrics)
+        return Phase2ValidationResult.from_dict(payload)
 
     @classmethod
     def _json_safe(cls, value: Any) -> Any:
