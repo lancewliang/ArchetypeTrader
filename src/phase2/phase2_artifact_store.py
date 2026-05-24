@@ -117,6 +117,9 @@ class Phase2ArtifactStore(DataFileStore):
             "validation_results": validation_dir,
             "best_checkpoint": checkpoint_dir / "best_checkpoint.pt",
             "best_validation_result": validation_dir / "best_validation_result.json",
+            "phase2_selector_validation_html": (
+                report_dir / "phase2_selector_validation.html"
+            ),
         }
 
     def save_phase2_checkpoint(
@@ -303,6 +306,22 @@ class Phase2ArtifactStore(DataFileStore):
         self._save_json_payload(self._validation_result_to_dict(validation_result), path)
         return path
 
+    def save_phase2_selector_validation_html(
+        self,
+        *,
+        validation_result: Phase2ValidationResult,
+        html: str,
+        split_name: str | None = None,
+        epoch: int | None = None,
+    ) -> Path:
+        """保存单个 Phase II selector validation HTML 报告。"""
+        path = self._phase2_selector_validation_html_path(
+            split_name=split_name,
+            epoch=epoch,
+        )
+        self._save_text_payload(html, path)
+        return path
+
     def _phase2_artifact_path(self, key: str) -> Path:
         path = self.artifact_paths.get(key)
         if path is None:
@@ -331,6 +350,17 @@ class Phase2ArtifactStore(DataFileStore):
         if epoch is None:
             return validation_dir / f"{split_name}_validation_result.json"
         return validation_dir / f"{split_name}_epoch_{epoch:04d}_validation.json"
+
+    def _phase2_selector_validation_html_path(
+        self,
+        *,
+        split_name: str,
+        epoch: int | None,
+    ) -> Path:
+        report_dir = self._phase2_artifact_path("reports")
+        if epoch is None:
+            return report_dir / f"{split_name}_selector_validation.html"
+        return report_dir / f"{split_name}_epoch_{epoch:04d}_selector_validation.html"
 
     def _save_torch_payload(self, payload: Mapping[str, Any], path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -369,6 +399,29 @@ class Phase2ArtifactStore(DataFileStore):
                 indent=2,
             )
             temp_file.write("\n")
+
+        try:
+            digest = self._sha256_file(temp_path)
+            temp_path.replace(path)
+            self._write_sha256_sidecar(path, digest)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    def _save_text_payload(self, payload: str, path: Path) -> None:
+        """以原子替换方式保存文本 payload 并写出 sha256 sidecar。"""
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(payload)
 
         try:
             digest = self._sha256_file(temp_path)

@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 import hashlib
 import logging
 from pathlib import Path
@@ -51,6 +52,7 @@ from .phase2_config import (
     Phase2TrainConfig,
 )
 from .phase2_env import ArchetypeSelectionEnv
+from .report import Phase2SelectorReport
 from .phase2_selection_dataset import (
     Phase2SelectionDataset,
     Phase2SelectionDatasetBuilder,
@@ -144,6 +146,7 @@ class Phase2MainFlow:
             tsize=self.dataset_config.tsize,
         )
         self.checkpoint_selector = Phase2CheckpointSelector()
+        self.report = Phase2SelectorReport()
 
         self.phase1_model: ArchetypeVQModel | None = None
         self.q_network: Phase2QNetwork | None = None
@@ -535,6 +538,15 @@ class Phase2MainFlow:
                 validation_result,
                 split_name="validation",
                 epoch=epoch,
+            )
+            report_html = self.report.build_html(
+                validation_result=validation_result,
+                config=asdict(self.config),
+                artifacts=self.artifact_store.artifact_paths,
+            )
+            self.artifact_store.save_phase2_selector_validation_html(
+                validation_result=validation_result,
+                html=report_html,
             )
             self.validation_checkpoints.append(
                 Phase2ValidationCheckpoint(
