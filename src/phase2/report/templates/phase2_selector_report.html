@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fa;
+      --panel: #ffffff;
+      --ink: #1d2433;
+      --muted: #667085;
+      --line: #d8dee8;
+      --soft-line: #edf1f6;
+      --head: #101828;
+      --pass: #147a4d;
+      --pass-bg: #e8f6ef;
+      --warn: #a15c00;
+      --warn-bg: #fff4df;
+      --fail: #b42318;
+      --fail-bg: #ffe8e5;
+      --skip: #525866;
+      --skip-bg: #eef1f5;
+      --selector: #2563eb;
+      --assigned: #0f766e;
+      --oracle: #7c3aed;
+      --random: #a15c00;
+      --hold: #be123c;
+      --shadow: 0 8px 24px rgba(16, 24, 40, 0.08);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system,
+        BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    header {
+      background: var(--head);
+      color: #fff;
+      border-bottom: 1px solid #0b1220;
+    }
+
+    h1, h2, h3, p { margin: 0; }
+
+    h1 {
+      font-size: 28px;
+      line-height: 1.2;
+      letter-spacing: 0;
+      font-weight: 750;
+    }
+
+    h2 {
+      font-size: 18px;
+      line-height: 1.25;
+      font-weight: 720;
+    }
+
+    h3 {
+      font-size: 14px;
+      line-height: 1.25;
+      font-weight: 720;
+    }
+
+    main { padding: 24px 0 48px; }
+    section { margin-top: 18px; }
+
+    .wrap {
+      width: min(1440px, calc(100vw - 40px));
+      margin: 0 auto;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      padding: 28px 0;
+      align-items: end;
+    }
+
+    .subtitle {
+      margin-top: 8px;
+      color: #cbd5e1;
+      max-width: 920px;
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(3, auto);
+      gap: 10px;
+      justify-content: end;
+      color: #d1d5db;
+      font-size: 12px;
+    }
+
+    .meta span {
+      display: inline-flex;
+      gap: 6px;
+      padding: 6px 8px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.05);
+      white-space: nowrap;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .summary-grid {
+      grid-template-columns: 280px repeat(5, minmax(150px, 1fr));
+      align-items: stretch;
+    }
+
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .panel, .score-card, .layer-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .panel { overflow: hidden; }
+    .score-card { padding: 16px; }
+
+    .panel-head {
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid var(--soft-line);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .panel-body { padding: 14px 16px 16px; }
+
+    .score-value {
+      font-size: 42px;
+      line-height: 1;
+      font-weight: 760;
+      margin-top: 8px;
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+    }
+
+    .decision {
+      margin-top: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 720;
+    }
+
+    .metric-num {
+      font-size: 20px;
+      font-weight: 760;
+      line-height: 1.2;
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+
+    .badge {
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      text-transform: uppercase;
+    }
+
+    .badge.pass { color: var(--pass); background: var(--pass-bg); }
+    .badge.warn { color: var(--warn); background: var(--warn-bg); }
+    .badge.fail { color: var(--fail); background: var(--fail-bg); }
+    .badge.skip { color: var(--skip); background: var(--skip-bg); }
+
+    .note {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .section-title {
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .table-wrap { overflow: auto; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 820px;
+    }
+
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--soft-line);
+      padding: 9px 10px;
+    }
+
+    th {
+      color: #475467;
+      font-size: 12px;
+      text-transform: uppercase;
+      background: #f9fafb;
+      white-space: nowrap;
+    }
+
+    td {
+      overflow-wrap: anywhere;
+      font-variant-numeric: tabular-nums;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    .layer-card {
+      overflow: hidden;
+    }
+
+    .layer-card .panel-head {
+      background: #fbfcfe;
+    }
+
+    .layer-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      flex-wrap: wrap;
+    }
+
+    .chart-panel {
+      padding: 14px 16px 16px;
+    }
+
+    .chart {
+      width: 100%;
+      min-height: 260px;
+      display: block;
+      border: 1px solid var(--soft-line);
+      border-radius: 6px;
+      background: #fff;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 14px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 10px;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      display: inline-block;
+    }
+
+    .usage-bar {
+      height: 8px;
+      min-width: 24px;
+      border-radius: 999px;
+      background: #dbeafe;
+      overflow: hidden;
+    }
+
+    .usage-bar span {
+      display: block;
+      height: 100%;
+      width: 100%;
+      background: var(--selector);
+      transform-origin: left center;
+    }
+
+    @media (max-width: 1180px) {
+      .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 760px) {
+      .wrap { width: min(100vw - 24px, 1440px); }
+      .hero {
+        grid-template-columns: 1fr;
+        align-items: start;
+      }
+      .meta {
+        grid-template-columns: 1fr;
+        justify-content: start;
+      }
+      .summary-grid, .two, .three { grid-template-columns: 1fr; }
+      h1 { font-size: 24px; }
+      .score-value { font-size: 34px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap hero">
+      <div>
+        <h1>{{ header_title }}</h1>
+        <p class="subtitle">
+          {{ header.pair }} · batch {{ header.batch }} · checkpoint {{ header.checkpoint }}
+        </p>
+      </div>
+      <div class="meta">
+        <span>生成时间 {{ report.generated_at }}</span>
+        <span>结构版本 {{ report.schema }}</span>
+        {% for item in header.meta_items %}
+        <span>{{ item.label }} {{ item.value }}</span>
+        {% endfor %}
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="grid summary-grid">
+      <article class="score-card">
+        <div class="metric-label">选择状态</div>
+        <div class="score-value">{{ summary.score }}</div>
+        <div class="decision">
+          <span class="badge {{ summary.badge_class }}">{{ summary.status_label }}</span>
+        </div>
+      </article>
+      <article class="score-card">
+        <div class="metric-label">Mean Return</div>
+        <div class="metric-num">{{ summary.mean_return }}</div>
+      </article>
+      <article class="score-card">
+        <div class="metric-label">Sharpe Like</div>
+        <div class="metric-num">{{ summary.sharpe_like }}</div>
+      </article>
+      <article class="score-card">
+        <div class="metric-label">Win Rate</div>
+        <div class="metric-num">{{ summary.win_rate }}</div>
+      </article>
+      <article class="score-card">
+        <div class="metric-label">选中轮次</div>
+        <div class="metric-num">{{ summary.epoch }}</div>
+      </article>
+      <article class="score-card">
+        <div class="metric-label">失败层</div>
+        <div class="metric-num">{{ summary.failed_layers }}</div>
+      </article>
+    </section>
+
+    <section class="grid three">
+      <article class="panel">
+        <div class="panel-head"><h3>检验点</h3></div>
+        <div class="panel-body">
+          <div class="metric-num">{{ summary.checkpoint_id }}</div>
+          <div class="note">layer {{ summary.layer_count }} · {{ summary.reason }}</div>
+        </div>
+      </article>
+      <article class="panel">
+        <div class="panel-head"><h3>K / N / Horizon</h3></div>
+        <div class="panel-body">
+          <div class="metric-num">{{ header.k }} / {{ header.n_val }} / {{ header.horizon }}</div>
+          <div class="note">codebook size, validation samples, rollout horizon</div>
+        </div>
+      </article>
+      <article class="panel">
+        <div class="panel-head"><h3>报告边界</h3></div>
+        <div class="panel-body">
+          <div class="note">本报告只消费 evaluator 已经落盘的聚合 payload，不重新执行 selector、decoder、reward 或 checkpoint selection。</div>
+        </div>
+      </article>
+    </section>
+
+    {% if core_metric_rows %}
+    <section>
+      <h2 class="section-title">核心指标</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead>
+            <tr><th>字段</th><th>数值</th><th>说明</th></tr>
+          </thead>
+          <tbody>
+            {% for row in core_metric_rows %}
+            <tr>
+              <td>{{ row.key }}</td>
+              <td>{{ row.value }}</td>
+              <td>{{ row.description }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if baseline_rows %}
+    <section>
+      <h2 class="section-title">Baseline 对比</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Baseline</th>
+              <th>Mean Return</th>
+              <th>Uplift</th>
+              <th>Beat Rate</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in baseline_rows %}
+            <tr>
+              <td>{{ row.baseline }}</td>
+              <td>{{ row.mean_return }}</td>
+              <td>{{ row.uplift }}</td>
+              <td>{{ row.beat_rate }}</td>
+              <td><span class="badge {{ row.badge_class }}">{{ row.status }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if cumulative_return_chart.series %}
+    <section>
+      <h2 class="section-title">累计收益曲线</h2>
+      <article class="panel chart-panel">
+        <svg class="chart" viewBox="0 0 {{ cumulative_return_chart.width }} {{ cumulative_return_chart.height }}" role="img" aria-label="{{ cumulative_return_chart.title }}">
+          {% for line in cumulative_return_chart.grid_lines %}
+          <line x1="48" x2="790" y1="{{ line.y }}" y2="{{ line.y }}" stroke="#edf1f6" stroke-width="1"></line>
+          <text x="8" y="{{ line.y }}" fill="#667085" font-size="11" dominant-baseline="middle">{{ line.label }}</text>
+          {% endfor %}
+          {% for series in cumulative_return_chart.series %}
+          <polyline fill="none" stroke="{{ series.color }}" stroke-width="2.5" points="{{ series.points }}">
+            <title>{{ series.tooltip }}</title>
+          </polyline>
+          {% endfor %}
+        </svg>
+        <div class="legend">
+          {% for series in cumulative_return_chart.series %}
+          <span><i class="swatch" style="background: {{ series.color }}"></i>{{ series.label }} {{ series.end_value }}</span>
+          {% endfor %}
+        </div>
+        <p class="note">{{ cumulative_return_chart.x_axis_label }} · y {{ cumulative_return_chart.y_min }} to {{ cumulative_return_chart.y_max }}</p>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if layers %}
+    <section>
+      <h2 class="section-title">Validation Layers</h2>
+      <div class="grid two">
+        {% for layer in layers %}
+        <article class="layer-card">
+          <div class="panel-head">
+            <div>
+              <h3>Layer {{ layer.layer_id }} · {{ layer.name }}</h3>
+              <div class="layer-meta">{{ layer.metric_count }} metrics · {{ layer.failed_count }} failed</div>
+            </div>
+            <span class="badge {{ layer.badge_class }}">{{ layer.status_label }}</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Value</th>
+                  <th>Threshold</th>
+                  <th>Direction</th>
+                  <th>Status</th>
+                  <th>Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for metric in layer.metrics %}
+                <tr>
+                  <td>{{ metric.name }}</td>
+                  <td>{{ metric.value }}</td>
+                  <td>{{ metric.threshold }}</td>
+                  <td>{{ metric.direction }}</td>
+                  <td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td>
+                  <td>{{ metric.message }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if per_code_profitability_rows %}
+    <section>
+      <h2 class="section-title">Per-Code 盈利对比</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Selector Support</th>
+              <th>Assigned Support</th>
+              <th>Selector Mean</th>
+              <th>Assigned Mean</th>
+              <th>Selector Win</th>
+              <th>Assigned Win</th>
+              <th>Uplift</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in per_code_profitability_rows %}
+            <tr>
+              <td>{{ row.code_id }}</td>
+              <td>{{ row.selector_support }}</td>
+              <td>{{ row.kl_support }}</td>
+              <td>{{ row.selector_mean_return }}</td>
+              <td>{{ row.kl_mean_return }}</td>
+              <td>{{ row.selector_win_rate }}</td>
+              <td>{{ row.kl_win_rate }}</td>
+              <td>{{ row.uplift_vs_kl }}</td>
+              <td><span class="badge {{ row.badge_class }}">{{ row.status_label }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if code_usage_rows %}
+    <section>
+      <h2 class="section-title">Code 使用分布</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Selector Count</th>
+              <th>Selector Ratio</th>
+              <th>Assigned Count</th>
+              <th>Assigned Ratio</th>
+              <th>Delta</th>
+              <th>分布</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in code_usage_rows %}
+            <tr>
+              <td>{{ row.code_id }}</td>
+              <td>{{ row.selector_count }}</td>
+              <td>{{ row.selector_ratio }}</td>
+              <td>{{ row.kl_count }}</td>
+              <td>{{ row.kl_ratio }}</td>
+              <td>{{ row.ratio_delta }}</td>
+              <td><div class="usage-bar"><span style="width: {{ row.bar_width }}"></span></div></td>
+              <td><span class="badge {{ row.badge_class }}">{{ row.status_label }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    {% if cumulative_return_series %}
+    <section>
+      <h2 class="section-title">累计收益序列数据</h2>
+      <article class="panel table-wrap">
+        <table>
+          <thead>
+            <tr><th>Series</th><th>Points</th></tr>
+          </thead>
+          <tbody>
+            {% for series in cumulative_return_series %}
+            <tr>
+              <td>{{ series.label }}</td>
+              <td>
+                {% for point in series.points %}
+                {{ point.step }}:{{ point.value }}
+                {% endfor %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+    {% endif %}
+
+    <section class="grid two">
+      {% if config_rows %}
+      <article class="panel table-wrap">
+        <div class="panel-head"><h2>配置快照</h2></div>
+        <table>
+          <thead><tr><th>字段</th><th>数值</th><th>说明</th></tr></thead>
+          <tbody>
+            {% for row in config_rows %}
+            <tr><td>{{ row.key }}</td><td>{{ row.value }}</td><td>{{ row.description }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+      {% endif %}
+
+      {% if artifact_rows %}
+      <article class="panel table-wrap">
+        <div class="panel-head"><h2>产物路径</h2></div>
+        <table>
+          <thead><tr><th>字段</th><th>路径</th><th>说明</th></tr></thead>
+          <tbody>
+            {% for row in artifact_rows %}
+            <tr><td>{{ row.key }}</td><td>{{ row.value }}</td><td>{{ row.description }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

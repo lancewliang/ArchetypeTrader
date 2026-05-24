@@ -514,6 +514,10 @@ class Phase2MainFlow:
         evaluator = Phase2Evaluator(
             reward_config=self.reward_config,
             device=self.device,
+            q_network=q_network,
+            decoder_policy=decoder_policy,
+            rollout_batch_size=self.train_config.rollout_batch_size,
+            random_seed=self.train_config.seed,
         )
         for epoch in range(1, self.train_config.epochs + 1):
             train_metrics = trainer.train_one_epoch(epoch=epoch)
