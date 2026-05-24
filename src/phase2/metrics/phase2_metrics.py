@@ -60,34 +60,47 @@ class Phase2Metrics:
     # 当前 epoch 编号。用于把训练指标和 checkpoint 对齐。
     epoch: int | None = None
 
-    # 已累计 replay sample 数。用于加权平均和审计训练覆盖范围。
+    # 已累计 replay sample 数。用途：加权平均和审计训练覆盖范围；方向：
+    # 诊断字段，覆盖越充分越可靠，但不直接作为好坏排序。
     num_samples: int = 0
 
-    # 已执行 Q-network update 次数。
+    # 已执行 Q-network update 次数。用途：确认训练进度和日志完整性；方向：
+    # 诊断字段，不直接作为好坏排序。
     num_updates: int = 0
 
-    # Double DQN + imitation regularization 总 loss。
+    # Double DQN + imitation regularization 总 loss。含义：TD loss 与 imitation
+    # loss 的加权和；用途：观察训练是否收敛；方向：通常越小越好，但需结合
+    # validation return，不能单独选择 checkpoint。
     total_loss: float = 0.0
 
-    # TD Huber loss。
+    # TD Huber loss。含义：Q value 对 Double DQN bootstrap target 的拟合误差；
+    # 用途：诊断 value learning 是否收敛；方向：通常越小越好，异常升高表示
+    # Q 估计不稳或 reward 分布变化。
     td_loss: float = 0.0
 
-    # assigned-label imitation cross entropy/KL loss。
+    # assigned-label imitation cross entropy/KL loss。含义：selector policy 与
+    # Phase I assigned label 先验的距离；用途：诊断 imitation regularization 是否
+    # 生效；方向：越小表示越贴近 assigned label，但过小可能退化为只复制 label。
     imitation_loss: float = 0.0
 
-    # 当前 action 对应的 Q value 均值。
+    # 当前 action 对应的 Q value 均值。用途：监控 Q 尺度和 overestimation；
+    # 方向：诊断字段，不是越大越好；异常过大通常表示估值发散风险。
     selected_q_mean: float = 0.0
 
-    # Double DQN bootstrap target 均值。
+    # Double DQN bootstrap target 均值。用途：对照 selected_q_mean 检查 target
+    # 尺度；方向：诊断字段，不直接作为好坏排序。
     td_target_mean: float = 0.0
 
-    # replay batch reward 均值。
+    # replay batch reward 均值。用途：观察训练采样到的即时 reward 水平；方向：
+    # 越大通常越好，但受 replay 分布和 reward clipping 影响，只作训练诊断。
     reward_mean: float = 0.0
 
-    # next state 上 online network greedy action 的均值，仅作为行为诊断。
+    # next state 上 online network greedy action 的均值。用途：粗略观察 action/code
+    # 选择是否偏向高编号或低编号；方向：无好坏方向，仅作为行为诊断。
     greedy_next_action_mean: float = 0.0
 
-    # 梯度裁剪前的梯度范数均值。没有发生 update 时为 0。
+    # 梯度裁剪前的梯度范数均值。用途：诊断训练稳定性；方向：越小不一定越好，
+    # 但异常过大表示梯度爆炸风险，长期接近 0 表示学习停滞风险。
     grad_norm: float = 0.0
 
     def add_batch(

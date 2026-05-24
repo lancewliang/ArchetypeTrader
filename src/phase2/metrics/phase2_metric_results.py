@@ -79,15 +79,35 @@ else:
 class Phase2MetricResult:
     """单个 Phase II validation metric 的判定结果。"""
 
+    # 指标稳定名称。用途：report、JSON 和 rule 追踪；方向：无好坏方向。
     name: str
+
+    # 指标实际值。用途：展示和审计 hard gate 判定；方向：由 direction 字段定义。
     value: int | float | str | bool | None
+
+    # 人类可读阈值表达式，例如 ">= 0.5"。用途：report 展示；方向：由表达式定义。
     threshold: str
+
+    # 判定严重级别。用途：区分 pass/warn/fail/skip；方向：pass 最好，fail 最差。
     severity: MetricSeverity
+
+    # 该指标是否通过规则。用途：聚合 layer passed；方向：True 更好。
     passed: bool
+
+    # 指标所属 layer 稳定名称。用途：分组展示和审计；方向：无好坏方向。
     layer: str
+
+    # 指标解释、失败原因或诊断建议。用途：report 文案；方向：无好坏方向。
     message: str = ""
+
+    # 机器可读阈值。用途：后续重放或结构化审计；方向：由 direction 字段定义。
     threshold_value: MetricThresholdValue = None
+
+    # 指标方向：越大越好、越小越好、区间约束或等值约束。
     direction: MetricDirection | None = None
+
+    # 当前值到阈值的距离。用途：排序风险程度或展示裕量；方向：通常越大代表
+    # 离通过边界越安全，具体含义由 rule helper 生成。
     distance_to_threshold: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -127,9 +147,16 @@ class Phase2MetricResult:
 class Phase2LayerResult:
     """单个 Phase II validation layer 的判定结果。"""
 
+    # layer 数字编号，0-5。用途：固定展示顺序；方向：无好坏方向。
     layer_id: int
+
+    # layer 稳定名称。用途：report 分组和规则追踪；方向：无好坏方向。
     name: str
+
+    # 本层是否通过。用途：checkpoint selector hard gate 聚合；方向：True 更好。
     passed: bool
+
+    # 本层下属 metric 判定结果。用途：报告阈值细节；方向：由每个 metric 决定。
     metrics: tuple[Phase2MetricResult, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -212,19 +239,24 @@ class Phase2ValidationMetrics:
         对象中的稳定字段进行排序和展示。
     """
 
-    # selector greedy action 的平均 horizon return。
+    # selector greedy action 的平均 horizon return。用途：checkpoint selector 主排序
+    # 指标；方向：越大越好，必须结合 risk 和 baseline uplift 审计。
     mean_return: float
 
-    # selector greedy action 的 return 中位数。
+    # selector greedy action 的 return 中位数。用途：降低极端收益样本对平均值的
+    # 干扰；方向：越大越好，明显低于 0 表示收益可能依赖少数尾部样本。
     median_return: float
 
-    # 类 Sharpe 风险调整收益指标。
+    # 类 Sharpe 风险调整收益指标。用途：衡量单位波动下的平均收益质量；方向：
+    # 越大越好，低于或接近 0 表示风险调整收益不足。
     sharpe_like: float
 
-    # horizon return 大于 0 的比例。
+    # horizon return 大于 0 的比例。用途：衡量正收益样本覆盖面；方向：越大越好，
+    # 但不能替代收益幅度。
     win_rate: float
 
-    # 平均换手率或行为强度指标。
+    # 平均换手率或行为强度指标。用途：诊断交易成本和过度交易风险；方向：通常
+    # 越小越稳，但过低也可能表示策略退化为不交易，需要结合 return。
     mean_turnover: float
 
     def to_dict(self) -> dict[str, Any]:
@@ -247,12 +279,32 @@ class Phase2ValidationPayloads:
     ``selection_trace``。
     """
 
+    # Layer 0 评估可信度过程数据。用途：审计 split、epoch、样本数和失败计数；
+    # 方向：过程数据本身无排序方向，由 Layer 0 metrics 转换为好坏判定。
     evaluation_validity_payload: Phase2EvaluationValidityPayload | None = None
+
+    # Layer 1 selector 收益过程数据。用途：保存收益、gross return、fee、turnover
+    # 序列以便复查聚合指标；方向：过程数据无直接方向。
     selector_profitability_payload: Phase2SelectorProfitabilityPayload | None = None
+
+    # Layer 2 baseline 对比过程数据。用途：保存 selector/assigned/random/oracle
+    # return 序列；方向：过程数据无直接方向。
     baseline_uplift_payload: Phase2BaselineUpliftPayload | None = None
+
+    # Layer 3 demonstration consistency 过程数据。用途：保存 selected/assigned code、
+    # return 和 Q value 序列；方向：过程数据无直接方向。
     demonstration_consistency_payload: Phase2DemonstrationConsistencyPayload | None = None
+
+    # Layer 4 code usage 过程数据。用途：保存 selected code 分布和 per-code 诊断；
+    # 方向：过程数据无直接方向。
     code_usage_collapse_payload: Phase2CodeUsageCollapsePayload | None = None
+
+    # Layer 5 泛化稳定性过程数据。用途：保存 score/churn/Q scale 历史和 probe
+    # payload；方向：过程数据无直接方向。
     generalization_stability_payload: Phase2GeneralizationStabilityPayload | None = None
+
+    # HTML/report 复用的聚合 payload。用途：避免报表重新执行 evaluator；方向：
+    # 展示数据，无直接排序方向。
     report_payload: Mapping[str, object] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -363,16 +415,20 @@ class Phase2ValidationResult:
         保存为 Phase II validation result payload。
     """
 
-    # checkpoint selector 直接消费的核心摘要指标，例如 mean_return、risk。
+    # checkpoint selector 直接消费的核心摘要指标。用途：排序和摘要展示；方向：
+    # 由 Phase2ValidationMetrics 各字段定义。
     metrics: Phase2ValidationMetrics
 
-    # hard-gate/reference layer 判定结果。
+    # hard-gate/reference layer 判定结果。用途：过滤不可用 checkpoint、展示风险；
+    # 方向：通过层越多越好，但 Layer 5 当前主要是 warn/reference。
     layers: tuple[Phase2LayerResult, ...] = ()
 
-    # Layer 0-5 强类型 raw metrics 和本层中间 payload。
+    # Layer 0-5 强类型 raw metrics 和本层中间 payload。用途：完整审计每层聚合
+    # 指标；方向：由具体 metrics 字段定义。
     layer_computations: tuple[Phase2LayerComputation, ...] = ()
 
-    # 报表和诊断卡片复用的聚合 payload。
+    # 报表和诊断卡片复用的聚合 payload。用途：HTML/JSON report 展示；方向：
+    # 展示数据，无直接排序方向。
     payloads: Phase2ValidationPayloads | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -426,16 +482,19 @@ class Phase2LayerComputation:
     ``Phase2LayerResult``。
     """
 
-    # layer 数字编号，0 到 5。
+    # layer 数字编号，0 到 5。用途：固定 layer 顺序；方向：无好坏方向。
     layer_id: int
 
-    # layer 稳定名称，例如 "selector_profitability"。
+    # layer 稳定名称，例如 "selector_profitability"。用途：反序列化和 report
+    # 分组；方向：无好坏方向。
     layer_name: str
 
-    # 本层强类型 raw metrics。
+    # 本层强类型 raw metrics。用途：保存 evaluator 已计算的原始聚合指标；
+    # 方向：由具体 layer metrics 字段定义。
     metrics: Phase2LayerMetrics
 
     # 可选额外中间产物，例如 per-code diagnostics 或 predictability payload。
+    # 用途：补充 report 细节；方向：过程数据无直接排序方向。
     extra_payload: Mapping[str, object] | None = None
 
     def to_dict(self) -> dict[str, Any]:
