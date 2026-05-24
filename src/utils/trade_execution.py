@@ -191,17 +191,66 @@ class ActionExecutionCalculator:
         if depthprices is None:
             return np.zeros(delta_positions.shape[0], dtype=np.float64)
 
-        slippage_path = np.zeros_like(delta_positions, dtype=np.float64)
-        for sample_index in range(delta_positions.shape[0]):
-            for step_index in range(delta_positions.shape[1]):
-                slippage_path[sample_index, step_index] = (
-                    cls.compute_lob_slippage_from_depthprice(
-                        delta_position=float(delta_positions[sample_index, step_index]),
-                        depthprice=depthprices[sample_index, step_index],
-                        mark_price=float(mark_prices[sample_index, step_index]),
-                    )
-                )
-        return np.sum(slippage_path, axis=1)
+        return np.sum(
+            cls.compute_lob_slippage_from_depthprices(
+                delta_positions=delta_positions,
+                depthprices=depthprices[:, : delta_positions.shape[1]],
+                mark_prices=mark_prices,
+            ),
+            axis=1,
+        )
+
+    @staticmethod
+    def compute_lob_slippage_from_depthprices(
+        *,
+        delta_positions: np.ndarray,
+        depthprices: np.ndarray,
+        mark_prices: np.ndarray,
+    ) -> np.ndarray:
+        """批量使用 ``[ask_price, ask_size, bid_price, bid_size]`` LOB 向量计算滑点。"""
+
+        delta_values = np.asarray(delta_positions, dtype=np.float64)
+        depth_values = np.asarray(depthprices, dtype=np.float64)
+        mark_values = np.asarray(mark_prices, dtype=np.float64)
+        if depth_values.ndim != 3 or depth_values.shape[-1] != LOB_DEPTH_WIDTH:
+            raise ValueError(
+                f"depthprices must have shape [sample, horizon, {LOB_DEPTH_WIDTH}]"
+            )
+        if delta_values.shape != depth_values.shape[:2]:
+            raise ValueError(
+                "delta_positions must share [sample, horizon] with depthprices"
+            )
+        if mark_values.shape != delta_values.shape:
+            raise ValueError("mark_prices must share shape with delta_positions")
+
+        level_count = len(LOB_ASK_PRICE_COLS)
+        ask_prices = depth_values[..., :level_count]
+        ask_sizes = depth_values[..., level_count : level_count * 2]
+        bid_prices = depth_values[..., level_count * 2 : level_count * 3]
+        bid_sizes = depth_values[..., level_count * 3 : level_count * 4]
+
+        buy_mask = delta_values > 0.0
+        sell_mask = delta_values < 0.0
+        side_prices = np.where(buy_mask[..., None], ask_prices, bid_prices)
+        side_sizes = np.where(buy_mask[..., None], ask_sizes, bid_sizes)
+
+        remaining = np.abs(delta_values)
+        fill_cash = np.zeros_like(delta_values, dtype=np.float64)
+        last_prices = mark_values.copy()
+        for level_index in range(level_count):
+            level_prices = side_prices[..., level_index]
+            level_sizes = side_sizes[..., level_index]
+            active = (remaining > 0.0) & (level_prices > 0.0) & (level_sizes > 0.0)
+            last_prices = np.where(active, level_prices, last_prices)
+            fill_qty = np.minimum(remaining, np.where(active, level_sizes, 0.0))
+            fill_cash += fill_qty * np.where(active, level_prices, 0.0)
+            remaining -= fill_qty
+
+        fill_cash += remaining * last_prices
+        mark_cash = np.abs(delta_values) * mark_values
+        slippage = np.where(buy_mask, fill_cash - mark_cash, mark_cash - fill_cash)
+        slippage = np.where(buy_mask | sell_mask, slippage, 0.0)
+        return np.maximum(slippage, 0.0)
 
     # @staticmethod
     # def compute_lob_slippage(

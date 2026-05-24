@@ -207,6 +207,75 @@ class Phase2ReplayBuffer:
         self._write_index = (self._write_index + 1) % self.capacity
         self._size = min(self._size + 1, self.capacity)
 
+    def add_batch(
+        self,
+        *,
+        visible_states: VisibleStates,
+        actions: np.ndarray,
+        rewards: np.ndarray,
+        next_visible_states: VisibleStates,
+        dones: np.ndarray,
+        demonstration_horizon_label_batch: DemonstrationHorizonLabelTensorBatch,
+    ) -> None:
+        """批量写入 horizon-level transitions。
+
+        语义与连续调用 ``add()`` 一致；当输入批量大于 capacity 时，仅保留最后
+        ``capacity`` 条 transition。
+        """
+
+        visible_state_batch = self._prepare_visible_state_batch(
+            visible_states,
+            name="visible_states",
+        )
+        next_visible_state_batch = self._prepare_visible_state_batch(
+            next_visible_states,
+            name="next_visible_states",
+        )
+        batch_size = visible_state_batch[0].shape[0]
+        action_values = _validate_int_array(actions, name="actions", size=batch_size)
+        reward_values = _validate_float_array(rewards, name="rewards", size=batch_size)
+        done_values = _validate_bool_array(dones, name="dones", size=batch_size)
+        sample_ids, code_labels = demonstration_horizon_label_batch
+        sample_id_values = _validate_int_array(
+            sample_ids,
+            name="sample_ids",
+            size=batch_size,
+        )
+        code_label_values = _validate_int_array(
+            code_labels,
+            name="code_labels",
+            size=batch_size,
+        )
+
+        if batch_size > self.capacity:
+            offset = batch_size - self.capacity
+            visible_state_batch = tuple(state[offset:] for state in visible_state_batch)
+            next_visible_state_batch = tuple(
+                state[offset:] for state in next_visible_state_batch
+            )
+            action_values = action_values[offset:]
+            reward_values = reward_values[offset:]
+            done_values = done_values[offset:]
+            sample_id_values = sample_id_values[offset:]
+            code_label_values = code_label_values[offset:]
+            batch_size = self.capacity
+
+        write_indices = (np.arange(batch_size, dtype=np.int64) + self._write_index) % (
+            self.capacity
+        )
+        for stream_index, state in enumerate(visible_state_batch):
+            self._visible_state_buffers[stream_index][write_indices] = state
+        for stream_index, state in enumerate(next_visible_state_batch):
+            self._next_visible_state_buffers[stream_index][write_indices] = state
+        self._actions[write_indices] = action_values
+        self._rewards[write_indices] = reward_values
+        self._dones[write_indices] = done_values
+        self._sample_ids[write_indices] = sample_id_values
+        self._code_labels[write_indices] = code_label_values
+
+        self._write_index = (self._write_index + batch_size) % self.capacity
+        self._size = min(self._size + batch_size, self.capacity)
+
     def sample(
         self,
         batch_size: int,
@@ -316,6 +385,44 @@ class Phase2ReplayBuffer:
             prepared_states.append(state_array)
         return tuple(prepared_states)
 
+    def _prepare_visible_state_batch(
+        self,
+        visible_states: VisibleStates,
+        *,
+        name: str,
+    ) -> tuple[np.ndarray, ...]:
+        if len(visible_states) != len(self.visible_state_shapes):
+            raise ValueError(
+                f"{name} must contain {len(self.visible_state_shapes)} arrays, "
+                f"got {len(visible_states)}"
+            )
+
+        prepared_states: list[np.ndarray] = []
+        batch_size: int | None = None
+        for index, (state, expected_shape) in enumerate(
+            zip(visible_states, self.visible_state_shapes, strict=True)
+        ):
+            state_array = np.asarray(state, dtype=np.float32)
+            expected_ndim = len(expected_shape) + 1
+            if state_array.ndim != expected_ndim:
+                raise ValueError(
+                    f"{name}[{index}] must have shape [batch, *{expected_shape}], "
+                    f"got {state_array.shape}"
+                )
+            if tuple(state_array.shape[1:]) != expected_shape:
+                raise ValueError(
+                    f"{name}[{index}] sample shape must be {expected_shape}, "
+                    f"got {state_array.shape[1:]}"
+                )
+            if batch_size is None:
+                batch_size = int(state_array.shape[0])
+                if batch_size <= 0:
+                    raise ValueError(f"{name} batch size must be positive")
+            elif int(state_array.shape[0]) != batch_size:
+                raise ValueError(f"all {name} streams must share batch size")
+            prepared_states.append(state_array)
+        return tuple(prepared_states)
+
 def _validate_visible_state_shapes(
     visible_state_shapes: tuple[tuple[int, ...], ...],
 ) -> tuple[tuple[int, ...], ...]:
@@ -362,6 +469,55 @@ def _validate_reward(reward: float) -> float:
     if not np.isfinite(reward):
         raise ValueError(f"reward must be finite, got {reward}")
     return reward
+
+
+def _as_numpy_array(value: np.ndarray | torch.Tensor, *, name: str) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    try:
+        return np.asarray(value)
+    except Exception as exc:
+        raise TypeError(f"{name} must be array-like") from exc
+
+
+def _validate_int_array(
+    value: np.ndarray | torch.Tensor,
+    *,
+    name: str,
+    size: int,
+) -> np.ndarray:
+    values = np.asarray(_as_numpy_array(value, name=name), dtype=np.int64)
+    if values.shape != (size,):
+        raise ValueError(f"{name} must have shape [{size}], got {values.shape}")
+    if np.any(values < 0):
+        raise ValueError(f"{name} must be non-negative")
+    return values
+
+
+def _validate_float_array(
+    value: np.ndarray | torch.Tensor,
+    *,
+    name: str,
+    size: int,
+) -> np.ndarray:
+    values = np.asarray(_as_numpy_array(value, name=name), dtype=np.float32)
+    if values.shape != (size,):
+        raise ValueError(f"{name} must have shape [{size}], got {values.shape}")
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"{name} must be finite")
+    return values
+
+
+def _validate_bool_array(
+    value: np.ndarray | torch.Tensor,
+    *,
+    name: str,
+    size: int,
+) -> np.ndarray:
+    values = np.asarray(_as_numpy_array(value, name=name), dtype=np.bool_)
+    if values.shape != (size,):
+        raise ValueError(f"{name} must have shape [{size}], got {values.shape}")
+    return values
 
 
 def _validate_demonstration_horizon_label(

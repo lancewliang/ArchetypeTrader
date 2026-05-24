@@ -42,6 +42,7 @@ from .checkpoint.phase2_checkpoint_selector import (
 from .evaluators.phase2_evaluator import Phase2Evaluator
 from .model.phase2_decoder_policy import FrozenArchetypeDecoderPolicy
 from .phase2_artifact_store import Phase2ArtifactStore
+from .phase2_batch_env import ArchetypeSelectionBatchEnv
 from .phase2_config import (
     Phase2DatasetConfig,
     Phase2MainConfig,
@@ -55,6 +56,7 @@ from .phase2_selection_dataset import (
     Phase2SelectionDatasetBuilder,
 )
 from .rl import Phase2ReplayBuffer
+from .rl.phase2_double_dqn_batch_trainer import Phase2DoubleDqnBatchTrainer
 from .rl.phase2_double_dqn_trainer import Phase2DoubleDqnTrainer
 from .model.phase2_q_network import Phase2QNetwork
 
@@ -487,12 +489,19 @@ class Phase2MainFlow:
             visible_state_shapes=visible_state_shapes,
             seed=self.train_config.seed,
         )
-        env = ArchetypeSelectionEnv(
+        use_batch_rollout = int(self.train_config.rollout_batch_size) > 1
+        env_class = ArchetypeSelectionBatchEnv if use_batch_rollout else ArchetypeSelectionEnv
+        env = env_class(
             dataset=train_dataset,
             decoder_policy=decoder_policy,
             reward_config=self.reward_config,
         )
-        trainer = Phase2DoubleDqnTrainer(
+        trainer_class = (
+            Phase2DoubleDqnBatchTrainer
+            if use_batch_rollout
+            else Phase2DoubleDqnTrainer
+        )
+        trainer = trainer_class(
             online_q_network=q_network,
             target_q_network=target_q_network,
             env=env,
@@ -510,6 +519,8 @@ class Phase2MainFlow:
             train_metrics = trainer.train_one_epoch(epoch=epoch)
             latest_checkpoint = trainer.build_checkpoint(epoch)
             self.artifact_store.save_phase2_checkpoint(latest_checkpoint)
+            if not self._should_validate_checkpoint(epoch):
+                continue
             validation_result = evaluator.evaluate_checkpoint(
                 dataset=val_dataset,
                 deterministic=True,
@@ -573,7 +584,9 @@ class Phase2MainFlow:
             best_checkpoint_path,
         )
     
-     
+    def _should_validate_checkpoint(self, epoch: int) -> bool:
+        return epoch % self.train_config.validation_interval == 0
+
 
     def _infer_phase1_state_dims(self, state_dict: Mapping[str, Any]) -> tuple[int, int, int]:
         """从 Phase I checkpoint state dict 推断三路状态维度。

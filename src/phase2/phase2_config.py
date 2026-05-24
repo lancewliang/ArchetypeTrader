@@ -63,7 +63,7 @@ class Phase2RewardConfig:
     reward_clip: float | None = None
 
     # 是否对 replay batch reward 做标准化。
-    normalize_rewards: bool = True
+    normalize_rewards: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,7 +71,7 @@ class Phase2TrainConfig:
     """Phase II Double DQN 训练配置。"""
 
     # Double DQN 总训练轮数。
-    epochs: int = 50
+    epochs: int = 100
 
     # 每次从 replay buffer 采样的 transition 数。
     batch_size: int = 1024
@@ -87,6 +87,13 @@ class Phase2TrainConfig:
 
     # 每轮执行多少次 Q-network update。
     updates_per_epoch: int = 2
+
+    # 采集 env transition 时的批量大小。用于批量执行 selector 前向、decoder 推理和
+    # reward 计算，避免逐 horizon 产生大量小张量调度。
+    rollout_batch_size: int = 512
+
+    # 每多少轮验证一次。
+    validation_interval: int = 20
 
     # 每多少轮将 online network 同步到 target network。
     target_update_interval_epochs: int = 5

@@ -98,6 +98,12 @@ def parse_args() -> argparse.Namespace:
         default=Phase2TrainConfig().updates_per_epoch,
     )
     parser.add_argument(
+        "--rollout-batch-size",
+        type=int,
+        default=Phase2TrainConfig().rollout_batch_size,
+        help="Phase II env 采样批量大小；调大可减少逐样本 decoder/reward 开销。",
+    )
+    parser.add_argument(
         "--target-update-interval-epochs",
         type=int,
         default=Phase2TrainConfig().target_update_interval_epochs,
@@ -214,6 +220,7 @@ def create_phase2_flow(args: argparse.Namespace) -> Phase2MainFlow:
         replay_capacity=args.replay_capacity,
         learning_start_epoch=args.learning_start_epoch,
         updates_per_epoch=args.updates_per_epoch,
+        rollout_batch_size=args.rollout_batch_size,
         target_update_interval_epochs=args.target_update_interval_epochs,
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
