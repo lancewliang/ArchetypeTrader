@@ -71,7 +71,7 @@ class Phase2TrainConfig:
     """Phase II Double DQN 训练配置。"""
 
     # Double DQN 总训练轮数。
-    epochs: int = 100
+    epochs: int = 200
 
     # 每次从 replay buffer 采样的 transition 数。
     batch_size: int = 1024
@@ -80,7 +80,7 @@ class Phase2TrainConfig:
     learning_rate: float = 3e-4
 
     # replay buffer 最大 transition 数。
-    replay_capacity: int = 200_000
+    replay_capacity: int = 10_0000
 
     # 从第几轮开始更新 Q-network。
     learning_start_epoch: int = 1

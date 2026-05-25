@@ -547,6 +547,8 @@ class Phase2MainFlow:
             self.artifact_store.save_phase2_selector_validation_html(
                 validation_result=validation_result,
                 html=report_html,
+                epoch=epoch,
+                split_name="validation",
             )
             self.validation_checkpoints.append(
                 Phase2ValidationCheckpoint(

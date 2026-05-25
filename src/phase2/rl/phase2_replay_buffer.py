@@ -108,7 +108,8 @@ class Phase2ReplayBuffer:
     功能说明:
         管理 horizon-level transition 的固定容量缓存。使用环形写入策略，支持按
         seed 可复现随机采样，并把 numpy transition 组装为
-        ``Phase2SelectionTransitionBatch``。
+        ``Phase2SelectionTransitionBatch``。同一个 ``(sample_id, action)`` 只保留
+        一条 active transition。
 
     设计边界:
         本类只负责 replay buffer 的接口边界，不理解 Q-network、decoder policy 或
@@ -160,6 +161,11 @@ class Phase2ReplayBuffer:
         self._dones = np.empty(self.capacity, dtype=np.bool_)
         self._sample_ids = np.empty(self.capacity, dtype=np.int64)
         self._code_labels = np.empty(self.capacity, dtype=np.int64)
+        self._transition_index_by_key: dict[tuple[int, int], int] = {}
+        self._transition_keys_by_index: list[tuple[int, int] | None] = [
+            None
+            for _ in range(self.capacity)
+        ]
 
         self._write_index = 0
         self._size = 0
@@ -169,7 +175,8 @@ class Phase2ReplayBuffer:
         """写入一个 horizon-level transition。
 
         功能说明:
-            将 transition 写入环形 buffer；容量满后覆盖最旧 transition。
+            将 transition 写入环形 buffer；容量满后覆盖最旧 transition。若当前
+            buffer 中已存在相同 ``(sample_id, action)``，则跳过写入。
 
         使用场景:
             trainer 每次 env step 后调用本方法，把新 transition 放入 replay buffer。
@@ -193,7 +200,38 @@ class Phase2ReplayBuffer:
             transition.demonstration_horizon_label
         )
 
+        transition_key = (sample_id, action)
+        if transition_key in self._transition_index_by_key:
+            return
+
+        self._write_transition(
+            visible_states=visible_states,
+            action=action,
+            reward=reward,
+            next_visible_states=next_visible_states,
+            done=done,
+            sample_id=sample_id,
+            code_label=code_label,
+            transition_key=transition_key,
+        )
+
+    def _write_transition(
+        self,
+        *,
+        visible_states: tuple[np.ndarray, ...],
+        action: int,
+        reward: float,
+        next_visible_states: tuple[np.ndarray, ...],
+        done: bool,
+        sample_id: int,
+        code_label: int,
+        transition_key: tuple[int, int],
+    ) -> None:
         index = self._write_index
+        old_key = self._transition_keys_by_index[index]
+        if old_key is not None:
+            self._transition_index_by_key.pop(old_key, None)
+
         for stream_index, state in enumerate(visible_states):
             self._visible_state_buffers[stream_index][index] = state
         for stream_index, state in enumerate(next_visible_states):
@@ -203,6 +241,8 @@ class Phase2ReplayBuffer:
         self._dones[index] = done
         self._sample_ids[index] = sample_id
         self._code_labels[index] = code_label
+        self._transition_keys_by_index[index] = transition_key
+        self._transition_index_by_key[transition_key] = index
 
         self._write_index = (self._write_index + 1) % self.capacity
         self._size = min(self._size + 1, self.capacity)
@@ -219,8 +259,8 @@ class Phase2ReplayBuffer:
     ) -> None:
         """批量写入 horizon-level transitions。
 
-        语义与连续调用 ``add()`` 一致；当输入批量大于 capacity 时，仅保留最后
-        ``capacity`` 条 transition。
+        语义与连续调用 ``add()`` 一致；重复 ``(sample_id, action)`` 会被跳过。
+        当输入批量大于 capacity 时，仅保留最后 ``capacity`` 条 active transition。
         """
 
         visible_state_batch = self._prepare_visible_state_batch(
@@ -247,34 +287,29 @@ class Phase2ReplayBuffer:
             size=batch_size,
         )
 
-        if batch_size > self.capacity:
-            offset = batch_size - self.capacity
-            visible_state_batch = tuple(state[offset:] for state in visible_state_batch)
-            next_visible_state_batch = tuple(
-                state[offset:] for state in next_visible_state_batch
+        for batch_index in range(batch_size):
+            action = int(action_values[batch_index])
+            sample_id = int(sample_id_values[batch_index])
+            transition_key = (sample_id, action)
+            if transition_key in self._transition_index_by_key:
+                continue
+
+            self._write_transition(
+                visible_states=tuple(
+                    state[batch_index]
+                    for state in visible_state_batch
+                ),
+                action=action,
+                reward=float(reward_values[batch_index]),
+                next_visible_states=tuple(
+                    state[batch_index]
+                    for state in next_visible_state_batch
+                ),
+                done=bool(done_values[batch_index]),
+                sample_id=sample_id,
+                code_label=int(code_label_values[batch_index]),
+                transition_key=transition_key,
             )
-            action_values = action_values[offset:]
-            reward_values = reward_values[offset:]
-            done_values = done_values[offset:]
-            sample_id_values = sample_id_values[offset:]
-            code_label_values = code_label_values[offset:]
-            batch_size = self.capacity
-
-        write_indices = (np.arange(batch_size, dtype=np.int64) + self._write_index) % (
-            self.capacity
-        )
-        for stream_index, state in enumerate(visible_state_batch):
-            self._visible_state_buffers[stream_index][write_indices] = state
-        for stream_index, state in enumerate(next_visible_state_batch):
-            self._next_visible_state_buffers[stream_index][write_indices] = state
-        self._actions[write_indices] = action_values
-        self._rewards[write_indices] = reward_values
-        self._dones[write_indices] = done_values
-        self._sample_ids[write_indices] = sample_id_values
-        self._code_labels[write_indices] = code_label_values
-
-        self._write_index = (self._write_index + batch_size) % self.capacity
-        self._size = min(self._size + batch_size, self.capacity)
 
     def sample(
         self,
