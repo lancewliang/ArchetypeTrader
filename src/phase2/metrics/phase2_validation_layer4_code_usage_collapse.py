@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Mapping
-
-from src.utils import _dataclass_from_mapping
+from src.utils import PydanticBaseModel
 
 from .phase2_metric_results import Phase2LayerResult
 from .phase2_validation_rule_helpers import (
@@ -15,8 +12,7 @@ from .phase2_validation_rule_helpers import (
 )
 
 
-@dataclass(frozen=True)
-class Phase2PerCodeUsageDiagnostic:
+class Phase2PerCodeUsageDiagnostic(PydanticBaseModel):
     """Layer 4 per-code usage/profitability diagnostic row。"""
 
     # codebook 中的 archetype id。用途：定位具体 code；方向：无好坏方向。
@@ -58,20 +54,7 @@ class Phase2PerCodeUsageDiagnostic:
     # 忽略的盈利 archetype；方向：False 更好。
     is_dead_profitable: bool
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2PerCodeUsageDiagnostic":
-        """从 dict 恢复 diagnostic row。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase2CodeUsageCollapsePayload:
+class Phase2CodeUsageCollapsePayload(PydanticBaseModel):
     """Layer 4 raw metrics 计算的中间 payload。"""
 
     # selector 实际选择的 code id 序列。用途：计算 entropy/perplexity/usage ratio；
@@ -86,59 +69,7 @@ class Phase2CodeUsageCollapsePayload:
     # 方向：由每个 diagnostic 字段定义。
     per_code_diagnostics: tuple[Phase2PerCodeUsageDiagnostic, ...] = ()
 
-    def __post_init__(self) -> None:
-        """标准化 payload 字段。"""
-
-        object.__setattr__(
-            self,
-            "selected_code_ids",
-            tuple(int(value) for value in self.selected_code_ids),
-        )
-        object.__setattr__(
-            self,
-            "assigned_code_labels",
-            tuple(int(value) for value in self.assigned_code_labels),
-        )
-        object.__setattr__(
-            self,
-            "per_code_diagnostics",
-            tuple(
-                item
-                if isinstance(item, Phase2PerCodeUsageDiagnostic)
-                else Phase2PerCodeUsageDiagnostic.from_dict(item)
-                for item in self.per_code_diagnostics
-            ),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return {
-            "selected_code_ids": list(self.selected_code_ids),
-            "assigned_code_labels": list(self.assigned_code_labels),
-            "per_code_diagnostics": [
-                item.to_dict() for item in self.per_code_diagnostics
-            ],
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2CodeUsageCollapsePayload":
-        """从 dict 恢复 payload。"""
-
-        return cls(
-            selected_code_ids=tuple(int(v) for v in payload.get("selected_code_ids", ())),
-            assigned_code_labels=tuple(
-                int(v) for v in payload.get("assigned_code_labels", ())
-            ),
-            per_code_diagnostics=tuple(
-                Phase2PerCodeUsageDiagnostic.from_dict(item)
-                for item in payload.get("per_code_diagnostics", ())
-            ),
-        )
-
-
-@dataclass(frozen=True)
-class Phase2CodeUsageCollapseMetrics:
+class Phase2CodeUsageCollapseMetrics(PydanticBaseModel):
     """Layer 4 code usage and collapse raw metrics。"""
 
     # selected code 分布熵。用途：检测 code collapse；方向：越大表示使用越分散，
@@ -176,20 +107,7 @@ class Phase2CodeUsageCollapseMetrics:
     # 方向：越大越可靠。
     min_per_code_sample_count: int
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2CodeUsageCollapseMetrics":
-        """从 dict 恢复 metrics。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase2CodeUsageCollapseThresholds:
+class Phase2CodeUsageCollapseThresholds(PydanticBaseModel):
     """Layer 4 code usage and collapse 阈值配置。"""
 
     # active code 数固定下限。方向：active_code_count 越大越好。
@@ -223,18 +141,6 @@ class Phase2CodeUsageCollapseThresholds:
             self.active_code_count_min,
             int(round(float(num_archetypes) * self.active_code_ratio_min)),
         )
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2CodeUsageCollapseThresholds":
-        """从 dict 恢复 thresholds。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
 
 def evaluate_code_usage_collapse_rules(
     metrics: Phase2CodeUsageCollapseMetrics,

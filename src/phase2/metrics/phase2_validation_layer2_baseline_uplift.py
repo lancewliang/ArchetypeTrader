@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Mapping
-
-from src.utils import _dataclass_from_mapping
+from src.utils import PydanticBaseModel
 
 from .phase2_metric_results import Phase2LayerResult
 from .phase2_validation_rule_helpers import (
@@ -16,8 +13,7 @@ from .phase2_validation_rule_helpers import (
 )
 
 
-@dataclass(frozen=True)
-class Phase2BaselineUpliftPayload:
+class Phase2BaselineUpliftPayload(PydanticBaseModel):
     """Layer 2 baseline uplift raw metrics 计算的中间 payload。"""
 
     # selector greedy policy 的逐样本净 return。用途：和各 baseline 做样本级/均值
@@ -39,51 +35,7 @@ class Phase2BaselineUpliftPayload:
     # random baseline 使用的随机种子。用途：复现实验；方向：过程数据，无好坏方向。
     random_seed: int | None = None
 
-    def __post_init__(self) -> None:
-        """标准化收益序列。"""
-
-        for field_name in (
-            "selector_returns",
-            "assigned_label_returns",
-            "random_returns",
-            "oracle_returns",
-        ):
-            object.__setattr__(
-                self,
-                field_name,
-                tuple(float(value) for value in getattr(self, field_name)),
-            )
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return {
-            "selector_returns": list(self.selector_returns),
-            "assigned_label_returns": list(self.assigned_label_returns),
-            "random_returns": list(self.random_returns),
-            "oracle_returns": list(self.oracle_returns),
-            "random_seed": self.random_seed,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2BaselineUpliftPayload":
-        """从 dict 恢复 payload。"""
-
-        return cls(
-            selector_returns=tuple(float(v) for v in payload.get("selector_returns", ())),
-            assigned_label_returns=tuple(
-                float(v) for v in payload.get("assigned_label_returns", ())
-            ),
-            random_returns=tuple(float(v) for v in payload.get("random_returns", ())),
-            oracle_returns=tuple(float(v) for v in payload.get("oracle_returns", ())),
-            random_seed=(
-                int(seed) if (seed := payload.get("random_seed")) is not None else None
-            ),
-        )
-
-
-@dataclass(frozen=True)
-class Phase2BaselineUpliftMetrics:
+class Phase2BaselineUpliftMetrics(PydanticBaseModel):
     """Layer 2 baseline uplift raw metrics。"""
 
     # assigned-label baseline 平均 return。用途：对比 Phase I label 复用策略；方向：
@@ -126,20 +78,7 @@ class Phase2BaselineUpliftMetrics:
     # 方向：越大越好。
     beat_random_rate: float
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2BaselineUpliftMetrics":
-        """从 dict 恢复 metrics。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase2BaselineUpliftThresholds:
+class Phase2BaselineUpliftThresholds(PydanticBaseModel):
     """Layer 2 baseline uplift 阈值配置。"""
 
     # uplift_vs_random 下限。方向：uplift_vs_random 越大越好。
@@ -159,18 +98,6 @@ class Phase2BaselineUpliftThresholds:
 
     # regret_to_oracle warning 上限。方向：regret_to_oracle 越小越好。
     regret_to_oracle_warn_max: float = 10.0
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2BaselineUpliftThresholds":
-        """从 dict 恢复 thresholds。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
 
 def evaluate_baseline_uplift_rules(
     metrics: Phase2BaselineUpliftMetrics,

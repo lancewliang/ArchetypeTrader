@@ -16,10 +16,12 @@ selection metrics。validation/test 的可排序结果由 ``phase2_metric_result
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
+from pydantic import ConfigDict
 import torch
+
+from src.utils import PydanticBaseModel
 
 if TYPE_CHECKING:
     from ..rl.phase2_double_dqn_loss import Phase2DoubleDqnLossOutput
@@ -37,8 +39,7 @@ def _tensor_to_float(value: torch.Tensor | float | int | None) -> float:
     return float(value)
 
 
-@dataclass
-class Phase2Metrics:
+class Phase2Metrics(PydanticBaseModel):
     """Phase II Double DQN 训练期基础指标。
 
     功能说明:
@@ -50,6 +51,12 @@ class Phase2Metrics:
         ``averaged()``；日志、checkpoint metadata 或 artifact store 保存时调用
         ``to_dict()``。
     """
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        extra="ignore",
+        frozen=False,
+    )
 
     # 训练阶段名称，例如 "train" 或 "eval"。用于日志和 report 分组。
     stage: str | None = None
@@ -191,28 +198,5 @@ class Phase2Metrics:
                 **payload,
             }
         return payload
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2Metrics":
-        """从 dict 恢复训练期基础指标。"""
-
-        return cls(
-            stage=payload.get("stage"),
-            split=payload.get("split"),
-            epoch=int(payload["epoch"]) if payload.get("epoch") is not None else None,
-            num_samples=int(payload.get("num_samples", 0)),
-            num_updates=int(payload.get("num_updates", 0)),
-            total_loss=float(payload.get("total_loss", 0.0)),
-            td_loss=float(payload.get("td_loss", 0.0)),
-            imitation_loss=float(payload.get("imitation_loss", 0.0)),
-            selected_q_mean=float(payload.get("selected_q_mean", 0.0)),
-            td_target_mean=float(payload.get("td_target_mean", 0.0)),
-            reward_mean=float(payload.get("reward_mean", 0.0)),
-            greedy_next_action_mean=float(
-                payload.get("greedy_next_action_mean", 0.0)
-            ),
-            grad_norm=float(payload.get("grad_norm", 0.0)),
-        )
-
 
 __all__ = ["Phase2Metrics"]

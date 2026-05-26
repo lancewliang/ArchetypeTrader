@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Mapping
-
-from src.utils import _dataclass_from_mapping
+from src.utils import PydanticBaseModel
 
 from .phase2_metric_results import Phase2LayerResult
 from .phase2_validation_rule_helpers import (
@@ -16,8 +13,7 @@ from .phase2_validation_rule_helpers import (
 )
 
 
-@dataclass(frozen=True)
-class Phase2DemonstrationConsistencyPayload:
+class Phase2DemonstrationConsistencyPayload(PydanticBaseModel):
     """Layer 3 raw metrics 计算的中间 payload。"""
 
     # selector 实际选择的 code id 序列。用途：和 assigned label 比较一致性/偏离；
@@ -44,70 +40,7 @@ class Phase2DemonstrationConsistencyPayload:
     # baseline，无直接好坏方向。
     assigned_label_q_values: tuple[float, ...] = ()
 
-    def __post_init__(self) -> None:
-        """标准化 payload 字段。"""
-
-        object.__setattr__(
-            self,
-            "selected_code_ids",
-            tuple(int(value) for value in self.selected_code_ids),
-        )
-        object.__setattr__(
-            self,
-            "assigned_code_labels",
-            tuple(int(value) for value in self.assigned_code_labels),
-        )
-        for field_name in (
-            "selector_returns",
-            "assigned_label_returns",
-            "selected_q_values",
-            "assigned_label_q_values",
-        ):
-            object.__setattr__(
-                self,
-                field_name,
-                tuple(float(value) for value in getattr(self, field_name)),
-            )
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return {
-            "selected_code_ids": list(self.selected_code_ids),
-            "assigned_code_labels": list(self.assigned_code_labels),
-            "selector_returns": list(self.selector_returns),
-            "assigned_label_returns": list(self.assigned_label_returns),
-            "selected_q_values": list(self.selected_q_values),
-            "assigned_label_q_values": list(self.assigned_label_q_values),
-        }
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2DemonstrationConsistencyPayload":
-        """从 dict 恢复 payload。"""
-
-        return cls(
-            selected_code_ids=tuple(int(v) for v in payload.get("selected_code_ids", ())),
-            assigned_code_labels=tuple(
-                int(v) for v in payload.get("assigned_code_labels", ())
-            ),
-            selector_returns=tuple(float(v) for v in payload.get("selector_returns", ())),
-            assigned_label_returns=tuple(
-                float(v) for v in payload.get("assigned_label_returns", ())
-            ),
-            selected_q_values=tuple(
-                float(v) for v in payload.get("selected_q_values", ())
-            ),
-            assigned_label_q_values=tuple(
-                float(v) for v in payload.get("assigned_label_q_values", ())
-            ),
-        )
-
-
-@dataclass(frozen=True)
-class Phase2DemonstrationConsistencyMetrics:
+class Phase2DemonstrationConsistencyMetrics(PydanticBaseModel):
     """Layer 3 demonstration consistency raw metrics。"""
 
     # selected code 等于 Phase I assigned label 的比例。用途：衡量 selector 对
@@ -138,23 +71,7 @@ class Phase2DemonstrationConsistencyMetrics:
     # 的平均收益质量；方向：越大越好。
     deviation_return_delta: float
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2DemonstrationConsistencyMetrics":
-        """从 dict 恢复 metrics。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase2DemonstrationConsistencyThresholds:
+class Phase2DemonstrationConsistencyThresholds(PydanticBaseModel):
     """Layer 3 demonstration consistency 阈值配置。"""
 
     # label_match_rate 下限。方向：过低不好。
@@ -174,21 +91,6 @@ class Phase2DemonstrationConsistencyThresholds:
 
     # label_q_margin warning 下限。方向：越大越好。
     label_q_margin_warn_min: float = 0.0
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2DemonstrationConsistencyThresholds":
-        """从 dict 恢复 thresholds。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
 
 def evaluate_demonstration_consistency_rules(
     metrics: Phase2DemonstrationConsistencyMetrics,

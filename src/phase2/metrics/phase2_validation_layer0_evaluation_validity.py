@@ -6,10 +6,7 @@ hard gate 失败都表示该 checkpoint 的评估结果不可用于 best checkpo
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Mapping
-
-from src.utils import _dataclass_from_mapping
+from src.utils import PydanticBaseModel
 
 from .phase2_metric_results import Phase2LayerResult
 from .phase2_validation_rule_helpers import (
@@ -19,8 +16,7 @@ from .phase2_validation_rule_helpers import (
 )
 
 
-@dataclass(frozen=True)
-class Phase2EvaluationValidityPayload:
+class Phase2EvaluationValidityPayload(PydanticBaseModel):
     """Layer 0 raw metrics 计算的中间 payload。"""
 
     # 当前评估 split 名称，例如 validation/test。用途：落盘路径和 report 分组；
@@ -49,20 +45,7 @@ class Phase2EvaluationValidityPayload:
     # 不直接作为好坏排序。
     num_archetypes: int
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2EvaluationValidityPayload":
-        """从 dict 恢复 payload。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase2EvaluationValidityMetrics:
+class Phase2EvaluationValidityMetrics(PydanticBaseModel):
     """Layer 0 evaluation validity raw metrics。"""
 
     # 当前 split 参与评估的样本数。用途：确认收益、分位数和 per-code 统计有足够
@@ -93,20 +76,7 @@ class Phase2EvaluationValidityMetrics:
     # 方向：必须等于 True。
     visible_state_contract_valid: bool
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2EvaluationValidityMetrics":
-        """从 dict 恢复 metrics。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase2EvaluationValidityThresholds:
+class Phase2EvaluationValidityThresholds(PydanticBaseModel):
     """Layer 0 evaluation validity 阈值配置。"""
 
     # 最小评估样本数。用途：过滤统计不稳定的评估；方向：num_samples 越大越好。
@@ -133,21 +103,6 @@ class Phase2EvaluationValidityThresholds:
     # 是否要求 visible state 契约有效。用途：泄露防护；方向：
     # visible_state_contract_valid 必须等于该值。
     visible_state_contract_required: bool = True
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2EvaluationValidityThresholds":
-        """从 dict 恢复 thresholds。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
 
 def evaluate_evaluation_validity_rules(
     metrics: Phase2EvaluationValidityMetrics,

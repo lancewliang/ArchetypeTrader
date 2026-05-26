@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping
+from typing import Any
 
-from src.utils import _dataclass_from_mapping
+from pydantic import Field
+
+from src.utils import PydanticBaseModel
 
 from .phase2_metric_results import Phase2LayerResult
 from .phase2_validation_rule_helpers import (
@@ -15,8 +16,7 @@ from .phase2_validation_rule_helpers import (
 )
 
 
-@dataclass(frozen=True)
-class Phase2PredictabilityPayload:
+class Phase2PredictabilityPayload(PydanticBaseModel):
     """Selector 可预测性 raw metrics 计算的中间 payload。
 
     该 payload 保存 probe 训练诊断、confusion matrix 和随机种子。它只用于
@@ -42,62 +42,8 @@ class Phase2PredictabilityPayload:
     # probe 随机种子。用途：复现实验；方向：过程数据，无好坏方向。
     probe_seed: int
 
-    def __post_init__(self) -> None:
-        """标准化 payload 字段。"""
 
-        object.__setattr__(self, "probe_train_accuracy", float(self.probe_train_accuracy))
-        object.__setattr__(
-            self,
-            "probe_validation_accuracy",
-            float(self.probe_validation_accuracy),
-        )
-        object.__setattr__(
-            self,
-            "probe_predictability_gap",
-            float(self.probe_predictability_gap),
-        )
-        object.__setattr__(
-            self,
-            "probe_confusion_matrix",
-            tuple(
-                tuple(int(value) for value in row)
-                for row in self.probe_confusion_matrix
-            ),
-        )
-        object.__setattr__(self, "probe_seed", int(self.probe_seed))
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return {
-            "probe_train_accuracy": self.probe_train_accuracy,
-            "probe_validation_accuracy": self.probe_validation_accuracy,
-            "probe_predictability_gap": self.probe_predictability_gap,
-            "probe_confusion_matrix": [
-                [int(value) for value in row]
-                for row in self.probe_confusion_matrix
-            ],
-            "probe_seed": self.probe_seed,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2PredictabilityPayload":
-        """从 dict 恢复可预测性 payload。"""
-
-        return cls(
-            probe_train_accuracy=float(payload["probe_train_accuracy"]),
-            probe_validation_accuracy=float(payload["probe_validation_accuracy"]),
-            probe_predictability_gap=float(payload["probe_predictability_gap"]),
-            probe_confusion_matrix=tuple(
-                tuple(int(value) for value in row)
-                for row in payload.get("probe_confusion_matrix", ())
-            ),
-            probe_seed=int(payload["probe_seed"]),
-        )
-
-
-@dataclass(frozen=True)
-class Phase2PredictabilityMetrics:
+class Phase2PredictabilityMetrics(PydanticBaseModel):
     """Selector 可预测性 raw metrics。"""
 
     # 用可见状态预测 selected code 的 top-1 accuracy。用途：验证 selector 决策是否
@@ -123,20 +69,8 @@ class Phase2PredictabilityMetrics:
     # 状态对 code 选择的信息增益；方向：越大越好。
     mutual_information_lift: float
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
 
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2PredictabilityMetrics":
-        """从 dict 恢复 metrics。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase2PredictabilityThresholds:
+class Phase2PredictabilityThresholds(PydanticBaseModel):
     """Selector 可预测性阈值配置。"""
 
     # top-1 accuracy 固定下限。方向：probe_top1_accuracy 越大越好。
@@ -171,20 +105,8 @@ class Phase2PredictabilityThresholds:
 
         return max(self.probe_top3_floor, self.probe_top3_k_factor / num_archetypes)
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
 
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2PredictabilityThresholds":
-        """从 dict 恢复 thresholds。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase2GeneralizationStabilityPayload:
+class Phase2GeneralizationStabilityPayload(PydanticBaseModel):
     """Layer 5 raw metrics 计算的中间 payload。"""
 
     # train split 上的 selector score/return 摘要。用途：计算 train-val gap；
@@ -207,68 +129,7 @@ class Phase2GeneralizationStabilityPayload:
     # 字段定义。
     predictability_payload: Phase2PredictabilityPayload | None = None
 
-    def __post_init__(self) -> None:
-        """标准化 history 字段。"""
-
-        for field_name in (
-            "validation_score_history",
-            "selected_action_churn_history",
-            "q_value_scale_history",
-        ):
-            object.__setattr__(
-                self,
-                field_name,
-                tuple(float(value) for value in getattr(self, field_name)),
-            )
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return {
-            "train_score": self.train_score,
-            "validation_score_history": list(self.validation_score_history),
-            "selected_action_churn_history": list(
-                self.selected_action_churn_history
-            ),
-            "q_value_scale_history": list(self.q_value_scale_history),
-            "predictability_payload": (
-                self.predictability_payload.to_dict()
-                if self.predictability_payload is not None
-                else None
-            ),
-        }
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2GeneralizationStabilityPayload":
-        """从 dict 恢复 payload。"""
-
-        predictability_payload = payload.get("predictability_payload")
-        return cls(
-            train_score=(
-                float(score) if (score := payload.get("train_score")) is not None else None
-            ),
-            validation_score_history=tuple(
-                float(v) for v in payload.get("validation_score_history", ())
-            ),
-            selected_action_churn_history=tuple(
-                float(v) for v in payload.get("selected_action_churn_history", ())
-            ),
-            q_value_scale_history=tuple(
-                float(v) for v in payload.get("q_value_scale_history", ())
-            ),
-            predictability_payload=(
-                Phase2PredictabilityPayload.from_dict(predictability_payload)
-                if isinstance(predictability_payload, Mapping)
-                else None
-            ),
-        )
-
-
-@dataclass(frozen=True)
-class Phase2GeneralizationStabilityMetrics:
+class Phase2GeneralizationStabilityMetrics(PydanticBaseModel):
     """Layer 5 generalization and stability raw metrics。"""
 
     # train return/score 与 validation return/score 的差距。用途：识别过拟合；
@@ -321,35 +182,7 @@ class Phase2GeneralizationStabilityMetrics:
     # 方向：由 Phase2PredictabilityMetrics 字段定义。
     predictability: Phase2PredictabilityMetrics | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        payload = asdict(self)
-        if self.predictability is not None:
-            payload["predictability"] = self.predictability.to_dict()
-        return payload
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2GeneralizationStabilityMetrics":
-        """从 dict 恢复 metrics。"""
-
-        base_payload = dict(payload)
-        predictability_payload = base_payload.pop("predictability", None)
-        return cls(
-            **base_payload,
-            predictability=(
-                Phase2PredictabilityMetrics.from_dict(predictability_payload)
-                if isinstance(predictability_payload, Mapping)
-                else None
-            ),
-        )
-
-
-@dataclass(frozen=True)
-class Phase2GeneralizationStabilityThresholds:
+class Phase2GeneralizationStabilityThresholds(PydanticBaseModel):
     """Layer 5 generalization and stability 阈值配置。"""
 
     # train_val_return_gap warning 上限。方向：越小越好。
@@ -378,34 +211,9 @@ class Phase2GeneralizationStabilityThresholds:
 
     # 可预测性阈值集合。用途：生成 predictability warning/reference 指标；
     # 方向：由子阈值字段定义。
-    predictability_thresholds: Phase2PredictabilityThresholds = field(
+    predictability_thresholds: Phase2PredictabilityThresholds = Field(
         default_factory=Phase2PredictabilityThresholds
     )
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        payload = asdict(self)
-        payload["predictability_thresholds"] = self.predictability_thresholds.to_dict()
-        return payload
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2GeneralizationStabilityThresholds":
-        """从 dict 恢复 thresholds。"""
-
-        base_payload = dict(payload)
-        predictability_payload = base_payload.pop("predictability_thresholds", None)
-        return cls(
-            **base_payload,
-            predictability_thresholds=(
-                Phase2PredictabilityThresholds.from_dict(predictability_payload)
-                if isinstance(predictability_payload, Mapping)
-                else Phase2PredictabilityThresholds()
-            ),
-        )
 
 
 def evaluate_generalization_stability_rules(

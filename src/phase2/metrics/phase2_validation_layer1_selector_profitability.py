@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Mapping
-
-from src.utils import _dataclass_from_mapping
+from src.utils import PydanticBaseModel
 
 from .phase2_metric_results import Phase2LayerResult
 from .phase2_validation_rule_helpers import (
@@ -16,8 +13,7 @@ from .phase2_validation_rule_helpers import (
 )
 
 
-@dataclass(frozen=True)
-class Phase2SelectorProfitabilityPayload:
+class Phase2SelectorProfitabilityPayload(PydanticBaseModel):
     """Layer 1 raw metrics 计算的中间 payload。"""
 
     # selector greedy policy 的逐样本净 horizon return。用途：聚合 mean/median/win
@@ -36,58 +32,8 @@ class Phase2SelectorProfitabilityPayload:
     # 通常越小越稳，但过低可能表示不交易。
     selector_turnover: tuple[float, ...] = ()
 
-    def __post_init__(self) -> None:
-        """标准化 tuple 字段。"""
 
-        object.__setattr__(
-            self,
-            "selector_returns",
-            tuple(float(value) for value in self.selector_returns),
-        )
-        object.__setattr__(
-            self,
-            "selector_gross_returns",
-            tuple(float(value) for value in self.selector_gross_returns),
-        )
-        object.__setattr__(
-            self,
-            "selector_fees",
-            tuple(float(value) for value in self.selector_fees),
-        )
-        object.__setattr__(
-            self,
-            "selector_turnover",
-            tuple(float(value) for value in self.selector_turnover),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return {
-            "selector_returns": list(self.selector_returns),
-            "selector_gross_returns": list(self.selector_gross_returns),
-            "selector_fees": list(self.selector_fees),
-            "selector_turnover": list(self.selector_turnover),
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2SelectorProfitabilityPayload":
-        """从 dict 恢复 payload。"""
-
-        return cls(
-            selector_returns=tuple(float(v) for v in payload.get("selector_returns", ())),
-            selector_gross_returns=tuple(
-                float(v) for v in payload.get("selector_gross_returns", ())
-            ),
-            selector_fees=tuple(float(v) for v in payload.get("selector_fees", ())),
-            selector_turnover=tuple(
-                float(v) for v in payload.get("selector_turnover", ())
-            ),
-        )
-
-
-@dataclass(frozen=True)
-class Phase2SelectorProfitabilityMetrics:
+class Phase2SelectorProfitabilityMetrics(PydanticBaseModel):
     """Layer 1 selector profitability raw metrics。"""
 
     # selector 平均净 horizon return。用途：直接衡量策略期望收益；方向：越大越好，
@@ -134,23 +80,8 @@ class Phase2SelectorProfitabilityMetrics:
     # 但过低需结合 return 判断是否退化。
     mean_turnover: float
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
 
-        return asdict(self)
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2SelectorProfitabilityMetrics":
-        """从 dict 恢复 metrics。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase2SelectorProfitabilityThresholds:
+class Phase2SelectorProfitabilityThresholds(PydanticBaseModel):
     """Layer 1 selector profitability 阈值配置。"""
 
     # mean_return 下限。方向：mean_return 越大越好。
@@ -176,20 +107,6 @@ class Phase2SelectorProfitabilityThresholds:
 
     # mean_turnover 上限。方向：mean_turnover 通常越小越稳。
     mean_turnover_max: float = 1.50
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2SelectorProfitabilityThresholds":
-        """从 dict 恢复 thresholds。"""
-
-        return _dataclass_from_mapping(cls, payload)
 
 
 def evaluate_selector_profitability_rules(

@@ -18,8 +18,11 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Literal, Mapping, TypeAlias
+
+from pydantic import Field, field_validator, model_validator
+
+from src.utils import PydanticBaseModel
 
 
 MetricSeverity = Literal["pass", "warn", "fail", "skip"]
@@ -76,8 +79,7 @@ else:
     Phase2LayerPayload: TypeAlias = object
 
 
-@dataclass(frozen=True)
-class Phase2MetricResult:
+class Phase2MetricResult(PydanticBaseModel):
     """单个 Phase II validation metric 的判定结果。"""
 
     # 指标稳定名称。用途：report、JSON 和 rule 追踪；方向：无好坏方向。
@@ -111,41 +113,15 @@ class Phase2MetricResult:
     # 离通过边界越安全，具体含义由 rule helper 生成。
     distance_to_threshold: float | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
+    @field_validator("threshold_value", mode="before")
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2MetricResult":
-        """从 dict 恢复 metric result。"""
+    def _restore_threshold_value(cls, value: Any) -> MetricThresholdValue:
+        """Restore legacy list/tuple threshold payloads."""
 
-        return cls(
-            name=str(payload["name"]),
-            value=payload.get("value"),
-            threshold=str(payload["threshold"]),
-            severity=payload["severity"],  # type: ignore[arg-type]
-            passed=bool(payload["passed"]),
-            layer=str(payload["layer"]),
-            message=str(payload.get("message", "")),
-            threshold_value=_threshold_value_from_payload(
-                payload.get("threshold_value")
-            ),
-            direction=(
-                str(direction)
-                if (direction := payload.get("direction")) is not None
-                else None
-            ),  # type: ignore[arg-type]
-            distance_to_threshold=(
-                float(distance)
-                if (distance := payload.get("distance_to_threshold")) is not None
-                else None
-            ),
-        )
+        return _threshold_value_from_payload(value)
 
 
-@dataclass(frozen=True)
-class Phase2LayerResult:
+class Phase2LayerResult(PydanticBaseModel):
     """单个 Phase II validation layer 的判定结果。"""
 
     # layer 数字编号，0-5。用途：固定展示顺序；方向：无好坏方向。
@@ -160,30 +136,6 @@ class Phase2LayerResult:
     # 本层下属 metric 判定结果。用途：报告阈值细节；方向：由每个 metric 决定。
     metrics: tuple[Phase2MetricResult, ...]
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return {
-            "layer_id": self.layer_id,
-            "name": self.name,
-            "passed": self.passed,
-            "metrics": [metric.to_dict() for metric in self.metrics],
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2LayerResult":
-        """从 dict 恢复 layer result。"""
-
-        return cls(
-            layer_id=int(payload["layer_id"]),
-            name=str(payload["name"]),
-            passed=bool(payload["passed"]),
-            metrics=tuple(
-                Phase2MetricResult.from_dict(metric)
-                for metric in payload.get("metrics", ())
-            ),
-        )
-
 
 def _threshold_value_from_payload(value: Any) -> MetricThresholdValue:
     """恢复机器可读阈值。"""
@@ -197,32 +149,7 @@ def _threshold_value_from_payload(value: Any) -> MetricThresholdValue:
     return float(value)
 
 
-def _dataclass_from_payload(
-    dataclass_type: type[Any],
-    payload: Mapping[str, Any],
-) -> Any:
-    """用 payload 中匹配 dataclass 字段的键恢复对象。"""
-
-    allowed_fields = {field.name for field in fields(dataclass_type)}
-    return dataclass_type(
-        **{key: value for key, value in payload.items() if key in allowed_fields}
-    )
-
-
-def _payload_to_dict(value: Any) -> Any:
-    """递归序列化 metrics/payload 中的 dataclass 和容器。"""
-
-    if hasattr(value, "to_dict") and callable(value.to_dict):
-        return value.to_dict()
-    if isinstance(value, Mapping):
-        return {str(key): _payload_to_dict(item) for key, item in value.items()}
-    if isinstance(value, tuple | list):
-        return [_payload_to_dict(item) for item in value]
-    return value
-
-
-@dataclass(frozen=True)
-class Phase2ValidationMetrics:
+class Phase2ValidationMetrics(PydanticBaseModel):
     """Phase II validation 核心指标 payload。
 
     功能说明:
@@ -260,20 +187,8 @@ class Phase2ValidationMetrics:
     # 越小越稳，但过低也可能表示策略退化为不交易，需要结合 return。
     mean_turnover: float
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
 
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ValidationMetrics":
-        """从 dict 恢复 validation 核心指标。"""
-
-        return _dataclass_from_payload(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase2ReportPairProfitabilityPayloadRow:
+class Phase2ReportPairProfitabilityPayloadRow(PydanticBaseModel):
     """Report payload 中 Dominant Pair heatmap 的单个 cell 聚合行。"""
 
     morphology: str
@@ -289,44 +204,8 @@ class Phase2ReportPairProfitabilityPayloadRow:
     dominant_selected_code: int | None
     dominant_selected_code_ratio: float
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
 
-        return asdict(self)
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2ReportPairProfitabilityPayloadRow":
-        """从 dict 恢复 pair profitability payload row。"""
-
-        return cls(
-            morphology=str(payload.get("morphology", "")),
-            motif=str(payload.get("motif", "")),
-            support=int(payload.get("support", 0)),
-            selector_mean_return=float(payload.get("selector_mean_return", 0.0)),
-            kl_mean_return=float(payload.get("kl_mean_return", 0.0)),
-            random_mean_return=float(payload.get("random_mean_return", 0.0)),
-            mean_advantage_vs_kl=float(payload.get("mean_advantage_vs_kl", 0.0)),
-            mean_advantage_vs_random=float(
-                payload.get("mean_advantage_vs_random", 0.0)
-            ),
-            win_rate=float(payload.get("win_rate", 0.0)),
-            fee_drag_ratio=float(payload.get("fee_drag_ratio", 0.0)),
-            dominant_selected_code=(
-                int(value)
-                if (value := payload.get("dominant_selected_code")) is not None
-                else None
-            ),
-            dominant_selected_code_ratio=float(
-                payload.get("dominant_selected_code_ratio", 0.0)
-            ),
-        )
-
-
-@dataclass(frozen=True)
-class Phase2ReportCodeDiagnosticPayloadRow:
+class Phase2ReportCodeDiagnosticPayloadRow(PydanticBaseModel):
     """Report payload 中 code 级诊断表的单个聚合行。"""
 
     code_id: int
@@ -355,131 +234,43 @@ class Phase2ReportCodeDiagnosticPayloadRow:
     status: str
     risk_reason: str
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return asdict(self)
-
+    @field_validator(
+        "dominant_morphology",
+        "dominant_motif",
+        "dominant_pair",
+        mode="before",
+    )
     @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2ReportCodeDiagnosticPayloadRow":
-        """从 dict 恢复 code diagnostic payload row。"""
+    def _empty_string_to_none(cls, value: Any) -> str | None:
+        """Keep legacy optional string normalization."""
 
-        return cls(
-            code_id=int(payload.get("code_id", 0)),
-            selector_support=int(payload.get("selector_support", 0)),
-            selector_usage_ratio=float(payload.get("selector_usage_ratio", 0.0)),
-            kl_support=int(payload.get("kl_support", 0)),
-            kl_usage_ratio=float(payload.get("kl_usage_ratio", 0.0)),
-            usage_delta=float(payload.get("usage_delta", 0.0)),
-            selector_mean_return=float(payload.get("selector_mean_return", 0.0)),
-            kl_mean_return=float(payload.get("kl_mean_return", 0.0)),
-            uplift_vs_kl=float(payload.get("uplift_vs_kl", 0.0)),
-            selector_win_rate=float(payload.get("selector_win_rate", 0.0)),
-            selector_fee_drag_ratio=float(
-                payload.get("selector_fee_drag_ratio", 0.0)
-            ),
-            selector_turnover=float(payload.get("selector_turnover", 0.0)),
-            dominant_morphology=_optional_str(payload.get("dominant_morphology")),
-            dominant_morphology_ratio=float(
-                payload.get("dominant_morphology_ratio", 0.0)
-            ),
-            dominant_motif=_optional_str(payload.get("dominant_motif")),
-            dominant_motif_ratio=float(payload.get("dominant_motif_ratio", 0.0)),
-            dominant_pair=_optional_str(payload.get("dominant_pair")),
-            dominant_pair_ratio=float(payload.get("dominant_pair_ratio", 0.0)),
-            mean_q_margin=float(payload.get("mean_q_margin", 0.0)),
-            low_confidence_ratio=float(payload.get("low_confidence_ratio", 0.0)),
-            profitable_deviation_count=int(
-                payload.get("profitable_deviation_count", 0)
-            ),
-            unprofitable_deviation_count=int(
-                payload.get("unprofitable_deviation_count", 0)
-            ),
-            unprofitable_deviation_rate=float(
-                payload.get("unprofitable_deviation_rate", 0.0)
-            ),
-            status=str(payload.get("status", "warn")),
-            risk_reason=str(payload.get("risk_reason", "")),
-        )
+        return None if value in (None, "") else str(value)
 
 
-@dataclass(frozen=True)
-class Phase2ReportCodeCount:
+class Phase2ReportCodeCount(PydanticBaseModel):
     """Report payload 中某个 code 的样本数。"""
 
     code_id: int
     count: int
 
-    def to_dict(self) -> dict[str, int]:
-        """序列化为普通 dict。"""
 
-        return {"code_id": self.code_id, "count": self.count}
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ReportCodeCount":
-        """从 dict 恢复 code count。"""
-
-        return cls(
-            code_id=int(payload.get("code_id", 0)),
-            count=int(payload.get("count", 0)),
-        )
-
-
-@dataclass(frozen=True)
-class Phase2ReportCodeUsageDistribution:
+class Phase2ReportCodeUsageDistribution(PydanticBaseModel):
     """Report payload 中 selector 和 assigned-label 的 code 使用分布。"""
 
     selector: tuple[Phase2ReportCodeCount, ...] = ()
     kl: tuple[Phase2ReportCodeCount, ...] = ()
 
-    def __post_init__(self) -> None:
-        """标准化 code count 行。"""
-
-        object.__setattr__(
-            self,
-            "selector",
-            tuple(_code_count_from_value(item) for item in (self.selector or ())),
-        )
-        object.__setattr__(
-            self,
-            "kl",
-            tuple(_code_count_from_value(item) for item in (self.kl or ())),
-        )
-
-    def to_dict(self) -> dict[str, list[dict[str, int]]]:
-        """序列化为普通 dict。"""
-
-        return {
-            "selector": [item.to_dict() for item in self.selector],
-            "kl": [item.to_dict() for item in self.kl],
-        }
-
+    @field_validator("selector", "kl", mode="before")
     @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase2ReportCodeUsageDistribution":
-        """从 dict 恢复 code usage distribution。"""
+    def _restore_code_counts(cls, value: Any) -> tuple[Phase2ReportCodeCount, ...]:
+        """Keep legacy support for dict and object-like code count rows."""
 
-        return cls(
-            selector=tuple(
-                Phase2ReportCodeCount.from_dict(item)
-                for item in (payload.get("selector", ()) or ())
-                if isinstance(item, Mapping)
-            ),
-            kl=tuple(
-                Phase2ReportCodeCount.from_dict(item)
-                for item in (payload.get("kl", ()) or ())
-                if isinstance(item, Mapping)
-            ),
-        )
+        if value is None:
+            return ()
+        return tuple(_code_count_from_value(item) for item in value)
 
 
-@dataclass(frozen=True)
-class Phase2ReportCumulativeReturns:
+class Phase2ReportCumulativeReturns(PydanticBaseModel):
     """Report payload 中各 baseline 的累计收益曲线。"""
 
     selector: tuple[float, ...] = ()
@@ -488,55 +279,17 @@ class Phase2ReportCumulativeReturns:
     oracle: tuple[float, ...] = ()
     hold: tuple[float, ...] = ()
 
-    def __post_init__(self) -> None:
-        """标准化累计收益序列。"""
-
-        for name in ("selector", "kl", "random", "oracle", "hold"):
-            object.__setattr__(
-                self,
-                name,
-                tuple(float(value) for value in getattr(self, name)),
-            )
-
-    def to_dict(self) -> dict[str, list[float]]:
-        """序列化为普通 dict。"""
-
-        return {
-            "selector": list(self.selector),
-            "kl": list(self.kl),
-            "random": list(self.random),
-            "oracle": list(self.oracle),
-            "hold": list(self.hold),
-        }
-
+    @field_validator("selector", "kl", "random", "oracle", "hold", mode="before")
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ReportCumulativeReturns":
-        """从 dict 恢复累计收益曲线。"""
+    def _restore_float_tuple(cls, value: Any) -> tuple[float, ...]:
+        """Keep legacy cumulative-return sequence normalization."""
 
-        return cls(
-            selector=_float_tuple(payload.get("selector", ())),
-            kl=_float_tuple(payload.get("kl", ())),
-            random=_float_tuple(payload.get("random", ())),
-            oracle=_float_tuple(payload.get("oracle", ())),
-            hold=_float_tuple(payload.get("hold", ())),
-        )
-
-
-def _optional_str(value: Any) -> str | None:
-    """把空值标准化为 None，其他值转为 str。"""
-
-    return None if value in (None, "") else str(value)
-
-
-def _float_tuple(values: Any) -> tuple[float, ...]:
-    """把序列值标准化为 float tuple。"""
-
-    if isinstance(values, str | bytes):
-        return ()
-    try:
-        return tuple(float(value) for value in values)
-    except TypeError:
-        return ()
+        if value is None or isinstance(value, str | bytes):
+            return ()
+        try:
+            return tuple(float(item) for item in value)
+        except TypeError:
+            return ()
 
 
 def _code_count_from_value(value: Any) -> Phase2ReportCodeCount:
@@ -552,8 +305,7 @@ def _code_count_from_value(value: Any) -> Phase2ReportCodeCount:
     )
 
 
-@dataclass(frozen=True)
-class Phase2ValidationPayloads:
+class Phase2ValidationPayloads(PydanticBaseModel):
     """Phase II validation/report 需要复用的聚合 payload。
 
     本对象只保存 evaluator 已经聚合好的过程数据和诊断数据，不保存完整逐样本
@@ -562,34 +314,31 @@ class Phase2ValidationPayloads:
 
     # Layer 0 评估可信度过程数据。用途：审计 split、epoch、样本数和失败计数；
     # 方向：过程数据本身无排序方向，由 Layer 0 metrics 转换为好坏判定。
-    evaluation_validity_payload: Phase2EvaluationValidityPayload | None = None
+    evaluation_validity_payload: Any | None = None
 
     # Layer 1 selector 收益过程数据。用途：保存收益、gross return、fee、turnover
     # 序列以便复查聚合指标；方向：过程数据无直接方向。
-    selector_profitability_payload: Phase2SelectorProfitabilityPayload | None = None
+    selector_profitability_payload: Any | None = None
 
     # Layer 2 baseline 对比过程数据。用途：保存 selector/assigned/random/oracle
     # return 序列；方向：过程数据无直接方向。
-    baseline_uplift_payload: Phase2BaselineUpliftPayload | None = None
+    baseline_uplift_payload: Any | None = None
 
     # Layer 3 demonstration consistency 过程数据。用途：保存 selected/assigned code、
     # return 和 Q value 序列；方向：过程数据无直接方向。
-    demonstration_consistency_payload: Phase2DemonstrationConsistencyPayload | None = None
+    demonstration_consistency_payload: Any | None = None
 
     # Layer 4 code usage 过程数据。用途：保存 selected code 分布和 per-code 诊断；
     # 方向：过程数据无直接方向。
-    code_usage_collapse_payload: Phase2CodeUsageCollapsePayload | None = None
+    code_usage_collapse_payload: Any | None = None
 
     # Layer 5 泛化稳定性过程数据。用途：保存 score/churn/Q scale 历史和 probe
     # payload；方向：过程数据无直接方向。
-    generalization_stability_payload: Phase2GeneralizationStabilityPayload | None = None
+    generalization_stability_payload: Any | None = None
 
     # Report per-code 盈利对比行。默认从 code_usage_collapse_payload 的
     # per_code_diagnostics 复用，避免重复组装同一对象。
-    per_code_profitability_comparison: tuple[
-        "Phase2PerCodeUsageDiagnostic",
-        ...,
-    ] = ()
+    per_code_profitability_comparison: tuple[Any, ...] = ()
 
     # Report Dominant Pair heatmap 行。用途：展示 morphology/motif 组合收益。
     selector_pair_profitability_matrix: tuple[
@@ -601,16 +350,37 @@ class Phase2ValidationPayloads:
     code_diagnostics: tuple[Phase2ReportCodeDiagnosticPayloadRow, ...] = ()
 
     # Report code usage 分布。用途：展示 selector 与 assigned-label 使用差异。
-    codebook_usage_distribution: Phase2ReportCodeUsageDistribution = field(
+    codebook_usage_distribution: Phase2ReportCodeUsageDistribution = Field(
         default_factory=Phase2ReportCodeUsageDistribution
     )
 
     # Report 各 baseline 累计收益曲线。用途：HTML 静态曲线和 JSON payload。
-    oracle_label_cumulative_returns: Phase2ReportCumulativeReturns = field(
+    oracle_label_cumulative_returns: Phase2ReportCumulativeReturns = Field(
         default_factory=Phase2ReportCumulativeReturns
     )
 
-    def __post_init__(self) -> None:
+    @field_validator("codebook_usage_distribution", mode="before")
+    @classmethod
+    def _default_codebook_usage_distribution(
+        cls,
+        value: Any,
+    ) -> Phase2ReportCodeUsageDistribution | Any:
+        """Use an empty distribution for legacy null payloads."""
+
+        return Phase2ReportCodeUsageDistribution() if value is None else value
+
+    @field_validator("oracle_label_cumulative_returns", mode="before")
+    @classmethod
+    def _default_cumulative_returns(
+        cls,
+        value: Any,
+    ) -> Phase2ReportCumulativeReturns | Any:
+        """Use empty cumulative returns for legacy null payloads."""
+
+        return Phase2ReportCumulativeReturns() if value is None else value
+
+    @model_validator(mode="after")
+    def _normalize_nested_payloads(self) -> "Phase2ValidationPayloads":
         """标准化 validation/report payload 的嵌套强类型字段。"""
 
         from .phase2_validation_layer4_code_usage_collapse import (
@@ -680,41 +450,7 @@ class Phase2ValidationPayloads:
                 "oracle_label_cumulative_returns",
                 Phase2ReportCumulativeReturns(),
             )
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return {
-            "evaluation_validity_payload": _payload_to_dict(
-                self.evaluation_validity_payload
-            ),
-            "selector_profitability_payload": _payload_to_dict(
-                self.selector_profitability_payload
-            ),
-            "baseline_uplift_payload": _payload_to_dict(self.baseline_uplift_payload),
-            "demonstration_consistency_payload": _payload_to_dict(
-                self.demonstration_consistency_payload
-            ),
-            "code_usage_collapse_payload": _payload_to_dict(
-                self.code_usage_collapse_payload
-            ),
-            "generalization_stability_payload": _payload_to_dict(
-                self.generalization_stability_payload
-            ),
-            "per_code_profitability_comparison": _payload_to_dict(
-                self.per_code_profitability_comparison
-            ),
-            "selector_pair_profitability_matrix": _payload_to_dict(
-                self.selector_pair_profitability_matrix
-            ),
-            "code_diagnostics": _payload_to_dict(self.code_diagnostics),
-            "codebook_usage_distribution": _payload_to_dict(
-                self.codebook_usage_distribution
-            ),
-            "oracle_label_cumulative_returns": _payload_to_dict(
-                self.oracle_label_cumulative_returns
-            ),
-        }
+        return self
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ValidationPayloads":
@@ -817,8 +553,7 @@ class Phase2ValidationPayloads:
         )
 
 
-@dataclass(frozen=True)
-class Phase2ValidationResult:
+class Phase2ValidationResult(PydanticBaseModel):
     """Phase II validation 结果摘要。
 
     功能说明:
@@ -845,56 +580,55 @@ class Phase2ValidationResult:
 
     # Layer 0-5 强类型 raw metrics 和本层中间 payload。用途：完整审计每层聚合
     # 指标；方向：由具体 metrics 字段定义。
-    layer_computations: tuple[Phase2LayerComputation, ...] = ()
+    layer_computations: tuple[Any, ...] = ()
 
     # 报表和诊断卡片复用的聚合 payload。用途：HTML/JSON report 展示；方向：
     # 展示数据，无直接排序方向。
     payloads: Phase2ValidationPayloads | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return {
-            "metrics": self.metrics.to_dict(),
-            "layers": [layer.to_dict() for layer in self.layers],
-            "layer_computations": [
-                computation.to_dict() for computation in self.layer_computations
-            ],
-            "payloads": (
-                self.payloads.to_dict() if self.payloads is not None else None
-            ),
-        }
-
+    @model_validator(mode="before")
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ValidationResult":
-        """从 dict 恢复 validation result。"""
+    def _restore_validation_result_payload(cls, payload: Any) -> Any:
+        """Restore nested validation result fields from dict payloads."""
 
+        if not isinstance(payload, Mapping):
+            return payload
         metrics_payload = payload.get("metrics")
-        if not isinstance(metrics_payload, Mapping):
+        if isinstance(metrics_payload, Phase2ValidationMetrics):
+            restored_metrics = metrics_payload
+        elif isinstance(metrics_payload, Mapping):
+            restored_metrics = Phase2ValidationMetrics.from_dict(metrics_payload)
+        else:
             raise ValueError("invalid phase2 validation result payload: missing metrics")
         payloads_payload = payload.get("payloads")
-        return cls(
-            metrics=Phase2ValidationMetrics.from_dict(metrics_payload),
-            layers=tuple(
-                Phase2LayerResult.from_dict(layer)
+        return {
+            **dict(payload),
+            "metrics": restored_metrics,
+            "layers": tuple(
+                layer
+                if isinstance(layer, Phase2LayerResult)
+                else Phase2LayerResult.from_dict(layer)
                 for layer in payload.get("layers", ())
-                if isinstance(layer, Mapping)
+                if isinstance(layer, Phase2LayerResult | Mapping)
             ),
-            layer_computations=tuple(
-                Phase2LayerComputation.from_dict(computation)
+            "layer_computations": tuple(
+                computation
+                if isinstance(computation, Phase2LayerComputation)
+                else Phase2LayerComputation.from_dict(computation)
                 for computation in payload.get("layer_computations", ())
-                if isinstance(computation, Mapping)
+                if isinstance(computation, Phase2LayerComputation | Mapping)
             ),
-            payloads=(
-                Phase2ValidationPayloads.from_dict(payloads_payload)
+            "payloads": (
+                payloads_payload
+                if isinstance(payloads_payload, Phase2ValidationPayloads)
+                else Phase2ValidationPayloads.from_dict(payloads_payload)
                 if isinstance(payloads_payload, Mapping)
                 else None
             ),
-        )
+        }
 
 
-@dataclass(frozen=True)
-class Phase2LayerComputation:
+class Phase2LayerComputation(PydanticBaseModel):
     """单个 Phase II validation layer 的 raw metric 计算结果。
 
     各 ``phase2_validation_layers/layer*.py`` 文件只负责 raw metric 计算，不做
@@ -917,34 +651,28 @@ class Phase2LayerComputation:
     # 用途：补充 report 细节；方向：过程数据无直接排序方向。
     extra_payload: Mapping[str, object] | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        return {
-            "layer_id": self.layer_id,
-            "layer_name": self.layer_name,
-            "metrics": _payload_to_dict(self.metrics),
-            "extra_payload": _payload_to_dict(self.extra_payload),
-        }
-
+    @model_validator(mode="before")
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2LayerComputation":
-        """从 dict 恢复单层 raw metric 计算结果。"""
+    def _restore_layer_computation_payload(cls, payload: Any) -> Any:
+        """Restore layer-specific metrics and extra payloads."""
 
+        if not isinstance(payload, Mapping):
+            return payload
         layer_id = int(payload["layer_id"])
         layer_name = str(payload["layer_name"])
         metrics_payload = payload.get("metrics", {})
         extra_payload = payload.get("extra_payload")
-        return cls(
-            layer_id=layer_id,
-            layer_name=layer_name,
-            metrics=_layer_metrics_from_dict(layer_id, layer_name, metrics_payload),
-            extra_payload=(
+        return {
+            **dict(payload),
+            "layer_id": layer_id,
+            "layer_name": layer_name,
+            "metrics": _layer_metrics_from_dict(layer_id, layer_name, metrics_payload),
+            "extra_payload": (
                 _layer_extra_payload_from_dict(layer_name, extra_payload)
                 if isinstance(extra_payload, Mapping)
                 else None
             ),
-        )
+        }
 
 
 def _layer_metrics_from_dict(
