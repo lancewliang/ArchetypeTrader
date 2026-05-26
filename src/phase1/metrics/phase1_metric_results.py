@@ -15,10 +15,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Mapping
-
-from pydantic import field_validator
-
+from typing import  Literal, Mapping
 from src.utils import PydanticMappingModel
 
 from .phase1_validation_data_schema import (
@@ -32,8 +29,7 @@ from .phase1_validation_oracle_profitability import Phase1OracleProfitabilityPay
 from .phase1_validation_teacher_quality import Phase1TeacherQualityPayload
 from .phase1_validation_vq_internal import Phase1VQInternalPayload
 from .phase1_validation_score import (
-    Phase1ValidationScore,
-    Phase1ValidationScoreLike,
+    Phase1ValidationScore, 
 )
 
 
@@ -104,25 +100,7 @@ class Phase1MetricResult(PydanticMappingModel):
 
     # 到通过边界的有符号距离。>= 0 表示在阈值安全侧，< 0 表示越界。
     distance_to_threshold: float | None = None
-
-    @field_validator("threshold_value", mode="before")
-    @classmethod
-    def _restore_threshold_value(cls, value: Any) -> MetricThresholdValue:
-        """恢复机器可读阈值，兼容旧 payload 缺失该字段的情况。"""
-
-        return _metric_threshold_value_from_payload(value)
-
-
-def _metric_threshold_value_from_payload(value: Any) -> MetricThresholdValue:
-    """恢复机器可读阈值，兼容旧 payload 缺失该字段的情况。"""
-
-    if value is None:
-        return None
-    if isinstance(value, tuple | list):
-        if len(value) != 2:
-            return None
-        return (float(value[0]), float(value[1]))
-    return float(value)
+  
 
 
 class Phase1RiskFinding(PydanticMappingModel):
@@ -247,36 +225,7 @@ class Phase1ValidationResult(PydanticMappingModel):
     # 第四层 label predictability 中间 payload，用于审计 probe 诊断。
     label_predictability_payload: Phase1LabelPredictabilityPayload | None = None
 
-    @field_validator("score", mode="before")
-    @classmethod
-    def _restore_score(
-        cls,
-        value: Phase1ValidationScoreLike | Mapping[str, Any],
-    ) -> Phase1ValidationScore | None:
-        """恢复新 score 对象，同时兼容历史 float payload。"""
-
-        return _phase1_validation_score_from_payload(value)
-
-    def to_flat_dict(self) -> dict[str, int | float | bool | None]:
-        """生成 checkpoint selector 快速读取的扁平视图。
-
-        使用场景:
-            selector 不需要理解每个 metric 的计算细节，只读取通过状态、score、
-            失败层数量和 tie-breaker 字段即可。
-        """
-
-        payload: dict[str, int | float | bool | None] = {
-            "validation.passed": self.passed,
-            "validation.score": (
-                self.score.total_score if self.score is not None else None
-            ),
-            "validation.failed_layer_count": len(self.failed_layers),
-        }
-        for layer in self.layers:
-            payload[f"validation.layer{layer.layer_id}.{layer.name}.passed"] = layer.passed
-        for key, value in self.tie_breaker_metrics.items():
-            payload[f"validation.tie_breaker.{key}"] = value
-        return payload
+    
 
 
 __all__ = [
@@ -290,16 +239,3 @@ __all__ = [
     "RiskSeverity",
 ]
 
-
-def _phase1_validation_score_from_payload(
-    payload: Phase1ValidationScoreLike | Mapping[str, Any],
-) -> Phase1ValidationScore | None:
-    """恢复新 score 对象，同时兼容历史 float payload。"""
-
-    if payload is None:
-        return None
-    if isinstance(payload, Phase1ValidationScore):
-        return payload
-    if isinstance(payload, Mapping):
-        return Phase1ValidationScore.model_validate(payload)
-    return Phase1ValidationScore.from_float(float(payload))

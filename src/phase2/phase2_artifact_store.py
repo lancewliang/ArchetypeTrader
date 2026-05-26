@@ -355,10 +355,14 @@ class Phase2ArtifactStore(DataFileStore):
     def _phase2_selector_validation_html_path(
         self,
         *,
-        split_name: str,
+        split_name: str | None,
         epoch: int | None,
     ) -> Path:
         report_dir = self._phase2_artifact_path("reports")
+        if split_name is None and epoch is None:
+            return self._phase2_artifact_path("phase2_selector_validation_html")
+        if split_name is None:
+            split_name = "validation"
         if epoch is None:
             return report_dir / f"{split_name}_selector_validation.html"
         return report_dir / f"{split_name}_epoch_{epoch:04d}_selector_validation.html"
@@ -472,7 +476,9 @@ class Phase2ArtifactStore(DataFileStore):
 
     @staticmethod
     def _checkpoint_from_dict(payload: Mapping[str, Any]) -> Phase2Checkpoint:
-        config_payload = payload.get("config", {})
+        if "config" not in payload:
+            raise ValueError("invalid phase2 checkpoint payload: missing config")
+        config_payload = payload["config"]
         if isinstance(config_payload, Phase2TrainConfig):
             config = config_payload
         elif isinstance(config_payload, Mapping):

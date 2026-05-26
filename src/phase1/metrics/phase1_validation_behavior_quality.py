@@ -1,14 +1,9 @@
 """Phase I layer 2 behavior quality schema, thresholds, and hard gate rules."""
 
 from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
 from src.utils import PydanticMappingModel
-
-if TYPE_CHECKING:
-    from .phase1_metric_results import Phase1LayerResult
-    from .phase1_validation_data_schema import Phase1ValidationMetrics
+from .phase1_metric_results import Phase1LayerResult
+from .phase1_validation_data_schema import Phase1ValidationMetrics
 
 
 class Phase1BehaviorQualityPayload(PydanticMappingModel):

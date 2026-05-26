@@ -12,16 +12,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass
-from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any, Mapping, TypeAlias, cast
-
-from pydantic import Field, model_serializer, model_validator
-
+from dataclasses import dataclass
+from typing import Any, Mapping, TypeAlias
+from pydantic import Field
 from src.utils import PydanticMappingModel
-
-from ..checkpoint.phase2_checkpoint_selector import Phase2CheckpointSelectionResult
 from ..metrics import (
     Phase2LayerResult,
     Phase2MetricResult,
@@ -43,38 +37,6 @@ PHASE2_REPORT_SCHEMA = "phase2_selection_report.v1"
 
 DEFAULT_PHASE2_REPORT_TITLE = "Phase II Selector Validation Report"
 """未显式传入标题时使用的默认 report 标题。"""
-
-
-def json_safe(value: Any) -> JsonValue:
-    """把常见 Python/report 对象转换为 JSON-friendly 值。"""
-
-    if isinstance(value, PydanticMappingModel):
-        return json_safe(value.model_dump(mode="json"))
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): json_safe(item) for key, item in value.items()}
-    if isinstance(value, tuple | list):
-        return [json_safe(item) for item in value]
-    return cast(JsonValue, value)
-
-
-def template_safe(value: Any) -> Any:
-    """把 HTML context dataclass 递归转换为模板引擎可消费的普通 Python 值。"""
-
-    if isinstance(value, PydanticMappingModel):
-        return template_safe(value.model_dump(mode="python"))
-    if is_dataclass(value) and not isinstance(value, type):
-        return {
-            item.name: template_safe(getattr(value, item.name))
-            for item in fields(value)
-        }
-    if isinstance(value, Mapping):
-        return {str(key): template_safe(item) for key, item in value.items()}
-    if isinstance(value, tuple | list):
-        return [template_safe(item) for item in value]
-    return value
-
 
 class Phase2ReportMeta(PydanticMappingModel):
     """报告元信息。
@@ -98,58 +60,7 @@ class Phase2ReportMeta(PydanticMappingModel):
 
     # 运行侧额外元数据，例如 pair、batch、git sha、run id。
     metadata: Mapping[str, JsonValue] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _restore_flat_metadata(cls, value: Any) -> Any:
-        """Restore report metadata from the flattened public payload."""
-
-        if not isinstance(value, Mapping):
-            return value
-        reserved_keys = {"title", "generated_at", "schema", "metadata"}
-        metadata = {
-            str(key): item
-            for key, item in value.items()
-            if str(key) not in reserved_keys
-        }
-        explicit_metadata = value.get("metadata")
-        if isinstance(explicit_metadata, Mapping):
-            metadata.update({str(key): item for key, item in explicit_metadata.items()})
-        return {
-            "title": str(value.get("title", DEFAULT_PHASE2_REPORT_TITLE)),
-            "generated_at": str(value.get("generated_at", "-")),
-            "schema": str(value.get("schema", PHASE2_REPORT_SCHEMA)),
-            "metadata": _json_object(metadata),
-        }
-
-    @model_serializer(mode="plain")
-    def _serialize_flat_metadata(self) -> JsonObject:
-        """Serialize metadata into the legacy flattened ``report`` node."""
-
-        payload: JsonObject = {
-            "title": str(self.title),
-            "generated_at": str(self.generated_at),
-            "schema": str(self.schema),
-        }
-        payload.update(_json_object(self.metadata))
-        return payload
-
-    @classmethod
-    def generated(
-        cls,
-        *,
-        title: str = DEFAULT_PHASE2_REPORT_TITLE,
-        metadata: Mapping[str, object] | None = None,
-        generated_at: str | None = None,
-    ) -> "Phase2ReportMeta":
-        """为新生成的 report 创建元信息。"""
-
-        return cls(
-            title=title,
-            generated_at=generated_at or datetime.now(UTC).isoformat(),
-            metadata=_json_object(metadata or {}),
-        )
-
+ 
 class Phase2ReportDocument(PydanticMappingModel):
     """完整机器可读 report payload。
 
@@ -166,122 +77,21 @@ class Phase2ReportDocument(PydanticMappingModel):
     report: Phase2ReportMeta
 
     # 选择摘要，对应 payload["selection"]。
-    selection: Mapping[str, JsonValue] = Field(default_factory=dict)
+    selection: Mapping[str, object] = Field(default_factory=dict)
 
     # 首页摘要，对应 payload["summary"]。
-    summary: Mapping[str, JsonValue] = Field(default_factory=dict)
+    summary: Mapping[str, object] = Field(default_factory=dict)
 
     # 完整 validation result，对应 payload["validation"]；无合格选择时可为空。
     validation: Phase2ValidationResult | None = None
 
     # Phase II 配置快照，对应 payload["config"]。
-    config: Mapping[str, JsonValue] = Field(default_factory=dict)
+    config: Mapping[str, object] = Field(default_factory=dict)
 
     # 产物路径索引，对应 payload["artifacts"]。
-    artifacts: Mapping[str, JsonValue] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _restore_document_payload(cls, value: Any) -> Any:
-        """Restore nested report document fields from public payloads."""
-
-        if not isinstance(value, Mapping):
-            return value
-        report_node = _require_mapping(value.get("report"), "report")
-        validation_payload = value.get("validation")
-        return {
-            "report": Phase2ReportMeta.model_validate(report_node),
-            "selection": _json_object(_optional_mapping(value.get("selection"))),
-            "summary": _json_object(_optional_mapping(value.get("summary"))),
-            "validation": (
-                Phase2ValidationResult.model_validate(validation_payload)
-                if isinstance(validation_payload, Mapping)
-                else validation_payload
-            ),
-            "config": _json_object(_optional_mapping(value.get("config"))),
-            "artifacts": _json_object(_optional_mapping(value.get("artifacts"))),
-        }
-
-    @model_serializer(mode="plain")
-    def _serialize_document(self) -> JsonObject:
-        """Serialize to the stable public report payload shape."""
-
-        return {
-            "report": self.report.model_dump(mode="json"),
-            "selection": dict(self.selection),
-            "summary": dict(self.summary),
-            "validation": (
-                _json_object(self.validation.model_dump(mode="json"))
-                if self.validation is not None
-                else None
-            ),
-            "config": dict(self.config),
-            "artifacts": dict(self.artifacts),
-        }
-
-    @classmethod
-    def from_validation_result(
-        cls,
-        *,
-        validation_result: Phase2ValidationResult,
-        title: str = DEFAULT_PHASE2_REPORT_TITLE,
-        config: Mapping[str, object] | None = None,
-        artifacts: Mapping[str, str | Path] | None = None,
-        metadata: Mapping[str, object] | None = None,
-        generated_at: str | None = None,
-        selection: Mapping[str, object] | None = None,
-    ) -> "Phase2ReportDocument":
-        """从 validation result 构建完整 report document。"""
-
-        return cls(
-            report=Phase2ReportMeta.generated(
-                title=title,
-                generated_at=generated_at,
-                metadata=metadata,
-            ),
-            selection=_json_object(selection or {}),
-            summary=_build_validation_summary(validation_result),
-            validation=validation_result,
-            config=_json_object(config or {}),
-            artifacts=_json_object(artifacts or {}),
-        )
-
-    @classmethod
-    def from_selection_result(
-        cls,
-        *,
-        selection_result: Phase2CheckpointSelectionResult,
-        title: str = DEFAULT_PHASE2_REPORT_TITLE,
-        config: Mapping[str, object] | None = None,
-        artifacts: Mapping[str, str | Path] | None = None,
-        metadata: Mapping[str, object] | None = None,
-        generated_at: str | None = None,
-    ) -> "Phase2ReportDocument":
-        """从 checkpoint selection result 构建 report document。"""
-
-        validation = (
-            selection_result.checkpoint.validation_result
-            if selection_result.checkpoint is not None
-            else None
-        )
-        selection_payload = _selection_result_to_dict(selection_result)
-        summary = (
-            _build_validation_summary(validation)
-            if validation is not None
-            else _build_blocked_summary(selection_payload)
-        )
-        return cls(
-            report=Phase2ReportMeta.generated(
-                title=title,
-                generated_at=generated_at,
-                metadata=metadata,
-            ),
-            selection=selection_payload,
-            summary=summary,
-            validation=validation,
-            config=_json_object(config or {}),
-            artifacts=_json_object(artifacts or {}),
-        )
+    artifacts: Mapping[str, object] = Field(default_factory=dict)
+ 
+ 
 
 @dataclass(frozen=True)
 class Phase2ReportHeaderItem:
@@ -563,12 +373,6 @@ class Phase2ReportHtmlContext(PydanticMappingModel):
     )
     code_diagnostic_rows: tuple[Phase2ReportCodeDiagnosticRow, ...] = ()
 
-    def __getitem__(self, key: str) -> Any:
-        """兼容测试和调用方对 HTML context 的 dict-style 读取。"""
-
-        return self.model_dump(mode="python")[key]
-
-
 def ensure_phase2_report_document(
     payload: Phase2ReportDocument | Mapping[str, Any],
 ) -> Phase2ReportDocument:
@@ -617,7 +421,7 @@ def layer_result_to_view(layer: Phase2LayerResult) -> Phase2ReportLayerView:
         metrics=tuple(metric_result_to_view(metric) for metric in layer.metrics),
     )
 
-
+  
 def _build_validation_summary(
     validation_result: Phase2ValidationResult,
 ) -> JsonObject:
@@ -639,60 +443,6 @@ def _build_validation_summary(
         "layer_count": len(validation_result.layers),
         "failed_layers": list(failed_layers),
     }
-
-
-def _build_blocked_summary(selection: Mapping[str, JsonValue]) -> JsonObject:
-    """为无合格 checkpoint 的 selection result 生成摘要。"""
-
-    return {
-        "passed": False,
-        "status": "fail",
-        "reason": "no eligible Phase II validation checkpoint",
-        "selected_checkpoint_id": selection.get("selected_checkpoint_id"),
-        "selected_epoch": selection.get("selected_epoch"),
-        "selected_score": selection.get("selected_score"),
-    }
-
-
-def _selection_result_to_dict(
-    selection_result: Phase2CheckpointSelectionResult,
-) -> JsonObject:
-    """把 checkpoint selection result 转换为 report payload。"""
-
-    return {
-        "has_selection": selection_result.has_selection,
-        "selected_checkpoint_id": selection_result.selected_checkpoint_id,
-        "selected_epoch": selection_result.selected_epoch,
-        "selected_score": selection_result.selected_score,
-    }
-
-
-def _json_object(value: Mapping[str, Any]) -> JsonObject:
-    """确保 mapping 已转换为 JSON object。"""
-
-    safe_value = json_safe(value)
-    if not isinstance(safe_value, dict):
-        raise TypeError("expected a JSON object mapping")
-    return safe_value
-
-
-def _require_mapping(value: Any, field_name: str) -> Mapping[str, Any]:
-    """读取必填 mapping 字段。"""
-
-    if isinstance(value, Mapping):
-        return value
-    raise TypeError(f"{field_name} must be a mapping")
-
-
-def _optional_mapping(value: Any) -> Mapping[str, Any]:
-    """读取可选 mapping 字段，缺失时返回空 mapping。"""
-
-    if value is None:
-        return {}
-    if isinstance(value, Mapping):
-        return value
-    raise TypeError("optional report payload sections must be mappings")
-
 
 __all__ = [
     "DEFAULT_PHASE2_REPORT_TITLE",

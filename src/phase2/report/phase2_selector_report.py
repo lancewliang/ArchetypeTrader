@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Mapping
 
@@ -23,9 +24,9 @@ from ...phase1.report._template import render_template_file
 from ..metrics import Phase2ValidationResult
 from .phase2_selector_report_context import Phase2SelectorReportContextBuilder
 from .phase2_selector_report_schema import (
-    DEFAULT_PHASE2_REPORT_TITLE, 
-    Phase2ReportDocument,
-    template_safe,
+    DEFAULT_PHASE2_REPORT_TITLE,
+    Phase2ReportMeta,
+    Phase2ReportDocument 
 )
 
 
@@ -55,15 +56,19 @@ class Phase2SelectorReport:
     ) -> Phase2ReportDocument:
         """从 validation result 构建强类型 report payload document。"""
 
-        return Phase2ReportDocument.from_validation_result(
-            validation_result=validation_result,
-            title=self.title,
-            config=config,
-            artifacts=artifacts,
-            metadata=metadata,
-            selection=selection,
-        ) 
- 
+        return Phase2ReportDocument(
+            report=Phase2ReportMeta(
+                title=self.title,
+                generated_at=datetime.now(UTC).isoformat(),
+                metadata=metadata,
+            ),
+            selection=selection or {},
+            summary=_build_validation_summary(validation_result),
+            validation=validation_result,
+            config=config or {},
+            artifacts=artifacts or {},
+        )
+
     def build_html(
         self,
         *,
@@ -91,7 +96,30 @@ class Phase2SelectorReport:
         """将 report payload 渲染为静态 HTML 字符串。"""
 
         context = Phase2SelectorReportContextBuilder(title=self.title).build(payload)
-        return render_template_file(_TEMPLATE_PATH, template_safe(context))
+        return render_template_file(_TEMPLATE_PATH, context.to_dict())
 
+
+def _build_validation_summary(
+    validation_result: Phase2ValidationResult,
+) -> dict:
+    """从 validation result 生成 report 首页摘要。"""
+
+    metrics = validation_result.metrics
+    failed_layers = tuple(
+        layer.name for layer in validation_result.layers if not layer.passed
+    )
+    passed = len(failed_layers) == 0
+    return {
+        "passed": passed,
+        "status": "pass" if passed else "fail",
+        "mean_return": metrics.mean_return,
+        "median_return": metrics.median_return,
+        "sharpe_like": metrics.sharpe_like,
+        "win_rate": metrics.win_rate,
+        "mean_turnover": metrics.mean_turnover,
+        "layer_count": len(validation_result.layers),
+        "failed_layers": list(failed_layers),
+    }
+    
 
 __all__ = ["Phase2SelectorReport"]

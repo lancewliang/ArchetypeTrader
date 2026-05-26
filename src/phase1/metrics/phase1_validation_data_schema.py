@@ -20,12 +20,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, TypeAlias
+from typing import Mapping, TypeAlias
 
 import numpy as np
-from pydantic import Field, field_serializer, field_validator, model_validator
+from pydantic import Field
 
-from src.utils import PydanticBaseModel, PydanticMappingModel
+from src.utils import PydanticMappingModel
 from .phase1_validation_behavior_quality import (
     Phase1BehaviorQualityMetrics,
     Phase1BehaviorQualityPayload,
@@ -43,90 +43,8 @@ from .phase1_validation_teacher_quality import (
     Phase1TeacherQualityPayload,
 )
 from .phase1_validation_vq_internal import Phase1VQInternalMetrics
-
-
-def _array_to_payload(value: np.ndarray | None) -> list[Any] | None:
-    """把 numpy array 转成可 JSON 序列化的 list。
-
-    输入形状:
-        保留原数组形状，例如 ``[N]``、``[N, H]``、``[N, H, F]``、
-        ``[N, H, A]`` 或 ``[N, K]``，转换后用嵌套 list 表达同样维度。
-
-    使用场景:
-        ``Phase1EvaluationSnapshot`` 和 ``CodeAssignmentSnapshot`` 在调试、测试或
-        受控落盘时需要序列化中间数组。大规模训练的 checkpoint 通常不应保存完整
-        snapshot，而应保存聚合后的 validation result。
-    """
-
-    if value is None:
-        return None
-    return value.tolist()
-
-
-def _array_from_payload(value: Any) -> np.ndarray | None:
-    """把 list/array payload 恢复为 numpy array。
-
-    输入形状:
-        输入通常是 ``_array_to_payload()`` 生成的嵌套 list，维度对应原始数组，
-        例如 ``[N]``、``[N, H]``、``[N, H, F]``、``[N, H, A]`` 或 ``[N, K]``。
-
-    输出:
-        与输入嵌套结构同形状的 ``np.ndarray``；输入为 ``None`` 时返回 ``None``。
-    """
-
-    if value is None:
-        return None
-    return np.asarray(value)
-
-
-def _require_ndarray(field_name: str, value: Any) -> np.ndarray:
-    """校验 snapshot 字段必须是 numpy array。"""
-
-    if not isinstance(value, np.ndarray):
-        raise TypeError(f"{field_name} must be np.ndarray, got {type(value).__name__}")
-    return value
-
-
-def _require_shape(
-    field_name: str,
-    value: np.ndarray,
-    expected_shape: tuple[int, ...],
-) -> None:
-    """校验数组形状完全匹配。"""
-
-    if value.shape != expected_shape:
-        raise ValueError(
-            f"{field_name} must have shape {expected_shape}, got {value.shape}"
-        )
-
-
-def _require_ndim(field_name: str, value: np.ndarray, expected_ndim: int) -> None:
-    """校验数组维度数量。"""
-
-    if value.ndim != expected_ndim:
-        raise ValueError(
-            f"{field_name} must be {expected_ndim}D, got shape {value.shape}"
-        )
-
-
-def _flatten_model(prefix: str, value: Any, output: dict[str, int | float]) -> None:
-    """把嵌套 Pydantic model 中的数值字段展开为 ``prefix.field`` 形式。
-
-    使用场景:
-        ``Phase1ValidationMetrics.to_flat_dict()`` 生成 checkpoint selector 可快速
-        读取的扁平指标视图。
-    """
-
-    for field_name in type(value).model_fields:
-        field_value = getattr(value, field_name)
-        key = f"{prefix}.{field_name}"
-        if isinstance(field_value, PydanticBaseModel):
-            _flatten_model(key, field_value, output)
-        elif isinstance(field_value, bool):
-            output[key] = int(field_value)
-        elif isinstance(field_value, (int, float)):
-            output[key] = field_value
-
+ 
+ 
 
 class Phase1EvaluationSnapshot(PydanticMappingModel):
     """单个 split 在某个 checkpoint 下的完整可计算状态。
@@ -203,122 +121,6 @@ class Phase1EvaluationSnapshot(PydanticMappingModel):
     # horizon LOB 深度行情，shape=[N, H, 20]。用于执行收益中的盘口滑点计算；缺失时可为 None。
     depthprices: np.ndarray | None = Field(default=None, exclude=True)
 
-    @field_validator(
-        "sample_ids",
-        "states",
-        "relative_states",
-        "trend_states",
-        "demo_actions",
-        "demo_rewards",
-        "decoded_actions",
-        "decoded_logits",
-        "code_ids",
-        "z_e",
-        "z_q",
-        "distances",
-        mode="before",
-    )
-    @classmethod
-    def _restore_required_array(cls, value: Any) -> np.ndarray:
-        """Restore required array fields from list payloads."""
-
-        return np.asarray(value)
-
-    @field_validator("prices", "depthprices", mode="before")
-    @classmethod
-    def _restore_optional_array(cls, value: Any) -> np.ndarray | None:
-        """Restore optional array fields from list payloads."""
-
-        return _array_from_payload(value)
-
-    @field_serializer(
-        "sample_ids",
-        "states",
-        "relative_states",
-        "trend_states",
-        "prices",
-        "demo_actions",
-        "demo_rewards",
-        "decoded_actions",
-        "decoded_logits",
-        "code_ids",
-        "z_e",
-        "z_q",
-        "distances",
-        when_used="json",
-    )
-    def _serialize_array(self, value: np.ndarray | None) -> list[Any] | None:
-        """Serialize arrays as nested lists."""
-
-        return _array_to_payload(value)
-
-    @model_validator(mode="after")
-    def _validate_shapes(self) -> "Phase1EvaluationSnapshot":
-        """校验 snapshot 初始化时的数组维度一致性。"""
-
-        sample_ids = _require_ndarray("sample_ids", self.sample_ids)
-        states = _require_ndarray("states", self.states)
-        relative_states = _require_ndarray("relative_states", self.relative_states)
-        trend_states = _require_ndarray("trend_states", self.trend_states)
-        demo_actions = _require_ndarray("demo_actions", self.demo_actions)
-        demo_rewards = _require_ndarray("demo_rewards", self.demo_rewards)
-        decoded_actions = _require_ndarray("decoded_actions", self.decoded_actions)
-        decoded_logits = _require_ndarray("decoded_logits", self.decoded_logits)
-        code_ids = _require_ndarray("code_ids", self.code_ids)
-        z_e = _require_ndarray("z_e", self.z_e)
-        z_q = _require_ndarray("z_q", self.z_q)
-        distances = _require_ndarray("distances", self.distances)
-
-        _require_ndim("states", states, 3)
-        _require_ndim("relative_states", relative_states, 3)
-        _require_ndim("trend_states", trend_states, 3)
-        n_samples, horizon, _ = states.shape
-        nh_shape = (n_samples, horizon)
-        n_shape = (n_samples,)
-
-        _require_shape("sample_ids", sample_ids, n_shape)
-        if relative_states.shape[:2] != nh_shape:
-            raise ValueError(
-                "relative_states must have leading shape "
-                f"{nh_shape}, got {relative_states.shape}"
-            )
-        if trend_states.shape[:2] != nh_shape:
-            raise ValueError(
-                f"trend_states must have leading shape {nh_shape}, got {trend_states.shape}"
-            )
-        _require_shape("demo_actions", demo_actions, nh_shape)
-        _require_shape("demo_rewards", demo_rewards, nh_shape)
-        _require_shape("decoded_actions", decoded_actions, nh_shape)
-        _require_shape("code_ids", code_ids, n_shape)
-
-        if self.prices is not None:
-            prices = _require_ndarray("prices", self.prices)
-            _require_shape("prices", prices, nh_shape)
-        if self.depthprices is not None:
-            depthprices = _require_ndarray("depthprices", self.depthprices)
-            _require_shape("depthprices", depthprices, (n_samples, horizon, 20))
-
-        _require_ndim("decoded_logits", decoded_logits, 3)
-        if decoded_logits.shape[:2] != nh_shape:
-            raise ValueError(
-                f"decoded_logits must have leading shape {nh_shape}, got {decoded_logits.shape}"
-            )
-
-        _require_ndim("z_e", z_e, 2)
-        _require_ndim("z_q", z_q, 2)
-        _require_ndim("distances", distances, 2)
-        if z_e.shape[0] != n_samples:
-            raise ValueError(f"z_e must have leading shape {n_shape}, got {z_e.shape}")
-        if z_q.shape[0] != n_samples:
-            raise ValueError(f"z_q must have leading shape {n_shape}, got {z_q.shape}")
-        if distances.shape[0] != n_samples:
-            raise ValueError(
-                f"distances must have leading shape {n_shape}, got {distances.shape}"
-            )
-
-        return self
-
-
 class CodeAssignmentSnapshot(PydanticMappingModel):
     """某个 epoch 的 code assignment 快照。
 
@@ -353,54 +155,8 @@ class CodeAssignmentSnapshot(PydanticMappingModel):
 
     # 每个 code 的 decoded action/position 原型，shape=[K, H]；无样本 code 行为 NaN。
     action_prototypes: np.ndarray | None = None
-
-    @field_validator(
-        "sample_ids",
-        "code_ids",
-        "code_prototypes",
-        "action_prototypes",
-        mode="before",
-    )
-    @classmethod
-    def _restore_array(cls, value: Any) -> np.ndarray | None:
-        """Restore assignment arrays from list payloads."""
-
-        return _array_from_payload(value)
-
-    @field_serializer(
-        "sample_ids",
-        "code_ids",
-        "code_prototypes",
-        "action_prototypes",
-        when_used="json",
-    )
-    def _serialize_array(self, value: np.ndarray | None) -> list[Any] | None:
-        """Serialize assignment arrays as nested lists."""
-
-        return _array_to_payload(value)
-
-    @model_validator(mode="after")
-    def _validate_shapes(self) -> "CodeAssignmentSnapshot":
-        """校验 assignment snapshot 的样本和 label 对齐契约。"""
-
-        sample_ids = _require_ndarray("sample_ids", self.sample_ids)
-        code_ids = _require_ndarray("code_ids", self.code_ids)
-        _require_ndim("sample_ids", sample_ids, 1)
-        _require_ndim("code_ids", code_ids, 1)
-        _require_shape("code_ids", code_ids, sample_ids.shape)
-        if np.unique(sample_ids).size != sample_ids.size:
-            raise ValueError("sample_ids must be unique within an assignment snapshot")
-        if self.code_prototypes is not None:
-            code_prototypes = _require_ndarray("code_prototypes", self.code_prototypes)
-            _require_ndim("code_prototypes", code_prototypes, 2)
-        if self.action_prototypes is not None:
-            action_prototypes = _require_ndarray(
-                "action_prototypes",
-                self.action_prototypes,
-            )
-            _require_ndim("action_prototypes", action_prototypes, 2)
-
-        return self
+ 
+ 
 
 
 class Phase1CodeDiagnostic(PydanticMappingModel):
@@ -580,24 +336,7 @@ class Phase1ValidationMetrics(PydanticMappingModel):
 
     # 第四层 label 可预测性 metrics。
     label_predictability: Phase1LabelPredictabilityMetrics
-
-    def to_flat_dict(self) -> dict[str, int | float]:
-        """生成 checkpoint selector 使用的扁平数值视图。
-
-        示例:
-            ``oracle_profitability.risk_adjusted_return``、
-            ``vq_internal.active_code_ratio``。
-        """
-
-        output: dict[str, int | float] = {}
-        _flatten_model("teacher_quality", self.teacher_quality, output)
-        _flatten_model("vq_internal", self.vq_internal, output)
-        _flatten_model("behavior_quality", self.behavior_quality, output)
-        _flatten_model("oracle_profitability", self.oracle_profitability, output)
-        _flatten_model("label_predictability", self.label_predictability, output)
-        return output
-
-
+ 
 __all__ = [
     "CodeAssignmentSnapshot",
     "Phase1BehaviorQualityMetrics",

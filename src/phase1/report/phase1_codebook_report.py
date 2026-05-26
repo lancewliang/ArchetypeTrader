@@ -19,15 +19,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Mapping
 
 from ._template import render_template_file
 from .phase1_codebook_report_context import Phase1CodebookReportContextBuilder
 from .phase1_codebook_report_schema import (
-    JsonObject,
     Phase1CodebookReportDocument,
-    template_safe,
+    Phase1CodebookReportMeta,
 )
 from ..metrics import Phase1ValidationResult
 
@@ -71,12 +71,15 @@ class Phase1CodebookReport:
             ``Phase1CodebookReportDocument`` 强类型对象。
         """
 
-        return Phase1CodebookReportDocument.from_validation_result(
-            validation_result=validation_result,
-            title=self.title,
-            config=config,
-            artifacts=artifacts,
-            metadata=metadata,
+        return Phase1CodebookReportDocument(
+            report=Phase1CodebookReportMeta(
+                title=self.title,
+                generated_at=datetime.now(UTC).isoformat(),
+                metadata=metadata or {},
+            ),
+            validation=validation_result,
+            config=config or {},
+            artifacts=artifacts or {},
         )
  
     def build_html(
@@ -115,7 +118,7 @@ class Phase1CodebookReport:
         """
 
         context = Phase1CodebookReportContextBuilder(title=self.title).build(payload)
-        return render_template_file(_TEMPLATE_PATH, template_safe(context))
+        return render_template_file(_TEMPLATE_PATH, context.to_dict())
 
 
 __all__ = ["Phase1CodebookReport"]

@@ -3,16 +3,10 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any
-
-from pydantic import field_validator
-
+from typing import Any
 from src.utils import PydanticMappingModel
-
-if TYPE_CHECKING:
-    from .phase1_metric_results import Phase1LayerResult, Phase1MetricResult
-    from .phase1_validation_data_schema import (
-        CodeAssignmentSnapshot,
+from .phase1_metric_results import Phase1LayerResult, Phase1MetricResult
+from .phase1_validation_data_schema import (
         Phase1ValidationMetrics,
     )
 
@@ -46,25 +40,6 @@ class Phase1VQInternalPayload(PydanticMappingModel):
 
     # 参与 code distribution 统计的样本数。
     code_distribution_sample_count: int
-
-    @field_validator("current_assignment", mode="before")
-    @classmethod
-    def _restore_current_assignment(cls, value: Any) -> Any:
-        """Restore assignment snapshot from dict payloads."""
-
-        from .phase1_validation_data_schema import CodeAssignmentSnapshot
-
-        if isinstance(value, CodeAssignmentSnapshot):
-            return value
-        return CodeAssignmentSnapshot.model_validate(value)
-
-    @field_validator("assignment_churn_by_epoch", mode="before")
-    @classmethod
-    def _restore_churn_by_epoch(cls, value: Any) -> dict[int, float]:
-        """Normalize epoch keys and churn values."""
-
-        return {int(epoch): float(churn) for epoch, churn in (value or {}).items()}
-
 
 class Phase1VQInternalMetrics(PydanticMappingModel):
     """第一层 VQ 内部质量 raw metrics。

@@ -11,12 +11,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, TypeAlias, cast
 
-from pydantic import Field, model_serializer, model_validator
+from pydantic import Field
 
 from src.utils import PydanticMappingModel
 
@@ -39,47 +38,6 @@ PHASE1_CODEBOOK_REPORT_SCHEMA = "phase1_codebook_validation_report.v1"
 
 DEFAULT_PHASE1_CODEBOOK_REPORT_TITLE = "Phase I Codebook Validation Report"
 """未显式传入标题时使用的默认 report 标题。"""
-
-
-def json_safe(value: Any) -> JsonValue:
-    """把常见 Python/report 对象转换为 JSON-friendly 值。
-
-    作用：
-        统一处理 ``Path``、``tuple``、``Mapping`` 以及带 ``to_dict()`` 的强类型对象，
-        避免 report payload 入口重复写弱类型转换逻辑。
-    """
-
-    if isinstance(value, PydanticMappingModel):
-        return json_safe(value.model_dump(mode="json"))
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): json_safe(item) for key, item in value.items()}
-    if isinstance(value, tuple | list):
-        return [json_safe(item) for item in value]
-    return cast(JsonValue, value)
-
-
-def template_safe(value: Any) -> Any:
-    """把 HTML context dataclass 递归转换为模板引擎可消费的普通 Python 值。
-
-    作用：
-        report 模板引擎只理解 ``Mapping``、序列和标量；HTML view 层内部使用强类型
-        dataclass，最后由该函数在渲染边界统一降级为 dict/list。
-    """
-
-    if isinstance(value, PydanticMappingModel):
-        return template_safe(value.model_dump(mode="python"))
-    if is_dataclass(value) and not isinstance(value, type):
-        return {
-            item.name: template_safe(getattr(value, item.name))
-            for item in fields(value)
-        }
-    if isinstance(value, Mapping):
-        return {str(key): template_safe(item) for key, item in value.items()}
-    if isinstance(value, tuple | list):
-        return [template_safe(item) for item in value]
-    return value
 
 
 class Phase1CodebookReportMeta(PydanticMappingModel):
@@ -105,57 +63,6 @@ class Phase1CodebookReportMeta(PydanticMappingModel):
     # 运行侧额外元数据，例如 pair、batch、git sha、run id。
     metadata: Mapping[str, JsonValue] = Field(default_factory=dict)
 
-    @model_validator(mode="before")
-    @classmethod
-    def _restore_flat_metadata(cls, value: Any) -> Any:
-        """Restore metadata from the flattened public ``report`` node."""
-
-        if not isinstance(value, Mapping):
-            return value
-        reserved_keys = {"title", "generated_at", "schema", "metadata"}
-        metadata = {
-            str(key): item
-            for key, item in value.items()
-            if str(key) not in reserved_keys
-        }
-        explicit_metadata = value.get("metadata")
-        if isinstance(explicit_metadata, Mapping):
-            metadata.update({str(key): item for key, item in explicit_metadata.items()})
-        return {
-            "title": str(value.get("title", DEFAULT_PHASE1_CODEBOOK_REPORT_TITLE)),
-            "generated_at": str(value.get("generated_at", "-")),
-            "schema": str(value.get("schema", PHASE1_CODEBOOK_REPORT_SCHEMA)),
-            "metadata": _json_object(metadata),
-        }
-
-    @model_serializer(mode="plain")
-    def _serialize_flat_metadata(self) -> JsonObject:
-        """Serialize metadata into the legacy flattened ``report`` node."""
-
-        payload: JsonObject = {
-            "title": str(self.title),
-            "generated_at": str(self.generated_at),
-            "schema": str(self.schema),
-        }
-        payload.update(_json_object(self.metadata))
-        return payload
-
-    @classmethod
-    def generated(
-        cls,
-        *,
-        title: str = DEFAULT_PHASE1_CODEBOOK_REPORT_TITLE,
-        metadata: Mapping[str, object] | None = None,
-        generated_at: str | None = None,
-    ) -> "Phase1CodebookReportMeta":
-        """为新生成的 report 创建元信息。"""
-
-        return cls(
-            title=title,
-            generated_at=generated_at or datetime.now(UTC).isoformat(),
-            metadata=_json_object(metadata or {}),
-        )
-
 class Phase1CodebookReportDocument(PydanticMappingModel):
     """完整机器可读 report payload。
 
@@ -178,60 +85,6 @@ class Phase1CodebookReportDocument(PydanticMappingModel):
 
     # 产物路径索引，对应 payload["artifacts"]。
     artifacts: Mapping[str, JsonValue] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _restore_document_payload(cls, value: Any) -> Any:
-        """Restore report document fields from public payloads."""
-
-        if not isinstance(value, Mapping):
-            return value
-        report_payload = _require_mapping(value.get("report"), "report")
-        validation_payload = _require_mapping(
-            value.get("validation"),
-            "validation",
-        )
-        return {
-            "report": Phase1CodebookReportMeta.model_validate(report_payload),
-            "validation": Phase1ValidationResult.model_validate(validation_payload),
-            "config": _json_object(_optional_mapping(value.get("config"))),
-            "artifacts": _json_object(_optional_mapping(value.get("artifacts"))),
-        }
-
-    @model_serializer(mode="plain")
-    def _serialize_document(self) -> JsonObject:
-        """Serialize to the stable public report payload shape."""
-
-        return {
-            "report": self.report.model_dump(mode="json"),
-            "validation": _json_object(self.validation.model_dump(mode="json")),
-            "config": dict(self.config),
-            "artifacts": dict(self.artifacts),
-        }
-
-    @classmethod
-    def from_validation_result(
-        cls,
-        *,
-        validation_result: Phase1ValidationResult,
-        title: str = DEFAULT_PHASE1_CODEBOOK_REPORT_TITLE,
-        config: Mapping[str, object] | None = None,
-        artifacts: Mapping[str, str | Path] | None = None,
-        metadata: Mapping[str, object] | None = None,
-        generated_at: str | None = None,
-    ) -> "Phase1CodebookReportDocument":
-        """从 validation result 构建完整 report document。"""
-
-        return cls(
-            report=Phase1CodebookReportMeta.generated(
-                title=title,
-                generated_at=generated_at,
-                metadata=metadata,
-            ),
-            validation=validation_result,
-            config=_json_object(config or {}),
-            artifacts=_json_object(artifacts or {}),
-        )
 
 @dataclass(frozen=True)
 class Phase1ReportHeaderItem:
@@ -906,46 +759,7 @@ class Phase1CodebookReportHtmlContext(PydanticMappingModel):
         return self.model_dump(mode="python")[key]
 
 
-def ensure_phase1_codebook_report_document(
-    payload: Phase1CodebookReportDocument | Mapping[str, Any],
-) -> Phase1CodebookReportDocument:
-    """确保输入是强类型 report document。
 
-    作用：
-        给后续 context builder 提供统一入口；新代码可直接传 document，历史调用方传
-        dict 时在这里恢复成强类型对象。
-    """
-
-    if isinstance(payload, Phase1CodebookReportDocument):
-        return payload
-    return Phase1CodebookReportDocument.model_validate(payload)
-
-
-def _json_object(value: Mapping[str, Any]) -> JsonObject:
-    """确保 mapping 已转换为 JSON object。"""
-
-    safe_value = json_safe(value)
-    if not isinstance(safe_value, dict):
-        raise TypeError("expected a JSON object mapping")
-    return safe_value
-
-
-def _require_mapping(value: Any, field_name: str) -> Mapping[str, Any]:
-    """读取必填 mapping 字段。"""
-
-    if isinstance(value, Mapping):
-        return value
-    raise TypeError(f"{field_name} must be a mapping")
-
-
-def _optional_mapping(value: Any) -> Mapping[str, Any]:
-    """读取可选 mapping 字段，缺失时返回空 mapping。"""
-
-    if value is None:
-        return {}
-    if isinstance(value, Mapping):
-        return value
-    raise TypeError("optional report payload sections must be mappings")
 
 
 __all__ = [
@@ -979,7 +793,6 @@ __all__ = [
     "Phase1ReportPairProfitabilityCell",
     "Phase1ReportPairProfitabilityRow",
     "Phase1ReportPairProfitabilityMatrix",
-    "ensure_phase1_codebook_report_document",
     "json_safe",
     "template_safe",
 ]

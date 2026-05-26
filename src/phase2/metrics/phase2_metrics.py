@@ -15,16 +15,11 @@ selection metrics。validation/test 的可排序结果由 ``phase2_metric_result
 """
 
 from __future__ import annotations
-
-from typing import TYPE_CHECKING, Any
-
 from pydantic import ConfigDict
 import torch
 
 from src.utils import PydanticBaseModel
-
-if TYPE_CHECKING:
-    from ..rl.phase2_double_dqn_loss import Phase2DoubleDqnLossOutput
+from ..rl.phase2_double_dqn_loss import Phase2DoubleDqnLossOutput
 
 
 def _tensor_to_float(value: torch.Tensor | float | int | None) -> float:
@@ -174,30 +169,7 @@ class Phase2Metrics(PydanticBaseModel):
             greedy_next_action_mean=self.greedy_next_action_mean / self.num_samples,
             grad_norm=self.grad_norm / self.num_samples,
         )
-
-    def to_dict(self, *, include_context: bool = True) -> dict[str, Any]:
-        """序列化为普通 dict。"""
-
-        payload: dict[str, Any] = {
-            "total_loss": self.total_loss,
-            "td_loss": self.td_loss,
-            "imitation_loss": self.imitation_loss,
-            "selected_q_mean": self.selected_q_mean,
-            "td_target_mean": self.td_target_mean,
-            "reward_mean": self.reward_mean,
-            "greedy_next_action_mean": self.greedy_next_action_mean,
-            "grad_norm": self.grad_norm,
-        }
-        if include_context:
-            payload = {
-                "stage": self.stage,
-                "split": self.split,
-                "epoch": self.epoch,
-                "num_samples": self.num_samples,
-                "num_updates": self.num_updates,
-                **payload,
-            }
-        return payload
+ 
 
 
 __all__ = ["Phase2Metrics"]

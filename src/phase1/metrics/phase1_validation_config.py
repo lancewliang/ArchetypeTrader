@@ -13,15 +13,8 @@ layer thresholds 对象、一个评分权重对象和一个运行参数对象，
 """
 
 from __future__ import annotations
-
 from pydantic import model_validator
-
 from src.utils import PydanticMappingModel
-from .phase1_validation_behavior_quality import Phase1BehaviorQualityThresholds
-from .phase1_validation_label_predictability import Phase1LabelPredictabilityThresholds
-from .phase1_validation_oracle_profitability import Phase1OracleProfitabilityThresholds
-from .phase1_validation_teacher_quality import Phase1TeacherQualityThresholds
-from .phase1_validation_vq_internal import Phase1VQInternalThresholds
 
 
 class Phase1ValidationScoreWeights(PydanticMappingModel):
@@ -106,13 +99,3 @@ class Phase1ValidationRuntimeConfig(PydanticMappingModel):
     # code id 对齐使用的 prototype 类型。auto/action 优先 decoded action prototype，
     # code 优先 latent/code embedding prototype；缺失时回退到 raw id。
     code_alignment_prototype: str = "auto"
-
-    @model_validator(mode="after")
-    def _validate_code_alignment_prototype(self) -> "Phase1ValidationRuntimeConfig":
-        """校验 runtime config 枚举字段。"""
-
-        if self.code_alignment_prototype not in {"auto", "action", "code"}:
-            raise ValueError(
-                "code_alignment_prototype must be one of auto, action, code"
-            )
-        return self

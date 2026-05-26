@@ -1,20 +1,18 @@
 """Phase I layer 3 oracle profitability schema, thresholds, and hard gate rules."""
 
 from __future__ import annotations
-
-from typing import TYPE_CHECKING, Any
-
-from pydantic import field_serializer, field_validator
-
+from typing import Any
 from src.utils import PydanticMappingModel
-
-if TYPE_CHECKING:
-    from .phase1_metric_results import Phase1LayerResult
-    from .phase1_validation_data_schema import (
-        Phase1PerCodeProfitability,
+from .phase1_metric_results import Phase1LayerResult
+from .phase1_validation_data_schema import (
         Phase1ValidationMetrics,
     )
-
+from .phase1_validation_score_helpers import (
+        _clip01,
+        _inverse_ratio_score,
+        _positive_score,
+        _threshold_progress,
+    )
 
 class Phase1PairProfitabilityCell(PydanticMappingModel):
     """单个 morphology-motif pair 的 oracle 盈利性摘要。"""
@@ -69,31 +67,6 @@ class Phase1OracleProfitabilityPayload(PydanticMappingModel):
 
     # morphology x motif 的 oracle decoded profitability 矩阵 cell。
     pair_profitability_matrix: tuple[Phase1PairProfitabilityCell, ...] = ()
-
-    @field_validator("per_code_profitability", mode="before")
-    @classmethod
-    def _restore_per_code_profitability(cls, value: Any) -> tuple[Any, ...]:
-        """Restore per-code profitability rows from dict payloads."""
-
-        from .phase1_validation_data_schema import Phase1PerCodeProfitability
-
-        return tuple(
-            item
-            if isinstance(item, Phase1PerCodeProfitability)
-            else Phase1PerCodeProfitability.model_validate(item)
-            for item in (value or ())
-        )
-
-    @field_serializer("per_code_profitability", when_used="json")
-    def _serialize_per_code_profitability(self, value: tuple[Any, ...]) -> list[Any]:
-        """Serialize per-code profitability rows through their local API."""
-
-        return [
-            item.model_dump(mode="json")
-            if isinstance(item, PydanticMappingModel)
-            else item
-            for item in value
-        ]
 
 
 class Phase1OracleProfitabilityMetrics(PydanticMappingModel):
@@ -301,12 +274,7 @@ def evaluate_oracle_profitability_rules(
 def compute_oracle_profitability_score(metrics: Phase1ValidationMetrics) -> float:
     """计算 oracle profitability 子分数。"""
 
-    from .phase1_validation_score_helpers import (
-        _clip01,
-        _inverse_ratio_score,
-        _positive_score,
-        _threshold_progress,
-    )
+    
 
     oracle = metrics.oracle_profitability
     parts = (
