@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Literal, Mapping, TypeAlias
 
 from pydantic import Field, field_validator, model_validator
 
-from src.utils import PydanticBaseModel
+from src.utils import PydanticMappingModel
 
 
 MetricSeverity = Literal["pass", "warn", "fail", "skip"]
@@ -79,7 +79,7 @@ else:
     Phase2LayerPayload: TypeAlias = object
 
 
-class Phase2MetricResult(PydanticBaseModel):
+class Phase2MetricResult(PydanticMappingModel):
     """单个 Phase II validation metric 的判定结果。"""
 
     # 指标稳定名称。用途：report、JSON 和 rule 追踪；方向：无好坏方向。
@@ -121,7 +121,7 @@ class Phase2MetricResult(PydanticBaseModel):
         return _threshold_value_from_payload(value)
 
 
-class Phase2LayerResult(PydanticBaseModel):
+class Phase2LayerResult(PydanticMappingModel):
     """单个 Phase II validation layer 的判定结果。"""
 
     # layer 数字编号，0-5。用途：固定展示顺序；方向：无好坏方向。
@@ -149,7 +149,7 @@ def _threshold_value_from_payload(value: Any) -> MetricThresholdValue:
     return float(value)
 
 
-class Phase2ValidationMetrics(PydanticBaseModel):
+class Phase2ValidationMetrics(PydanticMappingModel):
     """Phase II validation 核心指标 payload。
 
     功能说明:
@@ -188,7 +188,7 @@ class Phase2ValidationMetrics(PydanticBaseModel):
     mean_turnover: float
 
 
-class Phase2ReportPairProfitabilityPayloadRow(PydanticBaseModel):
+class Phase2ReportPairProfitabilityPayloadRow(PydanticMappingModel):
     """Report payload 中 Dominant Pair heatmap 的单个 cell 聚合行。"""
 
     morphology: str
@@ -205,7 +205,7 @@ class Phase2ReportPairProfitabilityPayloadRow(PydanticBaseModel):
     dominant_selected_code_ratio: float
 
 
-class Phase2ReportCodeDiagnosticPayloadRow(PydanticBaseModel):
+class Phase2ReportCodeDiagnosticPayloadRow(PydanticMappingModel):
     """Report payload 中 code 级诊断表的单个聚合行。"""
 
     code_id: int
@@ -247,14 +247,14 @@ class Phase2ReportCodeDiagnosticPayloadRow(PydanticBaseModel):
         return None if value in (None, "") else str(value)
 
 
-class Phase2ReportCodeCount(PydanticBaseModel):
+class Phase2ReportCodeCount(PydanticMappingModel):
     """Report payload 中某个 code 的样本数。"""
 
     code_id: int
     count: int
 
 
-class Phase2ReportCodeUsageDistribution(PydanticBaseModel):
+class Phase2ReportCodeUsageDistribution(PydanticMappingModel):
     """Report payload 中 selector 和 assigned-label 的 code 使用分布。"""
 
     selector: tuple[Phase2ReportCodeCount, ...] = ()
@@ -270,7 +270,7 @@ class Phase2ReportCodeUsageDistribution(PydanticBaseModel):
         return tuple(_code_count_from_value(item) for item in value)
 
 
-class Phase2ReportCumulativeReturns(PydanticBaseModel):
+class Phase2ReportCumulativeReturns(PydanticMappingModel):
     """Report payload 中各 baseline 的累计收益曲线。"""
 
     selector: tuple[float, ...] = ()
@@ -298,14 +298,14 @@ def _code_count_from_value(value: Any) -> Phase2ReportCodeCount:
     if isinstance(value, Phase2ReportCodeCount):
         return value
     if isinstance(value, Mapping):
-        return Phase2ReportCodeCount.from_dict(value)
+        return Phase2ReportCodeCount.model_validate(value)
     return Phase2ReportCodeCount(
         code_id=int(getattr(value, "code_id")),
         count=int(getattr(value, "count")),
     )
 
 
-class Phase2ValidationPayloads(PydanticBaseModel):
+class Phase2ValidationPayloads(PydanticMappingModel):
     """Phase II validation/report 需要复用的聚合 payload。
 
     本对象只保存 evaluator 已经聚合好的过程数据和诊断数据，不保存完整逐样本
@@ -379,82 +379,13 @@ class Phase2ValidationPayloads(PydanticBaseModel):
 
         return Phase2ReportCumulativeReturns() if value is None else value
 
-    @model_validator(mode="after")
-    def _normalize_nested_payloads(self) -> "Phase2ValidationPayloads":
-        """标准化 validation/report payload 的嵌套强类型字段。"""
-
-        from .phase2_validation_layer4_code_usage_collapse import (
-            Phase2PerCodeUsageDiagnostic,
-        )
-
-        per_code_rows = self.per_code_profitability_comparison or (
-            self.code_usage_collapse_payload.per_code_diagnostics
-            if self.code_usage_collapse_payload is not None
-            else ()
-        )
-        object.__setattr__(
-            self,
-            "per_code_profitability_comparison",
-            tuple(
-                item
-                if isinstance(item, Phase2PerCodeUsageDiagnostic)
-                else Phase2PerCodeUsageDiagnostic.from_dict(item)
-                for item in per_code_rows
-            ),
-        )
-        object.__setattr__(
-            self,
-            "selector_pair_profitability_matrix",
-            tuple(
-                item
-                if isinstance(item, Phase2ReportPairProfitabilityPayloadRow)
-                else Phase2ReportPairProfitabilityPayloadRow.from_dict(item)
-                for item in (self.selector_pair_profitability_matrix or ())
-            ),
-        )
-        object.__setattr__(
-            self,
-            "code_diagnostics",
-            tuple(
-                item
-                if isinstance(item, Phase2ReportCodeDiagnosticPayloadRow)
-                else Phase2ReportCodeDiagnosticPayloadRow.from_dict(item)
-                for item in (self.code_diagnostics or ())
-            ),
-        )
-        if isinstance(self.codebook_usage_distribution, Mapping):
-            object.__setattr__(
-                self,
-                "codebook_usage_distribution",
-                Phase2ReportCodeUsageDistribution.from_dict(
-                    self.codebook_usage_distribution
-                ),
-            )
-        elif self.codebook_usage_distribution is None:
-            object.__setattr__(
-                self,
-                "codebook_usage_distribution",
-                Phase2ReportCodeUsageDistribution(),
-            )
-        if isinstance(self.oracle_label_cumulative_returns, Mapping):
-            object.__setattr__(
-                self,
-                "oracle_label_cumulative_returns",
-                Phase2ReportCumulativeReturns.from_dict(
-                    self.oracle_label_cumulative_returns
-                ),
-            )
-        elif self.oracle_label_cumulative_returns is None:
-            object.__setattr__(
-                self,
-                "oracle_label_cumulative_returns",
-                Phase2ReportCumulativeReturns(),
-            )
-        return self
-
+    @model_validator(mode="before")
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ValidationPayloads":
-        """从 dict 恢复 validation/report payload 聚合。"""
+    def _restore_payloads_payload(cls, payload: Any) -> Any:
+        """Restore nested validation/report payload objects."""
+
+        if not isinstance(payload, Mapping):
+            return payload
 
         from .phase2_validation_layer0_evaluation_validity import (
             Phase2EvaluationValidityPayload,
@@ -476,84 +407,144 @@ class Phase2ValidationPayloads(PydanticBaseModel):
             Phase2GeneralizationStabilityPayload,
         )
 
-        evaluation_payload = payload.get("evaluation_validity_payload")
-        selector_payload = payload.get("selector_profitability_payload")
-        baseline_payload = payload.get("baseline_uplift_payload")
-        demonstration_payload = payload.get("demonstration_consistency_payload")
-        code_usage_payload = payload.get("code_usage_collapse_payload")
-        stability_payload = payload.get("generalization_stability_payload")
         cumulative_payload = (
             payload.get("oracle_label_cumulative_returns")
             or payload.get("cumulative_return_curves")
             or {}
         )
-        return cls(
-            evaluation_validity_payload=(
-                Phase2EvaluationValidityPayload.from_dict(evaluation_payload)
-                if isinstance(evaluation_payload, Mapping)
-                else None
-            ),
-            selector_profitability_payload=(
-                Phase2SelectorProfitabilityPayload.from_dict(selector_payload)
-                if isinstance(selector_payload, Mapping)
-                else None
-            ),
-            baseline_uplift_payload=(
-                Phase2BaselineUpliftPayload.from_dict(baseline_payload)
-                if isinstance(baseline_payload, Mapping)
-                else None
-            ),
-            demonstration_consistency_payload=(
-                Phase2DemonstrationConsistencyPayload.from_dict(demonstration_payload)
-                if isinstance(demonstration_payload, Mapping)
-                else None
-            ),
-            code_usage_collapse_payload=(
-                Phase2CodeUsageCollapsePayload.from_dict(code_usage_payload)
-                if isinstance(code_usage_payload, Mapping)
-                else None
-            ),
-            generalization_stability_payload=(
-                Phase2GeneralizationStabilityPayload.from_dict(stability_payload)
-                if isinstance(stability_payload, Mapping)
-                else None
-            ),
-            per_code_profitability_comparison=tuple(
-                Phase2PerCodeUsageDiagnostic.from_dict(item)
-                for item in (
-                    payload.get("per_code_profitability_comparison", ()) or ()
-                )
-                if isinstance(item, Mapping)
-            ),
-            selector_pair_profitability_matrix=tuple(
-                Phase2ReportPairProfitabilityPayloadRow.from_dict(item)
-                for item in (
-                    payload.get("selector_pair_profitability_matrix", ()) or ()
-                )
-                if isinstance(item, Mapping)
-            ),
-            code_diagnostics=tuple(
-                Phase2ReportCodeDiagnosticPayloadRow.from_dict(item)
-                for item in (payload.get("code_diagnostics", ()) or ())
-                if isinstance(item, Mapping)
-            ),
-            codebook_usage_distribution=(
-                Phase2ReportCodeUsageDistribution.from_dict(distribution)
-                if isinstance(
-                    distribution := payload.get("codebook_usage_distribution"),
-                    Mapping,
-                )
-                else Phase2ReportCodeUsageDistribution()
-            ),
-            oracle_label_cumulative_returns=(
-                Phase2ReportCumulativeReturns.from_dict(cumulative_payload)
-                if isinstance(cumulative_payload, Mapping)
-                else Phase2ReportCumulativeReturns()
-            ),
+        restored = dict(payload)
+        nested_payload_builders = {
+            "evaluation_validity_payload": Phase2EvaluationValidityPayload,
+            "selector_profitability_payload": Phase2SelectorProfitabilityPayload,
+            "baseline_uplift_payload": Phase2BaselineUpliftPayload,
+            "demonstration_consistency_payload": Phase2DemonstrationConsistencyPayload,
+            "code_usage_collapse_payload": Phase2CodeUsageCollapsePayload,
+            "generalization_stability_payload": Phase2GeneralizationStabilityPayload,
+        }
+        for key, builder in nested_payload_builders.items():
+            value = restored.get(key)
+            if isinstance(value, Mapping):
+                restored[key] = builder.model_validate(value)
+            elif value is not None and not isinstance(value, builder):
+                restored[key] = None
+
+        restored["per_code_profitability_comparison"] = tuple(
+            item
+            if isinstance(item, Phase2PerCodeUsageDiagnostic)
+            else Phase2PerCodeUsageDiagnostic.model_validate(item)
+            for item in (
+                payload.get("per_code_profitability_comparison", ()) or ()
+            )
+            if isinstance(item, Phase2PerCodeUsageDiagnostic | Mapping)
+        )
+        restored["selector_pair_profitability_matrix"] = tuple(
+            item
+            if isinstance(item, Phase2ReportPairProfitabilityPayloadRow)
+            else Phase2ReportPairProfitabilityPayloadRow.model_validate(item)
+            for item in (
+                payload.get("selector_pair_profitability_matrix", ()) or ()
+            )
+            if isinstance(item, Phase2ReportPairProfitabilityPayloadRow | Mapping)
+        )
+        restored["code_diagnostics"] = tuple(
+            item
+            if isinstance(item, Phase2ReportCodeDiagnosticPayloadRow)
+            else Phase2ReportCodeDiagnosticPayloadRow.model_validate(item)
+            for item in (payload.get("code_diagnostics", ()) or ())
+            if isinstance(item, Phase2ReportCodeDiagnosticPayloadRow | Mapping)
+        )
+        distribution = payload.get("codebook_usage_distribution")
+        restored["codebook_usage_distribution"] = (
+            distribution
+            if isinstance(distribution, Phase2ReportCodeUsageDistribution)
+            else Phase2ReportCodeUsageDistribution.model_validate(distribution)
+            if isinstance(distribution, Mapping)
+            else Phase2ReportCodeUsageDistribution()
+        )
+        restored["oracle_label_cumulative_returns"] = (
+            cumulative_payload
+            if isinstance(cumulative_payload, Phase2ReportCumulativeReturns)
+            else Phase2ReportCumulativeReturns.model_validate(cumulative_payload)
+            if isinstance(cumulative_payload, Mapping)
+            else Phase2ReportCumulativeReturns()
+        )
+        return restored
+
+    @model_validator(mode="after")
+    def _normalize_nested_payloads(self) -> "Phase2ValidationPayloads":
+        """标准化 validation/report payload 的嵌套强类型字段。"""
+
+        from .phase2_validation_layer4_code_usage_collapse import (
+            Phase2PerCodeUsageDiagnostic,
         )
 
+        per_code_rows = self.per_code_profitability_comparison or (
+            self.code_usage_collapse_payload.per_code_diagnostics
+            if self.code_usage_collapse_payload is not None
+            else ()
+        )
+        object.__setattr__(
+            self,
+            "per_code_profitability_comparison",
+            tuple(
+                item
+                if isinstance(item, Phase2PerCodeUsageDiagnostic)
+                else Phase2PerCodeUsageDiagnostic.model_validate(item)
+                for item in per_code_rows
+            ),
+        )
+        object.__setattr__(
+            self,
+            "selector_pair_profitability_matrix",
+            tuple(
+                item
+                if isinstance(item, Phase2ReportPairProfitabilityPayloadRow)
+                else Phase2ReportPairProfitabilityPayloadRow.model_validate(item)
+                for item in (self.selector_pair_profitability_matrix or ())
+            ),
+        )
+        object.__setattr__(
+            self,
+            "code_diagnostics",
+            tuple(
+                item
+                if isinstance(item, Phase2ReportCodeDiagnosticPayloadRow)
+                else Phase2ReportCodeDiagnosticPayloadRow.model_validate(item)
+                for item in (self.code_diagnostics or ())
+            ),
+        )
+        if isinstance(self.codebook_usage_distribution, Mapping):
+            object.__setattr__(
+                self,
+                "codebook_usage_distribution",
+                Phase2ReportCodeUsageDistribution.model_validate(
+                    self.codebook_usage_distribution
+                ),
+            )
+        elif self.codebook_usage_distribution is None:
+            object.__setattr__(
+                self,
+                "codebook_usage_distribution",
+                Phase2ReportCodeUsageDistribution(),
+            )
+        if isinstance(self.oracle_label_cumulative_returns, Mapping):
+            object.__setattr__(
+                self,
+                "oracle_label_cumulative_returns",
+                Phase2ReportCumulativeReturns.model_validate(
+                    self.oracle_label_cumulative_returns
+                ),
+            )
+        elif self.oracle_label_cumulative_returns is None:
+            object.__setattr__(
+                self,
+                "oracle_label_cumulative_returns",
+                Phase2ReportCumulativeReturns(),
+            )
+        return self
 
-class Phase2ValidationResult(PydanticBaseModel):
+
+class Phase2ValidationResult(PydanticMappingModel):
     """Phase II validation 结果摘要。
 
     功能说明:
@@ -597,7 +588,7 @@ class Phase2ValidationResult(PydanticBaseModel):
         if isinstance(metrics_payload, Phase2ValidationMetrics):
             restored_metrics = metrics_payload
         elif isinstance(metrics_payload, Mapping):
-            restored_metrics = Phase2ValidationMetrics.from_dict(metrics_payload)
+            restored_metrics = Phase2ValidationMetrics.model_validate(metrics_payload)
         else:
             raise ValueError("invalid phase2 validation result payload: missing metrics")
         payloads_payload = payload.get("payloads")
@@ -607,28 +598,28 @@ class Phase2ValidationResult(PydanticBaseModel):
             "layers": tuple(
                 layer
                 if isinstance(layer, Phase2LayerResult)
-                else Phase2LayerResult.from_dict(layer)
+                else Phase2LayerResult.model_validate(layer)
                 for layer in payload.get("layers", ())
                 if isinstance(layer, Phase2LayerResult | Mapping)
             ),
             "layer_computations": tuple(
                 computation
                 if isinstance(computation, Phase2LayerComputation)
-                else Phase2LayerComputation.from_dict(computation)
+                else Phase2LayerComputation.model_validate(computation)
                 for computation in payload.get("layer_computations", ())
                 if isinstance(computation, Phase2LayerComputation | Mapping)
             ),
             "payloads": (
                 payloads_payload
                 if isinstance(payloads_payload, Phase2ValidationPayloads)
-                else Phase2ValidationPayloads.from_dict(payloads_payload)
+                else Phase2ValidationPayloads.model_validate(payloads_payload)
                 if isinstance(payloads_payload, Mapping)
                 else None
             ),
         }
 
 
-class Phase2LayerComputation(PydanticBaseModel):
+class Phase2LayerComputation(PydanticMappingModel):
     """单个 Phase II validation layer 的 raw metric 计算结果。
 
     各 ``phase2_validation_layers/layer*.py`` 文件只负责 raw metric 计算，不做
@@ -666,16 +657,16 @@ class Phase2LayerComputation(PydanticBaseModel):
             **dict(payload),
             "layer_id": layer_id,
             "layer_name": layer_name,
-            "metrics": _layer_metrics_from_dict(layer_id, layer_name, metrics_payload),
+            "metrics": _layer_metrics_from_payload(layer_id, layer_name, metrics_payload),
             "extra_payload": (
-                _layer_extra_payload_from_dict(layer_name, extra_payload)
+                _layer_extra_payload_from_payload(layer_name, extra_payload)
                 if isinstance(extra_payload, Mapping)
                 else None
             ),
         }
 
 
-def _layer_metrics_from_dict(
+def _layer_metrics_from_payload(
     layer_id: int,
     layer_name: str,
     payload: Any,
@@ -689,41 +680,41 @@ def _layer_metrics_from_dict(
             Phase2EvaluationValidityMetrics,
         )
 
-        return Phase2EvaluationValidityMetrics.from_dict(payload)
+        return Phase2EvaluationValidityMetrics.model_validate(payload)
     if layer_id == 1 or layer_name == "selector_profitability":
         from .phase2_validation_layer1_selector_profitability import (
             Phase2SelectorProfitabilityMetrics,
         )
 
-        return Phase2SelectorProfitabilityMetrics.from_dict(payload)
+        return Phase2SelectorProfitabilityMetrics.model_validate(payload)
     if layer_id == 2 or layer_name == "baseline_uplift":
         from .phase2_validation_layer2_baseline_uplift import (
             Phase2BaselineUpliftMetrics,
         )
 
-        return Phase2BaselineUpliftMetrics.from_dict(payload)
+        return Phase2BaselineUpliftMetrics.model_validate(payload)
     if layer_id == 3 or layer_name == "demonstration_consistency":
         from .phase2_validation_layer3_demonstration_consistency import (
             Phase2DemonstrationConsistencyMetrics,
         )
 
-        return Phase2DemonstrationConsistencyMetrics.from_dict(payload)
+        return Phase2DemonstrationConsistencyMetrics.model_validate(payload)
     if layer_id == 4 or layer_name == "code_usage_collapse":
         from .phase2_validation_layer4_code_usage_collapse import (
             Phase2CodeUsageCollapseMetrics,
         )
 
-        return Phase2CodeUsageCollapseMetrics.from_dict(payload)
+        return Phase2CodeUsageCollapseMetrics.model_validate(payload)
     if layer_id == 5 or layer_name == "generalization_stability":
         from .phase2_validation_layer5_generalization_stability import (
             Phase2GeneralizationStabilityMetrics,
         )
 
-        return Phase2GeneralizationStabilityMetrics.from_dict(payload)
+        return Phase2GeneralizationStabilityMetrics.model_validate(payload)
     return dict(payload)
 
 
-def _layer_extra_payload_from_dict(
+def _layer_extra_payload_from_payload(
     layer_name: str,
     payload: Mapping[str, Any],
 ) -> Mapping[str, object]:
@@ -761,12 +752,12 @@ def _layer_extra_payload_from_dict(
     for key, builder in payload_key_builders.items():
         value = restored.get(key)
         if isinstance(value, Mapping):
-            restored[key] = builder.from_dict(value)
+            restored[key] = builder.model_validate(value)
 
     diagnostics = restored.get("per_code_diagnostics")
     if isinstance(diagnostics, list | tuple):
         restored["per_code_diagnostics"] = tuple(
-            Phase2PerCodeUsageDiagnostic.from_dict(item)
+            Phase2PerCodeUsageDiagnostic.model_validate(item)
             if isinstance(item, Mapping)
             else item
             for item in diagnostics

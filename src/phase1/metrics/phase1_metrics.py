@@ -20,8 +20,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import ConfigDict, Field
 import torch
 
@@ -215,20 +213,5 @@ class Phase1Metrics(PydanticMappingModel):
             correct_actions=self.correct_actions,
             total_actions=self.total_actions,
         )
-
-    def to_dict(self, *, include_context: bool = True) -> dict[str, Any]:
-        """序列化为普通 dict。
-
-        参数:
-            include_context:
-                为 True 时包含 ``stage/split/epoch/num_samples``，适合直接写入
-                datastore JSON/report；为 False 时只输出指标字段，适合嵌入其他 payload。
-        """
-
-        exclude: set[str] = {"correct_actions", "total_actions"}
-        if not include_context:
-            exclude.update({"stage", "split", "epoch", "num_samples"})
-        return self.model_dump(mode="json", exclude=exclude)
-
 
 __all__ = ["Phase1Metrics"]

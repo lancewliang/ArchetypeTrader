@@ -80,7 +80,7 @@ class Phase1OracleProfitabilityPayload(PydanticMappingModel):
         return tuple(
             item
             if isinstance(item, Phase1PerCodeProfitability)
-            else Phase1PerCodeProfitability.from_dict(item)
+            else Phase1PerCodeProfitability.model_validate(item)
             for item in (value or ())
         )
 
@@ -88,7 +88,12 @@ class Phase1OracleProfitabilityPayload(PydanticMappingModel):
     def _serialize_per_code_profitability(self, value: tuple[Any, ...]) -> list[Any]:
         """Serialize per-code profitability rows through their local API."""
 
-        return [item.to_dict() if hasattr(item, "to_dict") else item for item in value]
+        return [
+            item.model_dump(mode="json")
+            if isinstance(item, PydanticMappingModel)
+            else item
+            for item in value
+        ]
 
 
 class Phase1OracleProfitabilityMetrics(PydanticMappingModel):

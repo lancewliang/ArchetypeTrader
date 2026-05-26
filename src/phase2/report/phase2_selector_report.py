@@ -25,6 +25,7 @@ from .phase2_selector_report_context import Phase2SelectorReportContextBuilder
 from .phase2_selector_report_schema import (
     DEFAULT_PHASE2_REPORT_TITLE, 
     Phase2ReportDocument,
+    template_safe,
 )
 
 
@@ -90,7 +91,7 @@ class Phase2SelectorReport:
         """将 report payload 渲染为静态 HTML 字符串。"""
 
         context = Phase2SelectorReportContextBuilder(title=self.title).build(payload)
-        return render_template_file(_TEMPLATE_PATH, context.to_dict())
+        return render_template_file(_TEMPLATE_PATH, template_safe(context))
 
 
 __all__ = ["Phase2SelectorReport"]

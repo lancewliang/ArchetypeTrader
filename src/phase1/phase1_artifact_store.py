@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, List, Mapping, cast
 
@@ -212,7 +211,7 @@ class Phase1ArtifactStore(DataFileStore):
             后续再补齐原子写入、索引更新、校验和审计元数据。
         """
 
-        best_checkpoint = replace(checkpoint, is_best=True)
+        best_checkpoint = checkpoint.model_copy(update={"is_best": True})
         self._save_phase1_checkpoint_payload(
             best_checkpoint,
             self._phase1_best_checkpoint_path(),
@@ -296,7 +295,7 @@ class Phase1ArtifactStore(DataFileStore):
             stage=validation_result.stage,
             epoch=validation_result.epoch,
         )
-        payload = validation_result.to_dict()
+        payload = validation_result.model_dump(mode="json")
         self._save_json_payload(payload, path)
         return path
 
@@ -314,7 +313,7 @@ class Phase1ArtifactStore(DataFileStore):
                 stage=metrics.stage,
                 epoch=metrics.epoch,
             )
-            payload = metrics.to_dict()
+            payload = metrics.model_dump(mode="json")
         else:
             if stage is None or epoch is None:
                 raise ValueError(
@@ -365,7 +364,7 @@ class Phase1ArtifactStore(DataFileStore):
             payload = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload, Mapping):
                 raise ValueError(f"invalid phase1 epoch metrics payload: {path}")
-            checkpoints.append(Phase1ValidationCheckpoint.from_dict(payload))
+            checkpoints.append(Phase1ValidationCheckpoint.model_validate(payload))
         return checkpoints
 
     def load_phase1_epoch_metrics(
@@ -394,7 +393,7 @@ class Phase1ArtifactStore(DataFileStore):
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError(f"invalid phase1 validation result payload: {path}")
-        return Phase1ValidationResult.from_dict(payload)
+        return Phase1ValidationResult.model_validate(payload)
 
     def _phase1_horizon_label_path(self, split_name: str = "train") -> Path:
         """返回 Phase I horizon label 的标准路径。"""
@@ -516,7 +515,7 @@ class Phase1ArtifactStore(DataFileStore):
         """以原子替换方式保存 checkpoint payload 并写出 sha256 sidecar。"""
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = checkpoint.to_dict()
+        payload = checkpoint.model_dump(mode="python")
 
         with tempfile.NamedTemporaryFile(
             dir=path.parent,

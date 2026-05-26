@@ -7,11 +7,10 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import field_validator
 
-from phase1.metrics.phase1_metric_results import Phase1MetricResult
 from src.utils import PydanticMappingModel
 
 if TYPE_CHECKING:
-    from .phase1_metric_results import Phase1LayerResult
+    from .phase1_metric_results import Phase1LayerResult, Phase1MetricResult
     from .phase1_validation_data_schema import (
         CodeAssignmentSnapshot,
         Phase1ValidationMetrics,
@@ -57,7 +56,7 @@ class Phase1VQInternalPayload(PydanticMappingModel):
 
         if isinstance(value, CodeAssignmentSnapshot):
             return value
-        return CodeAssignmentSnapshot.from_dict(value)
+        return CodeAssignmentSnapshot.model_validate(value)
 
     @field_validator("assignment_churn_by_epoch", mode="before")
     @classmethod

@@ -87,8 +87,8 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
 
     if value is None:
         return {}
-    if hasattr(value, "to_dict") and callable(value.to_dict):
-        payload = value.to_dict()
+    if hasattr(value, "model_dump") and callable(value.model_dump):
+        payload = value.model_dump(mode="python")
         return payload if isinstance(payload, Mapping) else {}
     if isinstance(value, Mapping):
         return value
@@ -312,7 +312,7 @@ class Phase2SelectorReportContextBuilder:
 
         if validation is None:
             return ()
-        metrics = validation.metrics.to_dict()
+        metrics = validation.metrics.model_dump(mode="python")
         return tuple(
             Phase2ReportMappingRow(
                 key=str(key),

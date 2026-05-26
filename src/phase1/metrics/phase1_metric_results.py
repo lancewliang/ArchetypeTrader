@@ -274,7 +274,7 @@ class Phase1ValidationResult(PydanticMappingModel):
         }
         for layer in self.layers:
             payload[f"validation.layer{layer.layer_id}.{layer.name}.passed"] = layer.passed
-        for key, value in self.tie_breaker_metrics.to_dict().items():
+        for key, value in self.tie_breaker_metrics.items():
             payload[f"validation.tie_breaker.{key}"] = value
         return payload
 
@@ -301,5 +301,5 @@ def _phase1_validation_score_from_payload(
     if isinstance(payload, Phase1ValidationScore):
         return payload
     if isinstance(payload, Mapping):
-        return Phase1ValidationScore.from_dict(payload)
+        return Phase1ValidationScore.model_validate(payload)
     return Phase1ValidationScore.from_float(float(payload))
