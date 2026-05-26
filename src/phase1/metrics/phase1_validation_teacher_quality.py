@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from src.utils import PydanticBaseModel, PydanticMappingModel
+from src.utils import PydanticMappingModel
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
@@ -32,7 +32,7 @@ class Phase1TeacherQualityPayload(PydanticMappingModel):
     missing_reason: str | None = None
 
 
-class Phase1TeacherQualityMetrics(PydanticBaseModel):
+class Phase1TeacherQualityMetrics(PydanticMappingModel):
     """第零层 DP teacher 质量 raw metrics。
 
     使用场景:
@@ -58,7 +58,7 @@ class Phase1TeacherQualityMetrics(PydanticBaseModel):
     # 去掉收益最高 top 5% 后剩余 DP 总优势或优势保留诊断值。
     dp_return_concentration_after_top5_removed: float
 
-class Phase1TeacherQualityThresholds(PydanticBaseModel):
+class Phase1TeacherQualityThresholds(PydanticMappingModel):
     """第零层 DP teacher 质量阈值配置。
 
     功能说明:

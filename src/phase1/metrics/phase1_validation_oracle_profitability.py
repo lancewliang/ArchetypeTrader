@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from pydantic import field_serializer, field_validator
 
-from src.utils import PydanticBaseModel, PydanticMappingModel
+from src.utils import PydanticMappingModel
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
@@ -17,7 +16,7 @@ if TYPE_CHECKING:
     )
 
 
-class Phase1PairProfitabilityCell(PydanticBaseModel):
+class Phase1PairProfitabilityCell(PydanticMappingModel):
     """单个 morphology-motif pair 的 oracle 盈利性摘要。"""
 
     # 市场形态标签，例如 uptrend、downtrend、range-high-vol。
@@ -92,7 +91,7 @@ class Phase1OracleProfitabilityPayload(PydanticMappingModel):
         return [item.to_dict() if hasattr(item, "to_dict") else item for item in value]
 
 
-class Phase1OracleProfitabilityMetrics(PydanticBaseModel):
+class Phase1OracleProfitabilityMetrics(PydanticMappingModel):
     """第三层 oracle assigned-label 盈利性 raw metrics。"""
 
     # decoded return 相对 flat baseline 的平均优势。
@@ -140,7 +139,7 @@ class Phase1OracleProfitabilityMetrics(PydanticBaseModel):
     # decoded 风险调整收益相对 random label baseline 的差值。
     risk_adjusted_return_vs_random: float = float("nan")
 
-class Phase1OracleProfitabilityThresholds(PydanticBaseModel):
+class Phase1OracleProfitabilityThresholds(PydanticMappingModel):
     """第三层 oracle assigned-label 盈利性阈值配置。"""
 
     # oracle assigned-label decoded 策略胜率下限。用于第三层判断盈利是否足够广泛。

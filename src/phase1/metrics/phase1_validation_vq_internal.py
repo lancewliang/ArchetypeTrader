@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from pydantic import field_validator
 
-from src.utils import PydanticBaseModel, PydanticMappingModel
+from phase1.metrics.phase1_metric_results import Phase1MetricResult
+from src.utils import PydanticMappingModel
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
@@ -67,7 +67,7 @@ class Phase1VQInternalPayload(PydanticMappingModel):
         return {int(epoch): float(churn) for epoch, churn in (value or {}).items()}
 
 
-class Phase1VQInternalMetrics(PydanticBaseModel):
+class Phase1VQInternalMetrics(PydanticMappingModel):
     """第一层 VQ 内部质量 raw metrics。
 
     使用场景:
@@ -118,7 +118,7 @@ class Phase1VQInternalMetrics(PydanticBaseModel):
     # 旧 checkpoint 可能没有该字段，因此给 NaN 默认值。
     quantization_distance_gap: float = float("nan")
 
-class Phase1VQInternalThresholds(PydanticBaseModel):
+class Phase1VQInternalThresholds(PydanticMappingModel):
     """第一层 VQ 内部质量阈值配置。
 
     功能说明:

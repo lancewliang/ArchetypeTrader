@@ -15,8 +15,11 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 from typing import Any, Literal, Mapping
+
+from pydantic import field_validator
+
+from src.utils import PydanticMappingModel
 
 from .phase1_validation_data_schema import (
     Phase1CodeDiagnostic,
@@ -60,8 +63,7 @@ RiskSeverity = Literal["info", "warn", "fail"]
 """checkpoint 级跨层风险定位严重级别。"""
 
 
-@dataclass(frozen=True)
-class Phase1MetricResult:
+class Phase1MetricResult(PydanticMappingModel):
     """单个 validation metric 的判定结果。
 
     功能说明:
@@ -103,37 +105,12 @@ class Phase1MetricResult:
     # 到通过边界的有符号距离。>= 0 表示在阈值安全侧，< 0 表示越界。
     distance_to_threshold: float | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict，供 checkpoint/report 落盘。"""
-
-        return asdict(self)
-
+    @field_validator("threshold_value", mode="before")
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1MetricResult":
-        """从 dict 恢复 metric result。"""
+    def _restore_threshold_value(cls, value: Any) -> MetricThresholdValue:
+        """恢复机器可读阈值，兼容旧 payload 缺失该字段的情况。"""
 
-        return cls(
-            name=str(payload["name"]),
-            value=payload.get("value"),
-            threshold=str(payload["threshold"]),
-            threshold_value=_metric_threshold_value_from_payload(
-                payload.get("threshold_value")
-            ),
-            direction=(
-                str(direction)
-                if (direction := payload.get("direction")) is not None
-                else None
-            ),  # type: ignore[arg-type]
-            distance_to_threshold=(
-                float(distance)
-                if (distance := payload.get("distance_to_threshold")) is not None
-                else None
-            ),
-            severity=payload["severity"],  # type: ignore[arg-type]
-            passed=bool(payload["passed"]),
-            layer=str(payload["layer"]),
-            message=str(payload.get("message", "")),
-        )
+        return _metric_threshold_value_from_payload(value)
 
 
 def _metric_threshold_value_from_payload(value: Any) -> MetricThresholdValue:
@@ -148,8 +125,7 @@ def _metric_threshold_value_from_payload(value: Any) -> MetricThresholdValue:
     return float(value)
 
 
-@dataclass(frozen=True)
-class Phase1RiskFinding:
+class Phase1RiskFinding(PydanticMappingModel):
     """checkpoint 级跨层风险定位结果。
 
     功能说明:
@@ -183,61 +159,8 @@ class Phase1RiskFinding:
     # 建议动作。
     recommended_action: str = ""
 
-    def __post_init__(self) -> None:
-        """标准化 tuple 字段，保证落盘结构稳定。"""
 
-        object.__setattr__(
-            self,
-            "related_metrics",
-            tuple(str(metric) for metric in self.related_metrics),
-        )
-        object.__setattr__(
-            self,
-            "related_codes",
-            tuple(int(code_id) for code_id in self.related_codes),
-        )
-        object.__setattr__(
-            self,
-            "related_pairs",
-            tuple(str(pair) for pair in self.related_pairs),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 checkpoint/report 可保存的 dict。"""
-
-        return {
-            "severity": self.severity,
-            "title": self.title,
-            "reason": self.reason,
-            "related_metrics": list(self.related_metrics),
-            "related_codes": list(self.related_codes),
-            "related_pairs": list(self.related_pairs),
-            "recommended_action": self.recommended_action,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1RiskFinding":
-        """从 dict 恢复 risk finding。"""
-
-        return cls(
-            severity=payload["severity"],  # type: ignore[arg-type]
-            title=str(payload["title"]),
-            reason=str(payload["reason"]),
-            related_metrics=tuple(
-                str(metric) for metric in payload.get("related_metrics", ())
-            ),
-            related_codes=tuple(
-                int(code_id) for code_id in payload.get("related_codes", ())
-            ),
-            related_pairs=tuple(
-                str(pair) for pair in payload.get("related_pairs", ())
-            ),
-            recommended_action=str(payload.get("recommended_action", "")),
-        )
-
-
-@dataclass(frozen=True)
-class Phase1LayerResult:
+class Phase1LayerResult(PydanticMappingModel):
     """单个 validation layer 的判定结果。
 
     功能说明:
@@ -260,33 +183,8 @@ class Phase1LayerResult:
     # 该层所有 metric 判定结果。
     metrics: tuple[Phase1MetricResult, ...]
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict，供 checkpoint/report 落盘。"""
 
-        return {
-            "layer_id": self.layer_id,
-            "name": self.name,
-            "passed": self.passed,
-            "metrics": [metric.to_dict() for metric in self.metrics],
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1LayerResult":
-        """从 dict 恢复 layer result。"""
-
-        return cls(
-            layer_id=int(payload["layer_id"]),
-            name=str(payload["name"]),
-            passed=bool(payload["passed"]),
-            metrics=tuple(
-                Phase1MetricResult.from_dict(metric)
-                for metric in payload.get("metrics", ())
-            ),
-        )
-
-
-@dataclass(frozen=True)
-class Phase1ValidationResult:
+class Phase1ValidationResult(PydanticMappingModel):
     """单个 checkpoint 的完整 Phase I validation 结果。
 
     功能说明:
@@ -311,7 +209,7 @@ class Phase1ValidationResult:
     passed: bool
 
     # 综合评分对象。只有 passed=True 时通常才有值；失败 checkpoint 推荐为 None。
-    score: Phase1ValidationScore
+    score: Phase1ValidationScore | None
 
     # 失败 layer 名称列表。
     failed_layers: tuple[str, ...]
@@ -349,59 +247,15 @@ class Phase1ValidationResult:
     # 第四层 label predictability 中间 payload，用于审计 probe 诊断。
     label_predictability_payload: Phase1LabelPredictabilityPayload | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 checkpoint/report 可保存的嵌套 dict。"""
+    @field_validator("score", mode="before")
+    @classmethod
+    def _restore_score(
+        cls,
+        value: Phase1ValidationScoreLike | Mapping[str, Any],
+    ) -> Phase1ValidationScore | None:
+        """恢复新 score 对象，同时兼容历史 float payload。"""
 
-        return {
-            "checkpoint_id": self.checkpoint_id,
-            "stage": self.stage,
-            "epoch": self.epoch,
-            "passed": self.passed,
-            "score": (
-                self.score.to_dict()
-                if isinstance(self.score, Phase1ValidationScore)
-                else self.score
-            ),
-            "failed_layers": list(self.failed_layers),
-            "layers": [layer.to_dict() for layer in self.layers],
-            "metrics": self.metrics.to_dict(),
-            "code_diagnostics": [
-                diagnostic.to_dict() for diagnostic in self.code_diagnostics
-            ],
-            "drift_diagnostics": {
-                name: result.to_dict()
-                for name, result in self.drift_diagnostics.items()
-            },
-            "tie_breaker_metrics": self.tie_breaker_metrics.to_dict(),
-            "risk_findings": [
-                finding.to_dict() for finding in self.risk_findings
-            ],
-            "teacher_quality_payload": (
-                self.teacher_quality_payload.to_dict()
-                if self.teacher_quality_payload is not None
-                else None
-            ),
-            "vq_internal_payload": (
-                self.vq_internal_payload.to_dict()
-                if self.vq_internal_payload is not None
-                else None
-            ),
-            "behavior_quality_payload": (
-                self.behavior_quality_payload.to_dict()
-                if self.behavior_quality_payload is not None
-                else None
-            ),
-            "oracle_profitability_payload": (
-                self.oracle_profitability_payload.to_dict()
-                if self.oracle_profitability_payload is not None
-                else None
-            ),
-            "label_predictability_payload": (
-                self.label_predictability_payload.to_dict()
-                if self.label_predictability_payload is not None
-                else None
-            ),
-        }
+        return _phase1_validation_score_from_payload(value)
 
     def to_flat_dict(self) -> dict[str, int | float | bool | None]:
         """生成 checkpoint selector 快速读取的扁平视图。
@@ -413,7 +267,9 @@ class Phase1ValidationResult:
 
         payload: dict[str, int | float | bool | None] = {
             "validation.passed": self.passed,
-            "validation.score": self.score.total_score,
+            "validation.score": (
+                self.score.total_score if self.score is not None else None
+            ),
             "validation.failed_layer_count": len(self.failed_layers),
         }
         for layer in self.layers:
@@ -421,68 +277,6 @@ class Phase1ValidationResult:
         for key, value in self.tie_breaker_metrics.to_dict().items():
             payload[f"validation.tie_breaker.{key}"] = value
         return payload
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1ValidationResult":
-        """从 checkpoint/report payload 恢复 validation result。"""
-
-        return cls(
-            checkpoint_id=str(payload["checkpoint_id"]),
-            stage=str(payload["stage"]),
-            epoch=int(payload["epoch"]),
-            passed=bool(payload["passed"]),
-            score=_phase1_validation_score_from_payload(payload.get("score")),
-            failed_layers=tuple(str(name) for name in payload.get("failed_layers", ())),
-            layers=tuple(
-                Phase1LayerResult.from_dict(layer)
-                for layer in payload.get("layers", ())
-            ),
-            metrics=Phase1ValidationMetrics.from_dict(payload["metrics"]),
-            code_diagnostics=tuple(
-                Phase1CodeDiagnostic.from_dict(diagnostic)
-                for diagnostic in payload.get("code_diagnostics", ())
-            ),
-            drift_diagnostics={
-                str(name): Phase1MetricResult.from_dict(result)
-                for name, result in payload.get("drift_diagnostics", {}).items()
-            },
-            tie_breaker_metrics=Phase1TieBreakerMetrics.from_dict(
-                payload["tie_breaker_metrics"]
-            ),
-            risk_findings=tuple(
-                Phase1RiskFinding.from_dict(finding)
-                for finding in payload.get("risk_findings", ())
-            ),
-            teacher_quality_payload=(
-                Phase1TeacherQualityPayload.from_dict(teacher_payload)
-                if (teacher_payload := payload.get("teacher_quality_payload"))
-                is not None
-                else None
-            ),
-            vq_internal_payload=(
-                Phase1VQInternalPayload.from_dict(vq_payload)
-                if (vq_payload := payload.get("vq_internal_payload")) is not None
-                else None
-            ),
-            behavior_quality_payload=(
-                Phase1BehaviorQualityPayload.from_dict(behavior_payload)
-                if (behavior_payload := payload.get("behavior_quality_payload"))
-                is not None
-                else None
-            ),
-            oracle_profitability_payload=(
-                Phase1OracleProfitabilityPayload.from_dict(oracle_payload)
-                if (oracle_payload := payload.get("oracle_profitability_payload"))
-                is not None
-                else None
-            ),
-            label_predictability_payload=(
-                Phase1LabelPredictabilityPayload.from_dict(label_payload)
-                if (label_payload := payload.get("label_predictability_payload"))
-                is not None
-                else None
-            ),
-        )
 
 
 __all__ = [

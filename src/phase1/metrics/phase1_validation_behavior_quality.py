@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from src.utils import PydanticBaseModel, PydanticMappingModel
+from src.utils import PydanticMappingModel
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
@@ -29,7 +29,7 @@ class Phase1BehaviorQualityPayload(PydanticMappingModel):
     # 当前 validation split 中满足 active occupancy 阈值的 code id。
     active_codes: tuple[int, ...]
 
-class Phase1BehaviorQualityMetrics(PydanticBaseModel):
+class Phase1BehaviorQualityMetrics(PydanticMappingModel):
     """第二层 archetype 行为质量 raw metrics。"""
 
     # support 不达标的 active code 比例。
@@ -65,7 +65,7 @@ class Phase1BehaviorQualityMetrics(PydanticBaseModel):
     # 当前 codebook size K，用于 duplicate code pair 上限按 K 动态判定。
     num_codes: int = 0
 
-class Phase1BehaviorQualityThresholds(PydanticBaseModel):
+class Phase1BehaviorQualityThresholds(PydanticMappingModel):
     """第二层 archetype 行为质量阈值配置。"""
 
     # 单个 active code 的绝对最小样本数。用于保证 per-code 诊断具备统计支撑。

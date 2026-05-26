@@ -20,12 +20,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any
 
+from pydantic import ConfigDict, Field
 import torch
 
 from ...model.vq_archetype import VqModelOutputs
+from ...utils import PydanticMappingModel
 
 
 def _tensor_to_float(value: torch.Tensor | float | int) -> float:
@@ -43,8 +44,7 @@ def _tensor_to_float(value: torch.Tensor | float | int) -> float:
     return float(value)
 
 
-@dataclass
-class Phase1Metrics:
+class Phase1Metrics(PydanticMappingModel):
     """Phase I 训练期基础指标。
 
     功能说明:
@@ -56,6 +56,13 @@ class Phase1Metrics:
         report/checkpoint 保存时调用 ``to_dict()``。本类不用于五层 codebook
         validation hard gate。
     """
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        coerce_numbers_to_str=True,
+        extra="ignore",
+        frozen=False,
+    )
 
     # 训练阶段名称，例如 "pretrain"、"train" 或 "eval"。用于日志和 report 分组。
     stage: str | None = None
@@ -97,10 +104,10 @@ class Phase1Metrics:
     action_accuracy: float = 0.0
 
     # 已正确重构的 action timestep 数。用于按 timestep 计算 accuracy，不直接写入默认 dict。
-    correct_actions: int = field(default=0, repr=False)
+    correct_actions: int = Field(default=0, exclude=True, repr=False)
 
     # 已统计的 action timestep 总数。用于按 timestep 计算 accuracy，不直接写入默认 dict。
-    total_actions: int = field(default=0, repr=False)
+    total_actions: int = Field(default=0, exclude=True, repr=False)
 
     def add_batch(
         self,
@@ -218,55 +225,10 @@ class Phase1Metrics:
                 datastore JSON/report；为 False 时只输出指标字段，适合嵌入其他 payload。
         """
 
-        payload: dict[str, Any] = {
-            "total_loss": self.total_loss,
-            "reconstruction_loss": self.reconstruction_loss,
-            "vq_loss": self.vq_loss,
-            "codebook_loss": self.codebook_loss,
-            "commitment_loss": self.commitment_loss,
-            "return_weighted_ce_loss": self.return_weighted_ce_loss,
-            "turnover_smooth_loss": self.turnover_smooth_loss,
-            "turnover_return_alignment_loss": self.turnover_return_alignment_loss,
-            "action_accuracy": self.action_accuracy,
-        }
-        if include_context:
-            payload = {
-                "stage": self.stage,
-                "split": self.split,
-                "epoch": self.epoch,
-                "num_samples": self.num_samples,
-                **payload,
-            }
-        return payload
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1Metrics":
-        """从 dict 恢复训练期指标。
-
-        使用场景:
-            report 或 datastore 读取历史 metrics 时使用。历史 payload
-            通常没有 ``correct_actions`` / ``total_actions``，因此默认恢复为 0。
-        """
-
-        return cls(
-            stage=payload.get("stage"),
-            split=payload.get("split"),
-            epoch=int(payload["epoch"]) if payload.get("epoch") is not None else None,
-            num_samples=int(payload.get("num_samples", 0)),
-            total_loss=float(payload.get("total_loss", 0.0)),
-            reconstruction_loss=float(payload.get("reconstruction_loss", 0.0)),
-            vq_loss=float(payload.get("vq_loss", 0.0)),
-            codebook_loss=float(payload.get("codebook_loss", 0.0)),
-            commitment_loss=float(payload.get("commitment_loss", 0.0)),
-            return_weighted_ce_loss=float(payload.get("return_weighted_ce_loss", 0.0)),
-            turnover_smooth_loss=float(payload.get("turnover_smooth_loss", 0.0)),
-            turnover_return_alignment_loss=float(
-                payload.get("turnover_return_alignment_loss", 0.0)
-            ),
-            action_accuracy=float(payload.get("action_accuracy", 0.0)),
-            correct_actions=int(payload.get("correct_actions", 0)),
-            total_actions=int(payload.get("total_actions", 0)),
-        )
+        exclude: set[str] = {"correct_actions", "total_actions"}
+        if not include_context:
+            exclude.update({"stage", "split", "epoch", "num_samples"})
+        return self.model_dump(mode="json", exclude=exclude)
 
 
 __all__ = ["Phase1Metrics"]

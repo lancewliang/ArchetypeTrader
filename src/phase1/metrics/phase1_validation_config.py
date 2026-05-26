@@ -3,7 +3,7 @@
 本文件只放配置对象，不放指标计算、规则判定或文件读写逻辑。
 配置按职责拆成三类:
 
-1. 五个 layer thresholds dataclass: 四层 hard gate 和一层 reference 各自使用的阈值；
+1. 五个 layer thresholds schema: 四层 hard gate 和一层 reference 各自使用的阈值；
 2. ``Phase1ValidationScoreWeights``: checkpoint 通过 hard gate 后的综合评分权重；
 3. ``Phase1ValidationRuntimeConfig``: evaluator 和各层 metric calculator 的运行参数。
 

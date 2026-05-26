@@ -12,7 +12,7 @@
        稳定的序列化结果。
 
 设计约束:
-    - 代码内部访问指标时使用 dataclass 字段，不通过字符串 key 访问；
+    - 代码内部访问指标时使用 Pydantic 字段，不通过字符串 key 访问；
     - 字符串 key 只出现在 ``to_dict()`` / ``to_flat_dict()`` 的序列化结果中；
     - 缺失或不可计算的数值指标使用 ``float("nan")`` 或 ``None``，不要省略字段；
     - 本模块不依赖 torch、模型类、dataloader 或文件系统。
@@ -20,12 +20,12 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from typing import Any, Mapping, TypeAlias
 
 import numpy as np
+from pydantic import Field, field_serializer, field_validator, model_validator
 
-from src.utils import _dataclass_from_mapping
+from src.utils import PydanticBaseModel, PydanticMappingModel
 from .phase1_validation_behavior_quality import (
     Phase1BehaviorQualityMetrics,
     Phase1BehaviorQualityPayload,
@@ -109,27 +109,26 @@ def _require_ndim(field_name: str, value: np.ndarray, expected_ndim: int) -> Non
         )
 
 
-def _flatten_dataclass(prefix: str, value: Any, output: dict[str, int | float]) -> None:
-    """把嵌套 dataclass 中的数值字段展开为 ``prefix.field`` 形式。
+def _flatten_model(prefix: str, value: Any, output: dict[str, int | float]) -> None:
+    """把嵌套 Pydantic model 中的数值字段展开为 ``prefix.field`` 形式。
 
     使用场景:
         ``Phase1ValidationMetrics.to_flat_dict()`` 生成 checkpoint selector 可快速
         读取的扁平指标视图。
     """
 
-    for field in fields(value):
-        field_value = getattr(value, field.name)
-        key = f"{prefix}.{field.name}"
-        if is_dataclass(field_value):
-            _flatten_dataclass(key, field_value, output)
+    for field_name in type(value).model_fields:
+        field_value = getattr(value, field_name)
+        key = f"{prefix}.{field_name}"
+        if isinstance(field_value, PydanticBaseModel):
+            _flatten_model(key, field_value, output)
         elif isinstance(field_value, bool):
             output[key] = int(field_value)
         elif isinstance(field_value, (int, float)):
             output[key] = field_value
 
 
-@dataclass(frozen=True)
-class Phase1EvaluationSnapshot:
+class Phase1EvaluationSnapshot(PydanticMappingModel):
     """单个 split 在某个 checkpoint 下的完整可计算状态。
 
     功能说明:
@@ -202,9 +201,59 @@ class Phase1EvaluationSnapshot:
     action_accuracy: float
 
     # horizon LOB 深度行情，shape=[N, H, 20]。用于执行收益中的盘口滑点计算；缺失时可为 None。
-    depthprices: np.ndarray | None = None
+    depthprices: np.ndarray | None = Field(default=None, exclude=True)
 
-    def __post_init__(self) -> None:
+    @field_validator(
+        "sample_ids",
+        "states",
+        "relative_states",
+        "trend_states",
+        "demo_actions",
+        "demo_rewards",
+        "decoded_actions",
+        "decoded_logits",
+        "code_ids",
+        "z_e",
+        "z_q",
+        "distances",
+        mode="before",
+    )
+    @classmethod
+    def _restore_required_array(cls, value: Any) -> np.ndarray:
+        """Restore required array fields from list payloads."""
+
+        return np.asarray(value)
+
+    @field_validator("prices", "depthprices", mode="before")
+    @classmethod
+    def _restore_optional_array(cls, value: Any) -> np.ndarray | None:
+        """Restore optional array fields from list payloads."""
+
+        return _array_from_payload(value)
+
+    @field_serializer(
+        "sample_ids",
+        "states",
+        "relative_states",
+        "trend_states",
+        "prices",
+        "demo_actions",
+        "demo_rewards",
+        "decoded_actions",
+        "decoded_logits",
+        "code_ids",
+        "z_e",
+        "z_q",
+        "distances",
+        when_used="json",
+    )
+    def _serialize_array(self, value: np.ndarray | None) -> list[Any] | None:
+        """Serialize arrays as nested lists."""
+
+        return _array_to_payload(value)
+
+    @model_validator(mode="after")
+    def _validate_shapes(self) -> "Phase1EvaluationSnapshot":
         """校验 snapshot 初始化时的数组维度一致性。"""
 
         sample_ids = _require_ndarray("sample_ids", self.sample_ids)
@@ -267,75 +316,10 @@ class Phase1EvaluationSnapshot:
                 f"distances must have leading shape {n_shape}, got {distances.shape}"
             )
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化 snapshot。
-
-        数组形状:
-            所有 ``np.ndarray`` 字段会按原 shape 转为嵌套 list，例如
-            ``sample_ids=[N]``、``states=[N,H,F]``、``prices=[N,H]``、
-            ``demo_rewards=[N,H]``、``decoded_logits=[N,H,A]``、
-            ``distances=[N,K]``。
-
-        使用场景:
-            单元测试、debug dump 或小样本诊断。生产 checkpoint 通常只保存聚合
-            metrics，避免把完整中间数组写得过大。
-        """
-
-        return {
-            "split": self.split,
-            "epoch": self.epoch,
-            "sample_ids": _array_to_payload(self.sample_ids),
-            "states": _array_to_payload(self.states),
-            "relative_states": _array_to_payload(self.relative_states),
-            "trend_states": _array_to_payload(self.trend_states),
-            "prices": _array_to_payload(self.prices),
-            "demo_actions": _array_to_payload(self.demo_actions),
-            "demo_rewards": _array_to_payload(self.demo_rewards),
-            "decoded_actions": _array_to_payload(self.decoded_actions),
-            "decoded_logits": _array_to_payload(self.decoded_logits),
-            "code_ids": _array_to_payload(self.code_ids),
-            "z_e": _array_to_payload(self.z_e),
-            "z_q": _array_to_payload(self.z_q),
-            "distances": _array_to_payload(self.distances),
-            "reconstruction_loss": self.reconstruction_loss,
-            "action_accuracy": self.action_accuracy,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1EvaluationSnapshot":
-        """从 dict 恢复 snapshot。
-
-        数组形状:
-            期望 payload 中数组字段保持 ``to_dict()`` 写出的嵌套 list 形状：
-            ``sample_ids=[N]``、``states=[N,H,F]``、``prices=[N,H]``、
-            ``demo_actions=[N,H]``、``demo_rewards=[N,H]``、
-            ``decoded_logits=[N,H,A]``、``code_ids=[N]``、``z_e/z_q=[N,D]``、
-            ``distances=[N,K]``。
-        """
-
-        return cls(
-            split=str(payload["split"]),
-            epoch=int(payload["epoch"]),
-            sample_ids=np.asarray(payload["sample_ids"]),
-            states=np.asarray(payload["states"]),
-            relative_states=np.asarray(payload["relative_states"]),
-            trend_states=np.asarray(payload["trend_states"]),
-            prices=_array_from_payload(payload.get("prices")),
-            demo_actions=np.asarray(payload["demo_actions"]),
-            demo_rewards=np.asarray(payload["demo_rewards"]),
-            decoded_actions=np.asarray(payload["decoded_actions"]),
-            decoded_logits=np.asarray(payload["decoded_logits"]),
-            code_ids=np.asarray(payload["code_ids"]),
-            z_e=np.asarray(payload["z_e"]),
-            z_q=np.asarray(payload["z_q"]),
-            distances=np.asarray(payload["distances"]),
-            reconstruction_loss=float(payload["reconstruction_loss"]),
-            action_accuracy=float(payload["action_accuracy"]),
-        )
+        return self
 
 
-@dataclass(frozen=True)
-class CodeAssignmentSnapshot:
+class CodeAssignmentSnapshot(PydanticMappingModel):
     """某个 epoch 的 code assignment 快照。
 
     功能说明:
@@ -370,7 +354,33 @@ class CodeAssignmentSnapshot:
     # 每个 code 的 decoded action/position 原型，shape=[K, H]；无样本 code 行为 NaN。
     action_prototypes: np.ndarray | None = None
 
-    def __post_init__(self) -> None:
+    @field_validator(
+        "sample_ids",
+        "code_ids",
+        "code_prototypes",
+        "action_prototypes",
+        mode="before",
+    )
+    @classmethod
+    def _restore_array(cls, value: Any) -> np.ndarray | None:
+        """Restore assignment arrays from list payloads."""
+
+        return _array_from_payload(value)
+
+    @field_serializer(
+        "sample_ids",
+        "code_ids",
+        "code_prototypes",
+        "action_prototypes",
+        when_used="json",
+    )
+    def _serialize_array(self, value: np.ndarray | None) -> list[Any] | None:
+        """Serialize assignment arrays as nested lists."""
+
+        return _array_to_payload(value)
+
+    @model_validator(mode="after")
+    def _validate_shapes(self) -> "CodeAssignmentSnapshot":
         """校验 assignment snapshot 的样本和 label 对齐契约。"""
 
         sample_ids = _require_ndarray("sample_ids", self.sample_ids)
@@ -390,45 +400,10 @@ class CodeAssignmentSnapshot:
             )
             _require_ndim("action_prototypes", action_prototypes, 2)
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化 assignment 快照，供 churn/lifetime 诊断持久化。
-
-        数组形状:
-            ``sample_ids`` 和 ``code_ids`` 均按 shape=[N] 转为一维 list；
-            prototype 字段保留原二维 shape，旧 payload 可不包含这些字段。
-        """
-
-        return {
-            "epoch": self.epoch,
-            "split": self.split,
-            "sample_ids": _array_to_payload(self.sample_ids),
-            "code_ids": _array_to_payload(self.code_ids),
-            "active_codes": list(self.active_codes),
-            "code_prototypes": _array_to_payload(self.code_prototypes),
-            "action_prototypes": _array_to_payload(self.action_prototypes),
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "CodeAssignmentSnapshot":
-        """从 dict 恢复 assignment 快照。
-
-        数组形状:
-            期望 ``sample_ids`` 和 ``code_ids`` 为 shape=[N] 的一维 list/array。
-        """
-
-        return cls(
-            epoch=int(payload["epoch"]),
-            split=str(payload["split"]),
-            sample_ids=np.asarray(payload["sample_ids"]),
-            code_ids=np.asarray(payload["code_ids"]),
-            active_codes=tuple(int(code_id) for code_id in payload["active_codes"]),
-            code_prototypes=_array_from_payload(payload.get("code_prototypes")),
-            action_prototypes=_array_from_payload(payload.get("action_prototypes")),
-        )
+        return self
 
 
-@dataclass(frozen=True)
-class Phase1CodeDiagnostic:
+class Phase1CodeDiagnostic(PydanticMappingModel):
     """单个 code 的 report 级诊断数据。
 
     功能说明:
@@ -484,20 +459,8 @@ class Phase1CodeDiagnostic:
     # 该 code 的综合诊断状态，由 support、结构清晰度、pair 稳定性和盈利辅助证据共同决定。
     status: str
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 report/checkpoint 可保存的 dict。"""
 
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1CodeDiagnostic":
-        """从 dict 恢复 code diagnostic。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase1TieBreakerMetrics:
+class Phase1TieBreakerMetrics(PydanticMappingModel):
     """checkpoint 综合分接近时使用的决胜指标。
 
     使用场景:
@@ -523,20 +486,8 @@ class Phase1TieBreakerMetrics:
     # validation reconstruction loss，越低越说明基础重构质量更好。
     reconstruction_loss: float
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 dict，供 checkpoint selector 快速读取。"""
 
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1TieBreakerMetrics":
-        """从 dict 恢复 tie-breaker metrics。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase1PerCodeProfitability:
+class Phase1PerCodeProfitability(PydanticMappingModel):
     """单个 code 的盈利性判定结果。
 
     使用场景:
@@ -562,17 +513,6 @@ class Phase1PerCodeProfitability:
     # 该 code 是否通过 per-code 盈利条件。
     passed: bool
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 dict，供 layer calculator/report 复用。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1PerCodeProfitability":
-        """从 dict 恢复 per-code profitability。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
 
 Phase1LayerMetrics: TypeAlias = (
     Phase1TeacherQualityMetrics
@@ -584,8 +524,7 @@ Phase1LayerMetrics: TypeAlias = (
 """单个 validation layer calculator 输出的强类型 metrics 类型。"""
 
 
-@dataclass(frozen=True)
-class Phase1LayerComputation:
+class Phase1LayerComputation(PydanticMappingModel):
     """单个 validation layer 的 raw metric 计算结果。
 
     功能说明:
@@ -612,11 +551,10 @@ class Phase1LayerComputation:
     code_diagnostics: tuple[Phase1CodeDiagnostic, ...] = ()
 
     # 可选额外中间产物，例如 per-code profitability 或 probe diagnostics。
-    extra_payload: Mapping[str, object] = field(default_factory=dict)
+    extra_payload: Mapping[str, object] = Field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class Phase1ValidationMetrics:
+class Phase1ValidationMetrics(PydanticMappingModel):
     """五层 validation raw metrics 聚合对象。
 
     功能说明:
@@ -643,17 +581,6 @@ class Phase1ValidationMetrics:
     # 第四层 label 可预测性 metrics。
     label_predictability: Phase1LabelPredictabilityMetrics
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为嵌套 dict，供 checkpoint/report 保存完整结构。"""
-
-        return {
-            "teacher_quality": self.teacher_quality.to_dict(),
-            "vq_internal": self.vq_internal.to_dict(),
-            "behavior_quality": self.behavior_quality.to_dict(),
-            "oracle_profitability": self.oracle_profitability.to_dict(),
-            "label_predictability": self.label_predictability.to_dict(),
-        }
-
     def to_flat_dict(self) -> dict[str, int | float]:
         """生成 checkpoint selector 使用的扁平数值视图。
 
@@ -663,28 +590,12 @@ class Phase1ValidationMetrics:
         """
 
         output: dict[str, int | float] = {}
-        _flatten_dataclass("teacher_quality", self.teacher_quality, output)
-        _flatten_dataclass("vq_internal", self.vq_internal, output)
-        _flatten_dataclass("behavior_quality", self.behavior_quality, output)
-        _flatten_dataclass("oracle_profitability", self.oracle_profitability, output)
-        _flatten_dataclass("label_predictability", self.label_predictability, output)
+        _flatten_model("teacher_quality", self.teacher_quality, output)
+        _flatten_model("vq_internal", self.vq_internal, output)
+        _flatten_model("behavior_quality", self.behavior_quality, output)
+        _flatten_model("oracle_profitability", self.oracle_profitability, output)
+        _flatten_model("label_predictability", self.label_predictability, output)
         return output
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1ValidationMetrics":
-        """从嵌套 dict 恢复五层 validation metrics。"""
-
-        return cls(
-            teacher_quality=Phase1TeacherQualityMetrics.from_dict(payload["teacher_quality"]),
-            vq_internal=Phase1VQInternalMetrics.from_dict(payload["vq_internal"]),
-            behavior_quality=Phase1BehaviorQualityMetrics.from_dict(payload["behavior_quality"]),
-            oracle_profitability=Phase1OracleProfitabilityMetrics.from_dict(
-                payload["oracle_profitability"]
-            ),
-            label_predictability=Phase1LabelPredictabilityMetrics.from_dict(
-                payload["label_predictability"]
-            ),
-        )
 
 
 __all__ = [

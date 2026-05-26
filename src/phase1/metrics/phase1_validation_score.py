@@ -29,7 +29,6 @@ label predictability 保留为参考值和 tie-breaker，不进入主 score。
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping
 
 from src.utils import PydanticMappingModel
 
@@ -248,8 +247,8 @@ def scores_are_tied(
         区分，避免 tie-breaker 触发范围比配置值更宽。
     """
 
-    best_value = best_score.total_score
-    candidate_value = candidate_score.total_score
+    best_value = get_phase1_validation_score_value(best_score)
+    candidate_value = get_phase1_validation_score_value(candidate_score)
     if best_value is None or candidate_value is None:
         return False
     return abs(best_value - candidate_value) < tolerance
