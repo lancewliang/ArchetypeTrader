@@ -27,6 +27,7 @@ from .phase1_codebook_report_context import Phase1CodebookReportContextBuilder
 from .phase1_codebook_report_schema import (
     JsonObject,
     Phase1CodebookReportDocument,
+    template_safe,
 )
 from ..metrics import Phase1ValidationResult
 
@@ -114,7 +115,7 @@ class Phase1CodebookReport:
         """
 
         context = Phase1CodebookReportContextBuilder(title=self.title).build(payload)
-        return render_template_file(_TEMPLATE_PATH, context.to_dict())
+        return render_template_file(_TEMPLATE_PATH, template_safe(context))
 
 
 __all__ = ["Phase1CodebookReport"]

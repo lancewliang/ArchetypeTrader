@@ -248,7 +248,7 @@ class Phase2ArtifactStore(DataFileStore):
             split_name=split_name,
             epoch=epoch,
         )
-        self._save_json_payload(self._validation_result_to_dict(validation_result), path)
+        self._save_json_payload(validation_result, path)
         return path
 
     def load_phase2_validation_result(
@@ -294,7 +294,8 @@ class Phase2ArtifactStore(DataFileStore):
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError(f"invalid phase2 validation result payload: {path}")
-        return self._validation_result_from_dict(payload)
+        return Phase2ValidationResult.from_dict(payload)
+
 
     def save_best_validation_result(
         self,
@@ -303,7 +304,7 @@ class Phase2ArtifactStore(DataFileStore):
         """保存被 selector 选中的 validation result 摘要。"""
 
         path = self._phase2_artifact_path("best_validation_result")
-        self._save_json_payload(self._validation_result_to_dict(validation_result), path)
+        self._save_json_payload(validation_result, path)
         return path
 
     def save_phase2_selector_validation_html(
@@ -381,7 +382,7 @@ class Phase2ArtifactStore(DataFileStore):
             temp_path.unlink(missing_ok=True)
             raise
 
-    def _save_json_payload(self, payload: Mapping[str, Any], path: Path) -> None:
+    def _save_json_payload(self, payload: Phase2ValidationResult, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -393,7 +394,7 @@ class Phase2ArtifactStore(DataFileStore):
         ) as temp_file:
             temp_path = Path(temp_file.name)
             json.dump(
-                self._json_safe(payload),
+                payload.to_dict(),
                 temp_file,
                 ensure_ascii=False,
                 indent=2,
@@ -492,30 +493,5 @@ class Phase2ArtifactStore(DataFileStore):
             q_network_state_dict=dict(payload["q_network_state_dict"]),
             optimizer_state_dict=dict(payload["optimizer_state_dict"]),
         )
-
-    @staticmethod
-    def _validation_result_to_dict(
-        validation_result: Phase2ValidationResult,
-    ) -> dict[str, Any]:
-        return validation_result.to_dict()
-
-    @staticmethod
-    def _validation_result_from_dict(
-        payload: Mapping[str, Any],
-    ) -> Phase2ValidationResult:
-        return Phase2ValidationResult.from_dict(payload)
-
-    @classmethod
-    def _json_safe(cls, value: Any) -> Any:
-        if isinstance(value, Path):
-            return str(value)
-        if isinstance(value, Mapping):
-            return {str(key): cls._json_safe(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [cls._json_safe(item) for item in value]
-        if hasattr(value, "item") and callable(value.item):
-            try:
-                return value.item()
-            except (TypeError, ValueError):
-                return value
-        return value
+  
+ 

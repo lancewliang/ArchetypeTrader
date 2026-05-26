@@ -11,10 +11,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, TypeAlias, cast
+
+from pydantic import Field, model_serializer, model_validator
+
+from src.utils import PydanticMappingModel
 
 from ..metrics import (
     Phase1ValidationResult,
@@ -45,8 +49,8 @@ def json_safe(value: Any) -> JsonValue:
         避免 report payload 入口重复写弱类型转换逻辑。
     """
 
-    if hasattr(value, "to_dict") and callable(value.to_dict):
-        return json_safe(value.to_dict())
+    if isinstance(value, PydanticMappingModel):
+        return json_safe(value.model_dump(mode="json"))
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, Mapping):
@@ -64,6 +68,8 @@ def template_safe(value: Any) -> Any:
         dataclass，最后由该函数在渲染边界统一降级为 dict/list。
     """
 
+    if isinstance(value, PydanticMappingModel):
+        return template_safe(value.model_dump(mode="python"))
     if is_dataclass(value) and not isinstance(value, type):
         return {
             item.name: template_safe(getattr(value, item.name))
@@ -76,8 +82,7 @@ def template_safe(value: Any) -> Any:
     return value
 
 
-@dataclass(frozen=True)
-class Phase1CodebookReportMeta:
+class Phase1CodebookReportMeta(PydanticMappingModel):
     """报告元信息。
 
     含义：
@@ -98,15 +103,42 @@ class Phase1CodebookReportMeta:
     schema: str = PHASE1_CODEBOOK_REPORT_SCHEMA
 
     # 运行侧额外元数据，例如 pair、batch、git sha、run id。
-    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+    metadata: Mapping[str, JsonValue] = Field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        """标准化字段，确保 metadata 已经 JSON-safe。"""
+    @model_validator(mode="before")
+    @classmethod
+    def _restore_flat_metadata(cls, value: Any) -> Any:
+        """Restore metadata from the flattened public ``report`` node."""
 
-        object.__setattr__(self, "title", str(self.title))
-        object.__setattr__(self, "generated_at", str(self.generated_at))
-        object.__setattr__(self, "schema", str(self.schema))
-        object.__setattr__(self, "metadata", _json_object(self.metadata))
+        if not isinstance(value, Mapping):
+            return value
+        reserved_keys = {"title", "generated_at", "schema", "metadata"}
+        metadata = {
+            str(key): item
+            for key, item in value.items()
+            if str(key) not in reserved_keys
+        }
+        explicit_metadata = value.get("metadata")
+        if isinstance(explicit_metadata, Mapping):
+            metadata.update({str(key): item for key, item in explicit_metadata.items()})
+        return {
+            "title": str(value.get("title", DEFAULT_PHASE1_CODEBOOK_REPORT_TITLE)),
+            "generated_at": str(value.get("generated_at", "-")),
+            "schema": str(value.get("schema", PHASE1_CODEBOOK_REPORT_SCHEMA)),
+            "metadata": _json_object(metadata),
+        }
+
+    @model_serializer(mode="plain")
+    def _serialize_flat_metadata(self) -> JsonObject:
+        """Serialize metadata into the legacy flattened ``report`` node."""
+
+        payload: JsonObject = {
+            "title": str(self.title),
+            "generated_at": str(self.generated_at),
+            "schema": str(self.schema),
+        }
+        payload.update(_json_object(self.metadata))
+        return payload
 
     @classmethod
     def generated(
@@ -124,40 +156,7 @@ class Phase1CodebookReportMeta:
             metadata=_json_object(metadata or {}),
         )
 
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase1CodebookReportMeta":
-        """从 payload 的 ``report`` 节点恢复强类型元信息。"""
-
-        reserved_keys = {"title", "generated_at", "schema"}
-        metadata = {
-            str(key): value
-            for key, value in payload.items()
-            if str(key) not in reserved_keys
-        }
-        return cls(
-            title=str(payload.get("title", DEFAULT_PHASE1_CODEBOOK_REPORT_TITLE)),
-            generated_at=str(payload.get("generated_at", "-")),
-            schema=str(payload.get("schema", PHASE1_CODEBOOK_REPORT_SCHEMA)),
-            metadata=_json_object(metadata),
-        )
-
-    def to_dict(self) -> JsonObject:
-        """转换为现有 payload 兼容的 ``report`` dict。"""
-
-        payload: JsonObject = {
-            "title": self.title,
-            "generated_at": self.generated_at,
-            "schema": self.schema,
-        }
-        payload.update(dict(self.metadata))
-        return payload
-
-
-@dataclass(frozen=True)
-class Phase1CodebookReportDocument:
+class Phase1CodebookReportDocument(PydanticMappingModel):
     """完整机器可读 report payload。
 
     含义：
@@ -175,16 +174,40 @@ class Phase1CodebookReportDocument:
     validation: Phase1ValidationResult
 
     # Phase I 配置快照，对应 payload["config"]。
-    config: Mapping[str, JsonValue] = field(default_factory=dict)
+    config: Mapping[str, JsonValue] = Field(default_factory=dict)
 
     # 产物路径索引，对应 payload["artifacts"]。
-    artifacts: Mapping[str, JsonValue] = field(default_factory=dict)
+    artifacts: Mapping[str, JsonValue] = Field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        """标准化 config/artifacts，使其可以直接落盘为 JSON。"""
+    @model_validator(mode="before")
+    @classmethod
+    def _restore_document_payload(cls, value: Any) -> Any:
+        """Restore report document fields from public payloads."""
 
-        object.__setattr__(self, "config", _json_object(self.config))
-        object.__setattr__(self, "artifacts", _json_object(self.artifacts))
+        if not isinstance(value, Mapping):
+            return value
+        report_payload = _require_mapping(value.get("report"), "report")
+        validation_payload = _require_mapping(
+            value.get("validation"),
+            "validation",
+        )
+        return {
+            "report": Phase1CodebookReportMeta.model_validate(report_payload),
+            "validation": Phase1ValidationResult.model_validate(validation_payload),
+            "config": _json_object(_optional_mapping(value.get("config"))),
+            "artifacts": _json_object(_optional_mapping(value.get("artifacts"))),
+        }
+
+    @model_serializer(mode="plain")
+    def _serialize_document(self) -> JsonObject:
+        """Serialize to the stable public report payload shape."""
+
+        return {
+            "report": self.report.model_dump(mode="json"),
+            "validation": _json_object(self.validation.model_dump(mode="json")),
+            "config": dict(self.config),
+            "artifacts": dict(self.artifacts),
+        }
 
     @classmethod
     def from_validation_result(
@@ -209,36 +232,6 @@ class Phase1CodebookReportDocument:
             config=_json_object(config or {}),
             artifacts=_json_object(artifacts or {}),
         )
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase1CodebookReportDocument":
-        """从 public payload dict 恢复 report document。"""
-
-        report_payload = _require_mapping(payload.get("report"), "report")
-        validation_payload = _require_mapping(
-            payload.get("validation"),
-            "validation",
-        )
-        return cls(
-            report=Phase1CodebookReportMeta.from_dict(report_payload),
-            validation=Phase1ValidationResult.from_dict(validation_payload),
-            config=_json_object(_optional_mapping(payload.get("config"))),
-            artifacts=_json_object(_optional_mapping(payload.get("artifacts"))),
-        )
-
-    def to_dict(self) -> JsonObject:
-        """转换为现有对外兼容的 report payload dict。"""
-
-        return {
-            "report": self.report.to_dict(),
-            "validation": _json_object(self.validation.to_dict()),
-            "config": dict(self.config),
-            "artifacts": dict(self.artifacts),
-        }
-
 
 @dataclass(frozen=True)
 class Phase1ReportHeaderItem:
@@ -834,8 +827,7 @@ class Phase1ReportPairProfitabilityMatrix:
     legend_max: str = "-"
 
 
-@dataclass(frozen=True)
-class Phase1CodebookReportHtmlContext:
+class Phase1CodebookReportHtmlContext(PydanticMappingModel):
     """完整 HTML 模板上下文。
 
     含义：
@@ -904,19 +896,14 @@ class Phase1CodebookReportHtmlContext:
     artifact_rows: tuple[Phase1ReportMappingRow, ...]
 
     # 累计收益 SVG 折线图。
-    oracle_cumulative_return_chart: Phase1ReportLineChart = field(
+    oracle_cumulative_return_chart: Phase1ReportLineChart = Field(
         default_factory=Phase1ReportLineChart
     )
-
-    def to_dict(self) -> dict[str, Any]:
-        """转换为模板引擎可消费的普通 dict。"""
-
-        return cast(dict[str, Any], template_safe(self))
 
     def __getitem__(self, key: str) -> Any:
         """兼容历史测试和调用方对 HTML context 的 dict-style 读取。"""
 
-        return self.to_dict()[key]
+        return self.model_dump(mode="python")[key]
 
 
 def ensure_phase1_codebook_report_document(
@@ -931,7 +918,7 @@ def ensure_phase1_codebook_report_document(
 
     if isinstance(payload, Phase1CodebookReportDocument):
         return payload
-    return Phase1CodebookReportDocument.from_dict(payload)
+    return Phase1CodebookReportDocument.model_validate(payload)
 
 
 def _json_object(value: Mapping[str, Any]) -> JsonObject:
