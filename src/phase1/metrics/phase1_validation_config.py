@@ -14,10 +14,10 @@ layer thresholds 对象、一个评分权重对象和一个运行参数对象，
 
 from __future__ import annotations
 from pydantic import model_validator
-from src.utils import PydanticMappingModel
+from src.utils import PydanticBaseModel
 
 
-class Phase1ValidationScoreWeights(PydanticMappingModel):
+class Phase1ValidationScoreWeights(PydanticBaseModel):
     """Phase I validation 综合评分权重配置。
 
     功能说明:
@@ -49,7 +49,7 @@ class Phase1ValidationScoreWeights(PydanticMappingModel):
     label_predictability: float = 0.0
 
 
-class Phase1ValidationRuntimeConfig(PydanticMappingModel):
+class Phase1ValidationRuntimeConfig(PydanticBaseModel):
     """Phase I codebook evaluator 运行参数配置。
 
     功能说明:

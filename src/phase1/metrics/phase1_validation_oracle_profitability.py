@@ -1,12 +1,9 @@
 """Phase I layer 3 oracle profitability schema, thresholds, and hard gate rules."""
 
 from __future__ import annotations
-from typing import Any
-from src.utils import PydanticMappingModel
-from .phase1_metric_results import Phase1LayerResult
-from .phase1_validation_data_schema import (
-        Phase1ValidationMetrics,
-    )
+from typing import TYPE_CHECKING, Any
+
+from src.utils import PydanticBaseModel
 from .phase1_validation_score_helpers import (
         _clip01,
         _inverse_ratio_score,
@@ -14,7 +11,12 @@ from .phase1_validation_score_helpers import (
         _threshold_progress,
     )
 
-class Phase1PairProfitabilityCell(PydanticMappingModel):
+if TYPE_CHECKING:
+    from .phase1_metric_results import Phase1LayerResult
+    from .phase1_validation_data_schema import Phase1ValidationMetrics
+
+
+class Phase1PairProfitabilityCell(PydanticBaseModel):
     """单个 morphology-motif pair 的 oracle 盈利性摘要。"""
 
     # 市场形态标签，例如 uptrend、downtrend、range-high-vol。
@@ -38,13 +40,12 @@ class Phase1PairProfitabilityCell(PydanticMappingModel):
     # 该 pair 上 total fee / gross profit。
     fee_drag: float
 
-class Phase1OracleProfitabilityPayload(PydanticMappingModel):
+class Phase1OracleProfitabilityPayload(PydanticBaseModel):
     """第三层 oracle profitability 计算的中间 payload。
 
     使用场景:
         保存 per-code 盈利性摘要、decoded/DP/flat/random label returns 以及
-        random seed。该对象实现 ``Mapping``，用于兼容现有
-        ``extra_payload["..."]`` 调用。
+        random seed，通过强类型字段或 ``model_dump()`` 消费。
     """
 
     # Layer 3 输出的 per-code 盈利性摘要，供 Layer 2 复用。
@@ -69,7 +70,7 @@ class Phase1OracleProfitabilityPayload(PydanticMappingModel):
     pair_profitability_matrix: tuple[Phase1PairProfitabilityCell, ...] = ()
 
 
-class Phase1OracleProfitabilityMetrics(PydanticMappingModel):
+class Phase1OracleProfitabilityMetrics(PydanticBaseModel):
     """第三层 oracle assigned-label 盈利性 raw metrics。"""
 
     # decoded return 相对 flat baseline 的平均优势。
@@ -117,7 +118,7 @@ class Phase1OracleProfitabilityMetrics(PydanticMappingModel):
     # decoded 风险调整收益相对 random label baseline 的差值。
     risk_adjusted_return_vs_random: float = float("nan")
 
-class Phase1OracleProfitabilityThresholds(PydanticMappingModel):
+class Phase1OracleProfitabilityThresholds(PydanticBaseModel):
     """第三层 oracle assigned-label 盈利性阈值配置。"""
 
     # oracle assigned-label decoded 策略胜率下限。用于第三层判断盈利是否足够广泛。

@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from src.utils import PydanticBaseModel
+from typing import TYPE_CHECKING
 
-from .phase2_metric_results import Phase2LayerResult
+from src.utils import PydanticBaseModel
 from .phase2_validation_rule_helpers import (
     _build_layer_result,
     _ge,
     _gt,
     _le,
 )
+
+if TYPE_CHECKING:
+    from .phase2_metric_results import Phase2LayerResult
 
 
 class Phase2BaselineUpliftPayload(PydanticBaseModel):

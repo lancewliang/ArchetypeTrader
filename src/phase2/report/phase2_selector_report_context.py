@@ -26,9 +26,7 @@ from .phase2_selector_report_schema import (
     Phase2ReportPerCodeProfitabilityRow,
     Phase2ReportSeries,
     Phase2ReportSeriesPoint,
-    Phase2ReportSummaryView,
-    ensure_phase2_report_document,
-    layer_result_to_view,
+    Phase2ReportSummaryView 
 )
 from ..metrics import (
     Phase2LayerComputation,
@@ -949,4 +947,41 @@ class Phase2SelectorReportContextBuilder:
         return tuple(y_min + step * index for index in range(5))
 
 
+def metric_result_to_view(metric: Phase2MetricResult) -> Phase2ReportMetricView:
+    """把 Phase II metric result 转换为模板友好的行视图。"""
+
+    return Phase2ReportMetricView(
+        name=metric.name,
+        value=str(metric.value) if metric.value is not None else "-",
+        threshold=metric.threshold,
+        threshold_value=(
+            str(metric.threshold_value)
+            if metric.threshold_value is not None
+            else "-"
+        ),
+        direction=metric.direction or "-",
+        distance_to_threshold=(
+            str(metric.distance_to_threshold)
+            if metric.distance_to_threshold is not None
+            else "-"
+        ),
+        badge_class=metric.severity,
+        severity_label=metric.severity.upper(),
+        message=metric.message,
+    )
+
+
+def layer_result_to_view(layer: Phase2LayerResult) -> Phase2ReportLayerView:
+    """把 Phase II layer result 转换为模板友好的 layer 视图。"""
+
+    failed_count = sum(1 for metric in layer.metrics if not metric.passed)
+    return Phase2ReportLayerView(
+        layer_id=str(layer.layer_id),
+        name=layer.name,
+        badge_class="pass" if layer.passed else "fail",
+        status_label="PASS" if layer.passed else "FAIL",
+        metric_count=str(len(layer.metrics)),
+        failed_count=str(failed_count),
+        metrics=tuple(metric_result_to_view(metric) for metric in layer.metrics),
+    )
 __all__ = ["Phase2SelectorReportContextBuilder"]

@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .phase2_metric_results import (
-    MetricDirection,
-    MetricSeverity,
-    MetricThresholdValue,
-    Phase2LayerResult,
-    Phase2MetricResult,
-)
+if TYPE_CHECKING:
+    from .phase2_metric_results import (
+        MetricDirection,
+        MetricSeverity,
+        MetricThresholdValue,
+        Phase2LayerResult,
+        Phase2MetricResult,
+    )
 
 
 def _is_missing(value: Any) -> bool:
@@ -40,6 +41,8 @@ def _build_layer_result(
 ) -> Phase2LayerResult:
     """根据本层 metric result 聚合 layer result。"""
 
+    from .phase2_metric_results import Phase2LayerResult
+
     metric_tuple = tuple(metrics)
     passed = all(metric.passed for metric in metric_tuple)
     if force_passed is not None:
@@ -66,6 +69,8 @@ def _metric_result(
     distance_to_threshold: float | None = None,
 ) -> Phase2MetricResult:
     """创建 hard gate 或 warning metric result。"""
+
+    from .phase2_metric_results import Phase2MetricResult
 
     if _is_missing(value):
         return Phase2MetricResult(

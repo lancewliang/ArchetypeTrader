@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from typing import  Literal, Mapping
-from src.utils import PydanticMappingModel
+from src.utils import PydanticBaseModel
 
 from .phase1_validation_data_schema import (
     Phase1CodeDiagnostic,
@@ -59,7 +59,7 @@ RiskSeverity = Literal["info", "warn", "fail"]
 """checkpoint 级跨层风险定位严重级别。"""
 
 
-class Phase1MetricResult(PydanticMappingModel):
+class Phase1MetricResult(PydanticBaseModel):
     """单个 validation metric 的判定结果。
 
     功能说明:
@@ -103,7 +103,7 @@ class Phase1MetricResult(PydanticMappingModel):
   
 
 
-class Phase1RiskFinding(PydanticMappingModel):
+class Phase1RiskFinding(PydanticBaseModel):
     """checkpoint 级跨层风险定位结果。
 
     功能说明:
@@ -138,7 +138,7 @@ class Phase1RiskFinding(PydanticMappingModel):
     recommended_action: str = ""
 
 
-class Phase1LayerResult(PydanticMappingModel):
+class Phase1LayerResult(PydanticBaseModel):
     """单个 validation layer 的判定结果。
 
     功能说明:
@@ -162,7 +162,7 @@ class Phase1LayerResult(PydanticMappingModel):
     metrics: tuple[Phase1MetricResult, ...]
 
 
-class Phase1ValidationResult(PydanticMappingModel):
+class Phase1ValidationResult(PydanticBaseModel):
     """单个 checkpoint 的完整 Phase I validation 结果。
 
     功能说明:

@@ -373,66 +373,8 @@ class Phase2ReportHtmlContext(PydanticMappingModel):
     )
     code_diagnostic_rows: tuple[Phase2ReportCodeDiagnosticRow, ...] = ()
 
-def metric_result_to_view(metric: Phase2MetricResult) -> Phase2ReportMetricView:
-    """把 Phase II metric result 转换为模板友好的行视图。"""
 
-    return Phase2ReportMetricView(
-        name=metric.name,
-        value=str(metric.value) if metric.value is not None else "-",
-        threshold=metric.threshold,
-        threshold_value=(
-            str(metric.threshold_value)
-            if metric.threshold_value is not None
-            else "-"
-        ),
-        direction=metric.direction or "-",
-        distance_to_threshold=(
-            str(metric.distance_to_threshold)
-            if metric.distance_to_threshold is not None
-            else "-"
-        ),
-        badge_class=metric.severity,
-        severity_label=metric.severity.upper(),
-        message=metric.message,
-    )
-
-
-def layer_result_to_view(layer: Phase2LayerResult) -> Phase2ReportLayerView:
-    """把 Phase II layer result 转换为模板友好的 layer 视图。"""
-
-    failed_count = sum(1 for metric in layer.metrics if not metric.passed)
-    return Phase2ReportLayerView(
-        layer_id=str(layer.layer_id),
-        name=layer.name,
-        badge_class="pass" if layer.passed else "fail",
-        status_label="PASS" if layer.passed else "FAIL",
-        metric_count=str(len(layer.metrics)),
-        failed_count=str(failed_count),
-        metrics=tuple(metric_result_to_view(metric) for metric in layer.metrics),
-    )
-
-  
-def _build_validation_summary(
-    validation_result: Phase2ValidationResult,
-) -> JsonObject:
-    """从 validation result 生成 report 首页摘要。"""
-
-    metrics = validation_result.metrics
-    failed_layers = tuple(
-        layer.name for layer in validation_result.layers if not layer.passed
-    )
-    passed = len(failed_layers) == 0
-    return {
-        "passed": passed,
-        "status": "pass" if passed else "fail",
-        "mean_return": metrics.mean_return,
-        "median_return": metrics.median_return,
-        "sharpe_like": metrics.sharpe_like,
-        "win_rate": metrics.win_rate,
-        "mean_turnover": metrics.mean_turnover,
-        "layer_count": len(validation_result.layers),
-        "failed_layers": list(failed_layers),
-    }
+   
 
 __all__ = [
     "DEFAULT_PHASE2_REPORT_TITLE",
@@ -462,7 +404,5 @@ __all__ = [
     "Phase2ReportSeriesPoint",
     "Phase2ReportSummaryView",
     "Phase2ReportCodeDiagnosticRow",
-    "ensure_phase2_report_document",
-    "layer_result_to_view",
-    "metric_result_to_view",
+ 
 ]

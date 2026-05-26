@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import math
 
-from src.utils import PydanticMappingModel
+from src.utils import PydanticBaseModel
 
 from .phase1_validation_config import Phase1ValidationScoreWeights
 from .phase1_validation_data_schema import (
@@ -53,7 +53,7 @@ DEFAULT_TIE_SCORE_TOLERANCE = 0.03
 """
 
 
-class Phase1ValidationScoreComponent(PydanticMappingModel):
+class Phase1ValidationScoreComponent(PydanticBaseModel):
     """单个 validation score 子项的可审计拆解。"""
 
     # 稳定 snake_case 子项名称，例如 "teacher_quality"。
@@ -69,7 +69,7 @@ class Phase1ValidationScoreComponent(PydanticMappingModel):
     weighted_value: float
 
 
-class Phase1ValidationScore(PydanticMappingModel):
+class Phase1ValidationScore(PydanticBaseModel):
     """Phase I validation 综合评分及其子项拆解。"""
 
     # 截断到 [0, 1] 后的最终总分，selector 使用该值排序。

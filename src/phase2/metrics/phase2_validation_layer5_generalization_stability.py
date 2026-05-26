@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
 from src.utils import PydanticBaseModel
 
-from .phase2_metric_results import Phase2LayerResult
 from .phase2_validation_rule_helpers import (
     _build_layer_result,
     _ge,
     _le,
 )
+
+if TYPE_CHECKING:
+    from .phase2_metric_results import Phase2LayerResult
 
 
 class Phase2PredictabilityPayload(PydanticBaseModel):

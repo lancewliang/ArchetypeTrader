@@ -19,7 +19,7 @@
 from __future__ import annotations
 from typing import Any, Literal, Mapping, TypeAlias
 from pydantic import Field 
-from src.utils import PydanticMappingModel
+from src.utils import PydanticBaseModel
 
 MetricSeverity = Literal["pass", "warn", "fail", "skip"]
 MetricDirection = Literal["greater_is_better", "less_is_better", "between", "equal"]
@@ -73,7 +73,7 @@ Phase2LayerPayload: TypeAlias = (
  
 
 
-class Phase2MetricResult(PydanticMappingModel):
+class Phase2MetricResult(PydanticBaseModel):
     """单个 Phase II validation metric 的判定结果。"""
 
     # 指标稳定名称。用途：report、JSON 和 rule 追踪；方向：无好坏方向。
@@ -108,7 +108,7 @@ class Phase2MetricResult(PydanticMappingModel):
     distance_to_threshold: float | None = None
  
 
-class Phase2LayerResult(PydanticMappingModel):
+class Phase2LayerResult(PydanticBaseModel):
     """单个 Phase II validation layer 的判定结果。"""
 
     # layer 数字编号，0-5。用途：固定展示顺序；方向：无好坏方向。
@@ -126,7 +126,7 @@ class Phase2LayerResult(PydanticMappingModel):
  
 
 
-class Phase2ValidationMetrics(PydanticMappingModel):
+class Phase2ValidationMetrics(PydanticBaseModel):
     """Phase II validation 核心指标 payload。
 
     功能说明:
@@ -165,7 +165,7 @@ class Phase2ValidationMetrics(PydanticMappingModel):
     mean_turnover: float
 
 
-class Phase2ReportPairProfitabilityPayloadRow(PydanticMappingModel):
+class Phase2ReportPairProfitabilityPayloadRow(PydanticBaseModel):
     """Report payload 中 Dominant Pair heatmap 的单个 cell 聚合行。"""
 
     morphology: str
@@ -182,7 +182,7 @@ class Phase2ReportPairProfitabilityPayloadRow(PydanticMappingModel):
     dominant_selected_code_ratio: float
 
 
-class Phase2ReportCodeDiagnosticPayloadRow(PydanticMappingModel):
+class Phase2ReportCodeDiagnosticPayloadRow(PydanticBaseModel):
     """Report payload 中 code 级诊断表的单个聚合行。"""
 
     code_id: int
@@ -212,21 +212,21 @@ class Phase2ReportCodeDiagnosticPayloadRow(PydanticMappingModel):
     risk_reason: str
  
 
-class Phase2ReportCodeCount(PydanticMappingModel):
+class Phase2ReportCodeCount(PydanticBaseModel):
     """Report payload 中某个 code 的样本数。"""
 
     code_id: int
     count: int
 
 
-class Phase2ReportCodeUsageDistribution(PydanticMappingModel):
+class Phase2ReportCodeUsageDistribution(PydanticBaseModel):
     """Report payload 中 selector 和 assigned-label 的 code 使用分布。"""
 
     selector: tuple[Phase2ReportCodeCount, ...] = ()
     kl: tuple[Phase2ReportCodeCount, ...] = ()
  
 
-class Phase2ReportCumulativeReturns(PydanticMappingModel):
+class Phase2ReportCumulativeReturns(PydanticBaseModel):
     """Report payload 中各 baseline 的累计收益曲线。"""
 
     selector: tuple[float, ...] = ()
@@ -238,7 +238,7 @@ class Phase2ReportCumulativeReturns(PydanticMappingModel):
  
 
 
-class Phase2ValidationPayloads(PydanticMappingModel):
+class Phase2ValidationPayloads(PydanticBaseModel):
     """Phase II validation/report 需要复用的聚合 payload。
 
     本对象只保存 evaluator 已经聚合好的过程数据和诊断数据，不保存完整逐样本
@@ -294,7 +294,7 @@ class Phase2ValidationPayloads(PydanticMappingModel):
  
 
 
-class Phase2ValidationResult(PydanticMappingModel):
+class Phase2ValidationResult(PydanticBaseModel):
     """Phase II validation 结果摘要。
 
     功能说明:
@@ -329,7 +329,7 @@ class Phase2ValidationResult(PydanticMappingModel):
  
 
 
-class Phase2LayerComputation(PydanticMappingModel):
+class Phase2LayerComputation(PydanticBaseModel):
     """单个 Phase II validation layer 的 raw metric 计算结果。
 
     各 ``phase2_validation_layers/layer*.py`` 文件只负责 raw metric 计算，不做

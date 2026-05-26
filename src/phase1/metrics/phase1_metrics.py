@@ -24,7 +24,7 @@ from pydantic import ConfigDict, Field
 import torch
 
 from ...model.vq_archetype import VqModelOutputs
-from ...utils import PydanticMappingModel
+from ...utils import PydanticBaseModel
 
 
 def _tensor_to_float(value: torch.Tensor | float | int) -> float:
@@ -42,7 +42,7 @@ def _tensor_to_float(value: torch.Tensor | float | int) -> float:
     return float(value)
 
 
-class Phase1Metrics(PydanticMappingModel):
+class Phase1Metrics(PydanticBaseModel):
     """Phase I 训练期基础指标。
 
     功能说明:

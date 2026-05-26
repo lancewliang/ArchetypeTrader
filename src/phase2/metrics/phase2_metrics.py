@@ -15,11 +15,15 @@ selection metrics。validation/test 的可排序结果由 ``phase2_metric_result
 """
 
 from __future__ import annotations
+from typing import TYPE_CHECKING
+
 from pydantic import ConfigDict
 import torch
 
 from src.utils import PydanticBaseModel
-from ..rl.phase2_double_dqn_loss import Phase2DoubleDqnLossOutput
+
+if TYPE_CHECKING:
+    from ..rl.phase2_double_dqn_loss import Phase2DoubleDqnLossOutput
 
 
 def _tensor_to_float(value: torch.Tensor | float | int | None) -> float:

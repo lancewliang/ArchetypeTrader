@@ -25,7 +25,7 @@ from typing import Mapping, TypeAlias
 import numpy as np
 from pydantic import Field
 
-from src.utils import PydanticMappingModel
+from src.utils import PydanticBaseModel
 from .phase1_validation_behavior_quality import (
     Phase1BehaviorQualityMetrics,
     Phase1BehaviorQualityPayload,
@@ -46,7 +46,7 @@ from .phase1_validation_vq_internal import Phase1VQInternalMetrics
  
  
 
-class Phase1EvaluationSnapshot(PydanticMappingModel):
+class Phase1EvaluationSnapshot(PydanticBaseModel):
     """单个 split 在某个 checkpoint 下的完整可计算状态。
 
     功能说明:
@@ -121,7 +121,7 @@ class Phase1EvaluationSnapshot(PydanticMappingModel):
     # horizon LOB 深度行情，shape=[N, H, 20]。用于执行收益中的盘口滑点计算；缺失时可为 None。
     depthprices: np.ndarray | None = Field(default=None, exclude=True)
 
-class CodeAssignmentSnapshot(PydanticMappingModel):
+class CodeAssignmentSnapshot(PydanticBaseModel):
     """某个 epoch 的 code assignment 快照。
 
     功能说明:
@@ -159,7 +159,7 @@ class CodeAssignmentSnapshot(PydanticMappingModel):
  
 
 
-class Phase1CodeDiagnostic(PydanticMappingModel):
+class Phase1CodeDiagnostic(PydanticBaseModel):
     """单个 code 的 report 级诊断数据。
 
     功能说明:
@@ -216,7 +216,7 @@ class Phase1CodeDiagnostic(PydanticMappingModel):
     status: str
 
 
-class Phase1TieBreakerMetrics(PydanticMappingModel):
+class Phase1TieBreakerMetrics(PydanticBaseModel):
     """checkpoint 综合分接近时使用的决胜指标。
 
     使用场景:
@@ -243,7 +243,7 @@ class Phase1TieBreakerMetrics(PydanticMappingModel):
     reconstruction_loss: float
 
 
-class Phase1PerCodeProfitability(PydanticMappingModel):
+class Phase1PerCodeProfitability(PydanticBaseModel):
     """单个 code 的盈利性判定结果。
 
     使用场景:
@@ -280,7 +280,7 @@ Phase1LayerMetrics: TypeAlias = (
 """单个 validation layer calculator 输出的强类型 metrics 类型。"""
 
 
-class Phase1LayerComputation(PydanticMappingModel):
+class Phase1LayerComputation(PydanticBaseModel):
     """单个 validation layer 的 raw metric 计算结果。
 
     功能说明:
@@ -310,7 +310,7 @@ class Phase1LayerComputation(PydanticMappingModel):
     extra_payload: Mapping[str, object] = Field(default_factory=dict)
 
 
-class Phase1ValidationMetrics(PydanticMappingModel):
+class Phase1ValidationMetrics(PydanticBaseModel):
     """五层 validation raw metrics 聚合对象。
 
     功能说明:

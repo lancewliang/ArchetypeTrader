@@ -4,19 +4,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from src.utils import PydanticMappingModel
+from src.utils import PydanticBaseModel
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
     from .phase1_validation_data_schema import Phase1ValidationMetrics
 
 
-class Phase1TeacherQualityPayload(PydanticMappingModel):
+class Phase1TeacherQualityPayload(PydanticBaseModel):
     """第零层 teacher quality 计算的中间 payload。
 
     使用场景:
         保存 DP return、flat baseline return、逐样本 advantage 以及不可计算原因。
-        该对象实现 ``Mapping``，用于兼容现有 ``extra_payload["..."]`` 调用。
+        通过强类型字段或 ``model_dump()`` 消费。
     """
 
     # 每条 horizon 的 DP teacher return。
@@ -32,7 +32,7 @@ class Phase1TeacherQualityPayload(PydanticMappingModel):
     missing_reason: str | None = None
 
 
-class Phase1TeacherQualityMetrics(PydanticMappingModel):
+class Phase1TeacherQualityMetrics(PydanticBaseModel):
     """第零层 DP teacher 质量 raw metrics。
 
     使用场景:
@@ -58,7 +58,7 @@ class Phase1TeacherQualityMetrics(PydanticMappingModel):
     # 去掉收益最高 top 5% 后剩余 DP 总优势或优势保留诊断值。
     dp_return_concentration_after_top5_removed: float
 
-class Phase1TeacherQualityThresholds(PydanticMappingModel):
+class Phase1TeacherQualityThresholds(PydanticBaseModel):
     """第零层 DP teacher 质量阈值配置。
 
     功能说明:

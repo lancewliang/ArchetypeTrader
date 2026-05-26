@@ -6,14 +6,17 @@ hard gate 失败都表示该 checkpoint 的评估结果不可用于 best checkpo
 
 from __future__ import annotations
 
-from src.utils import PydanticBaseModel
+from typing import TYPE_CHECKING
 
-from .phase2_metric_results import Phase2LayerResult
+from src.utils import PydanticBaseModel
 from .phase2_validation_rule_helpers import (
     _build_layer_result,
     _eq_bool,
     _ge,
 )
+
+if TYPE_CHECKING:
+    from .phase2_metric_results import Phase2LayerResult
 
 
 class Phase2EvaluationValidityPayload(PydanticBaseModel):

@@ -1,18 +1,21 @@
 """Phase I layer 2 behavior quality schema, thresholds, and hard gate rules."""
 
 from __future__ import annotations
-from src.utils import PydanticMappingModel
-from .phase1_metric_results import Phase1LayerResult
-from .phase1_validation_data_schema import Phase1ValidationMetrics
+from typing import TYPE_CHECKING
+
+from src.utils import PydanticBaseModel
+
+if TYPE_CHECKING:
+    from .phase1_metric_results import Phase1LayerResult
+    from .phase1_validation_data_schema import Phase1ValidationMetrics
 
 
-class Phase1BehaviorQualityPayload(PydanticMappingModel):
+class Phase1BehaviorQualityPayload(PydanticBaseModel):
     """第二层 behavior quality 计算的中间 payload。
 
     使用场景:
         保存每条样本的 morphology/motif 标签，以及当前 validation split 的
-        active code 列表。该对象实现 ``Mapping``，用于兼容现有
-        ``extra_payload["..."]`` 调用。
+        active code 列表，通过强类型字段或 ``model_dump()`` 消费。
     """
 
     # 每条 horizon 的市场形态标签。
@@ -24,7 +27,7 @@ class Phase1BehaviorQualityPayload(PydanticMappingModel):
     # 当前 validation split 中满足 active occupancy 阈值的 code id。
     active_codes: tuple[int, ...]
 
-class Phase1BehaviorQualityMetrics(PydanticMappingModel):
+class Phase1BehaviorQualityMetrics(PydanticBaseModel):
     """第二层 archetype 行为质量 raw metrics。"""
 
     # support 不达标的 active code 比例。
@@ -60,7 +63,7 @@ class Phase1BehaviorQualityMetrics(PydanticMappingModel):
     # 当前 codebook size K，用于 duplicate code pair 上限按 K 动态判定。
     num_codes: int = 0
 
-class Phase1BehaviorQualityThresholds(PydanticMappingModel):
+class Phase1BehaviorQualityThresholds(PydanticBaseModel):
     """第二层 archetype 行为质量阈值配置。"""
 
     # 单个 active code 的绝对最小样本数。用于保证 per-code 诊断具备统计支撑。

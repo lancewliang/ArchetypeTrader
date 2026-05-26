@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import math
-from src.utils import PydanticMappingModel
-from .phase1_metric_results import Phase1LayerResult, Phase1MetricResult
-from .phase1_validation_data_schema import Phase1ValidationMetrics
+from typing import TYPE_CHECKING
+
+from src.utils import PydanticBaseModel
+
+if TYPE_CHECKING:
+    from .phase1_metric_results import Phase1LayerResult, Phase1MetricResult
+    from .phase1_validation_data_schema import Phase1ValidationMetrics
 
 
-class Phase1LabelPredictabilityPayload(PydanticMappingModel):
+class Phase1LabelPredictabilityPayload(PydanticBaseModel):
     """第四层 label predictability 计算的中间 payload。
 
     使用场景:
         保存 probe train/validation accuracy、generalization gap、confusion matrix
-        和 probe seed。该对象实现 ``Mapping``，用于兼容现有
-        ``extra_payload["..."]`` 调用。
+        和 probe seed，通过强类型字段或 ``model_dump()`` 消费。
     """
 
     # probe 在 train split 上的 top-1 accuracy。
@@ -32,7 +35,7 @@ class Phase1LabelPredictabilityPayload(PydanticMappingModel):
     # probe 训练和随机 baseline 使用的随机种子。
     probe_seed: int
 
-class Phase1LabelPredictabilityMetrics(PydanticMappingModel):
+class Phase1LabelPredictabilityMetrics(PydanticBaseModel):
     """第四层 label 可预测性 raw metrics。"""
 
     # probe 在 validation split 上的 top-1 label accuracy。
@@ -59,7 +62,7 @@ class Phase1LabelPredictabilityMetrics(PydanticMappingModel):
     # 当前 validation split 中的 codebook size，用于 top-k accuracy 自适应阈值。
     num_codes: int = 0
 
-class Phase1LabelPredictabilityThresholds(PydanticMappingModel):
+class Phase1LabelPredictabilityThresholds(PydanticBaseModel):
     """第四层 label 可预测性阈值配置。"""
 
     # probe top-1 accuracy 的固定下限。实际阈值取 max(floor, k_factor / K)。

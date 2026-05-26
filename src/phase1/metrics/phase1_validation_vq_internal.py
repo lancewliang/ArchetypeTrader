@@ -3,21 +3,22 @@
 from __future__ import annotations
 
 import math
-from typing import Any
-from src.utils import PydanticMappingModel
-from .phase1_metric_results import Phase1LayerResult, Phase1MetricResult
-from .phase1_validation_data_schema import (
-        Phase1ValidationMetrics,
-    )
+from typing import TYPE_CHECKING, Any
+
+from src.utils import PydanticBaseModel
+
+if TYPE_CHECKING:
+    from .phase1_metric_results import Phase1LayerResult, Phase1MetricResult
+    from .phase1_validation_data_schema import Phase1ValidationMetrics
 
 
-class Phase1VQInternalPayload(PydanticMappingModel):
+class Phase1VQInternalPayload(PydanticBaseModel):
     """第一层 VQ 内部计算的中间 payload。
 
     使用场景:
         保存 code 使用分布、active codes、当前 assignment snapshot 以及
         assignment churn 诊断等非 hard-gate raw metrics 的辅助产物。
-        该对象实现 ``Mapping``，用于兼容现有 ``extra_payload.get(...)`` 调用。
+        通过强类型字段或 ``model_dump()`` 消费。
     """
 
     # validation split 的 code 使用分布，索引为 code id，值为 occupancy probability。
@@ -41,7 +42,7 @@ class Phase1VQInternalPayload(PydanticMappingModel):
     # 参与 code distribution 统计的样本数。
     code_distribution_sample_count: int
 
-class Phase1VQInternalMetrics(PydanticMappingModel):
+class Phase1VQInternalMetrics(PydanticBaseModel):
     """第一层 VQ 内部质量 raw metrics。
 
     使用场景:
@@ -92,7 +93,7 @@ class Phase1VQInternalMetrics(PydanticMappingModel):
     # 旧 checkpoint 可能没有该字段，因此给 NaN 默认值。
     quantization_distance_gap: float = float("nan")
 
-class Phase1VQInternalThresholds(PydanticMappingModel):
+class Phase1VQInternalThresholds(PydanticBaseModel):
     """第一层 VQ 内部质量阈值配置。
 
     功能说明:
