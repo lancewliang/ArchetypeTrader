@@ -114,15 +114,11 @@
       gap: 16px;
     }
 
-    .summary-grid {
-      grid-template-columns: 280px repeat(5, minmax(150px, 1fr));
-      align-items: stretch;
-    }
-
     .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
-    .panel, .score-card, .layer-card {
+    .panel, .score-card, .gate-card {
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: var(--radius);
@@ -130,7 +126,10 @@
     }
 
     .panel { overflow: hidden; }
-    .score-card { padding: 16px; }
+    .score-card {
+      padding: 16px;
+      min-height: 118px;
+    }
 
     .panel-head {
       padding: 14px 16px 10px;
@@ -174,6 +173,41 @@
       margin-top: 2px;
     }
 
+    .gate-card {
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      min-height: 132px;
+    }
+
+    .gate-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+      min-height: 38px;
+    }
+
+    .gate-num {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .gate-main {
+      margin-top: auto;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      padding-top: 14px;
+    }
+
+    .gate-main div {
+      border-top: 1px solid var(--soft-line);
+      padding-top: 8px;
+    }
+
     .badge {
       border-radius: 999px;
       padding: 3px 8px;
@@ -203,7 +237,7 @@
       gap: 10px;
     }
 
-    .table-wrap { overflow: auto; }
+    .table-wrap { overflow-x: auto; }
 
     table {
       width: 100%;
@@ -231,15 +265,12 @@
       font-variant-numeric: tabular-nums;
     }
 
+    td.num, th.num {
+      text-align: right;
+      white-space: nowrap;
+    }
+
     tr:last-child td { border-bottom: 0; }
-
-    .layer-card {
-      overflow: hidden;
-    }
-
-    .layer-card .panel-head {
-      background: #fbfcfe;
-    }
 
     .layer-meta {
       display: flex;
@@ -250,9 +281,22 @@
       flex-wrap: wrap;
     }
 
-    .chart-panel {
+    .threshold-block {
       padding: 14px 16px 16px;
+      border-bottom: 1px solid var(--soft-line);
     }
+
+    .threshold-block:last-child { border-bottom: 0; }
+
+    .threshold-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .chart-panel { padding: 14px 16px 16px; }
 
     .chart {
       width: 100%;
@@ -297,26 +341,91 @@
     .usage-bar span {
       display: block;
       height: 100%;
-      width: 100%;
       background: var(--selector);
       transform-origin: left center;
     }
 
-    @media (max-width: 1180px) {
-      .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .heatmap-wrap {
+      overflow-x: auto;
+      padding: 14px 16px 16px;
+    }
+
+    .heatmap {
+      display: grid;
+      gap: 4px;
+      min-width: 860px;
+    }
+
+    .heatmap-head,
+    .heatmap-row-head,
+    .heatmap-cell {
+      min-height: 58px;
+      border: 1px solid var(--soft-line);
+      border-radius: 6px;
+      padding: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-size: 12px;
+      line-height: 1.3;
+      font-weight: 720;
+      overflow-wrap: anywhere;
+    }
+
+    .heatmap-head,
+    .heatmap-row-head {
+      background: #fbfcfe;
+      color: #344054;
+    }
+
+    .heatmap-row-head {
+      justify-content: flex-start;
+      text-align: left;
+    }
+
+    .heatmap-cell {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .heatmap-legend {
+      margin-top: 12px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .heatmap-scale {
+      width: 180px;
+      height: 10px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--fail), #f8fafc, var(--pass));
+      border: 1px solid var(--soft-line);
+    }
+
+    .footer-note {
+      margin-top: 22px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    @media (max-width: 1100px) {
+      .hero, .two, .three, .four {
+        grid-template-columns: 1fr;
+      }
+
+      .meta {
+        justify-content: start;
+        grid-template-columns: repeat(2, auto);
+      }
     }
 
     @media (max-width: 760px) {
       .wrap { width: min(100vw - 24px, 1440px); }
-      .hero {
-        grid-template-columns: 1fr;
-        align-items: start;
-      }
-      .meta {
-        grid-template-columns: 1fr;
-        justify-content: start;
-      }
-      .summary-grid, .two, .three { grid-template-columns: 1fr; }
+      .meta { grid-template-columns: 1fr; }
       h1 { font-size: 24px; }
       .score-value { font-size: 34px; }
     }
@@ -328,70 +437,83 @@
       <div>
         <h1>{{ header_title }}</h1>
         <p class="subtitle">
-          {{ header.pair }} · batch {{ header.batch }} · checkpoint {{ header.checkpoint }}
+          Phase II selector validation report：用于确认 selector / assigned-label baseline / random / oracle / hold 对比、Code 诊断表和 Dominant Pair 热力图。
         </p>
       </div>
       <div class="meta">
-        <span>生成时间 {{ report.generated_at }}</span>
-        <span>结构版本 {{ report.schema }}</span>
+        <span><strong>Pair</strong> {{ header.pair }}</span>
+        <span><strong>Batch</strong> {{ header.batch }}</span>
+        <span><strong>Checkpoint</strong> {{ header.checkpoint }}</span>
+        <span><strong>K</strong> {{ header.k }}</span>
+        <span><strong>N</strong> {{ header.n_val }}</span>
+        <span><strong>Horizon</strong> {{ header.horizon }}</span>
         {% for item in header.meta_items %}
-        <span>{{ item.label }} {{ item.value }}</span>
+        <span><strong>{{ item.label }}</strong> {{ item.value }}</span>
         {% endfor %}
       </div>
     </div>
   </header>
 
   <main class="wrap">
-    <section class="grid summary-grid">
+    <section class="grid four">
       <article class="score-card">
-        <div class="metric-label">选择状态</div>
+        <div class="metric-label">Phase II score</div>
         <div class="score-value">{{ summary.score }}</div>
         <div class="decision">
-          <span class="badge {{ summary.badge_class }}">{{ summary.status_label }}</span>
+          <span class="badge {{ summary.badge_class }}">{{ summary.status_label }}</span> validation candidate
         </div>
       </article>
       <article class="score-card">
-        <div class="metric-label">Mean Return</div>
+        <div class="metric-label">Selector mean return</div>
         <div class="metric-num">{{ summary.mean_return }}</div>
+        <div class="metric-label">checkpoint {{ summary.checkpoint_id }}</div>
       </article>
       <article class="score-card">
-        <div class="metric-label">Sharpe Like</div>
+        <div class="metric-label">Sharpe-like</div>
         <div class="metric-num">{{ summary.sharpe_like }}</div>
+        <div class="metric-label">win rate {{ summary.win_rate }}</div>
       </article>
       <article class="score-card">
-        <div class="metric-label">Win Rate</div>
-        <div class="metric-num">{{ summary.win_rate }}</div>
-      </article>
-      <article class="score-card">
-        <div class="metric-label">选中轮次</div>
-        <div class="metric-num">{{ summary.epoch }}</div>
-      </article>
-      <article class="score-card">
-        <div class="metric-label">失败层</div>
-        <div class="metric-num">{{ summary.failed_layers }}</div>
+        <div class="metric-label">Validation layers</div>
+        <div class="metric-num">{{ summary.layer_count }}</div>
+        <div class="metric-label">failed: {{ summary.failed_layers }}</div>
       </article>
     </section>
 
+    {% if layers %}
     <section class="grid three">
-      <article class="panel">
-        <div class="panel-head"><h3>检验点</h3></div>
-        <div class="panel-body">
-          <div class="metric-num">{{ summary.checkpoint_id }}</div>
-          <div class="note">layer {{ summary.layer_count }} · {{ summary.reason }}</div>
+      {% for layer in layers %}
+      <article class="gate-card">
+        <div class="gate-title">
+          <div>
+            <div class="gate-num">Layer {{ layer.layer_id }}</div>
+            <h3>{{ layer.name }}</h3>
+          </div>
+          <span class="badge {{ layer.badge_class }}">{{ layer.status_label }}</span>
+        </div>
+        <div class="gate-main">
+          <div><div class="metric-num">{{ layer.metric_count }}</div><div class="metric-label">metrics</div></div>
+          <div><div class="metric-num">{{ layer.failed_count }}</div><div class="metric-label">failed</div></div>
+          <div><div class="metric-num">{{ layer.status_label }}</div><div class="metric-label">gate</div></div>
         </div>
       </article>
-      <article class="panel">
-        <div class="panel-head"><h3>K / N / Horizon</h3></div>
-        <div class="panel-body">
-          <div class="metric-num">{{ header.k }} / {{ header.n_val }} / {{ header.horizon }}</div>
-          <div class="note">codebook size, validation samples, rollout horizon</div>
-        </div>
+      {% endfor %}
+    </section>
+    {% endif %}
+
+    <section class="grid three">
+      <article class="score-card">
+        <div class="metric-label">Selected epoch</div>
+        <div class="metric-num">{{ summary.epoch }}</div>
       </article>
-      <article class="panel">
-        <div class="panel-head"><h3>报告边界</h3></div>
-        <div class="panel-body">
-          <div class="note">本报告只消费 evaluator 已经落盘的聚合 payload，不重新执行 selector、decoder、reward 或 checkpoint selection。</div>
-        </div>
+      <article class="score-card">
+        <div class="metric-label">Failed layers</div>
+        <div class="metric-num">{{ summary.failed_layers }}</div>
+      </article>
+      <article class="score-card">
+        <div class="metric-label">Report schema</div>
+        <div class="metric-num">{{ report.schema }}</div>
+        <div class="metric-label">{{ report.generated_at }}</div>
       </article>
     </section>
 
@@ -447,6 +569,49 @@
     </section>
     {% endif %}
 
+    {% if layers %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>指标阈值明细 <span class="note">Validation Thresholds</span></h2>
+        <span class="note">{{ summary.layer_count }} layers</span>
+      </div>
+      {% for layer in layers %}
+      <div class="threshold-block">
+        <div class="threshold-title">
+          <h3>Layer {{ layer.layer_id }} · {{ layer.name }}</h3>
+          <span class="badge {{ layer.badge_class }}">{{ layer.status_label }}</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Value</th>
+                <th>Threshold</th>
+                <th>Direction</th>
+                <th>Status</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for metric in layer.metrics %}
+              <tr>
+                <td>{{ metric.name }}</td>
+                <td>{{ metric.value }}</td>
+                <td>{{ metric.threshold }}</td>
+                <td>{{ metric.direction }}</td>
+                <td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td>
+                <td>{{ metric.message }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endfor %}
+    </section>
+    {% endif %}
+
     {% if cumulative_return_chart.series %}
     <section>
       <h2 class="section-title">累计收益曲线</h2>
@@ -472,55 +637,41 @@
     </section>
     {% endif %}
 
-    {% if layers %}
-    <section>
-      <h2 class="section-title">Validation Layers</h2>
-      <div class="grid two">
-        {% for layer in layers %}
-        <article class="layer-card">
-          <div class="panel-head">
-            <div>
-              <h3>Layer {{ layer.layer_id }} · {{ layer.name }}</h3>
-              <div class="layer-meta">{{ layer.metric_count }} metrics · {{ layer.failed_count }} failed</div>
-            </div>
-            <span class="badge {{ layer.badge_class }}">{{ layer.status_label }}</span>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Metric</th>
-                  <th>Value</th>
-                  <th>Threshold</th>
-                  <th>Direction</th>
-                  <th>Status</th>
-                  <th>Message</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for metric in layer.metrics %}
-                <tr>
-                  <td>{{ metric.name }}</td>
-                  <td>{{ metric.value }}</td>
-                  <td>{{ metric.threshold }}</td>
-                  <td>{{ metric.direction }}</td>
-                  <td><span class="badge {{ metric.badge_class }}">{{ metric.severity_label }}</span></td>
-                  <td>{{ metric.message }}</td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </article>
-        {% endfor %}
+    {% if pair_profitability_matrix.rows %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Dominant Pair 热力图</h2>
+        <span class="note">{{ pair_profitability_matrix.legend_label }}</span>
+      </div>
+      <div class="heatmap-wrap">
+        <div class="heatmap" style="grid-template-columns: {{ pair_profitability_matrix.grid_template_columns }}">
+          <div class="heatmap-head">Morphology / Motif</div>
+          {% for motif in pair_profitability_matrix.motif_headers %}
+          <div class="heatmap-head">{{ motif.value }}</div>
+          {% endfor %}
+          {% for row in pair_profitability_matrix.rows %}
+          <div class="heatmap-row-head">{{ row.morphology }}</div>
+          {% for cell in row.cells %}
+          <div class="heatmap-cell" title="{{ cell.tooltip }}" style="background: {{ cell.background_color }}; color: {{ cell.text_color }};">{{ cell.display_value }}</div>
+          {% endfor %}
+          {% endfor %}
+        </div>
+        <div class="heatmap-legend">
+          <span>{{ pair_profitability_matrix.legend_min }}</span>
+          <span class="heatmap-scale"></span>
+          <span>{{ pair_profitability_matrix.legend_max }}</span>
+          <span>{{ pair_profitability_matrix.legend_label }}</span>
+        </div>
       </div>
     </section>
     {% endif %}
 
     {% if per_code_profitability_rows %}
-    <section>
-      <h2 class="section-title">Per-Code 盈利对比</h2>
+    <section class="grid two">
       <article class="panel table-wrap">
+        <div class="panel-head">
+          <h2>Per-code 盈利图表 <span class="note">Selector vs Assigned</span></h2>
+        </div>
         <table>
           <thead>
             <tr>
@@ -552,13 +703,12 @@
           </tbody>
         </table>
       </article>
-    </section>
-    {% endif %}
 
-    {% if code_usage_rows %}
-    <section>
-      <h2 class="section-title">Code 使用分布</h2>
+      {% if code_usage_rows %}
       <article class="panel table-wrap">
+        <div class="panel-head">
+          <h2>Codebook 使用分布 <span class="note">Selector vs Assigned</span></h2>
+        </div>
         <table>
           <thead>
             <tr>
@@ -588,26 +738,72 @@
           </tbody>
         </table>
       </article>
+      {% endif %}
     </section>
     {% endif %}
 
-    {% if cumulative_return_series %}
+    {% if code_diagnostic_rows %}
     <section>
-      <h2 class="section-title">累计收益序列数据</h2>
+      <h2 class="section-title">Code 级诊断表</h2>
       <article class="panel table-wrap">
         <table>
           <thead>
-            <tr><th>Series</th><th>Points</th></tr>
+            <tr>
+              <th>Code</th>
+              <th>Status</th>
+              <th class="num">Selector Support</th>
+              <th class="num">Selector Usage</th>
+              <th class="num">Assigned Support</th>
+              <th class="num">Assigned Usage</th>
+              <th class="num">Usage Delta</th>
+              <th class="num">Selector Return</th>
+              <th class="num">Assigned Return</th>
+              <th class="num">Uplift</th>
+              <th class="num">Win Rate</th>
+              <th class="num">Fee Drag</th>
+              <th class="num">Turnover</th>
+              <th>Dominant Morphology</th>
+              <th class="num">Morph Ratio</th>
+              <th>Dominant Motif</th>
+              <th class="num">Motif Ratio</th>
+              <th>Dominant Pair</th>
+              <th class="num">Pair Ratio</th>
+              <th class="num">Q Margin</th>
+              <th class="num">Low Confidence</th>
+              <th class="num">Good Deviation</th>
+              <th class="num">Bad Deviation</th>
+              <th class="num">Bad Deviation Rate</th>
+              <th>Risk Reason</th>
+            </tr>
           </thead>
           <tbody>
-            {% for series in cumulative_return_series %}
+            {% for row in code_diagnostic_rows %}
             <tr>
-              <td>{{ series.label }}</td>
-              <td>
-                {% for point in series.points %}
-                {{ point.step }}:{{ point.value }}
-                {% endfor %}
-              </td>
+              <td>{{ row.code_id }}</td>
+              <td><span class="badge {{ row.badge_class }}">{{ row.status }}</span></td>
+              <td class="num">{{ row.selector_support }}</td>
+              <td class="num">{{ row.selector_usage_ratio }}</td>
+              <td class="num">{{ row.kl_support }}</td>
+              <td class="num">{{ row.kl_usage_ratio }}</td>
+              <td class="num">{{ row.usage_delta }}</td>
+              <td class="num">{{ row.selector_mean_return }}</td>
+              <td class="num">{{ row.kl_mean_return }}</td>
+              <td class="num">{{ row.uplift_vs_kl }}</td>
+              <td class="num">{{ row.selector_win_rate }}</td>
+              <td class="num">{{ row.selector_fee_drag_ratio }}</td>
+              <td class="num">{{ row.selector_turnover }}</td>
+              <td>{{ row.dominant_morphology }}</td>
+              <td class="num">{{ row.dominant_morphology_ratio }}</td>
+              <td>{{ row.dominant_motif }}</td>
+              <td class="num">{{ row.dominant_motif_ratio }}</td>
+              <td>{{ row.dominant_pair }}</td>
+              <td class="num">{{ row.dominant_pair_ratio }}</td>
+              <td class="num">{{ row.mean_q_margin }}</td>
+              <td class="num">{{ row.low_confidence_ratio }}</td>
+              <td class="num">{{ row.profitable_deviation_count }}</td>
+              <td class="num">{{ row.unprofitable_deviation_count }}</td>
+              <td class="num">{{ row.unprofitable_deviation_rate }}</td>
+              <td>{{ row.risk_reason }}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -645,6 +841,8 @@
       </article>
       {% endif %}
     </section>
+
+    <p class="footer-note">Phase II selector report. HTML 自包含，不依赖外部 CSS/JS。</p>
   </main>
 </body>
 </html>

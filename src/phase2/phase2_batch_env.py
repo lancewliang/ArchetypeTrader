@@ -23,6 +23,7 @@ class Phase2SelectionBatchResult:
     sample_ids: np.ndarray
     selected_code_ids: np.ndarray
     assigned_code_labels: np.ndarray
+    actions: np.ndarray
     gross_returns: np.ndarray
     fees: np.ndarray
     turnover: np.ndarray
@@ -60,6 +61,7 @@ class ArchetypeSelectionBatchEnv(ArchetypeSelectionEnv):
             sample_ids=sample_ids,
             selected_code_ids=selected_code_ids,
             assigned_code_labels=assigned_code_labels,
+            actions=np.asarray(actions, dtype=np.int64),
             gross_returns=np.asarray(execution.gross_returns, dtype=np.float64),
             fees=np.asarray(execution.fees, dtype=np.float64),
             turnover=np.asarray(execution.turnover, dtype=np.float64),

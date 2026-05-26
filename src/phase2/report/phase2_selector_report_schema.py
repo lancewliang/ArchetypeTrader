@@ -416,6 +416,82 @@ class Phase2ReportCodeUsageRow:
 
 
 @dataclass(frozen=True)
+class Phase2ReportPairProfitabilityCell:
+    """Dominant Pair 热力图中的单个 morphology/motif cell。"""
+
+    morphology: str
+    motif: str
+    support: str
+    selector_mean_return: str
+    kl_mean_return: str
+    random_mean_return: str
+    mean_advantage_vs_kl: str
+    mean_advantage_vs_random: str
+    win_rate: str
+    fee_drag_ratio: str
+    dominant_selected_code: str
+    dominant_selected_code_ratio: str
+    background_color: str = "#ffffff"
+    text_color: str = "#344054"
+    display_value: str = "-"
+    tooltip: str = ""
+
+
+@dataclass(frozen=True)
+class Phase2ReportPairProfitabilityRow:
+    """Dominant Pair 热力图中的一个 morphology 行。"""
+
+    morphology: str
+    cells: tuple[Phase2ReportPairProfitabilityCell, ...]
+
+
+@dataclass(frozen=True)
+class Phase2ReportPairProfitabilityMatrix:
+    """Dominant Pair 热力图展示模型。"""
+
+    motifs: tuple[str, ...] = ()
+    motif_headers: tuple[Phase2ReportMappingRow, ...] = ()
+    rows: tuple[Phase2ReportPairProfitabilityRow, ...] = ()
+    cells: tuple[Phase2ReportPairProfitabilityCell, ...] = ()
+    grid_template_columns: str = "minmax(118px, 1.2fr)"
+    legend_min: str = "-"
+    legend_max: str = "-"
+    legend_label: str = "mean advantage vs KL"
+
+
+@dataclass(frozen=True)
+class Phase2ReportCodeDiagnosticRow:
+    """Phase II selector code 级诊断表行。"""
+
+    code_id: str
+    status: str
+    badge_class: str
+    selector_support: str
+    selector_usage_ratio: str
+    kl_support: str
+    kl_usage_ratio: str
+    usage_delta: str
+    selector_mean_return: str
+    kl_mean_return: str
+    uplift_vs_kl: str
+    selector_win_rate: str
+    selector_fee_drag_ratio: str
+    selector_turnover: str
+    dominant_morphology: str
+    dominant_morphology_ratio: str
+    dominant_motif: str
+    dominant_motif_ratio: str
+    dominant_pair: str
+    dominant_pair_ratio: str
+    mean_q_margin: str
+    low_confidence_ratio: str
+    profitable_deviation_count: str
+    unprofitable_deviation_count: str
+    unprofitable_deviation_rate: str
+    risk_reason: str
+
+
+@dataclass(frozen=True)
 class Phase2ReportSeriesPoint:
     """图表序列中的单个点。"""
 
@@ -486,6 +562,10 @@ class Phase2ReportHtmlContext:
     cumulative_return_chart: Phase2ReportLineChart = field(
         default_factory=Phase2ReportLineChart
     )
+    pair_profitability_matrix: Phase2ReportPairProfitabilityMatrix = field(
+        default_factory=Phase2ReportPairProfitabilityMatrix
+    )
+    code_diagnostic_rows: tuple[Phase2ReportCodeDiagnosticRow, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """转换为模板引擎可消费的普通 dict。"""
@@ -643,10 +723,14 @@ __all__ = [
     "Phase2ReportMappingRow",
     "Phase2ReportMeta",
     "Phase2ReportMetricView",
+    "Phase2ReportPairProfitabilityCell",
+    "Phase2ReportPairProfitabilityMatrix",
+    "Phase2ReportPairProfitabilityRow",
     "Phase2ReportPerCodeProfitabilityRow",
     "Phase2ReportSeries",
     "Phase2ReportSeriesPoint",
     "Phase2ReportSummaryView",
+    "Phase2ReportCodeDiagnosticRow",
     "ensure_phase2_report_document",
     "json_safe",
     "layer_result_to_view",

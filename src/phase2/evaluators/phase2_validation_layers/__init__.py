@@ -11,10 +11,16 @@ from .layer5_generalization_stability import (
     compute_generalization_stability_metrics,
     compute_predictability_metrics,
 )
+from .report_aggregates import (
+    build_phase2_code_diagnostics,
+    build_selector_pair_profitability_matrix,
+)
 
 
 __all__ = [
     "compute_baseline_uplift_metrics",
+    "build_phase2_code_diagnostics",
+    "build_selector_pair_profitability_matrix",
     "compute_code_usage_collapse_metrics",
     "compute_demonstration_consistency_metrics",
     "compute_evaluation_validity_metrics",

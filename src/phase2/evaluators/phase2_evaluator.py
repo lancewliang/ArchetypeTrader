@@ -45,6 +45,8 @@ from ..metrics import (
     evaluate_selector_profitability_rules,
 )
 from .phase2_validation_layers import (
+    build_phase2_code_diagnostics,
+    build_selector_pair_profitability_matrix,
     compute_baseline_uplift_metrics,
     compute_code_usage_collapse_metrics,
     compute_demonstration_consistency_metrics,
@@ -65,6 +67,7 @@ class _RolloutMatrices:
     gross_returns: np.ndarray
     fees: np.ndarray
     turnover: np.ndarray
+    actions: np.ndarray
     failed_mask: np.ndarray
 
 
@@ -205,6 +208,10 @@ class Phase2Evaluator:
         selector_fees = self._take_by_code(rollout_matrices.fees, selected_code_ids)
         selector_turnover = self._take_by_code(
             rollout_matrices.turnover,
+            selected_code_ids,
+        )
+        selector_actions = self._take_actions_by_code(
+            rollout_matrices.actions,
             selected_code_ids,
         )
         assigned_label_returns = self._take_by_code(
@@ -358,9 +365,15 @@ class Phase2Evaluator:
                 random_returns=random_returns,
                 oracle_returns=oracle_returns,
                 hold_returns=hold_returns,
+                selector_fees=selector_fees,
+                selector_turnover=selector_turnover,
+                selector_actions=selector_actions,
+                q_margins=q_margins,
                 selected_code_ids=selected_code_ids,
                 assigned_code_labels=assigned_code_labels,
                 per_code_diagnostics=per_code_diagnostics,
+                dataset=dataset,
+                num_archetypes=num_archetypes,
             ),
         )
         return Phase2ValidationResult(
@@ -433,6 +446,12 @@ class Phase2Evaluator:
         gross_returns = np.full_like(returns, np.nan)
         fees = np.full_like(returns, np.nan)
         turnover = np.full_like(returns, np.nan)
+        horizon = int(dataset.horizon_dataset[0].shape[1])
+        actions = np.full(
+            (num_samples, num_archetypes, horizon),
+            -1,
+            dtype=np.int64,
+        )
         failed_mask = np.zeros((num_samples, num_archetypes), dtype=np.bool_)
         env = ArchetypeSelectionBatchEnv(
             dataset=dataset,
@@ -454,11 +473,13 @@ class Phase2Evaluator:
                 gross_returns[start:end, code_id] = result.gross_returns
                 fees[start:end, code_id] = result.fees
                 turnover[start:end, code_id] = result.turnover
+                actions[start:end, code_id, :] = result.actions
         return _RolloutMatrices(
             returns=returns,
             gross_returns=gross_returns,
             fees=fees,
             turnover=turnover,
+            actions=actions,
             failed_mask=failed_mask,
         )
 
@@ -508,17 +529,52 @@ class Phase2Evaluator:
         random_returns: np.ndarray,
         oracle_returns: np.ndarray,
         hold_returns: np.ndarray,
+        selector_fees: np.ndarray,
+        selector_turnover: np.ndarray,
+        selector_actions: np.ndarray,
+        q_margins: np.ndarray,
         selected_code_ids: np.ndarray,
         assigned_code_labels: np.ndarray,
         per_code_diagnostics: tuple[Any, ...],
+        dataset: Phase2SelectionDataset,
+        num_archetypes: int,
     ) -> Mapping[str, object]:
         """构造报表卡片复用的聚合 payload，不保存逐样本 trace。"""
 
+        _, _, _, prices, _ = dataset.horizon_dataset
         return {
             "per_code_profitability_comparison": [
                 item.to_dict() if hasattr(item, "to_dict") else item
                 for item in per_code_diagnostics
             ],
+            "selector_pair_profitability_matrix": (
+                build_selector_pair_profitability_matrix(
+                    selected_code_ids=selected_code_ids,
+                    selector_returns=selector_returns,
+                    kl_returns=assigned_label_returns,
+                    random_returns=random_returns,
+                    selector_fees=selector_fees,
+                    selector_turnover=selector_turnover,
+                    prices=prices,
+                    selector_actions=selector_actions,
+                    fee_rate=self.reward_config.fee_rate,
+                )
+            ),
+            "code_diagnostics": (
+                build_phase2_code_diagnostics(
+                    selected_code_ids=selected_code_ids,
+                    assigned_code_labels=assigned_code_labels,
+                    selector_returns=selector_returns,
+                    kl_returns=assigned_label_returns,
+                    selector_fees=selector_fees,
+                    selector_turnover=selector_turnover,
+                    q_margins=q_margins,
+                    num_archetypes=num_archetypes,
+                    prices=prices,
+                    selector_actions=selector_actions,
+                    fee_rate=self.reward_config.fee_rate,
+                )
+            ),
             "codebook_usage_distribution": {
                 "selector": self._count_distribution(selected_code_ids),
                 "kl": self._count_distribution(assigned_code_labels),
@@ -542,6 +598,20 @@ class Phase2Evaluator:
         if np.any(valid):
             row_indices = np.flatnonzero(valid)
             values[row_indices] = matrix[row_indices, codes[valid]]
+        return values
+
+    @staticmethod
+    def _take_actions_by_code(matrix: np.ndarray, code_ids: np.ndarray) -> np.ndarray:
+        """按每行 code id 从 [sample, code, horizon] 动作矩阵取动作序列。"""
+
+        if matrix.ndim != 3:
+            raise ValueError("action matrix must have shape [sample, code, horizon]")
+        values = np.full((matrix.shape[0], matrix.shape[2]), -1, dtype=np.int64)
+        codes = np.asarray(code_ids, dtype=np.int64)
+        valid = (codes >= 0) & (codes < matrix.shape[1])
+        if np.any(valid):
+            row_indices = np.flatnonzero(valid)
+            values[row_indices] = matrix[row_indices, codes[valid], :]
         return values
 
     @staticmethod

@@ -54,7 +54,7 @@ class Phase2RewardConfig:
     gamma: float = 0.99
 
     # 交易手续费率。
-    fee_rate: float = 0.0002
+    fee_rate: float = 0.0004
 
     # assigned-label imitation regularization 的全局权重。
     imitation_alpha: float = 1.0

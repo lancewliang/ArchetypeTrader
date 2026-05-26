@@ -11,6 +11,7 @@ from .phase2_selector_report_schema import (
     Phase2ReportBaselineRow,
     Phase2ReportChartGridLine,
     Phase2ReportChartSeries,
+    Phase2ReportCodeDiagnosticRow,
     Phase2ReportCodeUsageRow,
     Phase2ReportDocument,
     Phase2ReportHeader,
@@ -19,6 +20,9 @@ from .phase2_selector_report_schema import (
     Phase2ReportLayerView,
     Phase2ReportLineChart,
     Phase2ReportMappingRow,
+    Phase2ReportPairProfitabilityCell,
+    Phase2ReportPairProfitabilityMatrix,
+    Phase2ReportPairProfitabilityRow,
     Phase2ReportPerCodeProfitabilityRow,
     Phase2ReportSeries,
     Phase2ReportSeriesPoint,
@@ -174,6 +178,10 @@ class Phase2SelectorReportContextBuilder:
             cumulative_return_chart=self._build_cumulative_return_chart(
                 cumulative_series
             ),
+            pair_profitability_matrix=self._build_pair_profitability_matrix(
+                report_payload
+            ),
+            code_diagnostic_rows=self._build_code_diagnostic_rows(report_payload),
         )
 
     def _build_header(
@@ -500,6 +508,227 @@ class Phase2SelectorReportContextBuilder:
             status_label=status.upper(),
         )
 
+    def _build_pair_profitability_matrix(
+        self,
+        report_payload: Mapping[str, Any],
+    ) -> Phase2ReportPairProfitabilityMatrix:
+        """构建 Dominant Pair heatmap 视图模型。"""
+
+        raw_cells = report_payload.get("selector_pair_profitability_matrix", ())
+        if not isinstance(raw_cells, Sequence) or isinstance(raw_cells, str | bytes):
+            return Phase2ReportPairProfitabilityMatrix()
+        cell_mappings = tuple(
+            row
+            for item in raw_cells
+            if (row := _as_mapping(item))
+        )
+        if not cell_mappings:
+            return Phase2ReportPairProfitabilityMatrix()
+
+        morphologies = tuple(
+            sorted(
+                {
+                    str(row.get("morphology"))
+                    for row in cell_mappings
+                    if row.get("morphology") not in (None, "")
+                }
+            )
+        )
+        motifs = tuple(
+            sorted(
+                {
+                    str(row.get("motif"))
+                    for row in cell_mappings
+                    if row.get("motif") not in (None, "")
+                }
+            )
+        )
+        if not morphologies or not motifs:
+            return Phase2ReportPairProfitabilityMatrix()
+
+        finite_advantages = tuple(
+            value
+            for row in cell_mappings
+            if (value := _as_float(row.get("mean_advantage_vs_kl"))) is not None
+        )
+        max_abs_advantage = max(
+            (abs(value) for value in finite_advantages),
+            default=0.0,
+        )
+        by_pair = {
+            (str(row.get("morphology")), str(row.get("motif"))): row
+            for row in cell_mappings
+        }
+        rows: list[Phase2ReportPairProfitabilityRow] = []
+        cells: list[Phase2ReportPairProfitabilityCell] = []
+        for morphology in morphologies:
+            row_cells: list[Phase2ReportPairProfitabilityCell] = []
+            for motif in motifs:
+                source = by_pair.get((morphology, motif))
+                cell = self._pair_profitability_cell(
+                    morphology=morphology,
+                    motif=motif,
+                    row=source,
+                    max_abs_advantage=max_abs_advantage,
+                )
+                row_cells.append(cell)
+                cells.append(cell)
+            rows.append(
+                Phase2ReportPairProfitabilityRow(
+                    morphology=morphology,
+                    cells=tuple(row_cells),
+                )
+            )
+
+        return Phase2ReportPairProfitabilityMatrix(
+            motifs=motifs,
+            motif_headers=tuple(
+                Phase2ReportMappingRow(key=motif, value=motif)
+                for motif in motifs
+            ),
+            rows=tuple(rows),
+            cells=tuple(cells),
+            grid_template_columns=(
+                f"minmax(118px, 1.2fr) repeat({len(motifs)}, minmax(118px, 1fr))"
+            ),
+            legend_min=_format_value(-max_abs_advantage),
+            legend_max=_format_value(max_abs_advantage),
+        )
+
+    def _pair_profitability_cell(
+        self,
+        *,
+        morphology: str,
+        motif: str,
+        row: Mapping[str, Any] | None,
+        max_abs_advantage: float,
+    ) -> Phase2ReportPairProfitabilityCell:
+        """构建单个 heatmap cell。"""
+
+        if not row:
+            return Phase2ReportPairProfitabilityCell(
+                morphology=morphology,
+                motif=motif,
+                support="0",
+                selector_mean_return="-",
+                kl_mean_return="-",
+                random_mean_return="-",
+                mean_advantage_vs_kl="-",
+                mean_advantage_vs_random="-",
+                win_rate="-",
+                fee_drag_ratio="-",
+                dominant_selected_code="-",
+                dominant_selected_code_ratio="-",
+                display_value="-",
+                tooltip=f"{morphology} / {motif}: no validation samples.",
+            )
+
+        advantage = _as_float(row.get("mean_advantage_vs_kl"))
+        background_color, text_color = self._heatmap_colors(
+            advantage=advantage,
+            max_abs_advantage=max_abs_advantage,
+        )
+        selector_mean = _format_value(row.get("selector_mean_return"))
+        advantage_text = _format_value(row.get("mean_advantage_vs_kl"))
+        support = _format_value(row.get("support"))
+        dominant_code = _format_value(row.get("dominant_selected_code"))
+        display_value = f"{selector_mean} / adv {advantage_text} / n={support} c{dominant_code}"
+        return Phase2ReportPairProfitabilityCell(
+            morphology=morphology,
+            motif=motif,
+            support=support,
+            selector_mean_return=selector_mean,
+            kl_mean_return=_format_value(row.get("kl_mean_return")),
+            random_mean_return=_format_value(row.get("random_mean_return")),
+            mean_advantage_vs_kl=advantage_text,
+            mean_advantage_vs_random=_format_value(
+                row.get("mean_advantage_vs_random")
+            ),
+            win_rate=_format_percent(row.get("win_rate")),
+            fee_drag_ratio=_format_percent(row.get("fee_drag_ratio")),
+            dominant_selected_code=dominant_code,
+            dominant_selected_code_ratio=_format_percent(
+                row.get("dominant_selected_code_ratio")
+            ),
+            background_color=background_color,
+            text_color=text_color,
+            display_value=display_value,
+            tooltip=(
+                f"{morphology} / {motif}: selector={selector_mean}, "
+                f"adv_vs_kl={advantage_text}, support={support}, "
+                f"dominant_code={dominant_code}"
+            ),
+        )
+
+    def _build_code_diagnostic_rows(
+        self,
+        report_payload: Mapping[str, Any],
+    ) -> tuple[Phase2ReportCodeDiagnosticRow, ...]:
+        """构建完整 code 级诊断表。"""
+
+        rows = report_payload.get("code_diagnostics", ())
+        if not isinstance(rows, Sequence) or isinstance(rows, str | bytes):
+            return ()
+        result: list[Phase2ReportCodeDiagnosticRow] = []
+        for item in rows:
+            row = _as_mapping(item)
+            if not row:
+                continue
+            status = str(row.get("status") or "warn")
+            result.append(
+                Phase2ReportCodeDiagnosticRow(
+                    code_id=_format_value(row.get("code_id")),
+                    status=status.upper(),
+                    badge_class=_badge_class(status),
+                    selector_support=_format_value(row.get("selector_support")),
+                    selector_usage_ratio=_format_percent(
+                        row.get("selector_usage_ratio")
+                    ),
+                    kl_support=_format_value(row.get("kl_support")),
+                    kl_usage_ratio=_format_percent(row.get("kl_usage_ratio")),
+                    usage_delta=_format_percent(row.get("usage_delta")),
+                    selector_mean_return=_format_value(
+                        row.get("selector_mean_return")
+                    ),
+                    kl_mean_return=_format_value(row.get("kl_mean_return")),
+                    uplift_vs_kl=_format_value(row.get("uplift_vs_kl")),
+                    selector_win_rate=_format_percent(row.get("selector_win_rate")),
+                    selector_fee_drag_ratio=_format_percent(
+                        row.get("selector_fee_drag_ratio")
+                    ),
+                    selector_turnover=_format_value(row.get("selector_turnover")),
+                    dominant_morphology=_format_value(
+                        row.get("dominant_morphology")
+                    ),
+                    dominant_morphology_ratio=_format_percent(
+                        row.get("dominant_morphology_ratio")
+                    ),
+                    dominant_motif=_format_value(row.get("dominant_motif")),
+                    dominant_motif_ratio=_format_percent(
+                        row.get("dominant_motif_ratio")
+                    ),
+                    dominant_pair=_format_value(row.get("dominant_pair")),
+                    dominant_pair_ratio=_format_percent(
+                        row.get("dominant_pair_ratio")
+                    ),
+                    mean_q_margin=_format_value(row.get("mean_q_margin")),
+                    low_confidence_ratio=_format_percent(
+                        row.get("low_confidence_ratio")
+                    ),
+                    profitable_deviation_count=_format_value(
+                        row.get("profitable_deviation_count")
+                    ),
+                    unprofitable_deviation_count=_format_value(
+                        row.get("unprofitable_deviation_count")
+                    ),
+                    unprofitable_deviation_rate=_format_percent(
+                        row.get("unprofitable_deviation_rate")
+                    ),
+                    risk_reason=_format_value(row.get("risk_reason")),
+                )
+            )
+        return tuple(result)
+
     def _build_cumulative_return_series(
         self,
         report_payload: Mapping[str, Any],
@@ -626,6 +855,29 @@ class Phase2SelectorReportContextBuilder:
             )
             for key, value in mapping.items()
         )
+
+    @staticmethod
+    def _heatmap_colors(
+        *,
+        advantage: float | None,
+        max_abs_advantage: float,
+    ) -> tuple[str, str]:
+        """按 advantage 相对强度返回 heatmap 背景色和文字色。"""
+
+        if advantage is None or max_abs_advantage <= 0.0:
+            return "#ffffff", "#344054"
+        intensity = min(abs(advantage) / max_abs_advantage, 1.0)
+        if advantage >= 0.0:
+            if intensity >= 0.66:
+                return "#bbf7d0", "#14532d"
+            if intensity >= 0.33:
+                return "#dcfce7", "#14532d"
+            return "#f0fdf4", "#166534"
+        if intensity >= 0.66:
+            return "#fee2e2", "#7f1d1d"
+        if intensity >= 0.33:
+            return "#fef2f2", "#991b1b"
+        return "#fff7ed", "#9a3412"
 
     def _report_payload(
         self,
