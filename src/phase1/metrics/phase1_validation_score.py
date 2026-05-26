@@ -28,9 +28,10 @@ label predictability 保留为参考值和 tie-breaker，不进入主 score。
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import math
 from typing import Any, Mapping
+
+from src.utils import PydanticMappingModel
 
 from .phase1_validation_config import Phase1ValidationScoreWeights
 from .phase1_validation_data_schema import (
@@ -53,8 +54,7 @@ DEFAULT_TIE_SCORE_TOLERANCE = 0.03
 """
 
 
-@dataclass(frozen=True)
-class Phase1ValidationScoreComponent:
+class Phase1ValidationScoreComponent(PydanticMappingModel):
     """单个 validation score 子项的可审计拆解。"""
 
     # 稳定 snake_case 子项名称，例如 "teacher_quality"。
@@ -69,30 +69,8 @@ class Phase1ValidationScoreComponent:
     # value * weight 后的贡献值。
     weighted_value: float
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict，供 checkpoint/report 落盘。"""
 
-        return asdict(self)
-
-    @classmethod
-    def from_dict(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> "Phase1ValidationScoreComponent":
-        """从 dict 恢复 score component。"""
-
-        value = float(payload["value"])
-        weight = float(payload["weight"])
-        return cls(
-            name=str(payload["name"]),
-            value=value,
-            weight=weight,
-            weighted_value=float(payload.get("weighted_value", value * weight)),
-        )
-
-
-@dataclass(frozen=True)
-class Phase1ValidationScore:
+class Phase1ValidationScore(PydanticMappingModel):
     """Phase I validation 综合评分及其子项拆解。"""
 
     # 截断到 [0, 1] 后的最终总分，selector 使用该值排序。
@@ -100,27 +78,6 @@ class Phase1ValidationScore:
 
     # 每个子项的加权前分数、权重和加权贡献。
     components: tuple[Phase1ValidationScoreComponent, ...]
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 checkpoint/report 可保存的 dict。"""
-
-        return {
-            "total_score": self.total_score,
-            "components": [component.to_dict() for component in self.components],
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1ValidationScore":
-        """从 dict 恢复 score 对象。"""
-
-        components = tuple(
-            Phase1ValidationScoreComponent.from_dict(component)
-            for component in payload.get("components", ())
-        )
-        return cls(
-            total_score=float(payload["total_score"]),
-            components=components,
-        )
 
     @classmethod
     def from_float(cls, value: float) -> "Phase1ValidationScore":
