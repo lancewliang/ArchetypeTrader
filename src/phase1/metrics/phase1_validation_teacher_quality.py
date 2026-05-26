@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from src.utils import _dataclass_from_mapping
+from src.utils import PydanticBaseModel, PydanticMappingModel
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
     from .phase1_validation_data_schema import Phase1ValidationMetrics
 
 
-@dataclass(frozen=True)
-class Phase1TeacherQualityPayload(Mapping[str, object]):
+class Phase1TeacherQualityPayload(PydanticMappingModel):
     """第零层 teacher quality 计算的中间 payload。
 
     使用场景:
@@ -32,83 +29,10 @@ class Phase1TeacherQualityPayload(Mapping[str, object]):
     advantages: tuple[float, ...]
 
     # 中间指标不可计算原因；输入完整时为 None。
-    missing_reason: str | None
-
-    def __post_init__(self) -> None:
-        """标准化 payload 中的序列和字符串类型。"""
-
-        object.__setattr__(
-            self,
-            "dp_returns",
-            tuple(float(value) for value in self.dp_returns),
-        )
-        object.__setattr__(
-            self,
-            "flat_returns",
-            tuple(float(value) for value in self.flat_returns),
-        )
-        object.__setattr__(
-            self,
-            "advantages",
-            tuple(float(value) for value in self.advantages),
-        )
-        object.__setattr__(
-            self,
-            "missing_reason",
-            None if self.missing_reason is None else str(self.missing_reason),
-        )
-
-    def _mapping(self) -> dict[str, object]:
-        """返回兼容旧 ``extra_payload`` 字典访问的视图。"""
-
-        return {
-            "dp_returns": self.dp_returns,
-            "flat_returns": self.flat_returns,
-            "advantages": self.advantages,
-            "missing_reason": self.missing_reason,
-        }
-
-    def __getitem__(self, key: str) -> object:
-        """按旧 payload key 读取属性值。"""
-
-        return self._mapping()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        """迭代旧 payload key。"""
-
-        return iter(self._mapping())
-
-    def __len__(self) -> int:
-        """返回 payload key 数量。"""
-
-        return len(self._mapping())
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为可落盘 dict。"""
-
-        return {
-            "dp_returns": [float(value) for value in self.dp_returns],
-            "flat_returns": [float(value) for value in self.flat_returns],
-            "advantages": [float(value) for value in self.advantages],
-            "missing_reason": self.missing_reason,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1TeacherQualityPayload":
-        """从 dict 恢复第零层 teacher quality payload。"""
-
-        return cls(
-            dp_returns=tuple(float(value) for value in payload.get("dp_returns", ())),
-            flat_returns=tuple(
-                float(value) for value in payload.get("flat_returns", ())
-            ),
-            advantages=tuple(float(value) for value in payload.get("advantages", ())),
-            missing_reason=payload.get("missing_reason"),
-        )
+    missing_reason: str | None = None
 
 
-@dataclass(frozen=True)
-class Phase1TeacherQualityMetrics:
+class Phase1TeacherQualityMetrics(PydanticBaseModel):
     """第零层 DP teacher 质量 raw metrics。
 
     使用场景:
@@ -134,20 +58,7 @@ class Phase1TeacherQualityMetrics:
     # 去掉收益最高 top 5% 后剩余 DP 总优势或优势保留诊断值。
     dp_return_concentration_after_top5_removed: float
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 dict，供 checkpoint/report 落盘。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1TeacherQualityMetrics":
-        """从 dict 恢复第零层 metrics。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase1TeacherQualityThresholds:
+class Phase1TeacherQualityThresholds(PydanticBaseModel):
     """第零层 DP teacher 质量阈值配置。
 
     功能说明:
@@ -169,18 +80,6 @@ class Phase1TeacherQualityThresholds:
 
     # 非 neutral 市场形态覆盖率下限。用于判断样本是否有足够可学习的市场结构。
     morphology_coverage_min: float = 0.55
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1TeacherQualityThresholds":
-        """从 checkpoint/report 中的 dict 恢复第零层阈值配置。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
 
 def evaluate_teacher_quality_rules(
     metrics: Phase1TeacherQualityMetrics,

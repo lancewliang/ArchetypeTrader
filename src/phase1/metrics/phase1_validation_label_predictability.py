@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from dataclasses import asdict, dataclass
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from src.utils import _dataclass_from_mapping
+from src.utils import PydanticBaseModel, PydanticMappingModel
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
     from .phase1_validation_data_schema import Phase1ValidationMetrics
 
 
-@dataclass(frozen=True)
-class Phase1LabelPredictabilityPayload(Mapping[str, object]):
+class Phase1LabelPredictabilityPayload(PydanticMappingModel):
     """第四层 label predictability 计算的中间 payload。
 
     使用场景:
@@ -39,92 +36,7 @@ class Phase1LabelPredictabilityPayload(Mapping[str, object]):
     # probe 训练和随机 baseline 使用的随机种子。
     probe_seed: int
 
-    def __post_init__(self) -> None:
-        """标准化 payload 中的数值和矩阵类型。"""
-
-        object.__setattr__(
-            self,
-            "probe_train_accuracy",
-            float(self.probe_train_accuracy),
-        )
-        object.__setattr__(
-            self,
-            "probe_validation_accuracy",
-            float(self.probe_validation_accuracy),
-        )
-        object.__setattr__(
-            self,
-            "probe_predictability_gap",
-            float(self.probe_predictability_gap),
-        )
-        object.__setattr__(
-            self,
-            "probe_confusion_matrix",
-            tuple(
-                tuple(int(value) for value in row)
-                for row in self.probe_confusion_matrix
-            ),
-        )
-        object.__setattr__(self, "probe_seed", int(self.probe_seed))
-
-    def _mapping(self) -> dict[str, object]:
-        """返回兼容旧 ``extra_payload`` 字典访问的视图。"""
-
-        return {
-            "probe_train_accuracy": self.probe_train_accuracy,
-            "probe_validation_accuracy": self.probe_validation_accuracy,
-            "probe_predictability_gap": self.probe_predictability_gap,
-            "probe_confusion_matrix": self.probe_confusion_matrix,
-            "probe_seed": self.probe_seed,
-        }
-
-    def __getitem__(self, key: str) -> object:
-        """按旧 payload key 读取属性值。"""
-
-        return self._mapping()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        """迭代旧 payload key。"""
-
-        return iter(self._mapping())
-
-    def __len__(self) -> int:
-        """返回 payload key 数量。"""
-
-        return len(self._mapping())
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为可落盘 dict。"""
-
-        return {
-            "probe_train_accuracy": self.probe_train_accuracy,
-            "probe_validation_accuracy": self.probe_validation_accuracy,
-            "probe_predictability_gap": self.probe_predictability_gap,
-            "probe_confusion_matrix": [
-                [int(value) for value in row]
-                for row in self.probe_confusion_matrix
-            ],
-            "probe_seed": self.probe_seed,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1LabelPredictabilityPayload":
-        """从 dict 恢复第四层 label predictability payload。"""
-
-        return cls(
-            probe_train_accuracy=float(payload["probe_train_accuracy"]),
-            probe_validation_accuracy=float(payload["probe_validation_accuracy"]),
-            probe_predictability_gap=float(payload["probe_predictability_gap"]),
-            probe_confusion_matrix=tuple(
-                tuple(int(value) for value in row)
-                for row in payload.get("probe_confusion_matrix", ())
-            ),
-            probe_seed=int(payload["probe_seed"]),
-        )
-
-
-@dataclass(frozen=True)
-class Phase1LabelPredictabilityMetrics:
+class Phase1LabelPredictabilityMetrics(PydanticBaseModel):
     """第四层 label 可预测性 raw metrics。"""
 
     # probe 在 validation split 上的 top-1 label accuracy。
@@ -151,20 +63,7 @@ class Phase1LabelPredictabilityMetrics:
     # 当前 validation split 中的 codebook size，用于 top-k accuracy 自适应阈值。
     num_codes: int = 0
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 dict，供 checkpoint/report 落盘。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1LabelPredictabilityMetrics":
-        """从 dict 恢复第四层 metrics。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase1LabelPredictabilityThresholds:
+class Phase1LabelPredictabilityThresholds(PydanticBaseModel):
     """第四层 label 可预测性阈值配置。"""
 
     # probe top-1 accuracy 的固定下限。实际阈值取 max(floor, k_factor / K)。
@@ -190,18 +89,6 @@ class Phase1LabelPredictabilityThresholds:
 
     # H(label | morphology) 相对 H(label) 的上限，用于判断 morphology 是否解释 label 结构。
     label_entropy_given_morphology_max_ratio: float = 0.80
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1LabelPredictabilityThresholds":
-        """从 checkpoint/report 中的 dict 恢复第四层阈值配置。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
 
 def evaluate_label_predictability_rules(
     metrics: Phase1LabelPredictabilityMetrics,
@@ -374,7 +261,7 @@ def _reference_ge(
     threshold_value: float,
     layer: str,
     message: str,
-) -> "Phase1MetricResult":
+) -> Phase1MetricResult:
     """构造“越大越好”的非 gate 参考指标。"""
 
     from .phase1_validation_rule_helpers import _finite_distance, _is_missing

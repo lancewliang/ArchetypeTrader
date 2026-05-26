@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator, Mapping
-from dataclasses import asdict, dataclass, fields
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from src.utils import _dataclass_from_mapping
+from pydantic import field_validator
+
+from src.utils import PydanticBaseModel, PydanticMappingModel
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
@@ -17,8 +18,7 @@ if TYPE_CHECKING:
     )
 
 
-@dataclass(frozen=True)
-class Phase1VQInternalPayload(Mapping[str, object]):
+class Phase1VQInternalPayload(PydanticMappingModel):
     """第一层 VQ 内部计算的中间 payload。
 
     使用场景:
@@ -34,10 +34,10 @@ class Phase1VQInternalPayload(Mapping[str, object]):
     active_codes: tuple[int, ...]
 
     # 当前 validation split 的 sample -> code assignment 快照。
-    current_assignment: "CodeAssignmentSnapshot"
+    current_assignment: Any
 
     # 最近窗口内按 epoch 记录的 assignment churn。
-    assignment_churn_by_epoch: Mapping[int, float]
+    assignment_churn_by_epoch: dict[int, float]
 
     # 当前 codebook size。
     codebook_size: int
@@ -48,117 +48,26 @@ class Phase1VQInternalPayload(Mapping[str, object]):
     # 参与 code distribution 统计的样本数。
     code_distribution_sample_count: int
 
-    def __post_init__(self) -> None:
-        """标准化 payload 中的 tuple/dict 标量类型。"""
-
-        object.__setattr__(
-            self,
-            "code_distribution",
-            tuple(float(value) for value in self.code_distribution),
-        )
-        object.__setattr__(
-            self,
-            "active_codes",
-            tuple(int(code_id) for code_id in self.active_codes),
-        )
-        object.__setattr__(
-            self,
-            "assignment_churn_by_epoch",
-            {
-                int(epoch): float(churn)
-                for epoch, churn in self.assignment_churn_by_epoch.items()
-            },
-        )
-        object.__setattr__(self, "codebook_size", int(self.codebook_size))
-        object.__setattr__(
-            self,
-            "codebook_size_available",
-            bool(self.codebook_size_available),
-        )
-        object.__setattr__(
-            self,
-            "code_distribution_sample_count",
-            int(self.code_distribution_sample_count),
-        )
-
-    def _mapping(self) -> dict[str, object]:
-        """返回兼容旧 ``extra_payload`` 字典访问的视图。"""
-
-        return {
-            "code_distribution": self.code_distribution,
-            "active_codes": self.active_codes,
-            "current_assignment": self.current_assignment,
-            "assignment_churn_by_epoch": self.assignment_churn_by_epoch,
-            "codebook_size": self.codebook_size,
-            "codebook_size_available": self.codebook_size_available,
-            "code_distribution_sample_count": self.code_distribution_sample_count,
-        }
-
-    def __getitem__(self, key: str) -> object:
-        """按旧 payload key 读取属性值。"""
-
-        return self._mapping()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        """迭代旧 payload key。"""
-
-        return iter(self._mapping())
-
-    def __len__(self) -> int:
-        """返回 payload key 数量。"""
-
-        return len(self._mapping())
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为可落盘 dict。"""
-
-        return {
-            "code_distribution": [float(value) for value in self.code_distribution],
-            "active_codes": [int(code_id) for code_id in self.active_codes],
-            "current_assignment": self.current_assignment.to_dict(),
-            "assignment_churn_by_epoch": {
-                int(epoch): float(churn)
-                for epoch, churn in self.assignment_churn_by_epoch.items()
-            },
-            "codebook_size": self.codebook_size,
-            "codebook_size_available": self.codebook_size_available,
-            "code_distribution_sample_count": self.code_distribution_sample_count,
-        }
-
+    @field_validator("current_assignment", mode="before")
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1VQInternalPayload":
-        """从 dict 恢复第一层 VQ 内部 payload。"""
+    def _restore_current_assignment(cls, value: Any) -> Any:
+        """Restore assignment snapshot from dict payloads."""
 
         from .phase1_validation_data_schema import CodeAssignmentSnapshot
 
-        current_assignment = payload["current_assignment"]
-        if not isinstance(current_assignment, CodeAssignmentSnapshot):
-            current_assignment = CodeAssignmentSnapshot.from_dict(current_assignment)
-        return cls(
-            code_distribution=tuple(
-                float(value) for value in payload.get("code_distribution", ())
-            ),
-            active_codes=tuple(
-                int(code_id) for code_id in payload.get("active_codes", ())
-            ),
-            current_assignment=current_assignment,
-            assignment_churn_by_epoch={
-                int(epoch): float(churn)
-                for epoch, churn in payload.get(
-                    "assignment_churn_by_epoch",
-                    {},
-                ).items()
-            },
-            codebook_size=int(payload["codebook_size"]),
-            codebook_size_available=bool(payload["codebook_size_available"]),
-            code_distribution_sample_count=int(
-                payload["code_distribution_sample_count"]
-            ),
-        )
+        if isinstance(value, CodeAssignmentSnapshot):
+            return value
+        return CodeAssignmentSnapshot.from_dict(value)
+
+    @field_validator("assignment_churn_by_epoch", mode="before")
+    @classmethod
+    def _restore_churn_by_epoch(cls, value: Any) -> dict[int, float]:
+        """Normalize epoch keys and churn values."""
+
+        return {int(epoch): float(churn) for epoch, churn in (value or {}).items()}
 
 
-@dataclass(frozen=True)
-class Phase1VQInternalMetrics:
+class Phase1VQInternalMetrics(PydanticBaseModel):
     """第一层 VQ 内部质量 raw metrics。
 
     使用场景:
@@ -209,22 +118,7 @@ class Phase1VQInternalMetrics:
     # 旧 checkpoint 可能没有该字段，因此给 NaN 默认值。
     quantization_distance_gap: float = float("nan")
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 dict，供 checkpoint/report 落盘。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1VQInternalMetrics":
-        """从 dict 恢复第一层 metrics。"""
-
-        field_names = {field.name for field in fields(cls)}
-        values = {key: value for key, value in payload.items() if key in field_names}
-        return cls(**values)
-
-
-@dataclass(frozen=True)
-class Phase1VQInternalThresholds:
+class Phase1VQInternalThresholds(PydanticBaseModel):
     """第一层 VQ 内部质量阈值配置。
 
     功能说明:
@@ -276,18 +170,6 @@ class Phase1VQInternalThresholds:
 
     # validation/train 量化距离比值 warn/scoring 参考值，不参与当前 hard gate。
     quantization_distance_gap_max: float = 1.25
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1VQInternalThresholds":
-        """从 checkpoint/report 中的 dict 恢复第一层阈值配置。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
 
 def _missing_warn_result(
     *,

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from dataclasses import asdict, dataclass
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from src.utils import _dataclass_from_mapping
+from pydantic import field_serializer, field_validator
+
+from src.utils import PydanticBaseModel, PydanticMappingModel
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
@@ -16,8 +17,7 @@ if TYPE_CHECKING:
     )
 
 
-@dataclass(frozen=True)
-class Phase1PairProfitabilityCell:
+class Phase1PairProfitabilityCell(PydanticBaseModel):
     """单个 morphology-motif pair 的 oracle 盈利性摘要。"""
 
     # 市场形态标签，例如 uptrend、downtrend、range-high-vol。
@@ -41,28 +41,7 @@ class Phase1PairProfitabilityCell:
     # 该 pair 上 total fee / gross profit。
     fee_drag: float
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 report/checkpoint 可保存的 dict。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1PairProfitabilityCell":
-        """从 dict 恢复 pair profitability cell。"""
-
-        return cls(
-            morphology=str(payload["morphology"]),
-            motif=str(payload["motif"]),
-            support=int(payload["support"]),
-            mean_decoded_advantage=float(payload["mean_decoded_advantage"]),
-            decoded_win_rate=float(payload["decoded_win_rate"]),
-            retention_ratio=float(payload["retention_ratio"]),
-            fee_drag=float(payload["fee_drag"]),
-        )
-
-
-@dataclass(frozen=True)
-class Phase1OracleProfitabilityPayload(Mapping[str, object]):
+class Phase1OracleProfitabilityPayload(PydanticMappingModel):
     """第三层 oracle profitability 计算的中间 payload。
 
     使用场景:
@@ -72,7 +51,7 @@ class Phase1OracleProfitabilityPayload(Mapping[str, object]):
     """
 
     # Layer 3 输出的 per-code 盈利性摘要，供 Layer 2 复用。
-    per_code_profitability: tuple["Phase1PerCodeProfitability", ...]
+    per_code_profitability: tuple[Any, ...]
 
     # 每条 horizon 的 assigned-label decoded return。
     decoded_returns: tuple[float, ...]
@@ -92,130 +71,28 @@ class Phase1OracleProfitabilityPayload(Mapping[str, object]):
     # morphology x motif 的 oracle decoded profitability 矩阵 cell。
     pair_profitability_matrix: tuple[Phase1PairProfitabilityCell, ...] = ()
 
-    def __post_init__(self) -> None:
-        """标准化 payload 中的序列和标量类型。"""
-
-        pair_cells = []
-        for item in self.pair_profitability_matrix:
-            if isinstance(item, Phase1PairProfitabilityCell):
-                pair_cells.append(item)
-            else:
-                pair_cells.append(Phase1PairProfitabilityCell.from_dict(item))
-        object.__setattr__(
-            self,
-            "pair_profitability_matrix",
-            tuple(pair_cells),
-        )
-        object.__setattr__(
-            self,
-            "per_code_profitability",
-            tuple(self.per_code_profitability),
-        )
-        object.__setattr__(
-            self,
-            "decoded_returns",
-            tuple(float(value) for value in self.decoded_returns),
-        )
-        object.__setattr__(
-            self,
-            "dp_returns",
-            tuple(float(value) for value in self.dp_returns),
-        )
-        object.__setattr__(
-            self,
-            "flat_returns",
-            tuple(float(value) for value in self.flat_returns),
-        )
-        object.__setattr__(
-            self,
-            "random_label_returns",
-            tuple(float(value) for value in self.random_label_returns),
-        )
-        object.__setattr__(self, "random_seed", int(self.random_seed))
-
-    def _mapping(self) -> dict[str, object]:
-        """返回兼容旧 ``extra_payload`` 字典访问的视图。"""
-
-        return {
-            "per_code_profitability": self.per_code_profitability,
-            "decoded_returns": self.decoded_returns,
-            "dp_returns": self.dp_returns,
-            "flat_returns": self.flat_returns,
-            "random_label_returns": self.random_label_returns,
-            "random_seed": self.random_seed,
-            "pair_profitability_matrix": self.pair_profitability_matrix,
-        }
-
-    def __getitem__(self, key: str) -> object:
-        """按旧 payload key 读取属性值。"""
-
-        return self._mapping()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        """迭代旧 payload key。"""
-
-        return iter(self._mapping())
-
-    def __len__(self) -> int:
-        """返回 payload key 数量。"""
-
-        return len(self._mapping())
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为可落盘 dict。"""
-
-        return {
-            "per_code_profitability": [
-                item.to_dict() for item in self.per_code_profitability
-            ],
-            "decoded_returns": [float(value) for value in self.decoded_returns],
-            "dp_returns": [float(value) for value in self.dp_returns],
-            "flat_returns": [float(value) for value in self.flat_returns],
-            "random_label_returns": [
-                float(value) for value in self.random_label_returns
-            ],
-            "random_seed": self.random_seed,
-            "pair_profitability_matrix": [
-                item.to_dict() for item in self.pair_profitability_matrix
-            ],
-        }
-
+    @field_validator("per_code_profitability", mode="before")
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1OracleProfitabilityPayload":
-        """从 dict 恢复第三层 oracle profitability payload。"""
+    def _restore_per_code_profitability(cls, value: Any) -> tuple[Any, ...]:
+        """Restore per-code profitability rows from dict payloads."""
 
         from .phase1_validation_data_schema import Phase1PerCodeProfitability
 
-        per_code = []
-        for item in payload.get("per_code_profitability", ()):
-            if isinstance(item, Phase1PerCodeProfitability):
-                per_code.append(item)
-            else:
-                per_code.append(Phase1PerCodeProfitability.from_dict(item))
-        return cls(
-            per_code_profitability=tuple(per_code),
-            decoded_returns=tuple(
-                float(value) for value in payload.get("decoded_returns", ())
-            ),
-            dp_returns=tuple(float(value) for value in payload.get("dp_returns", ())),
-            flat_returns=tuple(
-                float(value) for value in payload.get("flat_returns", ())
-            ),
-            random_label_returns=tuple(
-                float(value) for value in payload.get("random_label_returns", ())
-            ),
-            random_seed=int(payload["random_seed"]),
-            pair_profitability_matrix=tuple(
-                item
-                if isinstance(item, Phase1PairProfitabilityCell)
-                else Phase1PairProfitabilityCell.from_dict(item)
-                for item in payload.get("pair_profitability_matrix", ())
-            ),
+        return tuple(
+            item
+            if isinstance(item, Phase1PerCodeProfitability)
+            else Phase1PerCodeProfitability.from_dict(item)
+            for item in (value or ())
         )
 
+    @field_serializer("per_code_profitability", when_used="json")
+    def _serialize_per_code_profitability(self, value: tuple[Any, ...]) -> list[Any]:
+        """Serialize per-code profitability rows through their local API."""
 
-@dataclass(frozen=True)
-class Phase1OracleProfitabilityMetrics:
+        return [item.to_dict() if hasattr(item, "to_dict") else item for item in value]
+
+
+class Phase1OracleProfitabilityMetrics(PydanticBaseModel):
     """第三层 oracle assigned-label 盈利性 raw metrics。"""
 
     # decoded return 相对 flat baseline 的平均优势。
@@ -263,20 +140,7 @@ class Phase1OracleProfitabilityMetrics:
     # decoded 风险调整收益相对 random label baseline 的差值。
     risk_adjusted_return_vs_random: float = float("nan")
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 dict，供 checkpoint/report 落盘。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1OracleProfitabilityMetrics":
-        """从 dict 恢复第三层 metrics。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase1OracleProfitabilityThresholds:
+class Phase1OracleProfitabilityThresholds(PydanticBaseModel):
     """第三层 oracle assigned-label 盈利性阈值配置。"""
 
     # oracle assigned-label decoded 策略胜率下限。用于第三层判断盈利是否足够广泛。
@@ -317,18 +181,6 @@ class Phase1OracleProfitabilityThresholds:
 
     # per-code fee drag 上限。
     per_code_fee_drag_max: float = 0.40
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1OracleProfitabilityThresholds":
-        """从 checkpoint/report 中的 dict 恢复第三层阈值配置。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
 
 def evaluate_oracle_profitability_rules(
     metrics: Phase1OracleProfitabilityMetrics,

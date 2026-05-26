@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from src.utils import _dataclass_from_mapping
+from src.utils import PydanticBaseModel, PydanticMappingModel
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
     from .phase1_validation_data_schema import Phase1ValidationMetrics
 
 
-@dataclass(frozen=True)
-class Phase1BehaviorQualityPayload(Mapping[str, object]):
+class Phase1BehaviorQualityPayload(PydanticMappingModel):
     """第二层 behavior quality 计算的中间 payload。
 
     使用场景:
@@ -32,75 +29,7 @@ class Phase1BehaviorQualityPayload(Mapping[str, object]):
     # 当前 validation split 中满足 active occupancy 阈值的 code id。
     active_codes: tuple[int, ...]
 
-    def __post_init__(self) -> None:
-        """标准化 payload 中的标签和 code id 类型。"""
-
-        object.__setattr__(
-            self,
-            "morphology_labels",
-            tuple(str(label) for label in self.morphology_labels),
-        )
-        object.__setattr__(
-            self,
-            "motif_labels",
-            tuple(str(label) for label in self.motif_labels),
-        )
-        object.__setattr__(
-            self,
-            "active_codes",
-            tuple(int(code_id) for code_id in self.active_codes),
-        )
-
-    def _mapping(self) -> dict[str, object]:
-        """返回兼容旧 ``extra_payload`` 字典访问的视图。"""
-
-        return {
-            "morphology_labels": self.morphology_labels,
-            "motif_labels": self.motif_labels,
-            "active_codes": self.active_codes,
-        }
-
-    def __getitem__(self, key: str) -> object:
-        """按旧 payload key 读取属性值。"""
-
-        return self._mapping()[key]
-
-    def __iter__(self) -> Iterator[str]:
-        """迭代旧 payload key。"""
-
-        return iter(self._mapping())
-
-    def __len__(self) -> int:
-        """返回 payload key 数量。"""
-
-        return len(self._mapping())
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为可落盘 dict。"""
-
-        return {
-            "morphology_labels": list(self.morphology_labels),
-            "motif_labels": list(self.motif_labels),
-            "active_codes": [int(code_id) for code_id in self.active_codes],
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1BehaviorQualityPayload":
-        """从 dict 恢复第二层 behavior quality payload。"""
-
-        return cls(
-            morphology_labels=tuple(
-                str(label) for label in payload.get("morphology_labels", ())
-            ),
-            motif_labels=tuple(str(label) for label in payload.get("motif_labels", ())),
-            active_codes=tuple(
-                int(code_id) for code_id in payload.get("active_codes", ())
-            ),
-        )
-
-
-@dataclass(frozen=True)
-class Phase1BehaviorQualityMetrics:
+class Phase1BehaviorQualityMetrics(PydanticBaseModel):
     """第二层 archetype 行为质量 raw metrics。"""
 
     # support 不达标的 active code 比例。
@@ -136,20 +65,7 @@ class Phase1BehaviorQualityMetrics:
     # 当前 codebook size K，用于 duplicate code pair 上限按 K 动态判定。
     num_codes: int = 0
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 dict，供 checkpoint/report 落盘。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1BehaviorQualityMetrics":
-        """从 dict 恢复第二层 metrics。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase1BehaviorQualityThresholds:
+class Phase1BehaviorQualityThresholds(PydanticBaseModel):
     """第二层 archetype 行为质量阈值配置。"""
 
     # 单个 active code 的绝对最小样本数。用于保证 per-code 诊断具备统计支撑。
@@ -202,18 +118,6 @@ class Phase1BehaviorQualityThresholds:
 
     # 重复 code pair 数量上限。None 表示按当前 codebook size K 动态判定。
     duplicate_code_pair_count_max: int | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1BehaviorQualityThresholds":
-        """从 checkpoint/report 中的 dict 恢复第二层阈值配置。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
 
 def evaluate_behavior_quality_rules(
     metrics: Phase1BehaviorQualityMetrics,

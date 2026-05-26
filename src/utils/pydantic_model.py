@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict
@@ -13,6 +13,7 @@ class PydanticBaseModel(BaseModel):
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
+        coerce_numbers_to_str=True,
         extra="ignore",
         frozen=True,
     )
@@ -29,4 +30,28 @@ class PydanticBaseModel(BaseModel):
         return cls.model_validate(payload)
 
 
-__all__ = ["PydanticBaseModel"]
+class PydanticMappingModel(PydanticBaseModel, Mapping[str, object]):
+    """Pydantic model with dict-like read access for legacy payloads."""
+
+    def _mapping(self) -> dict[str, object]:
+        """Return a Python-value mapping view."""
+
+        return self.model_dump(mode="python")
+
+    def __getitem__(self, key: str) -> object:
+        """Read a field by its payload key."""
+
+        return self._mapping()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        """Iterate payload keys."""
+
+        return iter(self._mapping())
+
+    def __len__(self) -> int:
+        """Return the number of payload keys."""
+
+        return len(self._mapping())
+
+
+__all__ = ["PydanticBaseModel", "PydanticMappingModel"]

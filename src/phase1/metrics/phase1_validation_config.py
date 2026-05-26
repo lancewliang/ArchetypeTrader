@@ -14,10 +14,9 @@ layer thresholds 对象、一个评分权重对象和一个运行参数对象，
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Mapping
+from pydantic import model_validator
 
-from src.utils import _dataclass_from_mapping
+from src.utils import PydanticMappingModel
 from .phase1_validation_behavior_quality import Phase1BehaviorQualityThresholds
 from .phase1_validation_label_predictability import Phase1LabelPredictabilityThresholds
 from .phase1_validation_oracle_profitability import Phase1OracleProfitabilityThresholds
@@ -25,8 +24,7 @@ from .phase1_validation_teacher_quality import Phase1TeacherQualityThresholds
 from .phase1_validation_vq_internal import Phase1VQInternalThresholds
 
 
-@dataclass(frozen=True)
-class Phase1ValidationScoreWeights:
+class Phase1ValidationScoreWeights(PydanticMappingModel):
     """Phase I validation 综合评分权重配置。
 
     功能说明:
@@ -57,20 +55,8 @@ class Phase1ValidationScoreWeights:
     # 若旧配置传入非零值，score 层会把该权重并入 oracle_profitability。
     label_predictability: float = 0.0
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
 
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1ValidationScoreWeights":
-        """从 checkpoint/report 中的 dict 恢复评分权重配置。"""
-
-        return _dataclass_from_mapping(cls, payload)
-
-
-@dataclass(frozen=True)
-class Phase1ValidationRuntimeConfig:
+class Phase1ValidationRuntimeConfig(PydanticMappingModel):
     """Phase I codebook evaluator 运行参数配置。
 
     功能说明:
@@ -121,21 +107,12 @@ class Phase1ValidationRuntimeConfig:
     # code 优先 latent/code embedding prototype；缺失时回退到 raw id。
     code_alignment_prototype: str = "auto"
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def _validate_code_alignment_prototype(self) -> "Phase1ValidationRuntimeConfig":
         """校验 runtime config 枚举字段。"""
 
         if self.code_alignment_prototype not in {"auto", "action", "code"}:
             raise ValueError(
                 "code_alignment_prototype must be one of auto, action, code"
             )
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为普通 dict，供 checkpoint、report 或日志落盘。"""
-
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase1ValidationRuntimeConfig":
-        """从 checkpoint/report 中的 dict 恢复 evaluator 运行参数配置。"""
-
-        return _dataclass_from_mapping(cls, payload)
+        return self
