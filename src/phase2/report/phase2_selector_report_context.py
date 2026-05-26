@@ -30,7 +30,11 @@ from .phase2_selector_report_schema import (
     ensure_phase2_report_document,
     layer_result_to_view,
 )
-from ..metrics import Phase2LayerComputation, Phase2ValidationResult
+from ..metrics import (
+    Phase2LayerComputation,
+    Phase2ReportPayload,
+    Phase2ValidationResult,
+)
 
 
 def _format_value(value: Any) -> str:
@@ -396,13 +400,11 @@ class Phase2SelectorReportContextBuilder:
 
     def _build_per_code_profitability_rows(
         self,
-        report_payload: Mapping[str, Any],
+        report_payload: Phase2ReportPayload,
     ) -> tuple[Phase2ReportPerCodeProfitabilityRow, ...]:
         """构建 per-code 盈利对比行。"""
 
-        rows = report_payload.get("per_code_profitability_comparison", ())
-        if not isinstance(rows, Sequence) or isinstance(rows, str | bytes):
-            return ()
+        rows = report_payload.per_code_profitability_comparison
         result: list[Phase2ReportPerCodeProfitabilityRow] = []
         for item in rows:
             row = _as_mapping(item)
@@ -433,22 +435,13 @@ class Phase2SelectorReportContextBuilder:
 
     def _build_code_usage_rows(
         self,
-        report_payload: Mapping[str, Any],
+        report_payload: Phase2ReportPayload,
     ) -> tuple[Phase2ReportCodeUsageRow, ...]:
         """构建 code usage 分布行。"""
 
-        comparison = report_payload.get("codebook_usage_comparison")
-        if isinstance(comparison, Sequence) and not isinstance(comparison, str | bytes):
-            return tuple(
-                row
-                for item in comparison
-                if (row := self._code_usage_row_from_mapping(_as_mapping(item)))
-                is not None
-            )
-
-        distribution = _as_mapping(report_payload.get("codebook_usage_distribution"))
-        selector_counts = self._count_map(distribution.get("selector"))
-        kl_counts = self._count_map(distribution.get("kl"))
+        distribution = report_payload.codebook_usage_distribution
+        selector_counts = self._count_map(distribution.selector)
+        kl_counts = self._count_map(distribution.kl)
         if not selector_counts and not kl_counts:
             return ()
         selector_total = sum(selector_counts.values())
@@ -510,13 +503,11 @@ class Phase2SelectorReportContextBuilder:
 
     def _build_pair_profitability_matrix(
         self,
-        report_payload: Mapping[str, Any],
+        report_payload: Phase2ReportPayload,
     ) -> Phase2ReportPairProfitabilityMatrix:
         """构建 Dominant Pair heatmap 视图模型。"""
 
-        raw_cells = report_payload.get("selector_pair_profitability_matrix", ())
-        if not isinstance(raw_cells, Sequence) or isinstance(raw_cells, str | bytes):
-            return Phase2ReportPairProfitabilityMatrix()
+        raw_cells = report_payload.selector_pair_profitability_matrix
         cell_mappings = tuple(
             row
             for item in raw_cells
@@ -662,13 +653,11 @@ class Phase2SelectorReportContextBuilder:
 
     def _build_code_diagnostic_rows(
         self,
-        report_payload: Mapping[str, Any],
+        report_payload: Phase2ReportPayload,
     ) -> tuple[Phase2ReportCodeDiagnosticRow, ...]:
         """构建完整 code 级诊断表。"""
 
-        rows = report_payload.get("code_diagnostics", ())
-        if not isinstance(rows, Sequence) or isinstance(rows, str | bytes):
-            return ()
+        rows = report_payload.code_diagnostics
         result: list[Phase2ReportCodeDiagnosticRow] = []
         for item in rows:
             row = _as_mapping(item)
@@ -731,14 +720,18 @@ class Phase2SelectorReportContextBuilder:
 
     def _build_cumulative_return_series(
         self,
-        report_payload: Mapping[str, Any],
+        report_payload: Phase2ReportPayload,
     ) -> tuple[Phase2ReportSeries, ...]:
         """构建累计收益序列数据。"""
 
-        curves = _as_mapping(
-            report_payload.get("cumulative_return_curves")
-            or report_payload.get("oracle_label_cumulative_returns")
-        )
+        cumulative_returns = report_payload.oracle_label_cumulative_returns
+        curves = {
+            "selector": cumulative_returns.selector,
+            "kl": cumulative_returns.kl,
+            "random": cumulative_returns.random,
+            "oracle": cumulative_returns.oracle,
+            "hold": cumulative_returns.hold,
+        }
         series: list[Phase2ReportSeries] = []
         for key, values in curves.items():
             if isinstance(values, str | bytes) or not isinstance(values, Sequence):
@@ -882,12 +875,17 @@ class Phase2SelectorReportContextBuilder:
     def _report_payload(
         self,
         validation: Phase2ValidationResult | None,
-    ) -> Mapping[str, Any]:
+    ) -> Phase2ReportPayload:
         """读取 evaluator 写入的 report 聚合 payload。"""
 
         if validation is None or validation.payloads is None:
-            return {}
-        return _as_mapping(validation.payloads.report_payload)
+            return Phase2ReportPayload()
+        payload = validation.payloads.report_payload
+        if isinstance(payload, Phase2ReportPayload):
+            return payload
+        if isinstance(payload, Mapping):
+            return Phase2ReportPayload.from_dict(payload)
+        return Phase2ReportPayload()
 
     def _payload_mapping(
         self,

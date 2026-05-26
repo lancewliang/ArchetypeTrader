@@ -13,7 +13,7 @@ from ...metrics import (
     Phase2PredictabilityMetrics,
     Phase2PredictabilityPayload,
 )
-from ._numeric import as_float_array, nan_value, safe_mean, safe_std
+from src.utils._numeric import as_float_array, nan_value, safe_mean, safe_std
 
 
 def compute_predictability_metrics(

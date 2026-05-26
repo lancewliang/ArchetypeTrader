@@ -8,7 +8,6 @@ rule 判定；不训练模型、不保存产物、不选择 best checkpoint。
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
 
 import numpy as np
 import torch
@@ -32,6 +31,11 @@ from ..metrics import (
     Phase2GeneralizationStabilityThresholds,
     Phase2LayerComputation,
     Phase2LayerResult,
+    Phase2PerCodeUsageDiagnostic,
+    Phase2ReportCodeCount,
+    Phase2ReportCodeUsageDistribution,
+    Phase2ReportCumulativeReturns,
+    Phase2ReportPayload,
     Phase2SelectorProfitabilityPayload,
     Phase2SelectorProfitabilityThresholds,
     Phase2ValidationMetrics,
@@ -295,12 +299,14 @@ class Phase2Evaluator:
             ),
         )
 
-        per_code_diagnostics = build_per_code_usage_diagnostics(
-            selected_code_ids=selected_code_ids,
-            assigned_code_labels=assigned_code_labels,
-            selector_returns=selector_returns,
-            kl_returns=assigned_label_returns,
-            num_archetypes=num_archetypes,
+        per_code_diagnostics: tuple[Phase2PerCodeUsageDiagnostic, ...] = (
+            build_per_code_usage_diagnostics(
+                selected_code_ids=selected_code_ids,
+                assigned_code_labels=assigned_code_labels,
+                selector_returns=selector_returns,
+                kl_returns=assigned_label_returns,
+                num_archetypes=num_archetypes,
+            )
         )
         code_usage_payload = Phase2CodeUsageCollapsePayload(
             selected_code_ids=tuple(selected_code_ids),
@@ -535,19 +541,16 @@ class Phase2Evaluator:
         q_margins: np.ndarray,
         selected_code_ids: np.ndarray,
         assigned_code_labels: np.ndarray,
-        per_code_diagnostics: tuple[Any, ...],
+        per_code_diagnostics: tuple[Phase2PerCodeUsageDiagnostic, ...],
         dataset: Phase2SelectionDataset,
         num_archetypes: int,
-    ) -> Mapping[str, object]:
+    ) -> Phase2ReportPayload:
         """构造报表卡片复用的聚合 payload，不保存逐样本 trace。"""
 
         _, _, _, prices, _ = dataset.horizon_dataset
-        return {
-            "per_code_profitability_comparison": [
-                item.to_dict() if hasattr(item, "to_dict") else item
-                for item in per_code_diagnostics
-            ],
-            "selector_pair_profitability_matrix": (
+        return Phase2ReportPayload(
+            per_code_profitability_comparison=per_code_diagnostics,
+            selector_pair_profitability_matrix=(
                 build_selector_pair_profitability_matrix(
                     selected_code_ids=selected_code_ids,
                     selector_returns=selector_returns,
@@ -560,7 +563,7 @@ class Phase2Evaluator:
                     fee_rate=self.reward_config.fee_rate,
                 )
             ),
-            "code_diagnostics": (
+            code_diagnostics=(
                 build_phase2_code_diagnostics(
                     selected_code_ids=selected_code_ids,
                     assigned_code_labels=assigned_code_labels,
@@ -575,18 +578,18 @@ class Phase2Evaluator:
                     fee_rate=self.reward_config.fee_rate,
                 )
             ),
-            "codebook_usage_distribution": {
-                "selector": self._count_distribution(selected_code_ids),
-                "kl": self._count_distribution(assigned_code_labels),
-            },
-            "oracle_label_cumulative_returns": {
-                "selector": self._cumulative_returns(selector_returns),
-                "kl": self._cumulative_returns(assigned_label_returns),
-                "random": self._cumulative_returns(random_returns),
-                "oracle": self._cumulative_returns(oracle_returns),
-                "hold": self._cumulative_returns(hold_returns),
-            },
-        }
+            codebook_usage_distribution=Phase2ReportCodeUsageDistribution(
+                selector=self._count_distribution(selected_code_ids),
+                kl=self._count_distribution(assigned_code_labels),
+            ),
+            oracle_label_cumulative_returns=Phase2ReportCumulativeReturns(
+                selector=self._cumulative_returns(selector_returns),
+                kl=self._cumulative_returns(assigned_label_returns),
+                random=self._cumulative_returns(random_returns),
+                oracle=self._cumulative_returns(oracle_returns),
+                hold=self._cumulative_returns(hold_returns),
+            ),
+        )
 
     @staticmethod
     def _take_by_code(matrix: np.ndarray, code_ids: np.ndarray) -> np.ndarray:
@@ -848,27 +851,27 @@ class Phase2Evaluator:
         return tuple(float(value) for value in counts / total)
 
     @staticmethod
-    def _count_distribution(code_ids: np.ndarray) -> list[dict[str, int]]:
+    def _count_distribution(code_ids: np.ndarray) -> tuple[Phase2ReportCodeCount, ...]:
         """返回 report 友好的 code count 分布。"""
 
         if code_ids.size == 0:
-            return []
+            return ()
         valid = code_ids[code_ids >= 0]
         if valid.size == 0:
-            return []
+            return ()
         counts = np.bincount(valid.astype(np.int64))
-        return [
-            {"code_id": int(code_id), "count": int(count)}
+        return tuple(
+            Phase2ReportCodeCount(code_id=int(code_id), count=int(count))
             for code_id, count in enumerate(counts)
             if int(count) > 0
-        ]
+        )
 
     @staticmethod
-    def _cumulative_returns(values: np.ndarray) -> list[float]:
+    def _cumulative_returns(values: np.ndarray) -> tuple[float, ...]:
         """返回 NaN 安全的累计收益序列。"""
 
         finite_values = np.where(np.isfinite(values), values, 0.0)
-        return [float(value) for value in np.cumsum(finite_values)]
+        return tuple(float(value) for value in np.cumsum(finite_values))
 
     def _epoch_seed(self, epoch: int | None) -> int:
         """构造随 epoch 稳定变化的随机种子。"""

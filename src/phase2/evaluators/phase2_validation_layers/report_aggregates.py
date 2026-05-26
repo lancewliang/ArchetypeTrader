@@ -12,6 +12,10 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from src.phase2.metrics import (
+    Phase2ReportCodeDiagnosticPayloadRow,
+    Phase2ReportPairProfitabilityPayloadRow,
+)
 from src.phase1.evaluators.phase1_validation_layers.layer2_behavior_quality import (
     classify_action_motif,
     classify_market_morphology,
@@ -35,7 +39,7 @@ def build_selector_pair_profitability_matrix(
     morphologies: Sequence[str] | np.ndarray | None = None,
     selector_motifs: Sequence[str] | np.ndarray | None = None,
     fee_rate: float = 0.0002,
-) -> tuple[dict[str, Any], ...]:
+) -> tuple[Phase2ReportPairProfitabilityPayloadRow, ...]:
     """Build ``selector_pair_profitability_matrix`` report rows.
 
     Phase II 口径：
@@ -77,7 +81,7 @@ def build_selector_pair_profitability_matrix(
     fee_values = _optional_float_array(selector_fees, sample_count)
     turnover_values = _optional_float_array(selector_turnover, sample_count)
 
-    rows: list[dict[str, Any]] = []
+    rows: list[Phase2ReportPairProfitabilityPayloadRow] = []
     pairs = sorted(
         {
             (str(morphology), str(motif))
@@ -94,24 +98,23 @@ def build_selector_pair_profitability_matrix(
         random_mean = _masked_mean(random_values, mask)
         dominant_code, dominant_ratio = _dominant_value(selected_codes[mask])
         rows.append(
-            {
-                "morphology": morphology,
-                "motif": motif,
-                "support": support,
-                "selector_mean_return": selector_mean,
-                "kl_mean_return": kl_mean,
-                "random_mean_return": random_mean,
-                "mean_advantage_vs_kl": _safe_difference(selector_mean, kl_mean),
-                "mean_advantage_vs_random": _safe_difference(
+            Phase2ReportPairProfitabilityPayloadRow(
+                morphology=morphology,
+                motif=motif,
+                support=support,
+                selector_mean_return=selector_mean,
+                kl_mean_return=kl_mean,
+                random_mean_return=random_mean,
+                mean_advantage_vs_kl=_safe_difference(selector_mean, kl_mean),
+                mean_advantage_vs_random=_safe_difference(
                     selector_mean,
                     random_mean,
                 ),
-                "win_rate": _masked_rate(selector_values > 0.0, mask),
-                "fee_drag_ratio": _fee_drag_ratio(fee_values[mask], selector_values[mask]),
-                "mean_turnover": _masked_mean(turnover_values, mask),
-                "dominant_selected_code": dominant_code,
-                "dominant_selected_code_ratio": dominant_ratio,
-            }
+                win_rate=_masked_rate(selector_values > 0.0, mask),
+                fee_drag_ratio=_fee_drag_ratio(fee_values[mask], selector_values[mask]),
+                dominant_selected_code=dominant_code,
+                dominant_selected_code_ratio=dominant_ratio,
+            )
         )
     return tuple(rows)
 
@@ -134,7 +137,7 @@ def build_phase2_code_diagnostics(
     active_ratio_min: float = 0.01,
     dominant_ratio_warn_min: float = 0.30,
     fee_rate: float = 0.0002,
-) -> tuple[dict[str, Any], ...]:
+) -> tuple[Phase2ReportCodeDiagnosticPayloadRow, ...]:
     """Build complete ``code_diagnostics`` report rows.
 
     该函数补充 Layer 4 基础 usage row 没有覆盖的行为归因字段：
@@ -179,7 +182,7 @@ def build_phase2_code_diagnostics(
     turnover_values = _optional_float_array(selector_turnover, sample_count)
     q_margin_values = _optional_float_array(q_margins, sample_count)
 
-    rows: list[dict[str, Any]] = []
+    rows: list[Phase2ReportCodeDiagnosticPayloadRow] = []
     for code_id in range(int(num_archetypes)):
         selected_mask = selected_codes == code_id
         assigned_mask = assigned_labels == code_id
@@ -221,39 +224,41 @@ def build_phase2_code_diagnostics(
             dominant_ratio_warn_min=dominant_ratio_warn_min,
         )
         rows.append(
-            {
-                "code_id": code_id,
-                "selector_support": selector_support,
-                "selector_usage_ratio": float(selector_distribution[code_id]),
-                "kl_support": kl_support,
-                "kl_usage_ratio": float(kl_distribution[code_id]),
-                "usage_delta": float(selector_distribution[code_id] - kl_distribution[code_id]),
-                "selector_mean_return": selector_mean,
-                "kl_mean_return": kl_mean,
-                "uplift_vs_kl": uplift,
-                "selector_win_rate": _masked_rate(selector_values > 0.0, selected_mask),
-                "selector_fee_drag_ratio": _fee_drag_ratio(
+            Phase2ReportCodeDiagnosticPayloadRow(
+                code_id=code_id,
+                selector_support=selector_support,
+                selector_usage_ratio=float(selector_distribution[code_id]),
+                kl_support=kl_support,
+                kl_usage_ratio=float(kl_distribution[code_id]),
+                usage_delta=float(
+                    selector_distribution[code_id] - kl_distribution[code_id]
+                ),
+                selector_mean_return=selector_mean,
+                kl_mean_return=kl_mean,
+                uplift_vs_kl=uplift,
+                selector_win_rate=_masked_rate(selector_values > 0.0, selected_mask),
+                selector_fee_drag_ratio=_fee_drag_ratio(
                     fee_values[selected_mask],
                     selector_values[selected_mask],
                 ),
-                "selector_turnover": _masked_mean(turnover_values, selected_mask),
-                "dominant_morphology": dominant_morphology,
-                "dominant_morphology_ratio": dominant_morphology_ratio,
-                "dominant_motif": dominant_motif,
-                "dominant_motif_ratio": dominant_motif_ratio,
-                "dominant_pair": dominant_pair,
-                "dominant_pair_ratio": dominant_pair_ratio,
-                "mean_q_margin": _masked_mean(q_margin_values, selected_mask),
-                "low_confidence_ratio": _masked_rate(
+                selector_turnover=_masked_mean(turnover_values, selected_mask),
+                dominant_morphology=dominant_morphology,
+                dominant_morphology_ratio=dominant_morphology_ratio,
+                dominant_motif=dominant_motif,
+                dominant_motif_ratio=dominant_motif_ratio,
+                dominant_pair=dominant_pair,
+                dominant_pair_ratio=dominant_pair_ratio,
+                mean_q_margin=_masked_mean(q_margin_values, selected_mask),
+                low_confidence_ratio=_masked_rate(
                     q_margin_values <= float(low_confidence_margin),
                     selected_mask & np.isfinite(q_margin_values),
                 ),
-                "profitable_deviation_count": profitable_deviation_count,
-                "unprofitable_deviation_count": unprofitable_deviation_count,
-                "unprofitable_deviation_rate": unprofitable_deviation_rate,
-                "status": status,
-                "risk_reason": risk_reason,
-            }
+                profitable_deviation_count=profitable_deviation_count,
+                unprofitable_deviation_count=unprofitable_deviation_count,
+                unprofitable_deviation_rate=unprofitable_deviation_rate,
+                status=status,
+                risk_reason=risk_reason,
+            )
         )
     return tuple(rows)
 

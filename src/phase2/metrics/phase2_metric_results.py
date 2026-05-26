@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Literal, Mapping, TypeAlias
 
 
@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from .phase2_validation_layer4_code_usage_collapse import (
         Phase2CodeUsageCollapsePayload,
         Phase2CodeUsageCollapseMetrics,
+        Phase2PerCodeUsageDiagnostic,
     )
     from .phase2_validation_layer5_generalization_stability import (
         Phase2GeneralizationStabilityPayload,
@@ -272,6 +273,438 @@ class Phase2ValidationMetrics:
 
 
 @dataclass(frozen=True)
+class Phase2ReportPairProfitabilityPayloadRow:
+    """Report payload 中 Dominant Pair heatmap 的单个 cell 聚合行。"""
+
+    morphology: str
+    motif: str
+    support: int
+    selector_mean_return: float
+    kl_mean_return: float
+    random_mean_return: float
+    mean_advantage_vs_kl: float
+    mean_advantage_vs_random: float
+    win_rate: float
+    fee_drag_ratio: float
+    dominant_selected_code: int | None
+    dominant_selected_code_ratio: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为普通 dict。"""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> "Phase2ReportPairProfitabilityPayloadRow":
+        """从 dict 恢复 pair profitability payload row。"""
+
+        return cls(
+            morphology=str(payload.get("morphology", "")),
+            motif=str(payload.get("motif", "")),
+            support=int(payload.get("support", 0)),
+            selector_mean_return=float(payload.get("selector_mean_return", 0.0)),
+            kl_mean_return=float(payload.get("kl_mean_return", 0.0)),
+            random_mean_return=float(payload.get("random_mean_return", 0.0)),
+            mean_advantage_vs_kl=float(payload.get("mean_advantage_vs_kl", 0.0)),
+            mean_advantage_vs_random=float(
+                payload.get("mean_advantage_vs_random", 0.0)
+            ),
+            win_rate=float(payload.get("win_rate", 0.0)),
+            fee_drag_ratio=float(payload.get("fee_drag_ratio", 0.0)),
+            dominant_selected_code=(
+                int(value)
+                if (value := payload.get("dominant_selected_code")) is not None
+                else None
+            ),
+            dominant_selected_code_ratio=float(
+                payload.get("dominant_selected_code_ratio", 0.0)
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class Phase2ReportCodeDiagnosticPayloadRow:
+    """Report payload 中 code 级诊断表的单个聚合行。"""
+
+    code_id: int
+    selector_support: int
+    selector_usage_ratio: float
+    kl_support: int
+    kl_usage_ratio: float
+    usage_delta: float
+    selector_mean_return: float
+    kl_mean_return: float
+    uplift_vs_kl: float
+    selector_win_rate: float
+    selector_fee_drag_ratio: float
+    selector_turnover: float
+    dominant_morphology: str | None
+    dominant_morphology_ratio: float
+    dominant_motif: str | None
+    dominant_motif_ratio: float
+    dominant_pair: str | None
+    dominant_pair_ratio: float
+    mean_q_margin: float
+    low_confidence_ratio: float
+    profitable_deviation_count: int
+    unprofitable_deviation_count: int
+    unprofitable_deviation_rate: float
+    status: str
+    risk_reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为普通 dict。"""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> "Phase2ReportCodeDiagnosticPayloadRow":
+        """从 dict 恢复 code diagnostic payload row。"""
+
+        return cls(
+            code_id=int(payload.get("code_id", 0)),
+            selector_support=int(payload.get("selector_support", 0)),
+            selector_usage_ratio=float(payload.get("selector_usage_ratio", 0.0)),
+            kl_support=int(payload.get("kl_support", 0)),
+            kl_usage_ratio=float(payload.get("kl_usage_ratio", 0.0)),
+            usage_delta=float(payload.get("usage_delta", 0.0)),
+            selector_mean_return=float(payload.get("selector_mean_return", 0.0)),
+            kl_mean_return=float(payload.get("kl_mean_return", 0.0)),
+            uplift_vs_kl=float(payload.get("uplift_vs_kl", 0.0)),
+            selector_win_rate=float(payload.get("selector_win_rate", 0.0)),
+            selector_fee_drag_ratio=float(
+                payload.get("selector_fee_drag_ratio", 0.0)
+            ),
+            selector_turnover=float(payload.get("selector_turnover", 0.0)),
+            dominant_morphology=_optional_str(payload.get("dominant_morphology")),
+            dominant_morphology_ratio=float(
+                payload.get("dominant_morphology_ratio", 0.0)
+            ),
+            dominant_motif=_optional_str(payload.get("dominant_motif")),
+            dominant_motif_ratio=float(payload.get("dominant_motif_ratio", 0.0)),
+            dominant_pair=_optional_str(payload.get("dominant_pair")),
+            dominant_pair_ratio=float(payload.get("dominant_pair_ratio", 0.0)),
+            mean_q_margin=float(payload.get("mean_q_margin", 0.0)),
+            low_confidence_ratio=float(payload.get("low_confidence_ratio", 0.0)),
+            profitable_deviation_count=int(
+                payload.get("profitable_deviation_count", 0)
+            ),
+            unprofitable_deviation_count=int(
+                payload.get("unprofitable_deviation_count", 0)
+            ),
+            unprofitable_deviation_rate=float(
+                payload.get("unprofitable_deviation_rate", 0.0)
+            ),
+            status=str(payload.get("status", "warn")),
+            risk_reason=str(payload.get("risk_reason", "")),
+        )
+
+
+@dataclass(frozen=True)
+class Phase2ReportCodeCount:
+    """Report payload 中某个 code 的样本数。"""
+
+    code_id: int
+    count: int
+
+    def to_dict(self) -> dict[str, int]:
+        """序列化为普通 dict。"""
+
+        return {"code_id": self.code_id, "count": self.count}
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ReportCodeCount":
+        """从 dict 恢复 code count。"""
+
+        return cls(
+            code_id=int(payload.get("code_id", 0)),
+            count=int(payload.get("count", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class Phase2ReportCodeUsageDistribution:
+    """Report payload 中 selector 和 assigned-label 的 code 使用分布。"""
+
+    selector: tuple[Phase2ReportCodeCount, ...] = ()
+    kl: tuple[Phase2ReportCodeCount, ...] = ()
+
+    def __post_init__(self) -> None:
+        """标准化 code count 行。"""
+
+        object.__setattr__(
+            self,
+            "selector",
+            tuple(_code_count_from_value(item) for item in (self.selector or ())),
+        )
+        object.__setattr__(
+            self,
+            "kl",
+            tuple(_code_count_from_value(item) for item in (self.kl or ())),
+        )
+
+    def to_dict(self) -> dict[str, list[dict[str, int]]]:
+        """序列化为普通 dict。"""
+
+        return {
+            "selector": [item.to_dict() for item in self.selector],
+            "kl": [item.to_dict() for item in self.kl],
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> "Phase2ReportCodeUsageDistribution":
+        """从 dict 恢复 code usage distribution。"""
+
+        return cls(
+            selector=tuple(
+                Phase2ReportCodeCount.from_dict(item)
+                for item in (payload.get("selector", ()) or ())
+                if isinstance(item, Mapping)
+            ),
+            kl=tuple(
+                Phase2ReportCodeCount.from_dict(item)
+                for item in (payload.get("kl", ()) or ())
+                if isinstance(item, Mapping)
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class Phase2ReportCumulativeReturns:
+    """Report payload 中各 baseline 的累计收益曲线。"""
+
+    selector: tuple[float, ...] = ()
+    kl: tuple[float, ...] = ()
+    random: tuple[float, ...] = ()
+    oracle: tuple[float, ...] = ()
+    hold: tuple[float, ...] = ()
+
+    def __post_init__(self) -> None:
+        """标准化累计收益序列。"""
+
+        for name in ("selector", "kl", "random", "oracle", "hold"):
+            object.__setattr__(
+                self,
+                name,
+                tuple(float(value) for value in getattr(self, name)),
+            )
+
+    def to_dict(self) -> dict[str, list[float]]:
+        """序列化为普通 dict。"""
+
+        return {
+            "selector": list(self.selector),
+            "kl": list(self.kl),
+            "random": list(self.random),
+            "oracle": list(self.oracle),
+            "hold": list(self.hold),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ReportCumulativeReturns":
+        """从 dict 恢复累计收益曲线。"""
+
+        return cls(
+            selector=_float_tuple(payload.get("selector", ())),
+            kl=_float_tuple(payload.get("kl", ())),
+            random=_float_tuple(payload.get("random", ())),
+            oracle=_float_tuple(payload.get("oracle", ())),
+            hold=_float_tuple(payload.get("hold", ())),
+        )
+
+
+@dataclass(frozen=True)
+class Phase2ReportPayload:
+    """HTML/JSON report 复用的强类型聚合 payload。"""
+
+    per_code_profitability_comparison: tuple[
+        "Phase2PerCodeUsageDiagnostic",
+        ...,
+    ] = ()
+    selector_pair_profitability_matrix: tuple[
+        Phase2ReportPairProfitabilityPayloadRow,
+        ...,
+    ] = ()
+    code_diagnostics: tuple[Phase2ReportCodeDiagnosticPayloadRow, ...] = ()
+    codebook_usage_distribution: Phase2ReportCodeUsageDistribution = field(
+        default_factory=Phase2ReportCodeUsageDistribution
+    )
+    oracle_label_cumulative_returns: Phase2ReportCumulativeReturns = field(
+        default_factory=Phase2ReportCumulativeReturns
+    )
+
+    def __post_init__(self) -> None:
+        """标准化 report payload 的嵌套行类型。"""
+
+        from .phase2_validation_layer4_code_usage_collapse import (
+            Phase2PerCodeUsageDiagnostic,
+        )
+
+        object.__setattr__(
+            self,
+            "per_code_profitability_comparison",
+            tuple(
+                item
+                if isinstance(item, Phase2PerCodeUsageDiagnostic)
+                else Phase2PerCodeUsageDiagnostic.from_dict(item)
+                for item in (self.per_code_profitability_comparison or ())
+            ),
+        )
+        object.__setattr__(
+            self,
+            "selector_pair_profitability_matrix",
+            tuple(
+                item
+                if isinstance(item, Phase2ReportPairProfitabilityPayloadRow)
+                else Phase2ReportPairProfitabilityPayloadRow.from_dict(item)
+                for item in (self.selector_pair_profitability_matrix or ())
+            ),
+        )
+        object.__setattr__(
+            self,
+            "code_diagnostics",
+            tuple(
+                item
+                if isinstance(item, Phase2ReportCodeDiagnosticPayloadRow)
+                else Phase2ReportCodeDiagnosticPayloadRow.from_dict(item)
+                for item in (self.code_diagnostics or ())
+            ),
+        )
+        if isinstance(self.codebook_usage_distribution, Mapping):
+            object.__setattr__(
+                self,
+                "codebook_usage_distribution",
+                Phase2ReportCodeUsageDistribution.from_dict(
+                    self.codebook_usage_distribution
+                ),
+            )
+        elif self.codebook_usage_distribution is None:
+            object.__setattr__(
+                self,
+                "codebook_usage_distribution",
+                Phase2ReportCodeUsageDistribution(),
+            )
+        if isinstance(self.oracle_label_cumulative_returns, Mapping):
+            object.__setattr__(
+                self,
+                "oracle_label_cumulative_returns",
+                Phase2ReportCumulativeReturns.from_dict(
+                    self.oracle_label_cumulative_returns
+                ),
+            )
+        elif self.oracle_label_cumulative_returns is None:
+            object.__setattr__(
+                self,
+                "oracle_label_cumulative_returns",
+                Phase2ReportCumulativeReturns(),
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为对外兼容的 report_payload dict。"""
+
+        return {
+            "per_code_profitability_comparison": [
+                item.to_dict() for item in self.per_code_profitability_comparison
+            ],
+            "selector_pair_profitability_matrix": [
+                item.to_dict() for item in self.selector_pair_profitability_matrix
+            ],
+            "code_diagnostics": [item.to_dict() for item in self.code_diagnostics],
+            "codebook_usage_distribution": self.codebook_usage_distribution.to_dict(),
+            "oracle_label_cumulative_returns": (
+                self.oracle_label_cumulative_returns.to_dict()
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ReportPayload":
+        """从 dict 恢复强类型 report payload。"""
+
+        from .phase2_validation_layer4_code_usage_collapse import (
+            Phase2PerCodeUsageDiagnostic,
+        )
+
+        cumulative_payload = (
+            payload.get("oracle_label_cumulative_returns")
+            or payload.get("cumulative_return_curves")
+            or {}
+        )
+        return cls(
+            per_code_profitability_comparison=tuple(
+                Phase2PerCodeUsageDiagnostic.from_dict(item)
+                for item in (
+                    payload.get("per_code_profitability_comparison", ()) or ()
+                )
+                if isinstance(item, Mapping)
+            ),
+            selector_pair_profitability_matrix=tuple(
+                Phase2ReportPairProfitabilityPayloadRow.from_dict(item)
+                for item in (
+                    payload.get("selector_pair_profitability_matrix", ()) or ()
+                )
+                if isinstance(item, Mapping)
+            ),
+            code_diagnostics=tuple(
+                Phase2ReportCodeDiagnosticPayloadRow.from_dict(item)
+                for item in (payload.get("code_diagnostics", ()) or ())
+                if isinstance(item, Mapping)
+            ),
+            codebook_usage_distribution=(
+                Phase2ReportCodeUsageDistribution.from_dict(distribution)
+                if isinstance(
+                    distribution := payload.get("codebook_usage_distribution"),
+                    Mapping,
+                )
+                else Phase2ReportCodeUsageDistribution()
+            ),
+            oracle_label_cumulative_returns=(
+                Phase2ReportCumulativeReturns.from_dict(cumulative_payload)
+                if isinstance(cumulative_payload, Mapping)
+                else Phase2ReportCumulativeReturns()
+            ),
+        )
+
+
+def _optional_str(value: Any) -> str | None:
+    """把空值标准化为 None，其他值转为 str。"""
+
+    return None if value in (None, "") else str(value)
+
+
+def _float_tuple(values: Any) -> tuple[float, ...]:
+    """把序列值标准化为 float tuple。"""
+
+    if isinstance(values, str | bytes):
+        return ()
+    try:
+        return tuple(float(value) for value in values)
+    except TypeError:
+        return ()
+
+
+def _code_count_from_value(value: Any) -> Phase2ReportCodeCount:
+    """把 dict 或 dataclass-like code count 转成强类型对象。"""
+
+    if isinstance(value, Phase2ReportCodeCount):
+        return value
+    if isinstance(value, Mapping):
+        return Phase2ReportCodeCount.from_dict(value)
+    return Phase2ReportCodeCount(
+        code_id=int(getattr(value, "code_id")),
+        count=int(getattr(value, "count")),
+    )
+
+
+@dataclass(frozen=True)
 class Phase2ValidationPayloads:
     """Phase II validation/report 需要复用的聚合 payload。
 
@@ -303,9 +736,19 @@ class Phase2ValidationPayloads:
     # payload；方向：过程数据无直接方向。
     generalization_stability_payload: Phase2GeneralizationStabilityPayload | None = None
 
-    # HTML/report 复用的聚合 payload。用途：避免报表重新执行 evaluator；方向：
-    # 展示数据，无直接排序方向。
-    report_payload: Mapping[str, object] | None = None
+    # HTML/report 复用的强类型聚合 payload。用途：避免报表重新执行 evaluator；
+    # 方向：展示数据，无直接排序方向。
+    report_payload: Phase2ReportPayload | None = None
+
+    def __post_init__(self) -> None:
+        """兼容旧 dict 输入，并在对象边界恢复强类型 report payload。"""
+
+        if isinstance(self.report_payload, Mapping):
+            object.__setattr__(
+                self,
+                "report_payload",
+                Phase2ReportPayload.from_dict(self.report_payload),
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 dict。"""
@@ -392,7 +835,9 @@ class Phase2ValidationPayloads:
                 else None
             ),
             report_payload=(
-                dict(report_payload) if isinstance(report_payload, Mapping) else None
+                Phase2ReportPayload.from_dict(report_payload)
+                if isinstance(report_payload, Mapping)
+                else None
             ),
         )
 
@@ -636,6 +1081,12 @@ __all__ = [
     "Phase2LayerPayload",
     "Phase2LayerResult",
     "Phase2MetricResult",
+    "Phase2ReportCodeCount",
+    "Phase2ReportCodeDiagnosticPayloadRow",
+    "Phase2ReportCodeUsageDistribution",
+    "Phase2ReportCumulativeReturns",
+    "Phase2ReportPairProfitabilityPayloadRow",
+    "Phase2ReportPayload",
     "Phase2ValidationMetrics",
     "Phase2ValidationPayloads",
     "Phase2ValidationResult",

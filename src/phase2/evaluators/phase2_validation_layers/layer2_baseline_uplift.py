@@ -9,7 +9,13 @@ from ...metrics import (
     Phase2BaselineUpliftPayload,
     Phase2LayerComputation,
 )
-from ._numeric import as_float_array, finite_values, nan_value, safe_mean, safe_ratio
+from src.utils._numeric import (
+    as_float_array,
+    finite_values,
+    nan_value,
+    safe_mean,
+    safe_ratio,
+)
 
 
 def compute_baseline_uplift_metrics(

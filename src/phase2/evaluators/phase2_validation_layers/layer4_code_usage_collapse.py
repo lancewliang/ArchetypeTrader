@@ -12,7 +12,7 @@ from ...metrics import (
     Phase2LayerComputation,
     Phase2PerCodeUsageDiagnostic,
 )
-from ._numeric import nan_value
+from src.utils._numeric import nan_value
 
 
 def compute_code_usage_collapse_metrics(

@@ -9,7 +9,7 @@ from ...metrics import (
     Phase2SelectorProfitabilityMetrics,
     Phase2SelectorProfitabilityPayload,
 )
-from ._numeric import (
+from src.utils._numeric import (
     as_float_array,
     finite_values,
     nan_value,

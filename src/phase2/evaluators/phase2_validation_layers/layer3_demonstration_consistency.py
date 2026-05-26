@@ -9,7 +9,7 @@ from ...metrics import (
     Phase2DemonstrationConsistencyPayload,
     Phase2LayerComputation,
 )
-from ._numeric import as_float_array, nan_value, safe_mean
+from src.utils._numeric import as_float_array, nan_value, safe_mean
 
 
 def compute_demonstration_consistency_metrics(
