@@ -152,11 +152,11 @@ class Phase2SelectorReportContextBuilder:
 
     def build(
         self,
-        payload: Phase2ReportDocument | Mapping[str, Any],
+        document: Phase2ReportDocument,
     ) -> Phase2ReportHtmlContext:
         """将 report document 转换为模板展示模型。"""
 
-        document = ensure_phase2_report_document(payload)
+        
         validation = document.validation
         validation_payloads = self._validation_payloads(validation)
         cumulative_series = self._build_cumulative_return_series(validation_payloads)

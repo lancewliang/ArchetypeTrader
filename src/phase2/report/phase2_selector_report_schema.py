@@ -373,16 +373,6 @@ class Phase2ReportHtmlContext(PydanticMappingModel):
     )
     code_diagnostic_rows: tuple[Phase2ReportCodeDiagnosticRow, ...] = ()
 
-def ensure_phase2_report_document(
-    payload: Phase2ReportDocument | Mapping[str, Any],
-) -> Phase2ReportDocument:
-    """确保输入是强类型 report document。"""
-
-    if isinstance(payload, Phase2ReportDocument):
-        return payload
-    return Phase2ReportDocument.model_validate(payload)
-
-
 def metric_result_to_view(metric: Phase2MetricResult) -> Phase2ReportMetricView:
     """把 Phase II metric result 转换为模板友好的行视图。"""
 
@@ -473,8 +463,6 @@ __all__ = [
     "Phase2ReportSummaryView",
     "Phase2ReportCodeDiagnosticRow",
     "ensure_phase2_report_document",
-    "json_safe",
     "layer_result_to_view",
     "metric_result_to_view",
-    "template_safe",
 ]

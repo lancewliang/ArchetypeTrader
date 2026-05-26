@@ -91,7 +91,7 @@ class Phase2SelectorReport:
  
     def render_html(
         self,
-        payload: Phase2ReportDocument | Mapping[str, object],
+        payload: Phase2ReportDocument ,
     ) -> str:
         """将 report payload 渲染为静态 HTML 字符串。"""
 
