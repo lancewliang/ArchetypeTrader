@@ -254,10 +254,10 @@ class Phase2ReportDocument:
     def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ReportDocument":
         """从 public payload dict 恢复 report document。"""
 
-        report_payload = _require_mapping(payload.get("report"), "report")
+        report_node = _require_mapping(payload.get("report"), "report")
         validation_payload = payload.get("validation")
         return cls(
-            report=Phase2ReportMeta.from_dict(report_payload),
+            report=Phase2ReportMeta.from_dict(report_node),
             selection=_json_object(_optional_mapping(payload.get("selection"))),
             summary=_json_object(_optional_mapping(payload.get("summary"))),
             validation=(

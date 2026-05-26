@@ -522,158 +522,6 @@ class Phase2ReportCumulativeReturns:
         )
 
 
-@dataclass(frozen=True)
-class Phase2ReportPayload:
-    """HTML/JSON report 复用的强类型聚合 payload。"""
-
-    per_code_profitability_comparison: tuple[
-        "Phase2PerCodeUsageDiagnostic",
-        ...,
-    ] = ()
-    selector_pair_profitability_matrix: tuple[
-        Phase2ReportPairProfitabilityPayloadRow,
-        ...,
-    ] = ()
-    code_diagnostics: tuple[Phase2ReportCodeDiagnosticPayloadRow, ...] = ()
-    codebook_usage_distribution: Phase2ReportCodeUsageDistribution = field(
-        default_factory=Phase2ReportCodeUsageDistribution
-    )
-    oracle_label_cumulative_returns: Phase2ReportCumulativeReturns = field(
-        default_factory=Phase2ReportCumulativeReturns
-    )
-
-    def __post_init__(self) -> None:
-        """标准化 report payload 的嵌套行类型。"""
-
-        from .phase2_validation_layer4_code_usage_collapse import (
-            Phase2PerCodeUsageDiagnostic,
-        )
-
-        object.__setattr__(
-            self,
-            "per_code_profitability_comparison",
-            tuple(
-                item
-                if isinstance(item, Phase2PerCodeUsageDiagnostic)
-                else Phase2PerCodeUsageDiagnostic.from_dict(item)
-                for item in (self.per_code_profitability_comparison or ())
-            ),
-        )
-        object.__setattr__(
-            self,
-            "selector_pair_profitability_matrix",
-            tuple(
-                item
-                if isinstance(item, Phase2ReportPairProfitabilityPayloadRow)
-                else Phase2ReportPairProfitabilityPayloadRow.from_dict(item)
-                for item in (self.selector_pair_profitability_matrix or ())
-            ),
-        )
-        object.__setattr__(
-            self,
-            "code_diagnostics",
-            tuple(
-                item
-                if isinstance(item, Phase2ReportCodeDiagnosticPayloadRow)
-                else Phase2ReportCodeDiagnosticPayloadRow.from_dict(item)
-                for item in (self.code_diagnostics or ())
-            ),
-        )
-        if isinstance(self.codebook_usage_distribution, Mapping):
-            object.__setattr__(
-                self,
-                "codebook_usage_distribution",
-                Phase2ReportCodeUsageDistribution.from_dict(
-                    self.codebook_usage_distribution
-                ),
-            )
-        elif self.codebook_usage_distribution is None:
-            object.__setattr__(
-                self,
-                "codebook_usage_distribution",
-                Phase2ReportCodeUsageDistribution(),
-            )
-        if isinstance(self.oracle_label_cumulative_returns, Mapping):
-            object.__setattr__(
-                self,
-                "oracle_label_cumulative_returns",
-                Phase2ReportCumulativeReturns.from_dict(
-                    self.oracle_label_cumulative_returns
-                ),
-            )
-        elif self.oracle_label_cumulative_returns is None:
-            object.__setattr__(
-                self,
-                "oracle_label_cumulative_returns",
-                Phase2ReportCumulativeReturns(),
-            )
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为对外兼容的 report_payload dict。"""
-
-        return {
-            "per_code_profitability_comparison": [
-                item.to_dict() for item in self.per_code_profitability_comparison
-            ],
-            "selector_pair_profitability_matrix": [
-                item.to_dict() for item in self.selector_pair_profitability_matrix
-            ],
-            "code_diagnostics": [item.to_dict() for item in self.code_diagnostics],
-            "codebook_usage_distribution": self.codebook_usage_distribution.to_dict(),
-            "oracle_label_cumulative_returns": (
-                self.oracle_label_cumulative_returns.to_dict()
-            ),
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "Phase2ReportPayload":
-        """从 dict 恢复强类型 report payload。"""
-
-        from .phase2_validation_layer4_code_usage_collapse import (
-            Phase2PerCodeUsageDiagnostic,
-        )
-
-        cumulative_payload = (
-            payload.get("oracle_label_cumulative_returns")
-            or payload.get("cumulative_return_curves")
-            or {}
-        )
-        return cls(
-            per_code_profitability_comparison=tuple(
-                Phase2PerCodeUsageDiagnostic.from_dict(item)
-                for item in (
-                    payload.get("per_code_profitability_comparison", ()) or ()
-                )
-                if isinstance(item, Mapping)
-            ),
-            selector_pair_profitability_matrix=tuple(
-                Phase2ReportPairProfitabilityPayloadRow.from_dict(item)
-                for item in (
-                    payload.get("selector_pair_profitability_matrix", ()) or ()
-                )
-                if isinstance(item, Mapping)
-            ),
-            code_diagnostics=tuple(
-                Phase2ReportCodeDiagnosticPayloadRow.from_dict(item)
-                for item in (payload.get("code_diagnostics", ()) or ())
-                if isinstance(item, Mapping)
-            ),
-            codebook_usage_distribution=(
-                Phase2ReportCodeUsageDistribution.from_dict(distribution)
-                if isinstance(
-                    distribution := payload.get("codebook_usage_distribution"),
-                    Mapping,
-                )
-                else Phase2ReportCodeUsageDistribution()
-            ),
-            oracle_label_cumulative_returns=(
-                Phase2ReportCumulativeReturns.from_dict(cumulative_payload)
-                if isinstance(cumulative_payload, Mapping)
-                else Phase2ReportCumulativeReturns()
-            ),
-        )
-
-
 def _optional_str(value: Any) -> str | None:
     """把空值标准化为 None，其他值转为 str。"""
 
@@ -736,18 +584,101 @@ class Phase2ValidationPayloads:
     # payload；方向：过程数据无直接方向。
     generalization_stability_payload: Phase2GeneralizationStabilityPayload | None = None
 
-    # HTML/report 复用的强类型聚合 payload。用途：避免报表重新执行 evaluator；
-    # 方向：展示数据，无直接排序方向。
-    report_payload: Phase2ReportPayload | None = None
+    # Report per-code 盈利对比行。默认从 code_usage_collapse_payload 的
+    # per_code_diagnostics 复用，避免重复组装同一对象。
+    per_code_profitability_comparison: tuple[
+        "Phase2PerCodeUsageDiagnostic",
+        ...,
+    ] = ()
+
+    # Report Dominant Pair heatmap 行。用途：展示 morphology/motif 组合收益。
+    selector_pair_profitability_matrix: tuple[
+        Phase2ReportPairProfitabilityPayloadRow,
+        ...,
+    ] = ()
+
+    # Report code 级诊断表行。用途：展示 code 行为归因、风险原因和偏离质量。
+    code_diagnostics: tuple[Phase2ReportCodeDiagnosticPayloadRow, ...] = ()
+
+    # Report code usage 分布。用途：展示 selector 与 assigned-label 使用差异。
+    codebook_usage_distribution: Phase2ReportCodeUsageDistribution = field(
+        default_factory=Phase2ReportCodeUsageDistribution
+    )
+
+    # Report 各 baseline 累计收益曲线。用途：HTML 静态曲线和 JSON payload。
+    oracle_label_cumulative_returns: Phase2ReportCumulativeReturns = field(
+        default_factory=Phase2ReportCumulativeReturns
+    )
 
     def __post_init__(self) -> None:
-        """兼容旧 dict 输入，并在对象边界恢复强类型 report payload。"""
+        """标准化 validation/report payload 的嵌套强类型字段。"""
 
-        if isinstance(self.report_payload, Mapping):
+        from .phase2_validation_layer4_code_usage_collapse import (
+            Phase2PerCodeUsageDiagnostic,
+        )
+
+        per_code_rows = self.per_code_profitability_comparison or (
+            self.code_usage_collapse_payload.per_code_diagnostics
+            if self.code_usage_collapse_payload is not None
+            else ()
+        )
+        object.__setattr__(
+            self,
+            "per_code_profitability_comparison",
+            tuple(
+                item
+                if isinstance(item, Phase2PerCodeUsageDiagnostic)
+                else Phase2PerCodeUsageDiagnostic.from_dict(item)
+                for item in per_code_rows
+            ),
+        )
+        object.__setattr__(
+            self,
+            "selector_pair_profitability_matrix",
+            tuple(
+                item
+                if isinstance(item, Phase2ReportPairProfitabilityPayloadRow)
+                else Phase2ReportPairProfitabilityPayloadRow.from_dict(item)
+                for item in (self.selector_pair_profitability_matrix or ())
+            ),
+        )
+        object.__setattr__(
+            self,
+            "code_diagnostics",
+            tuple(
+                item
+                if isinstance(item, Phase2ReportCodeDiagnosticPayloadRow)
+                else Phase2ReportCodeDiagnosticPayloadRow.from_dict(item)
+                for item in (self.code_diagnostics or ())
+            ),
+        )
+        if isinstance(self.codebook_usage_distribution, Mapping):
             object.__setattr__(
                 self,
-                "report_payload",
-                Phase2ReportPayload.from_dict(self.report_payload),
+                "codebook_usage_distribution",
+                Phase2ReportCodeUsageDistribution.from_dict(
+                    self.codebook_usage_distribution
+                ),
+            )
+        elif self.codebook_usage_distribution is None:
+            object.__setattr__(
+                self,
+                "codebook_usage_distribution",
+                Phase2ReportCodeUsageDistribution(),
+            )
+        if isinstance(self.oracle_label_cumulative_returns, Mapping):
+            object.__setattr__(
+                self,
+                "oracle_label_cumulative_returns",
+                Phase2ReportCumulativeReturns.from_dict(
+                    self.oracle_label_cumulative_returns
+                ),
+            )
+        elif self.oracle_label_cumulative_returns is None:
+            object.__setattr__(
+                self,
+                "oracle_label_cumulative_returns",
+                Phase2ReportCumulativeReturns(),
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -770,7 +701,19 @@ class Phase2ValidationPayloads:
             "generalization_stability_payload": _payload_to_dict(
                 self.generalization_stability_payload
             ),
-            "report_payload": _payload_to_dict(self.report_payload),
+            "per_code_profitability_comparison": _payload_to_dict(
+                self.per_code_profitability_comparison
+            ),
+            "selector_pair_profitability_matrix": _payload_to_dict(
+                self.selector_pair_profitability_matrix
+            ),
+            "code_diagnostics": _payload_to_dict(self.code_diagnostics),
+            "codebook_usage_distribution": _payload_to_dict(
+                self.codebook_usage_distribution
+            ),
+            "oracle_label_cumulative_returns": _payload_to_dict(
+                self.oracle_label_cumulative_returns
+            ),
         }
 
     @classmethod
@@ -791,6 +734,7 @@ class Phase2ValidationPayloads:
         )
         from .phase2_validation_layer4_code_usage_collapse import (
             Phase2CodeUsageCollapsePayload,
+            Phase2PerCodeUsageDiagnostic,
         )
         from .phase2_validation_layer5_generalization_stability import (
             Phase2GeneralizationStabilityPayload,
@@ -802,7 +746,11 @@ class Phase2ValidationPayloads:
         demonstration_payload = payload.get("demonstration_consistency_payload")
         code_usage_payload = payload.get("code_usage_collapse_payload")
         stability_payload = payload.get("generalization_stability_payload")
-        report_payload = payload.get("report_payload")
+        cumulative_payload = (
+            payload.get("oracle_label_cumulative_returns")
+            or payload.get("cumulative_return_curves")
+            or {}
+        )
         return cls(
             evaluation_validity_payload=(
                 Phase2EvaluationValidityPayload.from_dict(evaluation_payload)
@@ -834,10 +782,37 @@ class Phase2ValidationPayloads:
                 if isinstance(stability_payload, Mapping)
                 else None
             ),
-            report_payload=(
-                Phase2ReportPayload.from_dict(report_payload)
-                if isinstance(report_payload, Mapping)
-                else None
+            per_code_profitability_comparison=tuple(
+                Phase2PerCodeUsageDiagnostic.from_dict(item)
+                for item in (
+                    payload.get("per_code_profitability_comparison", ()) or ()
+                )
+                if isinstance(item, Mapping)
+            ),
+            selector_pair_profitability_matrix=tuple(
+                Phase2ReportPairProfitabilityPayloadRow.from_dict(item)
+                for item in (
+                    payload.get("selector_pair_profitability_matrix", ()) or ()
+                )
+                if isinstance(item, Mapping)
+            ),
+            code_diagnostics=tuple(
+                Phase2ReportCodeDiagnosticPayloadRow.from_dict(item)
+                for item in (payload.get("code_diagnostics", ()) or ())
+                if isinstance(item, Mapping)
+            ),
+            codebook_usage_distribution=(
+                Phase2ReportCodeUsageDistribution.from_dict(distribution)
+                if isinstance(
+                    distribution := payload.get("codebook_usage_distribution"),
+                    Mapping,
+                )
+                else Phase2ReportCodeUsageDistribution()
+            ),
+            oracle_label_cumulative_returns=(
+                Phase2ReportCumulativeReturns.from_dict(cumulative_payload)
+                if isinstance(cumulative_payload, Mapping)
+                else Phase2ReportCumulativeReturns()
             ),
         )
 
@@ -1086,7 +1061,6 @@ __all__ = [
     "Phase2ReportCodeUsageDistribution",
     "Phase2ReportCumulativeReturns",
     "Phase2ReportPairProfitabilityPayloadRow",
-    "Phase2ReportPayload",
     "Phase2ValidationMetrics",
     "Phase2ValidationPayloads",
     "Phase2ValidationResult",

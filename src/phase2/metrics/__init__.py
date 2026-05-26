@@ -16,7 +16,6 @@ from .phase2_metric_results import (
     Phase2ReportCodeUsageDistribution,
     Phase2ReportCumulativeReturns,
     Phase2ReportPairProfitabilityPayloadRow,
-    Phase2ReportPayload,
     Phase2ValidationPayloads,
 )
 from .phase2_validation_layer0_evaluation_validity import (
@@ -95,7 +94,6 @@ __all__ = [
     "Phase2ReportCodeUsageDistribution",
     "Phase2ReportCumulativeReturns",
     "Phase2ReportPairProfitabilityPayloadRow",
-    "Phase2ReportPayload",
     "Phase2SelectorProfitabilityMetrics",
     "Phase2SelectorProfitabilityPayload",
     "Phase2SelectorProfitabilityThresholds",

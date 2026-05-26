@@ -32,7 +32,7 @@ from .phase2_selector_report_schema import (
 )
 from ..metrics import (
     Phase2LayerComputation,
-    Phase2ReportPayload,
+    Phase2ValidationPayloads,
     Phase2ValidationResult,
 )
 
@@ -158,8 +158,8 @@ class Phase2SelectorReportContextBuilder:
 
         document = ensure_phase2_report_document(payload)
         validation = document.validation
-        report_payload = self._report_payload(validation)
-        cumulative_series = self._build_cumulative_return_series(report_payload)
+        validation_payloads = self._validation_payloads(validation)
+        cumulative_series = self._build_cumulative_return_series(validation_payloads)
         return Phase2ReportHtmlContext(
             page_title=document.report.title,
             header_title=self.title,
@@ -173,9 +173,9 @@ class Phase2SelectorReportContextBuilder:
             core_metric_rows=self._build_core_metric_rows(validation),
             baseline_rows=self._build_baseline_rows(validation),
             per_code_profitability_rows=self._build_per_code_profitability_rows(
-                report_payload
+                validation_payloads
             ),
-            code_usage_rows=self._build_code_usage_rows(report_payload),
+            code_usage_rows=self._build_code_usage_rows(validation_payloads),
             cumulative_return_series=cumulative_series,
             config_rows=self._build_mapping_rows(document.config),
             artifact_rows=self._build_mapping_rows(document.artifacts),
@@ -183,9 +183,9 @@ class Phase2SelectorReportContextBuilder:
                 cumulative_series
             ),
             pair_profitability_matrix=self._build_pair_profitability_matrix(
-                report_payload
+                validation_payloads
             ),
-            code_diagnostic_rows=self._build_code_diagnostic_rows(report_payload),
+            code_diagnostic_rows=self._build_code_diagnostic_rows(validation_payloads),
         )
 
     def _build_header(
@@ -400,11 +400,11 @@ class Phase2SelectorReportContextBuilder:
 
     def _build_per_code_profitability_rows(
         self,
-        report_payload: Phase2ReportPayload,
+        validation_payloads: Phase2ValidationPayloads,
     ) -> tuple[Phase2ReportPerCodeProfitabilityRow, ...]:
         """构建 per-code 盈利对比行。"""
 
-        rows = report_payload.per_code_profitability_comparison
+        rows = validation_payloads.per_code_profitability_comparison
         result: list[Phase2ReportPerCodeProfitabilityRow] = []
         for item in rows:
             row = _as_mapping(item)
@@ -435,11 +435,11 @@ class Phase2SelectorReportContextBuilder:
 
     def _build_code_usage_rows(
         self,
-        report_payload: Phase2ReportPayload,
+        validation_payloads: Phase2ValidationPayloads,
     ) -> tuple[Phase2ReportCodeUsageRow, ...]:
         """构建 code usage 分布行。"""
 
-        distribution = report_payload.codebook_usage_distribution
+        distribution = validation_payloads.codebook_usage_distribution
         selector_counts = self._count_map(distribution.selector)
         kl_counts = self._count_map(distribution.kl)
         if not selector_counts and not kl_counts:
@@ -503,11 +503,11 @@ class Phase2SelectorReportContextBuilder:
 
     def _build_pair_profitability_matrix(
         self,
-        report_payload: Phase2ReportPayload,
+        validation_payloads: Phase2ValidationPayloads,
     ) -> Phase2ReportPairProfitabilityMatrix:
         """构建 Dominant Pair heatmap 视图模型。"""
 
-        raw_cells = report_payload.selector_pair_profitability_matrix
+        raw_cells = validation_payloads.selector_pair_profitability_matrix
         cell_mappings = tuple(
             row
             for item in raw_cells
@@ -653,11 +653,11 @@ class Phase2SelectorReportContextBuilder:
 
     def _build_code_diagnostic_rows(
         self,
-        report_payload: Phase2ReportPayload,
+        validation_payloads: Phase2ValidationPayloads,
     ) -> tuple[Phase2ReportCodeDiagnosticRow, ...]:
         """构建完整 code 级诊断表。"""
 
-        rows = report_payload.code_diagnostics
+        rows = validation_payloads.code_diagnostics
         result: list[Phase2ReportCodeDiagnosticRow] = []
         for item in rows:
             row = _as_mapping(item)
@@ -720,11 +720,11 @@ class Phase2SelectorReportContextBuilder:
 
     def _build_cumulative_return_series(
         self,
-        report_payload: Phase2ReportPayload,
+        validation_payloads: Phase2ValidationPayloads,
     ) -> tuple[Phase2ReportSeries, ...]:
         """构建累计收益序列数据。"""
 
-        cumulative_returns = report_payload.oracle_label_cumulative_returns
+        cumulative_returns = validation_payloads.oracle_label_cumulative_returns
         curves = {
             "selector": cumulative_returns.selector,
             "kl": cumulative_returns.kl,
@@ -872,20 +872,15 @@ class Phase2SelectorReportContextBuilder:
             return "#fef2f2", "#991b1b"
         return "#fff7ed", "#9a3412"
 
-    def _report_payload(
+    def _validation_payloads(
         self,
         validation: Phase2ValidationResult | None,
-    ) -> Phase2ReportPayload:
-        """读取 evaluator 写入的 report 聚合 payload。"""
+    ) -> Phase2ValidationPayloads:
+        """读取 evaluator 写入的 validation/report 聚合 payload。"""
 
         if validation is None or validation.payloads is None:
-            return Phase2ReportPayload()
-        payload = validation.payloads.report_payload
-        if isinstance(payload, Phase2ReportPayload):
-            return payload
-        if isinstance(payload, Mapping):
-            return Phase2ReportPayload.from_dict(payload)
-        return Phase2ReportPayload()
+            return Phase2ValidationPayloads()
+        return validation.payloads
 
     def _payload_mapping(
         self,

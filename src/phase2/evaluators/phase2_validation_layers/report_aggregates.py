@@ -49,8 +49,7 @@ def build_selector_pair_profitability_matrix(
         - advantage 使用 selector return 相对 KL/assigned-label baseline 和
           random baseline 的均值差。
 
-    返回值是 JSON-friendly rows，可直接放入
-    ``Phase2ValidationPayloads.report_payload``。
+    返回值是强类型 rows，可直接放入 ``Phase2ValidationPayloads``。
     """
 
     selector_values = _as_float_array(selector_returns)

@@ -35,7 +35,6 @@ from ..metrics import (
     Phase2ReportCodeCount,
     Phase2ReportCodeUsageDistribution,
     Phase2ReportCumulativeReturns,
-    Phase2ReportPayload,
     Phase2SelectorProfitabilityPayload,
     Phase2SelectorProfitabilityThresholds,
     Phase2ValidationMetrics,
@@ -358,6 +357,22 @@ class Phase2Evaluator:
             win_rate=float(layer1.metrics.win_rate),
             mean_turnover=float(layer1.metrics.mean_turnover),
         )
+        report_fields = self._build_report_fields(
+            selector_returns=selector_returns,
+            assigned_label_returns=assigned_label_returns,
+            random_returns=random_returns,
+            oracle_returns=oracle_returns,
+            hold_returns=hold_returns,
+            selector_fees=selector_fees,
+            selector_turnover=selector_turnover,
+            selector_actions=selector_actions,
+            q_margins=q_margins,
+            selected_code_ids=selected_code_ids,
+            assigned_code_labels=assigned_code_labels,
+            per_code_diagnostics=per_code_diagnostics,
+            dataset=dataset,
+            num_archetypes=num_archetypes,
+        )
         payloads = Phase2ValidationPayloads(
             evaluation_validity_payload=evaluation_payload,
             selector_profitability_payload=selector_payload,
@@ -365,21 +380,13 @@ class Phase2Evaluator:
             demonstration_consistency_payload=demonstration_payload,
             code_usage_collapse_payload=code_usage_payload,
             generalization_stability_payload=stability_payload,
-            report_payload=self._build_report_payload(
-                selector_returns=selector_returns,
-                assigned_label_returns=assigned_label_returns,
-                random_returns=random_returns,
-                oracle_returns=oracle_returns,
-                hold_returns=hold_returns,
-                selector_fees=selector_fees,
-                selector_turnover=selector_turnover,
-                selector_actions=selector_actions,
-                q_margins=q_margins,
-                selected_code_ids=selected_code_ids,
-                assigned_code_labels=assigned_code_labels,
-                per_code_diagnostics=per_code_diagnostics,
-                dataset=dataset,
-                num_archetypes=num_archetypes,
+            selector_pair_profitability_matrix=(
+                report_fields.selector_pair_profitability_matrix
+            ),
+            code_diagnostics=report_fields.code_diagnostics,
+            codebook_usage_distribution=report_fields.codebook_usage_distribution,
+            oracle_label_cumulative_returns=(
+                report_fields.oracle_label_cumulative_returns
             ),
         )
         return Phase2ValidationResult(
@@ -527,7 +534,7 @@ class Phase2Evaluator:
             ),
         )
 
-    def _build_report_payload(
+    def _build_report_fields(
         self,
         *,
         selector_returns: np.ndarray,
@@ -544,11 +551,11 @@ class Phase2Evaluator:
         per_code_diagnostics: tuple[Phase2PerCodeUsageDiagnostic, ...],
         dataset: Phase2SelectionDataset,
         num_archetypes: int,
-    ) -> Phase2ReportPayload:
+    ) -> Phase2ValidationPayloads:
         """构造报表卡片复用的聚合 payload，不保存逐样本 trace。"""
 
         _, _, _, prices, _ = dataset.horizon_dataset
-        return Phase2ReportPayload(
+        return Phase2ValidationPayloads(
             per_code_profitability_comparison=per_code_diagnostics,
             selector_pair_profitability_matrix=(
                 build_selector_pair_profitability_matrix(
