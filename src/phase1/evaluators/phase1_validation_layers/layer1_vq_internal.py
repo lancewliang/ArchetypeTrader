@@ -23,7 +23,11 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from src.analysis.analysis_code_distribution_model import VQCodeDistributionPayload
+from src.analysis.analysis_code_distribution import (
+    buildVQCodeDistributionPayload,
+    compute_code_distribution,
+    compute_code_sample_counts,
+)
 from src.utils import nan_value as _nan
 
 from ...metrics import (
@@ -99,43 +103,6 @@ def compute_action_accuracy(demo: np.ndarray, decoded: np.ndarray) -> float:
     return float(np.mean(decoded_values == demo_values))
 
 
-def compute_code_distribution(code_ids: np.ndarray, k: int) -> np.ndarray:
-    """计算 code occupancy 分布。
-
-    输入参数:
-        code_ids: 每个样本的 assigned code id。
-        k: codebook size。
-
-    输出:
-        ``[K]`` 形状的 occupancy 概率分布；无样本时返回全 0。
-
-    使用场景:
-        active code ratio、max occupancy、dead code ratio 和 perplexity 计算。
-    """
-
-    if k <= 0:
-        return np.asarray([], dtype=np.float64)
-    values = np.asarray(code_ids, dtype=np.int64).reshape(-1)
-    if np.any((values < 0) | (values >= k)):
-        raise ValueError("code_ids must be in [0, k)")
-    counts = np.bincount(values, minlength=k)
-    total = np.sum(counts)
-    if total <= 0:
-        return np.zeros(k, dtype=np.float64)
-    return counts.astype(np.float64) / float(total)
-
-
-def compute_code_sample_counts(code_ids: np.ndarray, k: int) -> np.ndarray:
-    """计算每个 code 获得的样本数。"""
-
-    if k <= 0:
-        return np.asarray([], dtype=np.int64)
-    values = np.asarray(code_ids, dtype=np.int64).reshape(-1)
-    if np.any((values < 0) | (values >= k)):
-        raise ValueError("code_ids must be in [0, k)")
-    return np.bincount(values, minlength=k).astype(np.int64)
-
-
 def compute_normalized_perplexity(p: np.ndarray) -> float:
     """计算归一化 code perplexity。
 
@@ -200,7 +167,7 @@ def _compute_action_prototypes(
 def _current_assignment_snapshot(
     snapshot: Phase1EvaluationSnapshot,
     probabilities: np.ndarray,
-    runtime_config: Phase1ValidationRuntimeConfig,
+    active_codes: Sequence[int],
 ) -> CodeAssignmentSnapshot:
     """构造当前 epoch 的 assignment snapshot。
 
@@ -216,17 +183,12 @@ def _current_assignment_snapshot(
         assignment churn 和 code lifetime 计算，也可写入 extra payload 给后续保存。
     """
 
-    active_codes = tuple(
-        int(code_id)
-        for code_id, occupancy in enumerate(probabilities)
-        if occupancy >= runtime_config.active_code_min_occupancy
-    )
     return CodeAssignmentSnapshot(
         epoch=snapshot.epoch,
         split=snapshot.split,
         sample_ids=np.asarray(snapshot.sample_ids),
         code_ids=np.asarray(snapshot.code_ids),
-        active_codes=active_codes,
+        active_codes=tuple(int(code_id) for code_id in active_codes),
         code_prototypes=_compute_code_prototypes(
             snapshot.z_q,
             snapshot.code_ids,
@@ -575,27 +537,23 @@ def compute_vq_internal_metrics(
 
     code_ids = np.asarray(val_snapshot.code_ids, dtype=np.int64)
     num_codes = _num_codes(val_snapshot, runtime_config)
-    probabilities = compute_code_distribution(code_ids, num_codes)
-    code_sample_counts = compute_code_sample_counts(code_ids, num_codes)
+    code_distributions = buildVQCodeDistributionPayload(
+        code_ids=code_ids,
+        num_codes=num_codes,
+        active_code_min_occupancy=runtime_config.active_code_min_occupancy,
+    )
+    probabilities = np.asarray(code_distributions.code_distribution, dtype=np.float64)
     has_code_samples = probabilities.size > 0 and code_ids.size > 0
     current_assignment = _current_assignment_snapshot(
         val_snapshot,
         probabilities,
-        runtime_config,
+        code_distributions.active_codes,
     )
     assignment_churn_by_epoch = _assignment_churn_by_epoch(
         current_assignment,
         assignment_history,
         runtime_config.churn_window_epochs,
         prototype_kind=runtime_config.code_alignment_prototype,
-    )
-    code_distributions = VQCodeDistributionPayload(
-        code_distribution=tuple(float(value) for value in probabilities),
-        code_distribution_sample_count=tuple(
-            int(sample_count) for sample_count in code_sample_counts
-        ),
-        active_codes=tuple(int(code_id) for code_id in current_assignment.active_codes),
-        code_distribution_total_sample_count=int(code_ids.size),
     )
     payload = Phase1VQInternalPayload(
         code_distributions=code_distributions,

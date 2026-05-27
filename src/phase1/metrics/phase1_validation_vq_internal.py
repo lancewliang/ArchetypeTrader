@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
-from src.analysis.analysis_code_distribution_model import VQCodeDistributionPayload
+from src.analysis.analysis_code_distribution import VQCodeDistributionPayload
 from src.utils import PydanticBaseModel
 from .phase1_layer_computation import Phase1LayerComputationBase
 
