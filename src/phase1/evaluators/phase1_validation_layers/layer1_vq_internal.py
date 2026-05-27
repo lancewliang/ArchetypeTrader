@@ -672,7 +672,7 @@ def compute_vq_internal_metrics(
         layer_id=1,
         layer_name="vq_internal",
         metrics=metrics,
-        extra_payload=payload,
+        vq_internal_payload=payload,
     )
 
 

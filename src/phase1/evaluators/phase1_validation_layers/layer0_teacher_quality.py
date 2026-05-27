@@ -307,7 +307,7 @@ def compute_teacher_quality_metrics(
         layer_id=0,
         layer_name="teacher_quality",
         metrics=metrics,
-        extra_payload=Phase1TeacherQualityPayload(
+        teacher_quality_payload=Phase1TeacherQualityPayload(
             dp_returns=dp_returns,
             flat_returns=flat_returns,
             advantages=advantages,

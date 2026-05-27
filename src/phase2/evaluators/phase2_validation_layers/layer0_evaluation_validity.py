@@ -59,7 +59,7 @@ def compute_evaluation_validity_metrics(
         layer_id=0,
         layer_name="evaluation_validity",
         metrics=metrics,
-        extra_payload={"evaluation_validity_payload": payload},
+        evaluation_validity_payload=payload,
     )
 
 

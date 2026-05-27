@@ -93,10 +93,8 @@ def compute_code_usage_collapse_metrics(
         layer_id=4,
         layer_name="code_usage_collapse",
         metrics=metrics,
-        extra_payload={
-            "code_usage_collapse_payload": payload,
-            "per_code_diagnostics": per_code_diagnostics,
-        },
+        code_usage_collapse_payload=payload,
+        per_code_diagnostics=per_code_diagnostics,
     )
 
 

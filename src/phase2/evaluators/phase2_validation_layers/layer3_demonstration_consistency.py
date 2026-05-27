@@ -90,7 +90,7 @@ def compute_demonstration_consistency_metrics(
         layer_id=3,
         layer_name="demonstration_consistency",
         metrics=metrics,
-        extra_payload={"demonstration_consistency_payload": payload},
+        demonstration_consistency_payload=payload,
     )
 
 

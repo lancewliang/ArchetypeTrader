@@ -20,10 +20,10 @@
 
 from __future__ import annotations
 
-from typing import Mapping, TypeAlias
+from typing import TypeAlias
 
 import numpy as np
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from src.utils import PydanticBaseModel
 from .phase1_validation_behavior_quality import (
@@ -42,7 +42,10 @@ from .phase1_validation_teacher_quality import (
     Phase1TeacherQualityMetrics,
     Phase1TeacherQualityPayload,
 )
-from .phase1_validation_vq_internal import Phase1VQInternalMetrics
+from .phase1_validation_vq_internal import (
+    Phase1VQInternalMetrics,
+    Phase1VQInternalPayload,
+)
  
  
 
@@ -290,8 +293,8 @@ class Phase1LayerComputation(PydanticBaseModel):
 
     使用场景:
         ``Phase1CodebookEvaluator`` 调用 layer calculator 后，读取 ``metrics``
-        交给 ``phase1_validation_rules.py``，并把 ``code_diagnostics`` 和
-        ``extra_payload`` 合并进 checkpoint/report payload。
+        交给 ``phase1_validation_rules.py``，并把 ``code_diagnostics`` 和各层
+        强类型 payload 合并进 checkpoint/report payload。
     """
 
     # layer 数字编号，0 到 4。
@@ -306,9 +309,20 @@ class Phase1LayerComputation(PydanticBaseModel):
     # 可选 code-level 诊断表，主要由 layer2/layer3 填充。
     code_diagnostics: tuple[Phase1CodeDiagnostic, ...] = ()
 
-    # 可选额外中间产物，例如 per-code profitability 或 probe diagnostics。
-    extra_payload: Mapping[str, object] = Field(default_factory=dict)
+    # 第零层 teacher quality 中间 payload。
+    teacher_quality_payload: Phase1TeacherQualityPayload | None = None
 
+    # 第一层 VQ internal 中间 payload。
+    vq_internal_payload: Phase1VQInternalPayload | None = None
+
+    # 第二层 behavior quality 中间 payload。
+    behavior_quality_payload: Phase1BehaviorQualityPayload | None = None
+
+    # 第三层 oracle profitability 中间 payload。
+    oracle_profitability_payload: Phase1OracleProfitabilityPayload | None = None
+
+    # 第四层 label predictability 中间 payload。
+    label_predictability_payload: Phase1LabelPredictabilityPayload | None = None
 
 class Phase1ValidationMetrics(PydanticBaseModel):
     """五层 validation raw metrics 聚合对象。

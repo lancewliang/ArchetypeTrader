@@ -111,7 +111,7 @@ def _missing_prices_computation(
         layer_id=3,
         layer_name="oracle_profitability",
         metrics=metrics,
-        extra_payload=Phase1OracleProfitabilityPayload(
+        oracle_profitability_payload=Phase1OracleProfitabilityPayload(
             per_code_profitability=tuple(),
             decoded_returns=missing_returns,
             dp_returns=missing_returns.copy(),
@@ -807,7 +807,7 @@ def compute_oracle_profitability_metrics(
         layer_id=3,
         layer_name="oracle_profitability",
         metrics=metrics,
-        extra_payload=Phase1OracleProfitabilityPayload(
+        oracle_profitability_payload=Phase1OracleProfitabilityPayload(
             per_code_profitability=per_code,
             decoded_returns=decoded_execution.returns,
             dp_returns=dp_execution.returns,

@@ -588,7 +588,7 @@ def compute_label_predictability_metrics(
             layer_id=4,
             layer_name="label_predictability",
             metrics=metrics,
-            extra_payload=Phase1LabelPredictabilityPayload(
+            label_predictability_payload=Phase1LabelPredictabilityPayload(
                 probe_train_accuracy=_nan(),
                 probe_validation_accuracy=_nan(),
                 probe_predictability_gap=_nan(),
@@ -641,7 +641,7 @@ def compute_label_predictability_metrics(
         layer_id=4,
         layer_name="label_predictability",
         metrics=metrics,
-        extra_payload=Phase1LabelPredictabilityPayload(
+        label_predictability_payload=Phase1LabelPredictabilityPayload(
             probe_train_accuracy=train_accuracy,
             probe_validation_accuracy=metrics.probe_top1_accuracy,
             probe_predictability_gap=float(

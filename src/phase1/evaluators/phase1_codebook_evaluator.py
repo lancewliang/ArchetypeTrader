@@ -357,11 +357,9 @@ class Phase1CodebookEvaluator:
             assignment_history=assignment_history,
             runtime_config=self.runtime_config,
         )
-        vq_payload = vq_computation.extra_payload
+        vq_payload = vq_computation.vq_internal_payload
         current_assignment = (
-            vq_payload.current_assignment
-            if isinstance(vq_payload, Phase1VQInternalPayload)
-            else vq_payload.get("current_assignment")
+            vq_payload.current_assignment if vq_payload is not None else None
         )
         self.last_assignment_snapshot = (
             current_assignment
@@ -375,9 +373,11 @@ class Phase1CodebookEvaluator:
             device=self.device,
             thresholds=self.oracle_profitability_thresholds,
         )
-        per_code_profitability = oracle_computation.extra_payload.get(
-            "per_code_profitability",
-            (),
+        oracle_payload = oracle_computation.oracle_profitability_payload
+        per_code_profitability = (
+            oracle_payload.per_code_profitability
+            if oracle_payload is not None
+            else ()
         )
         behavior_computation = compute_behavior_quality_metrics(
             train_snapshot=train_snapshot,
@@ -454,22 +454,7 @@ class Phase1CodebookEvaluator:
             val_oracle_computation=oracle_computation,
             label_computation=label_computation,
         )
-        oracle_payload = (
-            oracle_computation.extra_payload
-            if isinstance(
-                oracle_computation.extra_payload,
-                Phase1OracleProfitabilityPayload,
-            )
-            else None
-        )
-        label_payload = (
-            label_computation.extra_payload
-            if isinstance(
-                label_computation.extra_payload,
-                Phase1LabelPredictabilityPayload,
-            )
-            else None
-        )
+        label_payload = label_computation.label_predictability_payload
         risk_findings = build_phase1_risk_findings(
             layers=layers,
             code_diagnostics=behavior_computation.code_diagnostics,
@@ -489,27 +474,9 @@ class Phase1CodebookEvaluator:
             score=score,
             tie_breaker_metrics=tie_breaker_metrics,
             risk_findings=risk_findings,
-            teacher_quality_payload=(
-                teacher_computation.extra_payload
-                if isinstance(
-                    teacher_computation.extra_payload,
-                    Phase1TeacherQualityPayload,
-                )
-                else None
-            ),
-            vq_internal_payload=(
-                vq_payload
-                if isinstance(vq_payload, Phase1VQInternalPayload)
-                else None
-            ),
-            behavior_quality_payload=(
-                behavior_computation.extra_payload
-                if isinstance(
-                    behavior_computation.extra_payload,
-                    Phase1BehaviorQualityPayload,
-                )
-                else None
-            ),
+            teacher_quality_payload=teacher_computation.teacher_quality_payload,
+            vq_internal_payload=vq_payload,
+            behavior_quality_payload=behavior_computation.behavior_quality_payload,
             oracle_profitability_payload=oracle_payload,
             label_predictability_payload=label_payload,
         )
@@ -593,8 +560,10 @@ class Phase1CodebookEvaluator:
             message="validation/train reconstruction loss gap 过大时提示重构泛化风险",
         )
 
-        predictability_gap = label_computation.extra_payload.get(
-            "probe_predictability_gap"
+        predictability_gap = (
+            label_computation.label_predictability_payload.probe_predictability_gap
+            if label_computation.label_predictability_payload is not None
+            else None
         )
         diagnostics["label_predictability_gap"] = self._drift_upper_metric(
             name="label_predictability_gap",
@@ -830,10 +799,15 @@ class Phase1CodebookEvaluator:
             device=self.device,
             thresholds=self.oracle_profitability_thresholds,
         )
-        train_items = train_oracle.extra_payload.get("per_code_profitability", ())
-        val_items = val_oracle_computation.extra_payload.get(
-            "per_code_profitability",
-            (),
+        train_items = (
+            train_oracle.oracle_profitability_payload.per_code_profitability
+            if train_oracle.oracle_profitability_payload is not None
+            else ()
+        )
+        val_items = (
+            val_oracle_computation.oracle_profitability_payload.per_code_profitability
+            if val_oracle_computation.oracle_profitability_payload is not None
+            else ()
         )
         train_map = {
             item.code_id: item.mean_advantage

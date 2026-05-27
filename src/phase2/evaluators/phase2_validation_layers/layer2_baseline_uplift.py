@@ -78,7 +78,7 @@ def compute_baseline_uplift_metrics(
         layer_id=2,
         layer_name="baseline_uplift",
         metrics=metrics,
-        extra_payload={"baseline_uplift_payload": payload},
+        baseline_uplift_payload=payload,
     )
 
 

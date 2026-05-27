@@ -130,7 +130,7 @@ def compute_generalization_stability_metrics(
         layer_id=5,
         layer_name="generalization_stability",
         metrics=metrics,
-        extra_payload={"generalization_stability_payload": payload},
+        generalization_stability_payload=payload,
     )
 
 

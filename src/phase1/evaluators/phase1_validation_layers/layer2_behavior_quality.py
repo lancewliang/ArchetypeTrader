@@ -983,7 +983,7 @@ def compute_behavior_quality_metrics(
         layer_name="behavior_quality",
         metrics=metrics,
         code_diagnostics=tuple(diagnostics),
-        extra_payload=Phase1BehaviorQualityPayload(
+        behavior_quality_payload=Phase1BehaviorQualityPayload(
             morphology_labels=morphologies,
             motif_labels=motifs,
             active_codes=active_codes,

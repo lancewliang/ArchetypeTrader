@@ -85,7 +85,7 @@ def compute_selector_profitability_metrics(
         layer_id=1,
         layer_name="selector_profitability",
         metrics=metrics,
-        extra_payload={"selector_profitability_payload": payload},
+        selector_profitability_payload=payload,
     )
 
 

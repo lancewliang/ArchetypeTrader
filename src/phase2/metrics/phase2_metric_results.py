@@ -17,8 +17,8 @@
 """
 
 from __future__ import annotations
-from typing import Any, Literal, Mapping, TypeAlias
-from pydantic import Field 
+from typing import Any, Literal, TypeAlias
+from pydantic import Field, model_validator
 from src.utils import PydanticBaseModel
 
 MetricSeverity = Literal["pass", "warn", "fail", "skip"]
@@ -247,31 +247,31 @@ class Phase2ValidationPayloads(PydanticBaseModel):
 
     # Layer 0 评估可信度过程数据。用途：审计 split、epoch、样本数和失败计数；
     # 方向：过程数据本身无排序方向，由 Layer 0 metrics 转换为好坏判定。
-    evaluation_validity_payload: Any | None = None
+    evaluation_validity_payload: Phase2EvaluationValidityPayload | None = None
 
     # Layer 1 selector 收益过程数据。用途：保存收益、gross return、fee、turnover
     # 序列以便复查聚合指标；方向：过程数据无直接方向。
-    selector_profitability_payload: Any | None = None
+    selector_profitability_payload: Phase2SelectorProfitabilityPayload | None = None
 
     # Layer 2 baseline 对比过程数据。用途：保存 selector/assigned/random/oracle
     # return 序列；方向：过程数据无直接方向。
-    baseline_uplift_payload: Any | None = None
+    baseline_uplift_payload: Phase2BaselineUpliftPayload | None = None
 
     # Layer 3 demonstration consistency 过程数据。用途：保存 selected/assigned code、
     # return 和 Q value 序列；方向：过程数据无直接方向。
-    demonstration_consistency_payload: Any | None = None
+    demonstration_consistency_payload: Phase2DemonstrationConsistencyPayload | None = None
 
     # Layer 4 code usage 过程数据。用途：保存 selected code 分布和 per-code 诊断；
     # 方向：过程数据无直接方向。
-    code_usage_collapse_payload: Any | None = None
+    code_usage_collapse_payload: Phase2CodeUsageCollapsePayload | None = None
 
     # Layer 5 泛化稳定性过程数据。用途：保存 score/churn/Q scale 历史和 probe
     # payload；方向：过程数据无直接方向。
-    generalization_stability_payload: Any | None = None
+    generalization_stability_payload: Phase2GeneralizationStabilityPayload | None = None
 
     # Report per-code 盈利对比行。默认从 code_usage_collapse_payload 的
     # per_code_diagnostics 复用，避免重复组装同一对象。
-    per_code_profitability_comparison: tuple[Any, ...] = ()
+    per_code_profitability_comparison: tuple[Phase2PerCodeUsageDiagnostic, ...] = ()
 
     # Report Dominant Pair heatmap 行。用途：展示 morphology/motif 组合收益。
     selector_pair_profitability_matrix: tuple[
@@ -348,10 +348,27 @@ class Phase2LayerComputation(PydanticBaseModel):
     # 方向：由具体 layer metrics 字段定义。
     metrics: Phase2LayerMetrics
 
-    # 可选额外中间产物，例如 per-code diagnostics 或 predictability payload。
-    # 用途：补充 report 细节；方向：过程数据无直接排序方向。
-    extra_payload: Mapping[str, object] | None = None
- 
+    # Layer 0 评估可信度过程数据。
+    evaluation_validity_payload: Phase2EvaluationValidityPayload | None = None
+
+    # Layer 1 selector 收益过程数据。
+    selector_profitability_payload: Phase2SelectorProfitabilityPayload | None = None
+
+    # Layer 2 baseline 对比过程数据。
+    baseline_uplift_payload: Phase2BaselineUpliftPayload | None = None
+
+    # Layer 3 demonstration consistency 过程数据。
+    demonstration_consistency_payload: Phase2DemonstrationConsistencyPayload | None = None
+
+    # Layer 4 code usage 过程数据。
+    code_usage_collapse_payload: Phase2CodeUsageCollapsePayload | None = None
+
+    # Layer 4 per-code 使用和收益诊断。
+    per_code_diagnostics: tuple[Phase2PerCodeUsageDiagnostic, ...] = ()
+
+    # Layer 5 泛化稳定性过程数据。
+    generalization_stability_payload: Phase2GeneralizationStabilityPayload | None = None
+
 
  
 
