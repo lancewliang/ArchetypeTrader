@@ -34,19 +34,15 @@ from ...model.tensor_data_types import (
 from ...model.vq_archetype import ArchetypeVQModel
 from ..metrics import (
     CodeAssignmentSnapshot,
-    Phase1BehaviorQualityMetrics,
     Phase1BehaviorQualityThresholds,
     Phase1EvaluationSnapshot,
-    Phase1LabelPredictabilityMetrics,
+    Phase1LabelPredictabilityComputation,
     Phase1LabelPredictabilityThresholds,
-    Phase1LayerComputation,
-    Phase1OracleProfitabilityMetrics,
+    Phase1MetricResult,
+    Phase1OracleProfitabilityComputation,
     Phase1OracleProfitabilityThresholds,
     Phase1PerCodeProfitability,
-    Phase1MetricResult,
-    Phase1TeacherQualityMetrics,
     Phase1TeacherQualityThresholds,
-    Phase1VQInternalMetrics,
     Phase1ValidationMetrics,
     Phase1ValidationResult,
     Phase1ValidationRuntimeConfig,
@@ -353,9 +349,7 @@ class Phase1CodebookEvaluator:
             runtime_config=self.runtime_config,
         )
         vq_payload = vq_computation.vq_internal_payload
-        current_assignment = (
-            vq_payload.current_assignment if vq_payload is not None else None
-        )
+        current_assignment = vq_payload.current_assignment
         self.last_assignment_snapshot = (
             current_assignment
             if isinstance(current_assignment, CodeAssignmentSnapshot)
@@ -369,11 +363,7 @@ class Phase1CodebookEvaluator:
             thresholds=self.oracle_profitability_thresholds,
         )
         oracle_payload = oracle_computation.oracle_profitability_payload
-        per_code_profitability = (
-            oracle_payload.per_code_profitability
-            if oracle_payload is not None
-            else ()
-        )
+        per_code_profitability = oracle_payload.per_code_profitability
         behavior_computation = compute_behavior_quality_metrics(
             train_snapshot=train_snapshot,
             val_snapshot=val_snapshot,
@@ -393,23 +383,11 @@ class Phase1CodebookEvaluator:
         )
 
         metrics = Phase1ValidationMetrics(
-            teacher_quality=cast(
-                Phase1TeacherQualityMetrics,
-                teacher_computation.metrics,
-            ),
-            vq_internal=cast(Phase1VQInternalMetrics, vq_computation.metrics),
-            behavior_quality=cast(
-                Phase1BehaviorQualityMetrics,
-                behavior_computation.metrics,
-            ),
-            oracle_profitability=cast(
-                Phase1OracleProfitabilityMetrics,
-                oracle_computation.metrics,
-            ),
-            label_predictability=cast(
-                Phase1LabelPredictabilityMetrics,
-                label_computation.metrics,
-            ),
+            teacher_quality=teacher_computation.metrics,
+            vq_internal=vq_computation.metrics,
+            behavior_quality=behavior_computation.metrics,
+            oracle_profitability=oracle_computation.metrics,
+            label_predictability=label_computation.metrics,
         )
         layers = (
             evaluate_teacher_quality_rules(
@@ -481,8 +459,8 @@ class Phase1CodebookEvaluator:
         *,
         train_snapshot: Phase1EvaluationSnapshot,
         val_snapshot: Phase1EvaluationSnapshot,
-        val_oracle_computation: Phase1LayerComputation,
-        label_computation: Phase1LayerComputation,
+        val_oracle_computation: Phase1OracleProfitabilityComputation,
+        label_computation: Phase1LabelPredictabilityComputation,
     ) -> dict[str, Phase1MetricResult]:
         """计算 train/validation 横向 drift diagnostics。
 
@@ -557,8 +535,6 @@ class Phase1CodebookEvaluator:
 
         predictability_gap = (
             label_computation.label_predictability_payload.probe_predictability_gap
-            if label_computation.label_predictability_payload is not None
-            else None
         )
         diagnostics["label_predictability_gap"] = self._drift_upper_metric(
             name="label_predictability_gap",
@@ -756,7 +732,7 @@ class Phase1CodebookEvaluator:
         self,
         *,
         train_snapshot: Phase1EvaluationSnapshot,
-        val_oracle_computation: Phase1LayerComputation,
+        val_oracle_computation: Phase1OracleProfitabilityComputation,
     ) -> Phase1MetricResult:
         """计算 per-code train/validation return gap drift warning。
 
@@ -794,15 +770,9 @@ class Phase1CodebookEvaluator:
             device=self.device,
             thresholds=self.oracle_profitability_thresholds,
         )
-        train_items = (
-            train_oracle.oracle_profitability_payload.per_code_profitability
-            if train_oracle.oracle_profitability_payload is not None
-            else ()
-        )
+        train_items = train_oracle.oracle_profitability_payload.per_code_profitability
         val_items = (
             val_oracle_computation.oracle_profitability_payload.per_code_profitability
-            if val_oracle_computation.oracle_profitability_payload is not None
-            else ()
         )
         train_map = {
             item.code_id: item.mean_advantage

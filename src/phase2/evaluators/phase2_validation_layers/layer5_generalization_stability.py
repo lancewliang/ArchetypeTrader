@@ -9,6 +9,7 @@ import numpy as np
 from ...metrics import (
     Phase2GeneralizationStabilityMetrics,
     Phase2GeneralizationStabilityPayload,
+    Phase2Layer5GeneralizationStabilityComputation,
     Phase2LayerComputation,
     Phase2PredictabilityMetrics,
     Phase2PredictabilityPayload,
@@ -126,9 +127,7 @@ def compute_generalization_stability_metrics(
         reward_mean_trend=_last_minus_first(reward_mean_history),
         predictability=predictability_metrics,
     )
-    return Phase2LayerComputation(
-        layer_id=5,
-        layer_name="generalization_stability",
+    return Phase2Layer5GeneralizationStabilityComputation(
         metrics=metrics,
         generalization_stability_payload=payload,
     )

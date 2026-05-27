@@ -9,6 +9,7 @@ import numpy as np
 from ...metrics import (
     Phase2CodeUsageCollapseMetrics,
     Phase2CodeUsageCollapsePayload,
+    Phase2Layer4CodeUsageCollapseComputation,
     Phase2LayerComputation,
     Phase2PerCodeUsageDiagnostic,
 )
@@ -89,9 +90,7 @@ def compute_code_usage_collapse_metrics(
         ),
         min_per_code_sample_count=_min_per_code_sample_count(per_code_diagnostics),
     )
-    return Phase2LayerComputation(
-        layer_id=4,
-        layer_name="code_usage_collapse",
+    return Phase2Layer4CodeUsageCollapseComputation(
         metrics=metrics,
         code_usage_collapse_payload=payload,
         per_code_diagnostics=per_code_diagnostics,

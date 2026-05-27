@@ -31,9 +31,9 @@ from src.utils import ActionExecutionCalculator, nan_value as _nan
 
 from ...metrics import (
     Phase1EvaluationSnapshot,
+    Phase1LabelPredictabilityComputation,
     Phase1LabelPredictabilityMetrics,
     Phase1LabelPredictabilityPayload,
-    Phase1LayerComputation,
     Phase1ValidationRuntimeConfig,
 )
 from .layer2_behavior_quality import classify_market_morphology
@@ -541,7 +541,7 @@ def compute_label_predictability_metrics(
     val_snapshot: Phase1EvaluationSnapshot,
     runtime_config: Phase1ValidationRuntimeConfig,
     device: torch.device | str,
-) -> Phase1LayerComputation:
+) -> Phase1LabelPredictabilityComputation:
     """计算 Layer 4 assigned-label 可预测性 raw metrics。
 
     功能说明:
@@ -558,7 +558,7 @@ def compute_label_predictability_metrics(
         device: decoder 推理设备。
 
     输出:
-        ``Phase1LayerComputation``，其中 ``metrics`` 为
+        ``Phase1LabelPredictabilityComputation``，其中 ``metrics`` 为
         ``Phase1LabelPredictabilityMetrics``，``label_predictability_payload`` 包含 probe train
         accuracy、validation accuracy、gap 和 seed。
 
@@ -584,9 +584,7 @@ def compute_label_predictability_metrics(
             label_entropy=_label_entropy(val_y),
             num_codes=int(max(np.unique(train_y).size, np.unique(val_y).size)),
         )
-        return Phase1LayerComputation(
-            layer_id=4,
-            layer_name="label_predictability",
+        return Phase1LabelPredictabilityComputation(
             metrics=metrics,
             label_predictability_payload=Phase1LabelPredictabilityPayload(
                 probe_train_accuracy=_nan(),
@@ -637,9 +635,7 @@ def compute_label_predictability_metrics(
     )
     train_probe_metrics = evaluate_probe(probe, train_x, train_y)
     train_accuracy = train_probe_metrics.probe_top1_accuracy
-    return Phase1LayerComputation(
-        layer_id=4,
-        layer_name="label_predictability",
+    return Phase1LabelPredictabilityComputation(
         metrics=metrics,
         label_predictability_payload=Phase1LabelPredictabilityPayload(
             probe_train_accuracy=train_accuracy,

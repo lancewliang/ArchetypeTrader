@@ -6,6 +6,7 @@ from ...metrics import (
     Phase2EvaluationValidityMetrics,
     Phase2EvaluationValidityPayload,
     Phase2LayerComputation,
+    Phase2Layer0EvaluationValidityComputation,
 )
 
 
@@ -55,9 +56,7 @@ def compute_evaluation_validity_metrics(
         label_alignment_valid=bool(label_alignment_valid),
         visible_state_contract_valid=bool(visible_state_contract_valid),
     )
-    return Phase2LayerComputation(
-        layer_id=0,
-        layer_name="evaluation_validity",
+    return Phase2Layer0EvaluationValidityComputation(
         metrics=metrics,
         evaluation_validity_payload=payload,
     )

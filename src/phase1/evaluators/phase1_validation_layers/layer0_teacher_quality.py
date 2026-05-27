@@ -25,7 +25,7 @@ from src.utils import ActionExecutionCalculator, nan_value as _nan
 
 from ...metrics import (
     Phase1EvaluationSnapshot,
-    Phase1LayerComputation,
+    Phase1TeacherQualityComputation,
     Phase1TeacherQualityMetrics,
     Phase1TeacherQualityPayload,
     Phase1ValidationRuntimeConfig,
@@ -240,7 +240,7 @@ def compute_teacher_quality_metrics(
     train_snapshot: Phase1EvaluationSnapshot,
     val_snapshot: Phase1EvaluationSnapshot,
     runtime_config: Phase1ValidationRuntimeConfig,
-) -> Phase1LayerComputation:
+) -> Phase1TeacherQualityComputation:
     """计算 Layer 0 DP teacher 质量 raw metrics。
 
     功能说明:
@@ -254,7 +254,7 @@ def compute_teacher_quality_metrics(
         runtime_config: validation 运行参数，提供手续费率和头部收益剔除比例。
 
     输出:
-        ``Phase1LayerComputation``，其中 ``metrics`` 为
+        ``Phase1TeacherQualityComputation``，其中 ``metrics`` 为
         ``Phase1TeacherQualityMetrics``。
 
     使用场景:
@@ -303,9 +303,7 @@ def compute_teacher_quality_metrics(
             runtime_config.top_contribution_ratio,
         ),
     )
-    return Phase1LayerComputation(
-        layer_id=0,
-        layer_name="teacher_quality",
+    return Phase1TeacherQualityComputation(
         metrics=metrics,
         teacher_quality_payload=Phase1TeacherQualityPayload(
             dp_returns=dp_returns,

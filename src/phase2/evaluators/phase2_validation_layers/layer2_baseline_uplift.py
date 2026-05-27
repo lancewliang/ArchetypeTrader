@@ -7,6 +7,7 @@ import numpy as np
 from ...metrics import (
     Phase2BaselineUpliftMetrics,
     Phase2BaselineUpliftPayload,
+    Phase2Layer2BaselineUpliftComputation,
     Phase2LayerComputation,
 )
 from src.utils._numeric import (
@@ -74,9 +75,7 @@ def compute_baseline_uplift_metrics(
         beat_assigned_rate=_paired_beat_rate(selector, assigned),
         beat_random_rate=_paired_beat_rate(selector, random),
     )
-    return Phase2LayerComputation(
-        layer_id=2,
-        layer_name="baseline_uplift",
+    return Phase2Layer2BaselineUpliftComputation(
         metrics=metrics,
         baseline_uplift_payload=payload,
     )

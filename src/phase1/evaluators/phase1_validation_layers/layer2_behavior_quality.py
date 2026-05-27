@@ -27,12 +27,12 @@ import numpy as np
 from src.utils import nan_value as _nan
 
 from ...metrics import (
+    Phase1BehaviorQualityComputation,
     Phase1BehaviorQualityMetrics,
     Phase1BehaviorQualityPayload,
     Phase1BehaviorQualityThresholds,
     Phase1CodeDiagnostic,
     Phase1EvaluationSnapshot,
-    Phase1LayerComputation,
     Phase1PerCodeProfitability,
     Phase1ValidationRuntimeConfig,
 )
@@ -771,7 +771,7 @@ def compute_behavior_quality_metrics(
     runtime_config: Phase1ValidationRuntimeConfig,
     per_code_profitability: Sequence[Phase1PerCodeProfitability] | None = None,
     thresholds: Phase1BehaviorQualityThresholds | None = None,
-) -> Phase1LayerComputation:
+) -> Phase1BehaviorQualityComputation:
     """计算 Layer 2 archetype 行为质量 raw metrics 和 code diagnostics。
 
     功能说明:
@@ -788,7 +788,7 @@ def compute_behavior_quality_metrics(
         thresholds: Layer 2 阈值配置；不传时使用默认 ``Phase1BehaviorQualityThresholds``。
 
     输出:
-        ``Phase1LayerComputation``，其中 ``metrics`` 为
+        ``Phase1BehaviorQualityComputation``，其中 ``metrics`` 为
         ``Phase1BehaviorQualityMetrics``，``code_diagnostics`` 为 per-code report
         诊断表，``behavior_quality_payload`` 包含 morphology、motif 和 active code 列表。
 
@@ -978,9 +978,7 @@ def compute_behavior_quality_metrics(
         ),
         num_codes=num_codes,
     )
-    return Phase1LayerComputation(
-        layer_id=2,
-        layer_name="behavior_quality",
+    return Phase1BehaviorQualityComputation(
         metrics=metrics,
         code_diagnostics=tuple(diagnostics),
         behavior_quality_payload=Phase1BehaviorQualityPayload(

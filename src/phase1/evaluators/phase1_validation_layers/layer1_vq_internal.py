@@ -28,7 +28,7 @@ from src.utils import nan_value as _nan
 from ...metrics import (
     CodeAssignmentSnapshot,
     Phase1EvaluationSnapshot,
-    Phase1LayerComputation,
+    Phase1VQInternalComputation,
     Phase1VQInternalPayload,
     Phase1VQInternalMetrics,
     Phase1ValidationRuntimeConfig,
@@ -538,7 +538,7 @@ def compute_vq_internal_metrics(
     val_snapshot: Phase1EvaluationSnapshot,
     assignment_history: Sequence[CodeAssignmentSnapshot],
     runtime_config: Phase1ValidationRuntimeConfig,
-) -> Phase1LayerComputation:
+) -> Phase1VQInternalComputation:
     """计算 Layer 1 VQ 内部质量 raw metrics。
 
     功能说明:
@@ -552,7 +552,7 @@ def compute_vq_internal_metrics(
         runtime_config: validation 运行参数，提供 active/dead code 和 churn window 配置。
 
     输出:
-        ``Phase1LayerComputation``，其中 ``metrics`` 为
+        ``Phase1VQInternalComputation``，其中 ``metrics`` 为
         ``Phase1VQInternalMetrics``，``vq_internal_payload`` 包含当前 assignment snapshot
         和辅助诊断元数据。
 
@@ -668,9 +668,7 @@ def compute_vq_internal_metrics(
         and np.isfinite(train_quantization_distance)
         else _nan(),
     )
-    return Phase1LayerComputation(
-        layer_id=1,
-        layer_name="vq_internal",
+    return Phase1VQInternalComputation(
         metrics=metrics,
         vq_internal_payload=payload,
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from ...metrics import (
+    Phase2Layer1SelectorProfitabilityComputation,
     Phase2LayerComputation,
     Phase2SelectorProfitabilityMetrics,
     Phase2SelectorProfitabilityPayload,
@@ -81,9 +82,7 @@ def compute_selector_profitability_metrics(
         fee_drag_ratio=safe_ratio(mean_fee, abs(mean_gross_return)),
         mean_turnover=safe_mean(turnover),
     )
-    return Phase2LayerComputation(
-        layer_id=1,
-        layer_name="selector_profitability",
+    return Phase2Layer1SelectorProfitabilityComputation(
         metrics=metrics,
         selector_profitability_payload=payload,
     )

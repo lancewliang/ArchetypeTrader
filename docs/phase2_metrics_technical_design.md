@@ -73,7 +73,13 @@ src/phase2/metrics/phase2_metric_results.py
 - `Phase2ValidationMetrics`
 - `Phase2ValidationResult`
 - `Phase2ValidationPayloads`
-- `Phase2LayerComputation`
+- `Phase2Layer0EvaluationValidityComputation`
+- `Phase2Layer1SelectorProfitabilityComputation`
+- `Phase2Layer2BaselineUpliftComputation`
+- `Phase2Layer3DemonstrationConsistencyComputation`
+- `Phase2Layer4CodeUsageCollapseComputation`
+- `Phase2Layer5GeneralizationStabilityComputation`
+- `Phase2LayerComputation` union
 
 `Phase2ValidationResult` 保存三类结果：
 
@@ -381,7 +387,7 @@ Layer 5 当前作为 warning/reference 层，默认不阻断 checkpoint selectio
 3. 在 `Phase2ValidationResult` 中写入：
    - `metrics`: checkpoint selector 需要的稳定排序字段。
    - `layers`: hard-gate/reference layer 判定结果。
-   - `layer_computations`: Layer 0-5 强类型 raw metrics 和本层 payload。
+   - `layer_computations`: Layer 0-5 各自的强类型 computation 对象。
    - `payloads`: report 聚合 payload。
 
 ## 6. 报表 payload 边界

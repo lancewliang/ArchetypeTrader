@@ -31,7 +31,7 @@ from src.utils import ActionExecutionCalculator, ActionExecutionResult, nan_valu
 
 from ...metrics import (
     Phase1EvaluationSnapshot,
-    Phase1LayerComputation,
+    Phase1OracleProfitabilityComputation,
     Phase1OracleProfitabilityMetrics,
     Phase1OracleProfitabilityPayload,
     Phase1OracleProfitabilityThresholds,
@@ -86,7 +86,7 @@ def _missing_prices_computation(
     val_snapshot: Phase1EvaluationSnapshot,
     *,
     random_seed: int,
-) -> Phase1LayerComputation:
+) -> Phase1OracleProfitabilityComputation:
     """构造缺失价格时的 skip-as-fail Layer 3 结果。"""
 
     missing_returns = _nan_array_like(val_snapshot.code_ids)
@@ -107,9 +107,7 @@ def _missing_prices_computation(
         random_label_risk_adjusted_return=_nan(),
         risk_adjusted_return_vs_random=_nan(),
     )
-    return Phase1LayerComputation(
-        layer_id=3,
-        layer_name="oracle_profitability",
+    return Phase1OracleProfitabilityComputation(
         metrics=metrics,
         oracle_profitability_payload=Phase1OracleProfitabilityPayload(
             per_code_profitability=tuple(),
@@ -672,7 +670,7 @@ def compute_oracle_profitability_metrics(
     runtime_config: Phase1ValidationRuntimeConfig,
     device: torch.device | str,
     thresholds: Phase1OracleProfitabilityThresholds | None = None,
-) -> Phase1LayerComputation:
+) -> Phase1OracleProfitabilityComputation:
     """计算 Layer 3 oracle assigned-label 盈利性 raw metrics。
 
     功能说明:
@@ -690,7 +688,7 @@ def compute_oracle_profitability_metrics(
             的 ``passed`` 字段；不传则使用默认阈值。
 
     输出:
-        ``Phase1LayerComputation``，其中 ``metrics`` 为
+        ``Phase1OracleProfitabilityComputation``，其中 ``metrics`` 为
         ``Phase1OracleProfitabilityMetrics``，``oracle_profitability_payload`` 包含 per-code
         profitability、decoded/DP/flat/random returns 和 random seed。
 
@@ -803,9 +801,7 @@ def compute_oracle_profitability_metrics(
             else _nan()
         ),
     )
-    return Phase1LayerComputation(
-        layer_id=3,
-        layer_name="oracle_profitability",
+    return Phase1OracleProfitabilityComputation(
         metrics=metrics,
         oracle_profitability_payload=Phase1OracleProfitabilityPayload(
             per_code_profitability=per_code,

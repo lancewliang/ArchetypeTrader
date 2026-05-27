@@ -7,6 +7,7 @@ import numpy as np
 from ...metrics import (
     Phase2DemonstrationConsistencyMetrics,
     Phase2DemonstrationConsistencyPayload,
+    Phase2Layer3DemonstrationConsistencyComputation,
     Phase2LayerComputation,
 )
 from src.utils._numeric import as_float_array, nan_value, safe_mean
@@ -86,9 +87,7 @@ def compute_demonstration_consistency_metrics(
         unprofitable_deviation_rate=unprofitable_deviation_rate,
         deviation_return_delta=deviation_delta,
     )
-    return Phase2LayerComputation(
-        layer_id=3,
-        layer_name="demonstration_consistency",
+    return Phase2Layer3DemonstrationConsistencyComputation(
         metrics=metrics,
         demonstration_consistency_payload=payload,
     )

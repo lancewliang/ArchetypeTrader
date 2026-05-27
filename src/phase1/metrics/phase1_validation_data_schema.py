@@ -20,10 +20,10 @@
 
 from __future__ import annotations
 
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 import numpy as np
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from src.utils import PydanticBaseModel
 from .phase1_validation_behavior_quality import (
@@ -210,56 +210,61 @@ class Phase1TieBreakerMetrics(PydanticBaseModel):
     reconstruction_loss: float
 
 
-Phase1LayerMetrics: TypeAlias = (
-    Phase1TeacherQualityMetrics
-    | Phase1VQInternalMetrics
-    | Phase1BehaviorQualityMetrics
-    | Phase1OracleProfitabilityMetrics
-    | Phase1LabelPredictabilityMetrics
-)
-"""单个 validation layer calculator 输出的强类型 metrics 类型。"""
-
-
-class Phase1LayerComputation(PydanticBaseModel):
-    """单个 validation layer 的 raw metric 计算结果。
-
-    功能说明:
-        五个 ``phase1_validation_layers/layer*.py`` 文件只负责 raw metric 计算，
-        不做 hard gate pass/fail 判定。该对象把本层强类型 metrics、可选
-        code-level diagnostics 和后续 layer 需要复用的额外 payload 打包返回。
-
-    使用场景:
-        ``Phase1CodebookEvaluator`` 调用 layer calculator 后，读取 ``metrics``
-        交给 ``phase1_validation_rules.py``，并把 ``code_diagnostics`` 和各层
-        强类型 payload 合并进 checkpoint/report payload。
-    """
+class Phase1LayerComputationBase(PydanticBaseModel):
+    """单个 validation layer raw metric 计算结果的公共字段。"""
 
     # layer 数字编号，0 到 4。
     layer_id: int
-
     # layer 稳定名称，例如 "teacher_quality"。
     layer_name: str
 
-    # 本层强类型 raw metrics。
-    metrics: Phase1LayerMetrics
 
-    # 可选 code-level 诊断表，主要由 layer2/layer3 填充。
+
+class Phase1TeacherQualityComputation(Phase1LayerComputationBase):
+    """Layer 0 DP teacher 质量 raw metric 计算结果。"""
+
+    layer_id: Literal[0] = 0
+    layer_name: Literal["teacher_quality"] = "teacher_quality"
+    metrics: Phase1TeacherQualityMetrics
+    teacher_quality_payload: Phase1TeacherQualityPayload
+
+
+class Phase1VQInternalComputation(Phase1LayerComputationBase):
+    """Layer 1 VQ 内部质量 raw metric 计算结果。"""
+
+    layer_id: Literal[1] = 1
+    layer_name: Literal["vq_internal"] = "vq_internal"
+    metrics: Phase1VQInternalMetrics
+    vq_internal_payload: Phase1VQInternalPayload
+
+
+class Phase1BehaviorQualityComputation(Phase1LayerComputationBase):
+    """Layer 2 archetype 行为质量 raw metric 计算结果。"""
+
+    layer_id: Literal[2] = 2
+    layer_name: Literal["behavior_quality"] = "behavior_quality"
+    metrics: Phase1BehaviorQualityMetrics
+    # Layer 2 code-level 诊断表。
     code_diagnostics: tuple[Phase1CodeDiagnostic, ...] = ()
+    behavior_quality_payload: Phase1BehaviorQualityPayload
 
-    # 第零层 teacher quality 中间 payload。
-    teacher_quality_payload: Phase1TeacherQualityPayload | None = None
 
-    # 第一层 VQ internal 中间 payload。
-    vq_internal_payload: Phase1VQInternalPayload | None = None
+class Phase1OracleProfitabilityComputation(Phase1LayerComputationBase):
+    """Layer 3 oracle assigned-label 盈利性 raw metric 计算结果。"""
 
-    # 第二层 behavior quality 中间 payload。
-    behavior_quality_payload: Phase1BehaviorQualityPayload | None = None
+    layer_id: Literal[3] = 3
+    layer_name: Literal["oracle_profitability"] = "oracle_profitability"
+    metrics: Phase1OracleProfitabilityMetrics
+    oracle_profitability_payload: Phase1OracleProfitabilityPayload
 
-    # 第三层 oracle profitability 中间 payload。
-    oracle_profitability_payload: Phase1OracleProfitabilityPayload | None = None
 
-    # 第四层 label predictability 中间 payload。
-    label_predictability_payload: Phase1LabelPredictabilityPayload | None = None
+class Phase1LabelPredictabilityComputation(Phase1LayerComputationBase):
+    """Layer 4 assigned-label 可预测性 raw metric 计算结果。"""
+
+    layer_id: Literal[4] = 4
+    layer_name: Literal["label_predictability"] = "label_predictability"
+    metrics: Phase1LabelPredictabilityMetrics
+    label_predictability_payload: Phase1LabelPredictabilityPayload
 
 class Phase1ValidationMetrics(PydanticBaseModel):
     """五层 validation raw metrics 聚合对象。
@@ -292,18 +297,22 @@ __all__ = [
     "CodeAssignmentSnapshot",
     "Phase1BehaviorQualityMetrics",
     "Phase1BehaviorQualityPayload",
+    "Phase1BehaviorQualityComputation",
     "Phase1CodeDiagnostic",
     "Phase1EvaluationSnapshot",
+    "Phase1LabelPredictabilityComputation",
     "Phase1LabelPredictabilityMetrics",
     "Phase1LabelPredictabilityPayload",
-    "Phase1LayerComputation",
-    "Phase1LayerMetrics",
+    "Phase1LayerComputationBase",
+    "Phase1OracleProfitabilityComputation",
     "Phase1OracleProfitabilityMetrics",
     "Phase1OracleProfitabilityPayload",
     "Phase1PerCodeProfitability",
+    "Phase1TeacherQualityComputation",
     "Phase1TeacherQualityMetrics",
     "Phase1TeacherQualityPayload",
     "Phase1TieBreakerMetrics",
+    "Phase1VQInternalComputation",
     "Phase1VQInternalMetrics",
     "Phase1ValidationMetrics",
 ]
