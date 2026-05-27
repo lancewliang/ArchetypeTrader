@@ -6,13 +6,14 @@ from dataclasses import dataclass
 import math
 from typing import Any, Mapping
 
+from src.analysis.analysis_code_distribution import build_code_distribution_context
+
 from .phase1_codebook_report_schema import (
     Phase1CodebookReportDocument,
     Phase1CodebookReportHtmlContext,
     Phase1ReportChartGridLine,
     Phase1ReportChartSeries,
     Phase1ReportCodeDiagnosticView,
-    Phase1ReportCodeDistributionRow,
     Phase1ReportHeader,
     Phase1ReportHeaderItem,
     Phase1ReportKpiRow,
@@ -411,11 +412,11 @@ class Phase1CodebookReportContextBuilder:
                     oracle_profitability_payload
                 )
             ),
-            code_distribution=self._build_code_distribution_context(
+            code_distribution_view=build_code_distribution_context(
                 vq_internal_payload
             )
             if vq_internal_payload is not None
-            else (),
+            else None,
             tie_breaker_rows=self._build_mapping_rows(
                 validation.tie_breaker_metrics.to_dict(),
                 descriptions=_METRIC_DESCRIPTIONS,
@@ -663,36 +664,6 @@ class Phase1CodebookReportContextBuilder:
             fee_drag=_format_value(item.fee_drag),
             status=item.status,
             badge_class=_badge_class(item.status),
-        )
-
-    def _build_code_distribution_context(
-        self,
-        payload: Phase1VQInternalPayload,
-    ) -> tuple[Phase1ReportCodeDistributionRow, ...]:
-        """构建 codebook 使用分布的模板上下文。"""
-
-        distribution = [float(value) for value in payload.code_distribution]
-        active_codes = {int(code_id) for code_id in payload.active_codes}
-
-        return tuple(
-            Phase1ReportCodeDistributionRow(
-                code_id=str(code_id),
-                occupancy=_format_value(occupancy),
-                occupancy_percent=(
-                    f"{occupancy * 100:.3g}%"
-                    if math.isfinite(occupancy)
-                    else _format_value(occupancy)
-                ),
-                bar_width=(
-                    f"{max(0.0, min(100.0, occupancy * 100.0)):.3g}%"
-                    if math.isfinite(occupancy)
-                    else "0%"
-                ),
-                active=code_id in active_codes,
-                badge_class="pass" if code_id in active_codes else "warn",
-                status_label="ACTIVE" if code_id in active_codes else "INACTIVE",
-            )
-            for code_id, occupancy in enumerate(distribution)
         )
 
     def _build_risk_finding_context(

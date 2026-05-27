@@ -17,6 +17,7 @@ from typing import Any, Mapping, TypeAlias, cast
 
 from pydantic import Field
 
+from src.analysis.analysis_code_distribution import CodeDistributionView
 from src.utils import PydanticMappingModel
 
 from ..metrics import (
@@ -424,36 +425,6 @@ class Phase1ReportProfitSeriesRow:
 
 
 @dataclass(frozen=True)
-class Phase1ReportCodeDistributionRow:
-    """codebook 使用分布行。
-
-    作用：
-        用于展示每个 code 的 occupancy、active/inactive 状态和条形宽度。
-    """
-
-    # code id。
-    code_id: str
-
-    # occupancy 原始展示值。
-    occupancy: str
-
-    # occupancy 百分比展示值。
-    occupancy_percent: str
-
-    # HTML/CSS 条形图宽度。
-    bar_width: str
-
-    # 该 code 是否 active。
-    active: bool
-
-    # active 状态 badge CSS class。
-    badge_class: str
-
-    # ACTIVE/INACTIVE 展示文本。
-    status_label: str
-
-
-@dataclass(frozen=True)
 class Phase1ReportLabelTip:
     """带 tooltip 说明的短标签。"""
 
@@ -724,8 +695,8 @@ class Phase1CodebookReportHtmlContext(PydanticMappingModel):
     # morphology x motif 盈利矩阵。
     pair_profitability_matrix: Phase1ReportPairProfitabilityMatrix
 
-    # codebook occupancy 分布。
-    code_distribution: tuple[Phase1ReportCodeDistributionRow, ...]
+    # codebook 使用分布视图。
+    code_distribution_view: CodeDistributionView | None = None
 
     # tie-breaker metric 行。
     tie_breaker_rows: tuple[Phase1ReportMappingRow, ...]
@@ -783,7 +754,6 @@ __all__ = [
     "Phase1ReportLabelTip",
     "Phase1ReportKpiRow",
     "Phase1ReportProfitSeriesRow",
-    "Phase1ReportCodeDistributionRow",
     "Phase1ReportScoreBreakdownRow",
     "Phase1ReportChartGridLine",
     "Phase1ReportChartSeries",

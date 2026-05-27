@@ -375,6 +375,31 @@
     .bar-fill.fail { background: var(--fail); }
     .bar-fill.skip { background: var(--skip); }
 
+    .usage-lines {
+      display: grid;
+      gap: 6px;
+      min-width: 180px;
+    }
+
+    .usage-line {
+      display: grid;
+      grid-template-columns: 76px minmax(96px, 1fr) 52px;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .usage-line .bar-track {
+      min-width: 0;
+      height: 8px;
+    }
+
+    .bar-fill.vp-demo { background: var(--blue); }
+    .bar-fill.best-code { background: var(--pass); }
+    .bar-fill.selector { background: var(--rose); }
+
     .kpi-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -763,29 +788,57 @@
       </article>
       {% endif %}
 
-      {% if code_distribution %}
+      {% if code_distribution_view and code_distribution_view.code_usage_rows %}
       <article class="panel">
         <div class="panel-head">
-          <h2><span class="metric-with-tip">Codebook 使用分布 <span class="note">Usage Distribution</span><span class="tip" tabindex="0" data-tip="展示 validation 样本被分配到各 code 的比例。健康状态是多数 code 都有稳定使用，但没有单个 code 占据过大比例。">?</span></span></h2>
-          <span class="note">K {{ header.k }}，N_val {{ header.n_val }}</span>
+          <h2><span class="metric-with-tip">Codebook 使用分布 <span class="note">Usage Distribution</span><span class="tip" tabindex="0" data-tip="展示 validation 样本被分配到各 code 的比例。Phase I 当前使用 assigned occupancy 构建 VP demo 与 active best-code 视图；selector 线预留给 Phase II selector usage。">?</span></span></h2>
+          <span class="note">K {{ code_distribution_view.total_code_count }}，N_val {{ code_distribution_view.totals_sample_count }}</span>
         </div>
         <div class="table-scroll">
           <table>
             <thead>
               <tr>
                 <th>Code</th>
-                <th class="num">占用率 Occupancy</th>
-                <th>使用量 Usage</th>
+                <th class="num">VP Demo</th>
+                <th class="num">Best Code</th>
+                <th class="num">Selector</th>
+                <th>三线 Usage</th>
                 <th>状态 Status</th>
               </tr>
             </thead>
             <tbody>
-              {% for row in code_distribution %}
+              {% for row in code_distribution_view.code_usage_rows %}
               <tr>
                 <td>code {{ row.code_id }}</td>
-                <td class="num">{{ row.occupancy_percent }}</td>
-                <td><div class="bar-track"><div class="bar-fill {{ row.badge_class }}" style="width: {{ row.bar_width }}"></div></div></td>
-                <td><span class="badge {{ row.badge_class }}">{{ row.status_label }}</span></td>
+                <td class="num">{{ row.vp_demo_sample_count }} / {{ row.vp_demo_sample_ratio }}%</td>
+                <td class="num">{{ row.best_code_sample_count }} / {{ row.best_code_sample_ratio }}%</td>
+                <td class="num">{{ row.selector_sample_count }} / {{ row.selector_sample_ratio }}%</td>
+                <td>
+                  <div class="usage-lines">
+                    <div class="usage-line">
+                      <span>VP demo</span>
+                      <div class="bar-track"><div class="bar-fill vp-demo" style="width: {{ row.vp_demo_sample_ratio }}%"></div></div>
+                      <span>{{ row.vp_demo_sample_ratio }}%</span>
+                    </div>
+                    <div class="usage-line">
+                      <span>Best</span>
+                      <div class="bar-track"><div class="bar-fill best-code" style="width: {{ row.best_code_sample_ratio }}%"></div></div>
+                      <span>{{ row.best_code_sample_ratio }}%</span>
+                    </div>
+                    <div class="usage-line">
+                      <span>Selector</span>
+                      <div class="bar-track"><div class="bar-fill selector" style="width: {{ row.selector_sample_ratio }}%"></div></div>
+                      <span>{{ row.selector_sample_ratio }}%</span>
+                    </div>
+                  </div>
+                </td>
+                <td>
+                  {% if row.active %}
+                  <span class="badge pass">ACTIVE</span>
+                  {% else %}
+                  <span class="badge warn">INACTIVE</span>
+                  {% endif %}
+                </td>
               </tr>
               {% endfor %}
             </tbody>
