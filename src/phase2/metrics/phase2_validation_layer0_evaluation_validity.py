@@ -6,9 +6,10 @@ hard gate 失败都表示该 checkpoint 的评估结果不可用于 best checkpo
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.utils import PydanticBaseModel
+from .phase2_layer_computation import Phase2LayerComputationBase
 from .phase2_validation_rule_helpers import (
     _build_layer_result,
     _eq_bool,
@@ -48,6 +49,7 @@ class Phase2EvaluationValidityPayload(PydanticBaseModel):
     # 不直接作为好坏排序。
     num_archetypes: int
 
+
 class Phase2EvaluationValidityMetrics(PydanticBaseModel):
     """Layer 0 evaluation validity raw metrics。"""
 
@@ -78,6 +80,16 @@ class Phase2EvaluationValidityMetrics(PydanticBaseModel):
     # selector observation 是否只包含在线可见信息。用途：防止未来信息泄露；
     # 方向：必须等于 True。
     visible_state_contract_valid: bool
+
+
+class Phase2Layer0EvaluationValidityComputation(Phase2LayerComputationBase):
+    """Layer 0 evaluation validity 的 raw metrics 和过程 payload。"""
+
+    layer_id: Literal[0] = 0
+    layer_name: Literal["evaluation_validity"] = "evaluation_validity"
+    metrics: Phase2EvaluationValidityMetrics
+    evaluation_validity_payload: Phase2EvaluationValidityPayload
+
 
 class Phase2EvaluationValidityThresholds(PydanticBaseModel):
     """Layer 0 evaluation validity 阈值配置。"""
@@ -169,6 +181,7 @@ def evaluate_evaluation_validity_rules(
 
 
 __all__ = [
+    "Phase2Layer0EvaluationValidityComputation",
     "Phase2EvaluationValidityMetrics",
     "Phase2EvaluationValidityPayload",
     "Phase2EvaluationValidityThresholds",

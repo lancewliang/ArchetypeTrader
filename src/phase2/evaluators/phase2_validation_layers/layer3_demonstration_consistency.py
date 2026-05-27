@@ -8,7 +8,6 @@ from ...metrics import (
     Phase2DemonstrationConsistencyMetrics,
     Phase2DemonstrationConsistencyPayload,
     Phase2Layer3DemonstrationConsistencyComputation,
-    Phase2LayerComputation,
 )
 from src.utils._numeric import as_float_array, nan_value, safe_mean
 
@@ -18,7 +17,7 @@ def compute_demonstration_consistency_metrics(
     *,
     cross_entropy_to_assigned: float = float("nan"),
     kl_to_assigned_onehot: float = float("nan"),
-) -> Phase2LayerComputation:
+) -> Phase2Layer3DemonstrationConsistencyComputation:
     """Compute selector consistency with Phase I assigned labels.
 
     算法:

@@ -8,7 +8,6 @@ from ...metrics import (
     Phase2BaselineUpliftMetrics,
     Phase2BaselineUpliftPayload,
     Phase2Layer2BaselineUpliftComputation,
-    Phase2LayerComputation,
 )
 from src.utils._numeric import (
     as_float_array,
@@ -21,7 +20,7 @@ from src.utils._numeric import (
 
 def compute_baseline_uplift_metrics(
     payload: Phase2BaselineUpliftPayload,
-) -> Phase2LayerComputation:
+) -> Phase2Layer2BaselineUpliftComputation:
     """Compute selector uplift versus assigned-label, random and oracle baselines.
 
     算法:

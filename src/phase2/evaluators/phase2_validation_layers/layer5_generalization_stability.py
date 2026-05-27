@@ -10,7 +10,6 @@ from ...metrics import (
     Phase2GeneralizationStabilityMetrics,
     Phase2GeneralizationStabilityPayload,
     Phase2Layer5GeneralizationStabilityComputation,
-    Phase2LayerComputation,
     Phase2PredictabilityMetrics,
     Phase2PredictabilityPayload,
 )
@@ -68,7 +67,7 @@ def compute_generalization_stability_metrics(
     imitation_loss_history: tuple[float, ...] = (),
     reward_mean_history: tuple[float, ...] = (),
     predictability_metrics: Phase2PredictabilityMetrics | None = None,
-) -> Phase2LayerComputation:
+) -> Phase2Layer5GeneralizationStabilityComputation:
     """Compute Layer 5 stability diagnostics from aggregate histories.
 
     算法:

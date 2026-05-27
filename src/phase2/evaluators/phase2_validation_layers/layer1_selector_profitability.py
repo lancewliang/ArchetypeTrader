@@ -6,7 +6,6 @@ import numpy as np
 
 from ...metrics import (
     Phase2Layer1SelectorProfitabilityComputation,
-    Phase2LayerComputation,
     Phase2SelectorProfitabilityMetrics,
     Phase2SelectorProfitabilityPayload,
 )
@@ -25,7 +24,7 @@ from src.utils._numeric import (
 
 def compute_selector_profitability_metrics(
     payload: Phase2SelectorProfitabilityPayload,
-) -> Phase2LayerComputation:
+) -> Phase2Layer1SelectorProfitabilityComputation:
     """Compute selector return, risk, fee and turnover metrics.
 
     算法:

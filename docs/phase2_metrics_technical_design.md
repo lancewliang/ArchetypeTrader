@@ -18,6 +18,7 @@
 
 ```text
 src/phase2/metrics/__init__.py
+src/phase2/metrics/phase2_layer_computation.py
 src/phase2/metrics/phase2_metric_results.py
 src/phase2/metrics/phase2_validation_rule_helpers.py
 src/phase2/metrics/phase2_validation_layer0_evaluation_validity.py
@@ -73,13 +74,15 @@ src/phase2/metrics/phase2_metric_results.py
 - `Phase2ValidationMetrics`
 - `Phase2ValidationResult`
 - `Phase2ValidationPayloads`
+
+各层 `Computation` 类型放在对应 `phase2_validation_layer*.py` 文件中：
+
 - `Phase2Layer0EvaluationValidityComputation`
 - `Phase2Layer1SelectorProfitabilityComputation`
 - `Phase2Layer2BaselineUpliftComputation`
 - `Phase2Layer3DemonstrationConsistencyComputation`
 - `Phase2Layer4CodeUsageCollapseComputation`
 - `Phase2Layer5GeneralizationStabilityComputation`
-- `Phase2LayerComputation` union
 
 `Phase2ValidationResult` 保存三类结果：
 

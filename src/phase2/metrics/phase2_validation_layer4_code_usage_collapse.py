@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.utils import PydanticBaseModel
+from .phase2_layer_computation import Phase2LayerComputationBase
 from .phase2_validation_rule_helpers import (
     _build_layer_result,
     _ge,
@@ -57,6 +58,7 @@ class Phase2PerCodeUsageDiagnostic(PydanticBaseModel):
     # 忽略的盈利 archetype；方向：False 更好。
     is_dead_profitable: bool
 
+
 class Phase2CodeUsageCollapsePayload(PydanticBaseModel):
     """Layer 4 raw metrics 计算的中间 payload。"""
 
@@ -71,6 +73,7 @@ class Phase2CodeUsageCollapsePayload(PydanticBaseModel):
     # per-code 使用和收益诊断。用途：report 展示和 dead profitable code 定位；
     # 方向：由每个 diagnostic 字段定义。
     per_code_diagnostics: tuple[Phase2PerCodeUsageDiagnostic, ...] = ()
+
 
 class Phase2CodeUsageCollapseMetrics(PydanticBaseModel):
     """Layer 4 code usage and collapse raw metrics。"""
@@ -109,6 +112,17 @@ class Phase2CodeUsageCollapseMetrics(PydanticBaseModel):
     # active/per-code 统计中的最小样本数。用途：判断 per-code return 可靠性；
     # 方向：越大越可靠。
     min_per_code_sample_count: int
+
+
+class Phase2Layer4CodeUsageCollapseComputation(Phase2LayerComputationBase):
+    """Layer 4 code usage/collapse 的 raw metrics 和诊断 payload。"""
+
+    layer_id: Literal[4] = 4
+    layer_name: Literal["code_usage_collapse"] = "code_usage_collapse"
+    metrics: Phase2CodeUsageCollapseMetrics
+    code_usage_collapse_payload: Phase2CodeUsageCollapsePayload
+    per_code_diagnostics: tuple[Phase2PerCodeUsageDiagnostic, ...] = ()
+
 
 class Phase2CodeUsageCollapseThresholds(PydanticBaseModel):
     """Layer 4 code usage and collapse 阈值配置。"""
@@ -214,6 +228,7 @@ def evaluate_code_usage_collapse_rules(
 
 
 __all__ = [
+    "Phase2Layer4CodeUsageCollapseComputation",
     "Phase2CodeUsageCollapseMetrics",
     "Phase2CodeUsageCollapsePayload",
     "Phase2CodeUsageCollapseThresholds",

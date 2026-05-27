@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.utils import PydanticBaseModel
+from .phase2_layer_computation import Phase2LayerComputationBase
 from .phase2_validation_rule_helpers import (
     _build_layer_result,
     _ge,
@@ -82,6 +83,15 @@ class Phase2SelectorProfitabilityMetrics(PydanticBaseModel):
     # 平均换手率或行为强度。用途：诊断过度交易和成本风险；方向：通常越小越稳，
     # 但过低需结合 return 判断是否退化。
     mean_turnover: float
+
+
+class Phase2Layer1SelectorProfitabilityComputation(Phase2LayerComputationBase):
+    """Layer 1 selector profitability 的 raw metrics 和过程 payload。"""
+
+    layer_id: Literal[1] = 1
+    layer_name: Literal["selector_profitability"] = "selector_profitability"
+    metrics: Phase2SelectorProfitabilityMetrics
+    selector_profitability_payload: Phase2SelectorProfitabilityPayload
 
 
 class Phase2SelectorProfitabilityThresholds(PydanticBaseModel):
@@ -184,6 +194,7 @@ def evaluate_selector_profitability_rules(
 
 
 __all__ = [
+    "Phase2Layer1SelectorProfitabilityComputation",
     "Phase2SelectorProfitabilityMetrics",
     "Phase2SelectorProfitabilityPayload",
     "Phase2SelectorProfitabilityThresholds",

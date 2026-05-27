@@ -17,7 +17,7 @@
 """
 
 from __future__ import annotations
-from typing import Literal, TypeAlias
+from typing import Literal
 from pydantic import Field
 from src.utils import PydanticBaseModel
 
@@ -25,52 +25,37 @@ MetricSeverity = Literal["pass", "warn", "fail", "skip"]
 MetricDirection = Literal["greater_is_better", "less_is_better", "between", "equal"]
 MetricThresholdValue = float | tuple[float, float] | bool | None
 
- 
 from .phase2_validation_layer0_evaluation_validity import (
+    Phase2Layer0EvaluationValidityComputation,
     Phase2EvaluationValidityPayload,
     Phase2EvaluationValidityMetrics,
 )
 from .phase2_validation_layer1_selector_profitability import (
+    Phase2Layer1SelectorProfitabilityComputation,
     Phase2SelectorProfitabilityPayload,
     Phase2SelectorProfitabilityMetrics,
 )
 from .phase2_validation_layer2_baseline_uplift import (
+    Phase2Layer2BaselineUpliftComputation,
     Phase2BaselineUpliftPayload,
     Phase2BaselineUpliftMetrics,
 )
 from .phase2_validation_layer3_demonstration_consistency import (
+    Phase2Layer3DemonstrationConsistencyComputation,
     Phase2DemonstrationConsistencyPayload,
     Phase2DemonstrationConsistencyMetrics,
 )
 from .phase2_validation_layer4_code_usage_collapse import (
+    Phase2Layer4CodeUsageCollapseComputation,
     Phase2CodeUsageCollapsePayload,
     Phase2CodeUsageCollapseMetrics,
     Phase2PerCodeUsageDiagnostic,
 )
 from .phase2_validation_layer5_generalization_stability import (
+    Phase2Layer5GeneralizationStabilityComputation,
     Phase2GeneralizationStabilityPayload,
-    Phase2PredictabilityPayload,
     Phase2GeneralizationStabilityMetrics,
 )
-
-Phase2LayerMetrics: TypeAlias = (
-    Phase2EvaluationValidityMetrics
-    | Phase2SelectorProfitabilityMetrics
-    | Phase2BaselineUpliftMetrics
-    | Phase2DemonstrationConsistencyMetrics
-    | Phase2CodeUsageCollapseMetrics
-    | Phase2GeneralizationStabilityMetrics
-)
-Phase2LayerPayload: TypeAlias = (
-    Phase2EvaluationValidityPayload
-    | Phase2SelectorProfitabilityPayload
-    | Phase2BaselineUpliftPayload
-    | Phase2DemonstrationConsistencyPayload
-    | Phase2CodeUsageCollapsePayload
-    | Phase2GeneralizationStabilityPayload
-    | Phase2PredictabilityPayload
-)
- 
 
 
 class Phase2MetricResult(PydanticBaseModel):
@@ -321,7 +306,15 @@ class Phase2ValidationResult(PydanticBaseModel):
 
     # Layer 0-5 强类型 raw metrics 和本层中间 payload。用途：完整审计每层聚合
     # 指标；方向：由具体 metrics 字段定义。
-    layer_computations: tuple[Phase2LayerComputation, ...] = ()
+    layer_computations: tuple[
+        Phase2Layer0EvaluationValidityComputation
+        | Phase2Layer1SelectorProfitabilityComputation
+        | Phase2Layer2BaselineUpliftComputation
+        | Phase2Layer3DemonstrationConsistencyComputation
+        | Phase2Layer4CodeUsageCollapseComputation
+        | Phase2Layer5GeneralizationStabilityComputation,
+        ...,
+    ] = ()
 
     # 报表和诊断卡片复用的聚合 payload。用途：HTML/JSON report 展示；方向：
     # 展示数据，无直接排序方向。
@@ -329,114 +322,10 @@ class Phase2ValidationResult(PydanticBaseModel):
  
 
 
-class Phase2LayerComputationBase(PydanticBaseModel):
-    """单个 Phase II validation layer computation 的公共字段。
-
-    各 ``phase2_validation_layers/layer*.py`` 文件只负责 raw metric 计算，不做
-    hard gate pass/fail 判定。rules 层后续读取 ``metrics`` 并生成
-    ``Phase2LayerResult``。
-    """
-
-    # layer 数字编号，0 到 5。用途：固定 layer 顺序；方向：无好坏方向。
-    layer_id: int
-
-    # layer 稳定名称，例如 "selector_profitability"。用途：反序列化和 report
-    # 分组；方向：无好坏方向。
-    layer_name: str
-
-    # 本层强类型 raw metrics。用途：保存 evaluator 已计算的原始聚合指标；
-    # 方向：由具体 layer metrics 字段定义。
-    metrics: Phase2LayerMetrics
-
-
-class Phase2Layer0EvaluationValidityComputation(Phase2LayerComputationBase):
-    """Layer 0 evaluation validity 的 raw metrics 和过程 payload。"""
-
-    layer_id: Literal[0] = 0
-    layer_name: Literal["evaluation_validity"] = "evaluation_validity"
-    metrics: Phase2EvaluationValidityMetrics
-    evaluation_validity_payload: Phase2EvaluationValidityPayload
-
-
-class Phase2Layer1SelectorProfitabilityComputation(Phase2LayerComputationBase):
-    """Layer 1 selector profitability 的 raw metrics 和过程 payload。"""
-
-    layer_id: Literal[1] = 1
-    layer_name: Literal["selector_profitability"] = "selector_profitability"
-    metrics: Phase2SelectorProfitabilityMetrics
-    selector_profitability_payload: Phase2SelectorProfitabilityPayload
-
-
-class Phase2Layer2BaselineUpliftComputation(Phase2LayerComputationBase):
-    """Layer 2 baseline uplift 的 raw metrics 和过程 payload。"""
-
-    layer_id: Literal[2] = 2
-    layer_name: Literal["baseline_uplift"] = "baseline_uplift"
-    metrics: Phase2BaselineUpliftMetrics
-    baseline_uplift_payload: Phase2BaselineUpliftPayload
-
-
-class Phase2Layer3DemonstrationConsistencyComputation(
-    Phase2LayerComputationBase
-):
-    """Layer 3 demonstration consistency 的 raw metrics 和过程 payload。"""
-
-    layer_id: Literal[3] = 3
-    layer_name: Literal["demonstration_consistency"] = (
-        "demonstration_consistency"
-    )
-    metrics: Phase2DemonstrationConsistencyMetrics
-    demonstration_consistency_payload: Phase2DemonstrationConsistencyPayload
-
-
-class Phase2Layer4CodeUsageCollapseComputation(Phase2LayerComputationBase):
-    """Layer 4 code usage/collapse 的 raw metrics 和诊断 payload。"""
-
-    layer_id: Literal[4] = 4
-    layer_name: Literal["code_usage_collapse"] = "code_usage_collapse"
-    metrics: Phase2CodeUsageCollapseMetrics
-    code_usage_collapse_payload: Phase2CodeUsageCollapsePayload
-    per_code_diagnostics: tuple[Phase2PerCodeUsageDiagnostic, ...] = ()
-
-
-class Phase2Layer5GeneralizationStabilityComputation(
-    Phase2LayerComputationBase
-):
-    """Layer 5 generalization/stability 的 raw metrics 和过程 payload。"""
-
-    layer_id: Literal[5] = 5
-    layer_name: Literal["generalization_stability"] = (
-        "generalization_stability"
-    )
-    metrics: Phase2GeneralizationStabilityMetrics
-    generalization_stability_payload: Phase2GeneralizationStabilityPayload
-
-
-Phase2LayerComputation: TypeAlias = (
-    Phase2Layer0EvaluationValidityComputation
-    | Phase2Layer1SelectorProfitabilityComputation
-    | Phase2Layer2BaselineUpliftComputation
-    | Phase2Layer3DemonstrationConsistencyComputation
-    | Phase2Layer4CodeUsageCollapseComputation
-    | Phase2Layer5GeneralizationStabilityComputation
-)
-"""Phase II 各层 layer computation 的统一类型。"""
-
-
 __all__ = [
     "MetricDirection",
     "MetricSeverity",
     "MetricThresholdValue",
-    "Phase2LayerComputation",
-    "Phase2LayerComputationBase",
-    "Phase2Layer0EvaluationValidityComputation",
-    "Phase2Layer1SelectorProfitabilityComputation",
-    "Phase2Layer2BaselineUpliftComputation",
-    "Phase2Layer3DemonstrationConsistencyComputation",
-    "Phase2Layer4CodeUsageCollapseComputation",
-    "Phase2Layer5GeneralizationStabilityComputation",
-    "Phase2LayerMetrics",
-    "Phase2LayerPayload",
     "Phase2LayerResult",
     "Phase2MetricResult",
     "Phase2ReportCodeCount",

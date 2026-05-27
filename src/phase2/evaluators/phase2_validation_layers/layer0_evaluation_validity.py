@@ -5,7 +5,6 @@ from __future__ import annotations
 from ...metrics import (
     Phase2EvaluationValidityMetrics,
     Phase2EvaluationValidityPayload,
-    Phase2LayerComputation,
     Phase2Layer0EvaluationValidityComputation,
 )
 
@@ -16,7 +15,7 @@ def compute_evaluation_validity_metrics(
     deterministic_eval: bool,
     label_alignment_valid: bool,
     visible_state_contract_valid: bool,
-) -> Phase2LayerComputation:
+) -> Phase2Layer0EvaluationValidityComputation:
     """Compute Layer 0 evaluation validity metrics from aggregate counts.
 
     算法:

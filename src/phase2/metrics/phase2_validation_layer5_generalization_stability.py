@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
 from src.utils import PydanticBaseModel
 
+from .phase2_layer_computation import Phase2LayerComputationBase
 from .phase2_validation_rule_helpers import (
     _build_layer_result,
     _ge,
@@ -131,6 +132,7 @@ class Phase2GeneralizationStabilityPayload(PydanticBaseModel):
     # 字段定义。
     predictability_payload: Phase2PredictabilityPayload | None = None
 
+
 class Phase2GeneralizationStabilityMetrics(PydanticBaseModel):
     """Layer 5 generalization and stability raw metrics。"""
 
@@ -183,6 +185,20 @@ class Phase2GeneralizationStabilityMetrics(PydanticBaseModel):
     # 可选可预测性 metrics。用途：说明 selector 选择是否可由可见状态解释；
     # 方向：由 Phase2PredictabilityMetrics 字段定义。
     predictability: Phase2PredictabilityMetrics | None = None
+
+
+class Phase2Layer5GeneralizationStabilityComputation(
+    Phase2LayerComputationBase
+):
+    """Layer 5 generalization/stability 的 raw metrics 和过程 payload。"""
+
+    layer_id: Literal[5] = 5
+    layer_name: Literal["generalization_stability"] = (
+        "generalization_stability"
+    )
+    metrics: Phase2GeneralizationStabilityMetrics
+    generalization_stability_payload: Phase2GeneralizationStabilityPayload
+
 
 class Phase2GeneralizationStabilityThresholds(PydanticBaseModel):
     """Layer 5 generalization and stability 阈值配置。"""
@@ -368,6 +384,7 @@ def _predictability_results(
 
 
 __all__ = [
+    "Phase2Layer5GeneralizationStabilityComputation",
     "Phase2GeneralizationStabilityMetrics",
     "Phase2GeneralizationStabilityPayload",
     "Phase2GeneralizationStabilityThresholds",

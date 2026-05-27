@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.utils import PydanticBaseModel
+from .phase2_layer_computation import Phase2LayerComputationBase
 from .phase2_validation_rule_helpers import (
     _build_layer_result,
     _ge,
@@ -37,6 +38,7 @@ class Phase2BaselineUpliftPayload(PydanticBaseModel):
 
     # random baseline 使用的随机种子。用途：复现实验；方向：过程数据，无好坏方向。
     random_seed: int | None = None
+
 
 class Phase2BaselineUpliftMetrics(PydanticBaseModel):
     """Layer 2 baseline uplift raw metrics。"""
@@ -80,6 +82,16 @@ class Phase2BaselineUpliftMetrics(PydanticBaseModel):
     # 样本级 selector_return > random_return 的比例。用途：检查是否多数优于随机；
     # 方向：越大越好。
     beat_random_rate: float
+
+
+class Phase2Layer2BaselineUpliftComputation(Phase2LayerComputationBase):
+    """Layer 2 baseline uplift 的 raw metrics 和过程 payload。"""
+
+    layer_id: Literal[2] = 2
+    layer_name: Literal["baseline_uplift"] = "baseline_uplift"
+    metrics: Phase2BaselineUpliftMetrics
+    baseline_uplift_payload: Phase2BaselineUpliftPayload
+
 
 class Phase2BaselineUpliftThresholds(PydanticBaseModel):
     """Layer 2 baseline uplift 阈值配置。"""
@@ -160,6 +172,7 @@ def evaluate_baseline_uplift_rules(
 
 
 __all__ = [
+    "Phase2Layer2BaselineUpliftComputation",
     "Phase2BaselineUpliftMetrics",
     "Phase2BaselineUpliftPayload",
     "Phase2BaselineUpliftThresholds",

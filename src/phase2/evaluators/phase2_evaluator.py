@@ -29,7 +29,7 @@ from ..metrics import (
     Phase2EvaluationValidityThresholds,
     Phase2GeneralizationStabilityPayload,
     Phase2GeneralizationStabilityThresholds,
-    Phase2LayerComputation,
+    Phase2LayerComputationBase,
     Phase2LayerResult,
     Phase2PerCodeUsageDiagnostic,
     Phase2ReportCodeCount,
@@ -498,7 +498,7 @@ class Phase2Evaluator:
 
     def _evaluate_layer_rules(
         self,
-        layer_computations: tuple[Phase2LayerComputation, ...],
+        layer_computations: tuple[Phase2LayerComputationBase, ...],
         *,
         num_archetypes: int,
     ) -> tuple[Phase2LayerResult, ...]:

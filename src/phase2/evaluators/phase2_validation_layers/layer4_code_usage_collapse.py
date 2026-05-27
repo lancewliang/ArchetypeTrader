@@ -10,7 +10,6 @@ from ...metrics import (
     Phase2CodeUsageCollapseMetrics,
     Phase2CodeUsageCollapsePayload,
     Phase2Layer4CodeUsageCollapseComputation,
-    Phase2LayerComputation,
     Phase2PerCodeUsageDiagnostic,
 )
 from src.utils._numeric import nan_value
@@ -21,7 +20,7 @@ def compute_code_usage_collapse_metrics(
     *,
     num_archetypes: int,
     train_label_distribution: tuple[float, ...] | None = None,
-) -> Phase2LayerComputation:
+) -> Phase2Layer4CodeUsageCollapseComputation:
     """Compute code usage entropy, collapse and distribution drift metrics.
 
     算法:

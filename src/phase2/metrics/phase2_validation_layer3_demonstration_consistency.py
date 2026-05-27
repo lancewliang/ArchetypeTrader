@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.utils import PydanticBaseModel
+from .phase2_layer_computation import Phase2LayerComputationBase
 from .phase2_validation_rule_helpers import (
     _between,
     _build_layer_result,
@@ -43,6 +44,7 @@ class Phase2DemonstrationConsistencyPayload(PydanticBaseModel):
     # baseline，无直接好坏方向。
     assigned_label_q_values: tuple[float, ...] = ()
 
+
 class Phase2DemonstrationConsistencyMetrics(PydanticBaseModel):
     """Layer 3 demonstration consistency raw metrics。"""
 
@@ -73,6 +75,20 @@ class Phase2DemonstrationConsistencyMetrics(PydanticBaseModel):
     # 仅在偏离样本上的 selector_return - assigned_return 平均值。用途：衡量偏离
     # 的平均收益质量；方向：越大越好。
     deviation_return_delta: float
+
+
+class Phase2Layer3DemonstrationConsistencyComputation(
+    Phase2LayerComputationBase
+):
+    """Layer 3 demonstration consistency 的 raw metrics 和过程 payload。"""
+
+    layer_id: Literal[3] = 3
+    layer_name: Literal["demonstration_consistency"] = (
+        "demonstration_consistency"
+    )
+    metrics: Phase2DemonstrationConsistencyMetrics
+    demonstration_consistency_payload: Phase2DemonstrationConsistencyPayload
+
 
 class Phase2DemonstrationConsistencyThresholds(PydanticBaseModel):
     """Layer 3 demonstration consistency 阈值配置。"""
@@ -147,6 +163,7 @@ def evaluate_demonstration_consistency_rules(
 
 
 __all__ = [
+    "Phase2Layer3DemonstrationConsistencyComputation",
     "Phase2DemonstrationConsistencyMetrics",
     "Phase2DemonstrationConsistencyPayload",
     "Phase2DemonstrationConsistencyThresholds",

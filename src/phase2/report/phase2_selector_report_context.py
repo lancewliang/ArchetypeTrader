@@ -30,7 +30,7 @@ from .phase2_selector_report_schema import (
     Phase2ReportSummaryView 
 )
 from ..metrics import (
-    Phase2LayerComputation,
+    Phase2LayerComputationBase,
     Phase2ValidationPayloads,
     Phase2ValidationResult,
 )
@@ -908,7 +908,7 @@ class Phase2SelectorReportContextBuilder(PydanticBaseModel):
 
     @staticmethod
     def _matches_layer(
-        computation: Phase2LayerComputation,
+        computation: Phase2LayerComputationBase,
         layer_id: int,
         layer_name: str,
     ) -> bool:
