@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
+from src.analysis.analysis_code_distribution_model import VQCodeDistributionPayload
 from src.utils import PydanticBaseModel
 from .phase1_layer_computation import Phase1LayerComputationBase
 
@@ -59,13 +60,7 @@ class Phase1VQInternalPayload(PydanticBaseModel):
         assignment churn 诊断等非 hard-gate raw metrics 的辅助产物。
         通过强类型字段或 ``model_dump()`` 消费。
     """
-
-    # validation split 的 code 使用分布，索引为 code id，值为 occupancy probability。
-    code_distribution: tuple[float, ...]
-     # validation split 的 code 使用分布，索引为 code id，值为 assigned 样本数。
-    code_distribution_sample_count: tuple[int, ...]
-    # validation split 中达到 active occupancy 阈值的 code id。
-    active_codes: tuple[int, ...]
+    code_distributions: VQCodeDistributionPayload   
 
     # 当前 validation split 的 sample -> code assignment 快照。
     current_assignment: CodeAssignmentSnapshot
@@ -78,9 +73,6 @@ class Phase1VQInternalPayload(PydanticBaseModel):
 
     # 当前 codebook size 是否可用。
     codebook_size_available: bool
-
-    # 参与 code distribution 统计的样本数。
-    code_distribution_total_sample_count: int
 
 class Phase1VQInternalMetrics(PydanticBaseModel):
     """第一层 VQ 内部质量 raw metrics。

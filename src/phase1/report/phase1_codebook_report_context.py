@@ -413,7 +413,7 @@ class Phase1CodebookReportContextBuilder:
                 )
             ),
             code_distribution_view=build_code_distribution_context(
-                vq_internal_payload
+                vq_internal_payload.code_distributions
             )
             if vq_internal_payload is not None
             else None,
@@ -571,7 +571,11 @@ class Phase1CodebookReportContextBuilder:
         """读取 header 中的 N_val，优先使用 code distribution 统计样本数。"""
 
         if vq_internal_payload is not None:
-            sample_count = vq_internal_payload.code_distribution_sample_count
+            sample_count = (
+                vq_internal_payload
+                .code_distributions
+                .code_distribution_total_sample_count
+            )
             if sample_count > 0:
                 return sample_count
         if (

@@ -23,6 +23,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
+from src.analysis.analysis_code_distribution_model import VQCodeDistributionPayload
 from src.utils import nan_value as _nan
 
 from ...metrics import (
@@ -122,6 +123,17 @@ def compute_code_distribution(code_ids: np.ndarray, k: int) -> np.ndarray:
     if total <= 0:
         return np.zeros(k, dtype=np.float64)
     return counts.astype(np.float64) / float(total)
+
+
+def compute_code_sample_counts(code_ids: np.ndarray, k: int) -> np.ndarray:
+    """计算每个 code 获得的样本数。"""
+
+    if k <= 0:
+        return np.asarray([], dtype=np.int64)
+    values = np.asarray(code_ids, dtype=np.int64).reshape(-1)
+    if np.any((values < 0) | (values >= k)):
+        raise ValueError("code_ids must be in [0, k)")
+    return np.bincount(values, minlength=k).astype(np.int64)
 
 
 def compute_normalized_perplexity(p: np.ndarray) -> float:
@@ -564,6 +576,7 @@ def compute_vq_internal_metrics(
     code_ids = np.asarray(val_snapshot.code_ids, dtype=np.int64)
     num_codes = _num_codes(val_snapshot, runtime_config)
     probabilities = compute_code_distribution(code_ids, num_codes)
+    code_sample_counts = compute_code_sample_counts(code_ids, num_codes)
     has_code_samples = probabilities.size > 0 and code_ids.size > 0
     current_assignment = _current_assignment_snapshot(
         val_snapshot,
@@ -576,16 +589,20 @@ def compute_vq_internal_metrics(
         runtime_config.churn_window_epochs,
         prototype_kind=runtime_config.code_alignment_prototype,
     )
-    payload = Phase1VQInternalPayload(
+    code_distributions = VQCodeDistributionPayload(
         code_distribution=tuple(float(value) for value in probabilities),
-        active_codes=tuple(
-            int(code_id) for code_id in current_assignment.active_codes
+        code_distribution_sample_count=tuple(
+            int(sample_count) for sample_count in code_sample_counts
         ),
+        active_codes=tuple(int(code_id) for code_id in current_assignment.active_codes),
+        code_distribution_total_sample_count=int(code_ids.size),
+    )
+    payload = Phase1VQInternalPayload(
+        code_distributions=code_distributions,
         current_assignment=current_assignment,
         assignment_churn_by_epoch=assignment_churn_by_epoch,
         codebook_size=num_codes,
         codebook_size_available=num_codes > 0,
-        code_distribution_sample_count=int(code_ids.size),
     )
 
     action_accuracy = compute_action_accuracy(
@@ -679,6 +696,7 @@ __all__ = [
     "compute_action_accuracy",
     "compute_assignment_churn",
     "compute_code_distribution",
+    "compute_code_sample_counts",
     "compute_code_lifetime_pass_ratio",
     "compute_first_trade_t",
     "compute_nearest_second_margin",
