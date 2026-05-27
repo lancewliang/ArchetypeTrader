@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 from typing import Any, Mapping, Sequence
+
+from src.utils import PydanticBaseModel
 
 from .phase2_selector_report_schema import (
     DEFAULT_PHASE2_REPORT_TITLE,
@@ -81,7 +82,7 @@ def _badge_class(status: str | bool | None) -> str:
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:
-    """Best-effort conversion of dataclass-like report inputs to mappings."""
+    """Best-effort conversion of model-like report inputs to mappings."""
 
     if value is None:
         return {}
@@ -142,8 +143,7 @@ _SERIES_COLORS: dict[str, str] = {
 }
 
 
-@dataclass(frozen=True)
-class Phase2SelectorReportContextBuilder:
+class Phase2SelectorReportContextBuilder(PydanticBaseModel):
     """Build a static HTML template context from ``Phase2ReportDocument``."""
 
     title: str = DEFAULT_PHASE2_REPORT_TITLE

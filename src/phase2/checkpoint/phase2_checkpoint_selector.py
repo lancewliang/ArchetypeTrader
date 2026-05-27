@@ -20,14 +20,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 import math
+
+from src.utils import PydanticBaseModel
 
 from .phase2_checkpoint import Phase2ValidationCheckpoint
 
 
-@dataclass(frozen=True)
-class Phase2CheckpointSelectionResult:
+class Phase2CheckpointSelectionResult(PydanticBaseModel):
     """Phase II best validation checkpoint 选择结果。
 
     功能说明:

@@ -15,12 +15,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import sys
 from typing import Mapping
 
-from ...phase1.report._template import render_template_file 
+from src.utils import PydanticBaseModel
+
 from ..metrics import Phase2ValidationResult
 from .phase2_selector_report_context import Phase2SelectorReportContextBuilder
 from .phase2_selector_report_schema import (
@@ -31,10 +33,25 @@ from .phase2_selector_report_schema import (
 
 
 _TEMPLATE_PATH = Path(__file__).with_name("templates") / "phase2_selector_report.html"
+_TEMPLATE_RENDERER_PATH = Path(__file__).parents[2] / "phase1" / "report" / "_template.py"
 
 
-@dataclass(frozen=True)
-class Phase2SelectorReport:
+def _load_render_template_file():
+    """Load the shared template renderer without importing ``phase1.report``."""
+
+    spec = spec_from_file_location("_phase1_report_template", _TEMPLATE_RENDERER_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load report template renderer: {_TEMPLATE_RENDERER_PATH}")
+    module = module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.render_template_file
+
+
+render_template_file = _load_render_template_file()
+
+
+class Phase2SelectorReport(PydanticBaseModel):
     """Phase II selector validation 报告渲染器。
 
     功能说明:
@@ -60,7 +77,7 @@ class Phase2SelectorReport:
             report=Phase2ReportMeta(
                 title=self.title,
                 generated_at=datetime.now(UTC).isoformat(),
-                metadata=metadata,
+                metadata=metadata or {},
             ),
             selection=selection or {},
             summary=_build_validation_summary(validation_result),

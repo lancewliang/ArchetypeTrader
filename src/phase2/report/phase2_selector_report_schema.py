@@ -12,10 +12,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Mapping, TypeAlias
 from pydantic import Field
-from src.utils import PydanticMappingModel
+from src.utils import PydanticBaseModel
 from ..metrics import (
     Phase2LayerResult,
     Phase2MetricResult,
@@ -38,7 +37,7 @@ PHASE2_REPORT_SCHEMA = "phase2_selection_report.v1"
 DEFAULT_PHASE2_REPORT_TITLE = "Phase II Selector Validation Report"
 """未显式传入标题时使用的默认 report 标题。"""
 
-class Phase2ReportMeta(PydanticMappingModel):
+class Phase2ReportMeta(PydanticBaseModel):
     """报告元信息。
 
     含义：
@@ -59,9 +58,9 @@ class Phase2ReportMeta(PydanticMappingModel):
     schema: str = PHASE2_REPORT_SCHEMA
 
     # 运行侧额外元数据，例如 pair、batch、git sha、run id。
-    metadata: Mapping[str, JsonValue] = Field(default_factory=dict)
+    metadata: Mapping[str, Any] = Field(default_factory=dict)
  
-class Phase2ReportDocument(PydanticMappingModel):
+class Phase2ReportDocument(PydanticBaseModel):
     """完整机器可读 report payload。
 
     含义：
@@ -93,16 +92,14 @@ class Phase2ReportDocument(PydanticMappingModel):
  
  
 
-@dataclass(frozen=True)
-class Phase2ReportHeaderItem:
+class Phase2ReportHeaderItem(PydanticBaseModel):
     """HTML header 中单个元数据项。"""
 
     label: str
     value: str
 
 
-@dataclass(frozen=True)
-class Phase2ReportHeader:
+class Phase2ReportHeader(PydanticBaseModel):
     """HTML 报告页眉视图模型。"""
 
     pair: str
@@ -115,8 +112,7 @@ class Phase2ReportHeader:
     meta_items: tuple[Phase2ReportHeaderItem, ...]
 
 
-@dataclass(frozen=True)
-class Phase2ReportSummaryView:
+class Phase2ReportSummaryView(PydanticBaseModel):
     """HTML summary 区视图模型。"""
 
     checkpoint_id: str
@@ -132,8 +128,7 @@ class Phase2ReportSummaryView:
     reason: str = ""
 
 
-@dataclass(frozen=True)
-class Phase2ReportMetricView:
+class Phase2ReportMetricView(PydanticBaseModel):
     """单个 Phase II metric 的 HTML 表格行视图。"""
 
     name: str
@@ -148,8 +143,7 @@ class Phase2ReportMetricView:
     description: str = ""
 
 
-@dataclass(frozen=True)
-class Phase2ReportLayerView:
+class Phase2ReportLayerView(PydanticBaseModel):
     """单个 Phase II validation layer 的 HTML 视图。"""
 
     layer_id: str
@@ -161,8 +155,7 @@ class Phase2ReportLayerView:
     metrics: tuple[Phase2ReportMetricView, ...]
 
 
-@dataclass(frozen=True)
-class Phase2ReportMappingRow:
+class Phase2ReportMappingRow(PydanticBaseModel):
     """通用 key-value 表格行。"""
 
     key: str
@@ -170,8 +163,7 @@ class Phase2ReportMappingRow:
     description: str = ""
 
 
-@dataclass(frozen=True)
-class Phase2ReportKpiRow:
+class Phase2ReportKpiRow(PydanticBaseModel):
     """KPI 展示行。"""
 
     key: str
@@ -179,8 +171,7 @@ class Phase2ReportKpiRow:
     value: str
 
 
-@dataclass(frozen=True)
-class Phase2ReportBaselineRow:
+class Phase2ReportBaselineRow(PydanticBaseModel):
     """selector 与 baseline 对比行。"""
 
     baseline: str
@@ -191,8 +182,7 @@ class Phase2ReportBaselineRow:
     badge_class: str
 
 
-@dataclass(frozen=True)
-class Phase2ReportPerCodeProfitabilityRow:
+class Phase2ReportPerCodeProfitabilityRow(PydanticBaseModel):
     """per-code selector/assigned-label 盈利对比行。"""
 
     code_id: str
@@ -207,8 +197,7 @@ class Phase2ReportPerCodeProfitabilityRow:
     status_label: str
 
 
-@dataclass(frozen=True)
-class Phase2ReportCodeUsageRow:
+class Phase2ReportCodeUsageRow(PydanticBaseModel):
     """codebook 使用分布对比行。"""
 
     code_id: str
@@ -222,8 +211,7 @@ class Phase2ReportCodeUsageRow:
     status_label: str
 
 
-@dataclass(frozen=True)
-class Phase2ReportPairProfitabilityCell:
+class Phase2ReportPairProfitabilityCell(PydanticBaseModel):
     """Dominant Pair 热力图中的单个 morphology/motif cell。"""
 
     morphology: str
@@ -244,16 +232,14 @@ class Phase2ReportPairProfitabilityCell:
     tooltip: str = ""
 
 
-@dataclass(frozen=True)
-class Phase2ReportPairProfitabilityRow:
+class Phase2ReportPairProfitabilityRow(PydanticBaseModel):
     """Dominant Pair 热力图中的一个 morphology 行。"""
 
     morphology: str
     cells: tuple[Phase2ReportPairProfitabilityCell, ...]
 
 
-@dataclass(frozen=True)
-class Phase2ReportPairProfitabilityMatrix:
+class Phase2ReportPairProfitabilityMatrix(PydanticBaseModel):
     """Dominant Pair 热力图展示模型。"""
 
     motifs: tuple[str, ...] = ()
@@ -266,8 +252,7 @@ class Phase2ReportPairProfitabilityMatrix:
     legend_label: str = "mean advantage vs KL"
 
 
-@dataclass(frozen=True)
-class Phase2ReportCodeDiagnosticRow:
+class Phase2ReportCodeDiagnosticRow(PydanticBaseModel):
     """Phase II selector code 级诊断表行。"""
 
     code_id: str
@@ -298,16 +283,14 @@ class Phase2ReportCodeDiagnosticRow:
     risk_reason: str
 
 
-@dataclass(frozen=True)
-class Phase2ReportSeriesPoint:
+class Phase2ReportSeriesPoint(PydanticBaseModel):
     """图表序列中的单个点。"""
 
     step: str
     value: str
 
 
-@dataclass(frozen=True)
-class Phase2ReportSeries:
+class Phase2ReportSeries(PydanticBaseModel):
     """图表序列。"""
 
     key: str
@@ -315,16 +298,14 @@ class Phase2ReportSeries:
     points: tuple[Phase2ReportSeriesPoint, ...]
 
 
-@dataclass(frozen=True)
-class Phase2ReportChartGridLine:
+class Phase2ReportChartGridLine(PydanticBaseModel):
     """SVG 图表中的横向网格线。"""
 
     y: str
     label: str
 
 
-@dataclass(frozen=True)
-class Phase2ReportChartSeries:
+class Phase2ReportChartSeries(PydanticBaseModel):
     """SVG 折线图中的一条序列。"""
 
     key: str
@@ -335,8 +316,7 @@ class Phase2ReportChartSeries:
     tooltip: str
 
 
-@dataclass(frozen=True)
-class Phase2ReportLineChart:
+class Phase2ReportLineChart(PydanticBaseModel):
     """静态 SVG 折线图视图模型。"""
 
     title: str = ""
@@ -349,7 +329,7 @@ class Phase2ReportLineChart:
     x_axis_label: str = "validation horizon order"
 
 
-class Phase2ReportHtmlContext(PydanticMappingModel):
+class Phase2ReportHtmlContext(PydanticBaseModel):
     """完整 HTML 模板上下文。"""
 
     page_title: str

@@ -19,8 +19,9 @@
     checkpoint selector 只消费 validation checkpoint 中的校验结果。
 """
 
-from dataclasses import dataclass
 from typing import Any, Mapping
+
+from src.utils import PydanticBaseModel
 
 from ..metrics.phase2_metric_results import Phase2ValidationResult
 from ..phase2_config import Phase2TrainConfig
@@ -28,8 +29,7 @@ from ..phase2_config import Phase2TrainConfig
 
 
 
-@dataclass(frozen=True)
-class Phase2Checkpoint:
+class Phase2Checkpoint(PydanticBaseModel):
     """Phase II selector 模型 checkpoint payload。
 
     功能说明:
@@ -59,8 +59,7 @@ class Phase2Checkpoint:
     optimizer_state_dict: Mapping[str, Any]
 
 
-@dataclass(frozen=True)
-class Phase2ValidationCheckpoint:
+class Phase2ValidationCheckpoint(PydanticBaseModel):
     """Phase II validation checkpoint payload。
 
     功能说明:

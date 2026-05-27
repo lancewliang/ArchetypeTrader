@@ -33,7 +33,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from src.utils import PydanticBaseModel
+
 from ..metrics import (
     get_phase1_validation_score_value,
 )
@@ -45,8 +46,7 @@ from ..metrics import (
 )
 
 
-@dataclass(frozen=True)
-class Phase1RejectedCheckpointSummary:
+class Phase1RejectedCheckpointSummary(PydanticBaseModel):
     """被 checkpoint selector 排除的候选摘要。
 
     功能说明:
@@ -84,29 +84,8 @@ class Phase1RejectedCheckpointSummary:
     # selector 层排除该候选的原因，例如 "validation_failed" 或 "missing_score"。
     reason: str
 
-    def to_dict(self) -> dict[str, object]:
-        """序列化为普通 dict。
 
-        输入:
-            无，读取当前 dataclass 字段。
-
-        输出:
-            JSON 友好的 dict，供 report、日志或 artifact metadata 保存。
-        """
-
-        return {
-            "stage": self.stage,
-            "epoch": self.epoch,
-            "checkpoint_id": self.checkpoint_id,
-            "passed": self.passed,
-            "score": self.score,
-            "failed_layers": list(self.failed_layers),
-            "reason": self.reason,
-        }
-
-
-@dataclass(frozen=True)
-class Phase1CheckpointSelectionResult:
+class Phase1CheckpointSelectionResult(PydanticBaseModel):
     """Phase I best checkpoint 选择结果。
 
     功能说明:
@@ -160,27 +139,6 @@ class Phase1CheckpointSelectionResult:
         """
 
         return self.selected is not None
-
-    def to_dict(self) -> dict[str, object]:
-        """序列化 selection result 摘要。
-
-        输入:
-            无，读取当前选择结果字段。
-
-        输出:
-            JSON 友好的 dict。为避免重复保存完整 checkpoint payload，输出中只包含
-            selected checkpoint 的 ID、epoch、score 和失败候选摘要。
-        """
-
-        return {
-            "selected_checkpoint_id": self.selected_checkpoint_id,
-            "selected_epoch": self.selected_epoch,
-            "selected_score": self.selected_score,
-            "candidate_count": self.candidate_count,
-            "eligible_count": self.eligible_count,
-            "rejected": [item.to_dict() for item in self.rejected],
-            "reason": self.reason,
-        }
 
 
 class Phase1CheckpointSelector:

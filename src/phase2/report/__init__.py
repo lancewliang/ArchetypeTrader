@@ -7,7 +7,6 @@ from .phase2_selector_report_schema import (
     PHASE2_REPORT_SCHEMA,
     Phase2ReportDocument,
     Phase2ReportMeta,
-    ensure_phase2_report_document,
 )
 
 __all__ = [
@@ -17,5 +16,4 @@ __all__ = [
     "Phase2ReportMeta",
     "Phase2SelectorReport",
     "Phase2SelectorReportContextBuilder",
-    "ensure_phase2_report_document",
 ]

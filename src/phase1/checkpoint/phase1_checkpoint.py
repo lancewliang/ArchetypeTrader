@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Mapping
 
-from src.utils import PydanticMappingModel
+from src.utils import PydanticBaseModel
 
 from ..metrics import Phase1Metrics, Phase1ValidationResult
 
@@ -14,7 +14,7 @@ Phase1StateDict = Mapping[str, Any]
 Phase1CheckpointMetrics = Mapping[str, Mapping[str, Any]]
 
 
-class Phase1Checkpoint(PydanticMappingModel):
+class Phase1Checkpoint(PydanticBaseModel):
     """Phase I model checkpoint payload.
 
     This payload stores the training state needed to resume/export a model.
@@ -30,7 +30,7 @@ class Phase1Checkpoint(PydanticMappingModel):
     optimizer_state_dict: Phase1StateDict
 
 
-class Phase1ValidationCheckpoint(PydanticMappingModel):
+class Phase1ValidationCheckpoint(PydanticBaseModel):
     """Phase I 单个 epoch 的强类型验证检验点 payload。"""
 
     stage: str
