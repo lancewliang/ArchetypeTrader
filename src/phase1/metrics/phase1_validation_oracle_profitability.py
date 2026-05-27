@@ -1,7 +1,7 @@
 """Phase I layer 3 oracle profitability schema, thresholds, and hard gate rules."""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from src.utils import PydanticBaseModel
 from .phase1_validation_score_helpers import (
@@ -40,6 +40,34 @@ class Phase1PairProfitabilityCell(PydanticBaseModel):
     # 该 pair 上 total fee / gross profit。
     fee_drag: float
 
+
+class Phase1PerCodeProfitability(PydanticBaseModel):
+    """单个 code 的盈利性判定结果。
+
+    使用场景:
+        第三层 oracle profitability 计算 per-code bad ratio，第二层 behavior
+        quality 可复用该对象计算 profitable-code coverage。
+    """
+
+    # codebook 中的 code id。
+    code_id: int
+
+    # 该 code 在其 assigned validation samples 上的 mean advantage vs flat。
+    mean_advantage: float
+
+    # 该 code 的 win rate vs flat。
+    win_rate: float
+
+    # 该 code 的 decoded return 相对 DP teacher return 的保留比例。
+    retention_ratio: float
+
+    # 该 code 的手续费拖累比例。
+    fee_drag: float
+
+    # 该 code 是否通过 per-code 盈利条件。
+    passed: bool
+
+
 class Phase1OracleProfitabilityPayload(PydanticBaseModel):
     """第三层 oracle profitability 计算的中间 payload。
 
@@ -49,7 +77,7 @@ class Phase1OracleProfitabilityPayload(PydanticBaseModel):
     """
 
     # Layer 3 输出的 per-code 盈利性摘要，供 Layer 2 复用。
-    per_code_profitability: tuple[Any, ...]
+    per_code_profitability: tuple[Phase1PerCodeProfitability, ...]
 
     # 每条 horizon 的 assigned-label decoded return。
     decoded_returns: tuple[float, ...]
@@ -302,5 +330,6 @@ __all__ = [
     "Phase1OracleProfitabilityPayload",
     "Phase1OracleProfitabilityThresholds",
     "Phase1PairProfitabilityCell",
+    "Phase1PerCodeProfitability",
     "evaluate_oracle_profitability_rules",
 ]

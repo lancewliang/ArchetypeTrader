@@ -17,7 +17,7 @@
 """
 
 from __future__ import annotations
-from typing import Any, Literal, TypeAlias
+from typing import Literal, TypeAlias
 from pydantic import Field, model_validator
 from src.utils import PydanticBaseModel
 
@@ -321,7 +321,7 @@ class Phase2ValidationResult(PydanticBaseModel):
 
     # Layer 0-5 强类型 raw metrics 和本层中间 payload。用途：完整审计每层聚合
     # 指标；方向：由具体 metrics 字段定义。
-    layer_computations: tuple[Any, ...] = ()
+    layer_computations: tuple[Phase2LayerComputation, ...] = ()
 
     # 报表和诊断卡片复用的聚合 payload。用途：HTML/JSON report 展示；方向：
     # 展示数据，无直接排序方向。

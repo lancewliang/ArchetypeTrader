@@ -3,13 +3,51 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+import numpy as np
 
 from src.utils import PydanticBaseModel
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult, Phase1MetricResult
     from .phase1_validation_data_schema import Phase1ValidationMetrics
+
+
+class CodeAssignmentSnapshot(PydanticBaseModel):
+    """某个 epoch 的 code assignment 快照。
+
+    功能说明:
+        保存样本到 code 的离散分配结果，以及当前 active code 集合。
+
+    使用场景:
+        计算相邻 epoch assignment churn、active code lifetime，并诊断 codebook
+        是否仍在重排。
+
+    数组形状约定:
+        ``N`` 表示该 assignment snapshot 覆盖的 horizon 样本数。
+    """
+
+    # 当前 assignment 所属 epoch。
+    epoch: int
+
+    # 当前 assignment 所属 split，通常使用 validation split 计算 churn。
+    split: str
+
+    # 与 code_ids 一一对应的稳定样本 ID，shape=[N]。用于跨 epoch 对齐同一样本。
+    sample_ids: np.ndarray
+
+    # 每个样本在当前 epoch 被分配到的 code id，shape=[N]。
+    code_ids: np.ndarray
+
+    # 当前 epoch 满足 active 标准的 code id 集合。
+    active_codes: tuple[int, ...]
+
+    # 每个 code 的 latent/code embedding 原型，shape=[K, D]；无样本 code 行为 NaN。
+    code_prototypes: np.ndarray | None = None
+
+    # 每个 code 的 decoded action/position 原型，shape=[K, H]；无样本 code 行为 NaN。
+    action_prototypes: np.ndarray | None = None
 
 
 class Phase1VQInternalPayload(PydanticBaseModel):
@@ -28,7 +66,7 @@ class Phase1VQInternalPayload(PydanticBaseModel):
     active_codes: tuple[int, ...]
 
     # 当前 validation split 的 sample -> code assignment 快照。
-    current_assignment: Any
+    current_assignment: CodeAssignmentSnapshot
 
     # 最近窗口内按 epoch 记录的 assignment churn。
     assignment_churn_by_epoch: dict[int, float]
@@ -346,6 +384,7 @@ def compute_codebook_health_score(metrics: Phase1ValidationMetrics) -> float:
 
 
 __all__ = [
+    "CodeAssignmentSnapshot",
     "compute_codebook_health_score",
     "Phase1VQInternalMetrics",
     "Phase1VQInternalPayload",

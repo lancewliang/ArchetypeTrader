@@ -37,12 +37,14 @@ from .phase1_validation_label_predictability import (
 from .phase1_validation_oracle_profitability import (
     Phase1OracleProfitabilityMetrics,
     Phase1OracleProfitabilityPayload,
+    Phase1PerCodeProfitability,
 )
 from .phase1_validation_teacher_quality import (
     Phase1TeacherQualityMetrics,
     Phase1TeacherQualityPayload,
 )
 from .phase1_validation_vq_internal import (
+    CodeAssignmentSnapshot,
     Phase1VQInternalMetrics,
     Phase1VQInternalPayload,
 )
@@ -123,44 +125,6 @@ class Phase1EvaluationSnapshot(PydanticBaseModel):
 
     # horizon LOB 深度行情，shape=[N, H, 20]。用于执行收益中的盘口滑点计算；缺失时可为 None。
     depthprices: np.ndarray | None = Field(default=None, exclude=True)
-
-class CodeAssignmentSnapshot(PydanticBaseModel):
-    """某个 epoch 的 code assignment 快照。
-
-    功能说明:
-        保存样本到 code 的离散分配结果，以及当前 active code 集合。
-
-    使用场景:
-        计算相邻 epoch assignment churn、active code lifetime，并诊断 codebook
-        是否仍在重排。
-
-    数组形状约定:
-        ``N`` 表示该 assignment snapshot 覆盖的 horizon 样本数。
-    """
-
-    # 当前 assignment 所属 epoch。
-    epoch: int
-
-    # 当前 assignment 所属 split，通常使用 validation split 计算 churn。
-    split: str
-
-    # 与 code_ids 一一对应的稳定样本 ID，shape=[N]。用于跨 epoch 对齐同一样本。
-    sample_ids: np.ndarray
-
-    # 每个样本在当前 epoch 被分配到的 code id，shape=[N]。
-    code_ids: np.ndarray
-
-    # 当前 epoch 满足 active 标准的 code id 集合。
-    active_codes: tuple[int, ...]
-
-    # 每个 code 的 latent/code embedding 原型，shape=[K, D]；无样本 code 行为 NaN。
-    code_prototypes: np.ndarray | None = None
-
-    # 每个 code 的 decoded action/position 原型，shape=[K, H]；无样本 code 行为 NaN。
-    action_prototypes: np.ndarray | None = None
- 
- 
-
 
 class Phase1CodeDiagnostic(PydanticBaseModel):
     """单个 code 的 report 级诊断数据。
@@ -244,33 +208,6 @@ class Phase1TieBreakerMetrics(PydanticBaseModel):
 
     # validation reconstruction loss，越低越说明基础重构质量更好。
     reconstruction_loss: float
-
-
-class Phase1PerCodeProfitability(PydanticBaseModel):
-    """单个 code 的盈利性判定结果。
-
-    使用场景:
-        第三层 oracle profitability 计算 per-code bad ratio，第二层 behavior
-        quality 可复用该对象计算 profitable-code coverage。
-    """
-
-    # codebook 中的 code id。
-    code_id: int
-
-    # 该 code 在其 assigned validation samples 上的 mean advantage vs flat。
-    mean_advantage: float
-
-    # 该 code 的 win rate vs flat。
-    win_rate: float
-
-    # 该 code 的 decoded return 相对 DP teacher return 的保留比例。
-    retention_ratio: float
-
-    # 该 code 的手续费拖累比例。
-    fee_drag: float
-
-    # 该 code 是否通过 per-code 盈利条件。
-    passed: bool
 
 
 Phase1LayerMetrics: TypeAlias = (

@@ -11,7 +11,7 @@ from ..metrics import Phase1Metrics, Phase1ValidationResult
 Phase1CheckpointStage = Literal["pretrain", "vq"]
 Phase1CheckpointConfig = Mapping[str, Any]
 Phase1StateDict = Mapping[str, Any]
-Phase1CheckpointMetrics = Mapping[str, Mapping[str, Any]]
+
 
 
 class Phase1Checkpoint(PydanticBaseModel):

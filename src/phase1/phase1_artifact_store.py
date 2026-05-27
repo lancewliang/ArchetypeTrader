@@ -14,7 +14,7 @@ import torch
 from .checkpoint import (
     Phase1Checkpoint,
     Phase1CheckpointConfig,
-    Phase1CheckpointMetrics,
+    
     Phase1CheckpointStage,
     Phase1StateDict,
     Phase1ValidationCheckpoint,
