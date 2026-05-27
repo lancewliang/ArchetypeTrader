@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.utils import PydanticBaseModel
+from .phase1_layer_computation import Phase1LayerComputationBase
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult, Phase1MetricResult
@@ -61,6 +62,16 @@ class Phase1LabelPredictabilityMetrics(PydanticBaseModel):
 
     # 当前 validation split 中的 codebook size，用于 top-k accuracy 自适应阈值。
     num_codes: int = 0
+
+
+class Phase1LabelPredictabilityComputation(Phase1LayerComputationBase):
+    """Layer 4 assigned-label 可预测性 raw metric 计算结果。"""
+
+    layer_id: Literal[4] = 4
+    layer_name: Literal["label_predictability"] = "label_predictability"
+    metrics: Phase1LabelPredictabilityMetrics
+    label_predictability_payload: Phase1LabelPredictabilityPayload
+
 
 class Phase1LabelPredictabilityThresholds(PydanticBaseModel):
     """第四层 label 可预测性阈值配置。"""
@@ -312,6 +323,7 @@ def compute_label_predictability_score(metrics: Phase1ValidationMetrics) -> floa
 
 __all__ = [
     "compute_label_predictability_score",
+    "Phase1LabelPredictabilityComputation",
     "Phase1LabelPredictabilityMetrics",
     "Phase1LabelPredictabilityPayload",
     "Phase1LabelPredictabilityThresholds",

@@ -1,9 +1,10 @@
 """Phase I layer 2 behavior quality schema, thresholds, and hard gate rules."""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.utils import PydanticBaseModel
+from .phase1_layer_computation import Phase1LayerComputationBase
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult
@@ -26,6 +27,64 @@ class Phase1BehaviorQualityPayload(PydanticBaseModel):
 
     # 当前 validation split 中满足 active occupancy 阈值的 code id。
     active_codes: tuple[int, ...]
+
+
+class Phase1CodeDiagnostic(PydanticBaseModel):
+    """单个 code 的 report 级诊断数据。
+
+    功能说明:
+        汇总 code support、occupancy、dominant morphology/motif/pair 和 decoded
+        profitability 等信息。
+
+    使用场景:
+        直接供 report 渲染 code-level 表格，也可用于定位弱 code、坏 code 或重复 code。
+    """
+
+    # codebook 中的 code id。
+    code_id: int
+
+    # validation split 中分配到该 code 的样本数量。
+    support: int
+
+    # 该 code 的样本占比，等于 support / N。
+    occupancy: float
+
+    # 该 code 内占比最高的市场形态；不可计算时为 None。
+    dominant_morphology: str | None
+
+    # dominant morphology 在该 code 内的占比；不可计算时为 None。
+    dominant_morphology_ratio: float | None
+
+    # dominant morphology 相对全体验证集分布的 lift；不可计算时为 None。
+    morphology_lift: float | None
+
+    # 该 code 内占比最高的交易 motif；不可计算时为 None。
+    dominant_motif: str | None
+
+    # dominant motif 在该 code 内的占比；不可计算时为 None。
+    dominant_motif_ratio: float | None
+
+    # 该 code 内占比最高的 morphology-motif 组合；不可计算时为 None。
+    dominant_pair: str | None
+
+    # dominant pair 在该 code 内的占比；不可计算时为 None。
+    dominant_pair_ratio: float | None
+
+    # 该 code 的 decoded mean advantage vs flat；不可计算时为 None。
+    decoded_mean_advantage: float | None
+
+    # 该 code 的 decoded win rate vs flat；不可计算时为 None。
+    decoded_win_rate: float | None
+
+    # 该 code 的 decoded return 相对 DP teacher return 的保留比例；不可计算时为 None。
+    retention_ratio: float | None
+
+    # 该 code 的手续费拖累比例；不可计算时为 None。
+    fee_drag: float | None
+
+    # 该 code 的综合诊断状态，由 support、结构清晰度、pair 稳定性和盈利辅助证据共同决定。
+    status: str
+
 
 class Phase1BehaviorQualityMetrics(PydanticBaseModel):
     """第二层 archetype 行为质量 raw metrics。"""
@@ -62,6 +121,17 @@ class Phase1BehaviorQualityMetrics(PydanticBaseModel):
 
     # 当前 codebook size K，用于 duplicate code pair 上限按 K 动态判定。
     num_codes: int = 0
+
+
+class Phase1BehaviorQualityComputation(Phase1LayerComputationBase):
+    """Layer 2 archetype 行为质量 raw metric 计算结果。"""
+
+    layer_id: Literal[2] = 2
+    layer_name: Literal["behavior_quality"] = "behavior_quality"
+    metrics: Phase1BehaviorQualityMetrics
+    code_diagnostics: tuple[Phase1CodeDiagnostic, ...] = ()
+    behavior_quality_payload: Phase1BehaviorQualityPayload
+
 
 class Phase1BehaviorQualityThresholds(PydanticBaseModel):
     """第二层 archetype 行为质量阈值配置。"""
@@ -229,6 +299,8 @@ def compute_behavior_structure_score(metrics: Phase1ValidationMetrics) -> float:
 
 __all__ = [
     "compute_behavior_structure_score",
+    "Phase1BehaviorQualityComputation",
+    "Phase1CodeDiagnostic",
     "Phase1BehaviorQualityMetrics",
     "Phase1BehaviorQualityPayload",
     "Phase1BehaviorQualityThresholds",

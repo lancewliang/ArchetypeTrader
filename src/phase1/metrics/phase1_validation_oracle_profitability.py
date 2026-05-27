@@ -1,9 +1,10 @@
 """Phase I layer 3 oracle profitability schema, thresholds, and hard gate rules."""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.utils import PydanticBaseModel
+from .phase1_layer_computation import Phase1LayerComputationBase
 from .phase1_validation_score_helpers import (
         _clip01,
         _inverse_ratio_score,
@@ -145,6 +146,16 @@ class Phase1OracleProfitabilityMetrics(PydanticBaseModel):
 
     # decoded 风险调整收益相对 random label baseline 的差值。
     risk_adjusted_return_vs_random: float = float("nan")
+
+
+class Phase1OracleProfitabilityComputation(Phase1LayerComputationBase):
+    """Layer 3 oracle assigned-label 盈利性 raw metric 计算结果。"""
+
+    layer_id: Literal[3] = 3
+    layer_name: Literal["oracle_profitability"] = "oracle_profitability"
+    metrics: Phase1OracleProfitabilityMetrics
+    oracle_profitability_payload: Phase1OracleProfitabilityPayload
+
 
 class Phase1OracleProfitabilityThresholds(PydanticBaseModel):
     """第三层 oracle assigned-label 盈利性阈值配置。"""
@@ -326,6 +337,7 @@ def compute_oracle_profitability_score(metrics: Phase1ValidationMetrics) -> floa
 
 __all__ = [
     "compute_oracle_profitability_score",
+    "Phase1OracleProfitabilityComputation",
     "Phase1OracleProfitabilityMetrics",
     "Phase1OracleProfitabilityPayload",
     "Phase1OracleProfitabilityThresholds",

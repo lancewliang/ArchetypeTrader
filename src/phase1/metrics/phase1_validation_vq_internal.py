@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
 from src.utils import PydanticBaseModel
+from .phase1_layer_computation import Phase1LayerComputationBase
 
 if TYPE_CHECKING:
     from .phase1_metric_results import Phase1LayerResult, Phase1MetricResult
@@ -130,6 +131,16 @@ class Phase1VQInternalMetrics(PydanticBaseModel):
     # validation quantization distance / train quantization distance。
     # 旧 checkpoint 可能没有该字段，因此给 NaN 默认值。
     quantization_distance_gap: float = float("nan")
+
+
+class Phase1VQInternalComputation(Phase1LayerComputationBase):
+    """Layer 1 VQ 内部质量 raw metric 计算结果。"""
+
+    layer_id: Literal[1] = 1
+    layer_name: Literal["vq_internal"] = "vq_internal"
+    metrics: Phase1VQInternalMetrics
+    vq_internal_payload: Phase1VQInternalPayload
+
 
 class Phase1VQInternalThresholds(PydanticBaseModel):
     """第一层 VQ 内部质量阈值配置。
@@ -386,6 +397,7 @@ def compute_codebook_health_score(metrics: Phase1ValidationMetrics) -> float:
 __all__ = [
     "CodeAssignmentSnapshot",
     "compute_codebook_health_score",
+    "Phase1VQInternalComputation",
     "Phase1VQInternalMetrics",
     "Phase1VQInternalPayload",
     "Phase1VQInternalThresholds",

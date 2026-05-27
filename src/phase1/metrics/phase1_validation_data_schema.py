@@ -20,31 +20,36 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypeAlias
-
 import numpy as np
 from pydantic import Field
 
 from src.utils import PydanticBaseModel
+from .phase1_layer_computation import Phase1LayerComputationBase
 from .phase1_validation_behavior_quality import (
+    Phase1BehaviorQualityComputation,
     Phase1BehaviorQualityMetrics,
     Phase1BehaviorQualityPayload,
+    Phase1CodeDiagnostic,
 )
 from .phase1_validation_label_predictability import (
+    Phase1LabelPredictabilityComputation,
     Phase1LabelPredictabilityMetrics,
     Phase1LabelPredictabilityPayload,
 )
 from .phase1_validation_oracle_profitability import (
+    Phase1OracleProfitabilityComputation,
     Phase1OracleProfitabilityMetrics,
     Phase1OracleProfitabilityPayload,
     Phase1PerCodeProfitability,
 )
 from .phase1_validation_teacher_quality import (
+    Phase1TeacherQualityComputation,
     Phase1TeacherQualityMetrics,
     Phase1TeacherQualityPayload,
 )
 from .phase1_validation_vq_internal import (
     CodeAssignmentSnapshot,
+    Phase1VQInternalComputation,
     Phase1VQInternalMetrics,
     Phase1VQInternalPayload,
 )
@@ -126,63 +131,6 @@ class Phase1EvaluationSnapshot(PydanticBaseModel):
     # horizon LOB 深度行情，shape=[N, H, 20]。用于执行收益中的盘口滑点计算；缺失时可为 None。
     depthprices: np.ndarray | None = Field(default=None, exclude=True)
 
-class Phase1CodeDiagnostic(PydanticBaseModel):
-    """单个 code 的 report 级诊断数据。
-
-    功能说明:
-        汇总 code support、occupancy、dominant morphology/motif/pair 和 decoded
-        profitability 等信息。
-
-    使用场景:
-        直接供 report 渲染 code-level 表格，也可用于定位弱 code、坏 code 或重复 code。
-    """
-
-    # codebook 中的 code id。
-    code_id: int
-
-    # validation split 中分配到该 code 的样本数量。
-    support: int
-
-    # 该 code 的样本占比，等于 support / N。
-    occupancy: float
-
-    # 该 code 内占比最高的市场形态；不可计算时为 None。
-    dominant_morphology: str | None
-
-    # dominant morphology 在该 code 内的占比；不可计算时为 None。
-    dominant_morphology_ratio: float | None
-
-    # dominant morphology 相对全体验证集分布的 lift；不可计算时为 None。
-    morphology_lift: float | None
-
-    # 该 code 内占比最高的交易 motif；不可计算时为 None。
-    dominant_motif: str | None
-
-    # dominant motif 在该 code 内的占比；不可计算时为 None。
-    dominant_motif_ratio: float | None
-
-    # 该 code 内占比最高的 morphology-motif 组合；不可计算时为 None。
-    dominant_pair: str | None
-
-    # dominant pair 在该 code 内的占比；不可计算时为 None。
-    dominant_pair_ratio: float | None
-
-    # 该 code 的 decoded mean advantage vs flat；不可计算时为 None。
-    decoded_mean_advantage: float | None
-
-    # 该 code 的 decoded win rate vs flat；不可计算时为 None。
-    decoded_win_rate: float | None
-
-    # 该 code 的 decoded return 相对 DP teacher return 的保留比例；不可计算时为 None。
-    retention_ratio: float | None
-
-    # 该 code 的手续费拖累比例；不可计算时为 None。
-    fee_drag: float | None
-
-    # 该 code 的综合诊断状态，由 support、结构清晰度、pair 稳定性和盈利辅助证据共同决定。
-    status: str
-
-
 class Phase1TieBreakerMetrics(PydanticBaseModel):
     """checkpoint 综合分接近时使用的决胜指标。
 
@@ -209,62 +157,6 @@ class Phase1TieBreakerMetrics(PydanticBaseModel):
     # validation reconstruction loss，越低越说明基础重构质量更好。
     reconstruction_loss: float
 
-
-class Phase1LayerComputationBase(PydanticBaseModel):
-    """单个 validation layer raw metric 计算结果的公共字段。"""
-
-    # layer 数字编号，0 到 4。
-    layer_id: int
-    # layer 稳定名称，例如 "teacher_quality"。
-    layer_name: str
-
-
-
-class Phase1TeacherQualityComputation(Phase1LayerComputationBase):
-    """Layer 0 DP teacher 质量 raw metric 计算结果。"""
-
-    layer_id: Literal[0] = 0
-    layer_name: Literal["teacher_quality"] = "teacher_quality"
-    metrics: Phase1TeacherQualityMetrics
-    teacher_quality_payload: Phase1TeacherQualityPayload
-
-
-class Phase1VQInternalComputation(Phase1LayerComputationBase):
-    """Layer 1 VQ 内部质量 raw metric 计算结果。"""
-
-    layer_id: Literal[1] = 1
-    layer_name: Literal["vq_internal"] = "vq_internal"
-    metrics: Phase1VQInternalMetrics
-    vq_internal_payload: Phase1VQInternalPayload
-
-
-class Phase1BehaviorQualityComputation(Phase1LayerComputationBase):
-    """Layer 2 archetype 行为质量 raw metric 计算结果。"""
-
-    layer_id: Literal[2] = 2
-    layer_name: Literal["behavior_quality"] = "behavior_quality"
-    metrics: Phase1BehaviorQualityMetrics
-    # Layer 2 code-level 诊断表。
-    code_diagnostics: tuple[Phase1CodeDiagnostic, ...] = ()
-    behavior_quality_payload: Phase1BehaviorQualityPayload
-
-
-class Phase1OracleProfitabilityComputation(Phase1LayerComputationBase):
-    """Layer 3 oracle assigned-label 盈利性 raw metric 计算结果。"""
-
-    layer_id: Literal[3] = 3
-    layer_name: Literal["oracle_profitability"] = "oracle_profitability"
-    metrics: Phase1OracleProfitabilityMetrics
-    oracle_profitability_payload: Phase1OracleProfitabilityPayload
-
-
-class Phase1LabelPredictabilityComputation(Phase1LayerComputationBase):
-    """Layer 4 assigned-label 可预测性 raw metric 计算结果。"""
-
-    layer_id: Literal[4] = 4
-    layer_name: Literal["label_predictability"] = "label_predictability"
-    metrics: Phase1LabelPredictabilityMetrics
-    label_predictability_payload: Phase1LabelPredictabilityPayload
 
 class Phase1ValidationMetrics(PydanticBaseModel):
     """五层 validation raw metrics 聚合对象。
