@@ -790,7 +790,7 @@ def compute_behavior_quality_metrics(
     输出:
         ``Phase1LayerComputation``，其中 ``metrics`` 为
         ``Phase1BehaviorQualityMetrics``，``code_diagnostics`` 为 per-code report
-        诊断表，``extra_payload`` 包含 morphology、motif 和 active code 列表。
+        诊断表，``behavior_quality_payload`` 包含 morphology、motif 和 active code 列表。
 
     使用场景:
         full checkpoint validation 的第二层行为结构 raw metric 计算；结果交给

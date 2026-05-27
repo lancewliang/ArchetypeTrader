@@ -553,7 +553,7 @@ def compute_vq_internal_metrics(
 
     输出:
         ``Phase1LayerComputation``，其中 ``metrics`` 为
-        ``Phase1VQInternalMetrics``，``extra_payload`` 包含当前 assignment snapshot
+        ``Phase1VQInternalMetrics``，``vq_internal_payload`` 包含当前 assignment snapshot
         和辅助诊断元数据。
 
     使用场景:

@@ -559,7 +559,7 @@ def compute_label_predictability_metrics(
 
     输出:
         ``Phase1LayerComputation``，其中 ``metrics`` 为
-        ``Phase1LabelPredictabilityMetrics``，``extra_payload`` 包含 probe train
+        ``Phase1LabelPredictabilityMetrics``，``label_predictability_payload`` 包含 probe train
         accuracy、validation accuracy、gap 和 seed。
 
     使用场景:

@@ -15,7 +15,7 @@
 
 使用场景:
     ``Phase1CodebookEvaluator`` 在 validation snapshot 收集完成后调用
-    ``compute_oracle_profitability_metrics()``。其 ``extra_payload`` 中的
+    ``compute_oracle_profitability_metrics()``。其 ``oracle_profitability_payload`` 中的
     ``per_code_profitability`` 会传给 Layer 2 复用。
 """
 
@@ -691,7 +691,7 @@ def compute_oracle_profitability_metrics(
 
     输出:
         ``Phase1LayerComputation``，其中 ``metrics`` 为
-        ``Phase1OracleProfitabilityMetrics``，``extra_payload`` 包含 per-code
+        ``Phase1OracleProfitabilityMetrics``，``oracle_profitability_payload`` 包含 per-code
         profitability、decoded/DP/flat/random returns 和 random seed。
 
     使用场景:
