@@ -5,8 +5,14 @@ from collections.abc import Sequence
 
 import numpy as np
 
+from model.data_types import DemonstrationHorizonLabelDataset, HorizonDataset, HorizonLabelDataset, VisibleStatesDataset, VisibleStatesLabelDataset
 from src.utils import PydanticBaseModel
 
+import torch
+
+from model.vq_archetype import ArchetypeVQModel
+from src.phase1.evaluators.phase1_validation_layers.layer3_oracle_profitability import decode_labels
+from src.utils import ActionExecutionCalculator
 
 class VQCodeDistributionPayload(PydanticBaseModel):
     """ 
@@ -56,19 +62,15 @@ class CodeDistributionView(PydanticBaseModel):
     totals_sample_count: int
     # 代码使用情况行。
     code_usage_rows: tuple[CodeDistribution, ...]
-
-
-def buildVQCodeDistributionPayload(
+    
+def _buildCodeDistributionPayload(
     *,
-    code_ids: Sequence[int],
+    code_id_values: Sequence[int],
     num_codes: int,
     active_code_min_occupancy: float,
 ) -> VQCodeDistributionPayload:
-    """构建 VQ code 使用分布 payload。"""
-
-    code_id_values = np.asarray(code_ids, dtype=np.int64).reshape(-1)
-    code_distribution = compute_code_distribution(code_id_values, num_codes)
-    code_distribution_sample_count = compute_code_sample_counts(
+    code_distribution = _compute_code_distribution(code_id_values, num_codes)
+    code_distribution_sample_count = _compute_code_sample_counts(
         code_id_values,
         num_codes,
     )
@@ -86,8 +88,94 @@ def buildVQCodeDistributionPayload(
         code_distribution_total_sample_count=int(code_id_values.size),
     )
 
+def buildDemonstrationCodeDistributionPayload(
+    *,
+    dataset: DemonstrationHorizonLabelDataset,
+    num_codes: int,
+    active_code_min_occupancy: float,
+) -> VQCodeDistributionPayload:
+    """构建 Demonstration VQ code 使用分布 payload。"""
 
-def compute_code_distribution(code_ids: Sequence[int], k: int) -> np.ndarray:
+    _, code_labels = dataset
+    code_id_values = np.asarray(code_labels, dtype=np.int64).reshape(-1)
+    return _buildCodeDistributionPayload(
+        code_id_values=code_id_values,
+        num_codes=num_codes,
+        active_code_min_occupancy=active_code_min_occupancy,
+    )
+    
+def buildBestRewardCodeDistributionPayload(
+    *,
+    model: ArchetypeVQModel,
+    dataset: HorizonDataset,
+    num_codes: int,
+    active_code_min_occupancy: float,
+    device: torch.device | str = "cpu",
+    fee_rate: float = 0.0004,
+) -> VQCodeDistributionPayload:
+    """对每个样本枚举所有 code label，decode 动作并计算 reward，统计最优 code 分布。"""
+
+    states, relative_states, trend_states, prices, depthprices = dataset
+    sample_count = int(np.asarray(states).shape[0])
+    if sample_count == 0:
+        return _buildCodeDistributionPayload(
+            code_id_values=np.asarray([], dtype=np.int64),
+            num_codes=num_codes,
+            active_code_min_occupancy=active_code_min_occupancy,
+        )
+
+    best_code_ids = np.zeros(sample_count, dtype=np.int64)
+    best_returns = np.full(sample_count, -np.inf, dtype=np.float64)
+
+    torch_device = torch.device(device)
+    model = model.to(torch_device)
+    model.eval()
+
+    with torch.no_grad():
+        for code_id in range(num_codes):
+            code_ids = np.full(sample_count, code_id, dtype=np.int64)
+
+            actions = decode_labels(
+                model=model,
+                states=states,
+                relative_states=relative_states,
+                trend_states=trend_states,
+                code_ids=code_ids,
+                device=torch_device,
+            )
+
+            returns = ActionExecutionCalculator.execute_actions(
+                prices=prices,
+                actions=actions,
+                fee_rate=fee_rate,
+                depthprices=depthprices,
+            ).returns
+
+            improved = returns > best_returns
+            best_returns[improved] = returns[improved]
+            best_code_ids[improved] = code_id
+
+    return _buildCodeDistributionPayload(
+        code_id_values=best_code_ids,
+        num_codes=num_codes,
+        active_code_min_occupancy=active_code_min_occupancy,
+    )
+    
+def buildSelectorCodeDistributionPayload(
+    dataset: VisibleStatesLabelDataset,
+    num_codes: int,
+    active_code_min_occupancy: float    
+) -> VQCodeDistributionPayload:
+    """对每个样本选择器选中的 code，使用分布 payload。"""
+    _, code_labels = dataset
+    code_id_values = np.asarray(code_labels, dtype=np.int64).reshape(-1)
+    return _buildCodeDistributionPayload(
+        code_id_values=code_id_values,
+        num_codes=num_codes,
+        active_code_min_occupancy=active_code_min_occupancy,
+    )
+
+def _compute_code_distribution(code_ids: Sequence[int], k: int) -> np.ndarray:
     """计算 code occupancy 分布。"""
 
     if k <= 0:
@@ -102,7 +190,7 @@ def compute_code_distribution(code_ids: Sequence[int], k: int) -> np.ndarray:
     return counts.astype(np.float64) / float(total)
 
 
-def compute_code_sample_counts(code_ids: Sequence[int], k: int) -> np.ndarray:
+def _compute_code_sample_counts(code_ids: Sequence[int], k: int) -> np.ndarray:
     """计算每个 code 获得的样本数。"""
 
     if k <= 0:
@@ -113,40 +201,3 @@ def compute_code_sample_counts(code_ids: Sequence[int], k: int) -> np.ndarray:
     return np.bincount(values, minlength=k).astype(np.int64)
 
 
-def build_code_distribution_context(
-    payload: VQCodeDistributionPayload,
-) -> CodeDistributionView:
-    """构建 codebook 使用分布的模板上下文。"""
-
-    distribution = payload.code_distribution
-    active_codes = {int(code_id) for code_id in payload.active_codes}
-    total_sample_count = payload.code_distribution_total_sample_count
-    rows: list[CodeDistribution] = []
-    for code_id, occupancy in enumerate(distribution):
-        vp_demo_count = payload.code_distribution_sample_count[code_id]
-        rows.append(
-            CodeDistribution(
-                code_id=str(code_id),
-                vp_demo_sample_count=vp_demo_count,
-                vp_demo_sample_ratio=_occupancy_bar_width(occupancy),
-                best_code_sample_count=0,
-                best_code_sample_ratio=0,
-                selector_sample_count=0,
-                selector_sample_ratio=0,
-                bar_width=_occupancy_bar_width(occupancy),
-                active=code_id in active_codes,
-            )
-        )
-    return CodeDistributionView(
-        total_code_count=len(distribution),
-        totals_sample_count=total_sample_count,
-        code_usage_rows=tuple(rows),
-    )
-
-
-def _occupancy_bar_width(occupancy: float) -> int:
-    """把 occupancy 转换成 0-100 的条形宽度整数。"""
-
-    if not math.isfinite(occupancy):
-        return 0
-    return int(round(max(0.0, min(100.0, occupancy * 100.0))))

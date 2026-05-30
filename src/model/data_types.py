@@ -240,3 +240,10 @@ DemonstrationHorizonLabelDataset = tuple[np.ndarray, np.ndarray]
     可用 ``sample_ids`` 将 label 与 ``HorizonDataset`` 的样本行对齐，并用
     ``code_labels`` 作为选择模型的 supervised/imitation target。
 """
+
+VisibleStatesLabelDataset = tuple[np.ndarray, np.ndarray]
+"""
+Phase II selector 输出的的标签向量数据集。
+结构:
+    ``HorizonLabelDataset = (sample_ids, code_labels)``
+"""
