@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import math
 from typing import Any, Mapping
 
-from src.analysis.analysis_code_distribution import build_code_distribution_context
+from phase1.evaluators.phase1_validation_layers.analysis_code_distribution import build_code_distribution_context
 
 from .phase1_codebook_report_schema import (
     Phase1CodebookReportDocument,

@@ -17,7 +17,7 @@ from typing import Any, Mapping, TypeAlias, cast
 
 from pydantic import Field
 
-from src.analysis.analysis_code_distribution import CodeDistributionView
+from phase1.evaluators.phase1_validation_layers.analysis_code_distribution import CodeDistributionView
 from src.utils import PydanticMappingModel
 
 from ..metrics import (

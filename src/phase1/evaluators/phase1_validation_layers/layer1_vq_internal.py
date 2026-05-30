@@ -23,7 +23,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from src.analysis.analysis_code_distribution import (
+from phase1.evaluators.phase1_validation_layers.analysis_code_distribution import (
     buildVQCodeDistributionPayload,
     compute_code_distribution,
     compute_code_sample_counts,
